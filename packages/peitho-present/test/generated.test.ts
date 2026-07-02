@@ -3,13 +3,16 @@ import type { Manifest } from "../../../bindings/Manifest";
 import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
+  buildPresenterFeatures,
   calculateCanvasFit,
+  chooseOtherScreen,
   installCanvasClickNavigation,
   installCanvasScaler,
   installFullscreenShortcut,
   installPresentationControls,
   mountPresenterView,
-  mountPresentShell
+  mountPresentShell,
+  openPresenterWithDisplay
 } from "../src/index";
 import type {
   PresentationEndDetail,
@@ -66,5 +69,11 @@ describe("generated manifest contract", () => {
     expect(typeof installFullscreenShortcut).toBe("function");
     expect(typeof mountPresentShell).toBe("function");
     expect(typeof mountPresenterView).toBe("function");
+  });
+
+  it("exports display management helpers", () => {
+    expect(typeof buildPresenterFeatures).toBe("function");
+    expect(typeof chooseOtherScreen).toBe("function");
+    expect(typeof openPresenterWithDisplay).toBe("function");
   });
 });

@@ -16,6 +16,14 @@ export type {
   FullscreenShortcutOptions,
   PresentationControlsOptions
 } from "./controls";
+export {
+  buildPresenterFeatures,
+  chooseOtherScreen,
+  fallbackFeatures,
+  openPresenterWithDisplay,
+  PRESENTER_URL
+} from "./presentDisplay";
+export type { OpenPresenterWithDisplayOptions, PresenterPopup } from "./presentDisplay";
 export { installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";

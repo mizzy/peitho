@@ -1,4 +1,8 @@
 import type { NavigateDetail, SlideChangeDetail } from "./shell";
+import {
+  openPresenterWithDisplay,
+  type OpenPresenterWithDisplayOptions
+} from "./presentDisplay";
 
 export type PresentationControlsOptions = {
   root: HTMLElement;
@@ -6,7 +10,10 @@ export type PresentationControlsOptions = {
   document?: Document;
   bus?: EventTarget;
   idleMs?: number;
-  openPresenter?: () => void;
+  openPresenter?: () => void | Promise<void>;
+  getScreenDetails?: OpenPresenterWithDisplayOptions["getScreenDetails"];
+  openPresenterWindow?: OpenPresenterWithDisplayOptions["openWindow"];
+  requestFullscreen?: OpenPresenterWithDisplayOptions["requestFullscreen"];
 };
 
 export type CanvasClickNavigationOptions = {
@@ -27,9 +34,14 @@ export function installPresentationControls(options: PresentationControlsOptions
   const idleMs = options.idleMs ?? 3000;
   const openPresenter =
     options.openPresenter ??
-    (() => {
-      win.open("presenter.html", "_blank", "noopener");
-    });
+    (() =>
+      openPresenterWithDisplay({
+        window: win,
+        document: doc,
+        getScreenDetails: options.getScreenDetails,
+        openWindow: options.openPresenterWindow,
+        requestFullscreen: options.requestFullscreen
+      }));
 
   const bar = doc.createElement("nav");
   bar.dataset.peithoControlBar = "true";
@@ -65,7 +77,7 @@ export function installPresentationControls(options: PresentationControlsOptions
     const action = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-peitho-action]")
       ?.dataset.peithoAction;
     if (action === "prev" || action === "next") dispatchNavigate(action);
-    if (action === "presenter") openPresenter();
+    if (action === "presenter") void openPresenter();
     if (action === "fullscreen") toggleFullscreen(doc);
   };
   const onSlideChange = (event: Event): void => {

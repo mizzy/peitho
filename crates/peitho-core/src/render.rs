@@ -581,6 +581,19 @@ mod tests {
         assert!(!html.contains("mountPresenterView"));
     }
 
+    #[test]
+    fn present_index_keeps_controls_default_display_management_before_mount() {
+        let html = render_present_index();
+
+        let controls_index = html
+            .find("installPresentationControls({ root, window, document })")
+            .unwrap();
+        let mount_index = html.find("await mountPresentShell({ root })").unwrap();
+        assert!(controls_index < mount_index);
+        assert!(html.contains("installPresentationControls({ root, window, document })"));
+        assert!(!html.contains("openPresenter"));
+    }
+
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
         let template = parse_template(
             "title-only",
