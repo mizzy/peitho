@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::SlideKey,
@@ -11,7 +11,7 @@ use crate::{
     any(test, feature = "ts-bindings"),
     ts(export, export_to = "../../bindings/")
 )]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     version: u8,
     #[serde(rename = "peithoVersion")]
@@ -27,7 +27,7 @@ pub struct Manifest {
     any(test, feature = "ts-bindings"),
     ts(export, export_to = "../../bindings/")
 )]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSlide {
     index: usize,
     #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
@@ -46,6 +46,22 @@ impl ManifestSlide {
             has_notes,
         }
     }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn key(&self) -> &SlideKey {
+        &self.key
+    }
+
+    pub fn src(&self) -> &str {
+        &self.src
+    }
+
+    pub fn has_notes(&self) -> bool {
+        self.has_notes
+    }
 }
 
 impl Manifest {
@@ -58,6 +74,14 @@ impl Manifest {
             slide_count,
             slides,
         }
+    }
+
+    pub fn slide_count(&self) -> usize {
+        self.slide_count
+    }
+
+    pub fn slides(&self) -> &[ManifestSlide] {
+        &self.slides
     }
 }
 
@@ -179,6 +203,58 @@ mod tests {
         assert!(json.contains(r#""src": "slides/000-arch-1.html""#));
         assert!(json.contains(r#""src": "slides/001-details.html""#));
         assert!(json.contains(r#""hasNotes": false"#));
+    }
+
+    #[test]
+    fn deserializes_manifest_schema_for_publish_validation() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"arch-1\",\n",
+            "      \"src\": \"slides/000-arch-1.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.slide_count(), 1);
+        assert_eq!(manifest.slides()[0].src(), "slides/000-arch-1.html");
+        assert_eq!(manifest.slides()[0].key().as_str(), "arch-1");
+    }
+
+    #[test]
+    fn rejects_invalid_slide_key_when_deserializing_manifest() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"bad key\",\n",
+            "      \"src\": \"slides/000-bad.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ]\n",
+            "}\n"
+        );
+
+        let err = serde_json::from_str::<Manifest>(json).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("slide key must use lowercase ascii"));
     }
 
     fn checked_deck(

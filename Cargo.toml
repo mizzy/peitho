@@ -13,6 +13,8 @@ clap = { version = "4", features = ["derive"] }
 html-escape = "0.2"
 lol_html = "2"
 miette = { version = "7", features = ["fancy"] }
+notify = "8.2.0"
+notify-debouncer-mini = "0.7.0"
 predicates = "3"
 pulldown-cmark = "0.10"
 serde = { version = "1", features = ["derive"] }
