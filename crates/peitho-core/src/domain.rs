@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
@@ -21,6 +21,16 @@ impl SlideKey {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SlideKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
