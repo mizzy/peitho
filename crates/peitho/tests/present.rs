@@ -213,6 +213,9 @@ fn repository_example_present_no_serve_smoke() {
     assert!(presenter_html.contains(".peitho-presenter-pane"));
     assert!(shell_js.contains("CANVAS_WIDTH"));
     assert!(shell_js.contains("installPresentationControls"));
+    assert!(shell_js.contains("openPresenterWithDisplay"));
+    assert!(shell_js.contains("getScreenDetails"));
+    assert!(shell_js.contains("requestFullscreen"));
     assert!(shell_js.contains("mountPresenterView"));
 }
 

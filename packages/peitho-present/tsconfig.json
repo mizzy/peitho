@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["vitest/globals"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "../../bindings/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "test/**/*.ts", "../../bindings/**/*.ts"]
 }

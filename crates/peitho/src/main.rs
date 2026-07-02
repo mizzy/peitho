@@ -12,7 +12,7 @@ use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
 
-use peitho::server;
+use peitho::{browser, server};
 
 struct BuildArtifacts {
     slide_count: usize,
@@ -535,7 +535,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     println!("serving presentation at {url}");
     std::io::stdout().flush().into_diagnostic()?;
     if !options.no_open {
-        open_browser(&url);
+        browser::open_browser(&url);
     }
     server.serve_forever()
 }
@@ -604,41 +604,9 @@ fn template_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn browser_command() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
-        Some("open")
-    } else if cfg!(target_os = "linux") {
-        Some("xdg-open")
-    } else {
-        None
-    }
-}
-
-fn open_browser(url: &str) {
-    let Some(command) = browser_command() else {
-        eprintln!("warning: browser auto-open is not supported on this platform");
-        return;
-    };
-    if let Err(err) = std::process::Command::new(command).arg(url).spawn() {
-        eprintln!("warning: failed to open browser with {command}: {err}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn browser_command_matches_supported_platforms() {
-        let command = browser_command();
-        if cfg!(target_os = "macos") {
-            assert_eq!(command, Some("open"));
-        } else if cfg!(target_os = "linux") {
-            assert_eq!(command, Some("xdg-open"));
-        } else {
-            assert_eq!(command, None);
-        }
-    }
 
     #[test]
     fn watch_dependency_types_are_available() {

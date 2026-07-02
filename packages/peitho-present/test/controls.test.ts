@@ -85,6 +85,50 @@ it("opens presenter.html from the presenter button", () => {
   expect(openPresenter).toHaveBeenCalledTimes(1);
 });
 
+it("opens presenter popup with default display management", async () => {
+  const root = document.createElement("main");
+  const openWindow = vi.fn();
+  const cleanup = installPresentationControls({
+    root,
+    window,
+    document,
+    bus: window,
+    openPresenter: undefined,
+    openPresenterWindow: openWindow,
+    getScreenDetails: undefined
+  });
+  cleanups.push(cleanup);
+
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="presenter"]')?.click();
+  await Promise.resolve();
+
+  expect(openWindow).toHaveBeenCalledWith(
+    "presenter.html",
+    "peitho-presenter",
+    "popup=yes,width=1200,height=800,left=80,top=80"
+  );
+});
+
+it("keeps the explicit openPresenter injection as the highest priority", () => {
+  const root = document.createElement("main");
+  const openPresenter = vi.fn();
+  const openPresenterWindow = vi.fn();
+  const cleanup = installPresentationControls({
+    root,
+    window,
+    document,
+    bus: window,
+    openPresenter,
+    openPresenterWindow
+  });
+  cleanups.push(cleanup);
+
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="presenter"]')?.click();
+
+  expect(openPresenter).toHaveBeenCalledTimes(1);
+  expect(openPresenterWindow).not.toHaveBeenCalled();
+});
+
 it("clicks in the left viewport quarter request prev and other canvas clicks request next", () => {
   const root = document.createElement("main");
   const requests: unknown[] = [];
