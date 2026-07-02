@@ -88,6 +88,9 @@ fn write_slide_fragments(
     rendered: &peitho_core::Deck<peitho_core::Rendered>,
 ) -> miette::Result<()> {
     let slides_dir = out.join("slides");
+    if slides_dir.exists() {
+        fs::remove_dir_all(&slides_dir).into_diagnostic()?;
+    }
     fs::create_dir_all(&slides_dir).into_diagnostic()?;
     for slide in rendered.slides() {
         fs::write(out.join(slide.src()), slide.html()).into_diagnostic()?;

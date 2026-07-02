@@ -129,7 +129,9 @@ mod tests {
             concat!(
                 "{\n",
                 "  \"version\": 1,\n",
-                "  \"peithoVersion\": \"0.1.0\",\n",
+                "  \"peithoVersion\": \"",
+                env!("CARGO_PKG_VERSION"),
+                "\",\n",
                 "  \"title\": \"Peitho Architecture\",\n",
                 "  \"slideCount\": 2,\n",
                 "  \"slides\": [\n",

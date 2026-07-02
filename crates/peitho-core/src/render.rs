@@ -176,15 +176,32 @@ pub fn render_distribution_index() -> String {
 <body>
   <main id="peitho-slides"></main>
   <script>
-    async function loadDeck() {
-      const manifest = await fetch('manifest.json').then((response) => response.json());
-      document.title = manifest.title || 'Peitho Deck';
+    function showError(message) {
       const root = document.getElementById('peitho-slides');
-      for (const slide of manifest.slides) {
-        const html = await fetch(slide.src).then((response) => response.text());
-        const holder = document.createElement('div');
-        holder.innerHTML = html;
-        while (holder.firstChild) root.appendChild(holder.firstChild);
+      root.textContent = message;
+    }
+
+    async function fetchOk(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to load ${url}: ${response.status}`);
+      }
+      return response;
+    }
+
+    async function loadDeck() {
+      try {
+        const manifest = await fetchOk('manifest.json').then((response) => response.json());
+        document.title = manifest.title || 'Peitho Deck';
+        const root = document.getElementById('peitho-slides');
+        for (const slide of manifest.slides) {
+          const html = await fetchOk(slide.src).then((response) => response.text());
+          const holder = document.createElement('div');
+          holder.innerHTML = html;
+          while (holder.firstChild) root.appendChild(holder.firstChild);
+        }
+      } catch (error) {
+        showError(error.message);
       }
     }
     loadDeck();
@@ -304,8 +321,9 @@ mod tests {
         let html = render_distribution_index();
 
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
-        assert!(html.contains("fetch('manifest.json')"));
-        assert!(html.contains("fetch(slide.src)"));
+        assert!(html.contains("fetchOk('manifest.json')"));
+        assert!(html.contains("fetchOk(slide.src)"));
+        assert!(html.contains("response.ok"));
         assert!(html.contains(r#"id="peitho-slides""#));
         assert!(!html.contains("data-slide-key="));
     }

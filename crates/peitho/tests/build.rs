@@ -53,7 +53,7 @@ fn build_writes_index_html_and_css() {
 
     let index = fs::read_to_string(out.join("index.html")).unwrap();
     let first = fs::read_to_string(out.join("slides/000-arch-1.html")).unwrap();
-    assert!(index.contains("fetch('manifest.json')"));
+    assert!(index.contains("fetchOk('manifest.json')"));
     assert!(!index.contains(r#"data-slide-key="arch-1""#));
     assert!(first.contains(r#"data-slide-key="arch-1""#));
     assert!(fs::read_to_string(out.join("peitho.css"))
@@ -193,7 +193,10 @@ fn build_writes_manifest_json_with_refs_not_html() {
     let manifest = fs::read_to_string(out.join("manifest.json")).unwrap();
 
     assert!(manifest.contains(r#""version": 1"#));
-    assert!(manifest.contains(r#""peithoVersion": "0.1.0""#));
+    assert!(manifest.contains(&format!(
+        r#""peithoVersion": "{}""#,
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(manifest.contains(r#""title": "Peitho Architecture""#));
     assert!(manifest.contains(r#""slideCount": 3"#));
     assert!(manifest.contains(r#""src": "slides/000-arch-1.html""#));
@@ -206,8 +209,8 @@ fn build_writes_fetching_index_without_embedded_slide_html() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
 
-    assert!(index.contains("fetch('manifest.json')"));
-    assert!(index.contains("fetch(slide.src)"));
+    assert!(index.contains("fetchOk('manifest.json')"));
+    assert!(index.contains("fetchOk(slide.src)"));
     assert!(index.contains(r#"<main id="peitho-slides"></main>"#));
     assert!(!index.contains("Peitho Architecture"));
     assert!(!index.contains("data-slide-key=\"arch-1\""));
@@ -300,6 +303,56 @@ fn build_keeps_slide_html_only_in_fragment_files() {
     assert!(first.contains(r#"data-slide-key="arch-1""#));
 }
 
+#[test]
+fn build_clears_stale_slide_fragments_before_writing_new_ones() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let template = write_template(dir.path());
+    let base = write_base_css(dir.path());
+    let overrides = write_overrides_css(dir.path(), "");
+    let out = dir.path().join("dist");
+
+    write_multi_slide_fixture(&deck);
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--template",
+            template.to_str().unwrap(),
+            "--base-css",
+            base.to_str().unwrap(),
+            "--overrides-css",
+            overrides.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(slide_fragment_count(&out), 3);
+
+    fs::write(&deck, "# Solo").unwrap();
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--template",
+            template.to_str().unwrap(),
+            "--base-css",
+            base.to_str().unwrap(),
+            "--overrides-css",
+            overrides.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(slide_fragment_count(&out), 1);
+    assert!(out.join("slides/000-solo.html").exists());
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -358,6 +411,10 @@ fn write_overrides_css(dir: &Path, css: &str) -> PathBuf {
     let path = dir.join("overrides.css");
     fs::write(&path, css).unwrap();
     path
+}
+
+fn slide_fragment_count(out: &Path) -> usize {
+    fs::read_dir(out.join("slides")).unwrap().count()
 }
 
 fn build_multi_slide_fixture() -> (TempDir, PathBuf) {
