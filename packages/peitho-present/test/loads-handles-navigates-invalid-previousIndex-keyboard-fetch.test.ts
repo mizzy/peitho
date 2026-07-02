@@ -198,6 +198,20 @@ it("keyboard emits navigate events instead of calling shell directly", () => {
   ]);
 });
 
+it("keyboard emits navigate events to an injected bus", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+
+  const teardown = installKeyboardNavigation(window, bus);
+  windowListenerCleanups.push(teardown);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+
+  expect(requests).toEqual([{ to: "next" }]);
+});
+
 it("shows a visible error when a fragment fetch fails", async () => {
   const root = document.createElement("main");
   const fetcher = vi.fn(async (url: string) => {

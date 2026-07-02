@@ -53,6 +53,33 @@ fn present_no_serve_writes_clean_present_cache() {
 }
 
 #[test]
+fn present_no_serve_writes_presenter_html() {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function mountPresenterView() {}\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-serve", "--no-open"])
+        .assert()
+        .success();
+
+    let cache = dir.path().join(".peitho/present-cache");
+    let presenter = fs::read_to_string(cache.join("presenter.html")).unwrap();
+    assert!(presenter.contains("mountPresenterView"));
+    assert!(fs::read_to_string(cache.join("present.html"))
+        .unwrap()
+        .contains("Presenter view"));
+}
+
+#[test]
 fn present_fails_with_help_when_shell_bundle_is_missing() {
     let dir = tempdir().unwrap();
     let fixture = Fixture::write(dir.path());
@@ -139,7 +166,7 @@ fn present_no_open_server_prints_assigned_url() {
 }
 
 #[test]
-fn repository_example_present_no_serve_uses_bundled_shell() {
+fn repository_example_present_no_serve_smoke() {
     let shell = workspace_root().join("packages/peitho-present/dist/shell.js");
     assert!(shell.exists(), "shell bundle not built; run npm run build");
 
@@ -164,10 +191,17 @@ fn repository_example_present_no_serve_uses_bundled_shell() {
 
     let cache = workspace_root().join(".peitho/present-cache");
     assert!(cache.join("present.html").exists());
+    assert!(cache.join("presenter.html").exists());
     assert!(cache.join("shell.js").exists());
     assert!(fs::read_to_string(cache.join("manifest.json"))
         .unwrap()
         .contains(r#""slideCount": 3"#));
+    assert!(fs::read_to_string(cache.join("presenter.html"))
+        .unwrap()
+        .contains("mountPresenterView"));
+    assert!(fs::read_to_string(cache.join("shell.js"))
+        .unwrap()
+        .contains("mountPresenterView"));
 }
 
 struct Fixture {

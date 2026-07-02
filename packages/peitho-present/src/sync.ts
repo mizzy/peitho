@@ -32,7 +32,8 @@ function defaultChannelFactory(name: string): SyncChannel {
 
 export function installSyncBridge(
   win: Window = window,
-  channelFactory: SyncChannelFactory = defaultChannelFactory
+  channelFactory: SyncChannelFactory = defaultChannelFactory,
+  bus: EventTarget = win
 ): () => void {
   const channel = channelFactory("peitho-sync");
   const onSlideChange = (event: Event): void => {
@@ -46,11 +47,11 @@ export function installSyncBridge(
       console.error("Invalid peitho sync message");
       return;
     }
-    win.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } }));
+    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } }));
   };
-  win.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:slidechange", onSlideChange);
   return () => {
-    win.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
     channel.onmessage = null;
     channel.close();
   };
