@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::domain::SlideKey;
+use crate::{
+    domain::SlideKey,
+    error::{BuildError, ErrorKind, Result},
+};
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(
@@ -32,6 +35,19 @@ impl Notes {
     }
 }
 
+pub fn notes_json(notes: &Notes) -> Result<String> {
+    let mut json = serde_json::to_string_pretty(notes).map_err(|err| {
+        BuildError::new(
+            ErrorKind::Manifest,
+            None,
+            format!("failed to serialize notes: {err}"),
+            "keep notes fields serializable",
+        )
+    })?;
+    json.push('\n');
+    Ok(json)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, fs, path::Path};
@@ -48,6 +64,13 @@ mod tests {
 
         assert!(json.contains(r#""version": 1"#));
         assert!(json.contains(r#""notes": {}"#));
+    }
+
+    #[test]
+    fn serializes_notes_json_with_trailing_newline() {
+        let json = super::notes_json(&Notes::empty()).unwrap();
+
+        assert_eq!(json, "{\n  \"version\": 1,\n  \"notes\": {}\n}\n");
     }
 
     #[test]

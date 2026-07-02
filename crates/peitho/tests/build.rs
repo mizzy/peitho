@@ -205,6 +205,18 @@ fn build_writes_manifest_json_with_refs_not_html() {
 }
 
 #[test]
+fn build_still_writes_distribution_after_pipeline_refactor() {
+    let (_dir, out) = build_multi_slide_fixture();
+
+    assert!(out.join("index.html").exists());
+    assert!(out.join("manifest.json").exists());
+    assert!(out.join("peitho.css").exists());
+    assert!(out.join("slides/000-arch-1.html").exists());
+    assert!(!out.join("present.html").exists());
+    assert!(!out.join("notes.json").exists());
+}
+
+#[test]
 fn build_writes_fetching_index_without_embedded_slide_html() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
