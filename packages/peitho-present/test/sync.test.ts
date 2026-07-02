@@ -80,6 +80,21 @@ it("turns remote index messages into navigate requests", () => {
   expect(requests).toEqual([{ to: { index: 1 } }]);
 });
 
+it("dispatches remote sync navigation to the injected bus", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) =>
+    requests.push((event as CustomEvent).detail)
+  );
+
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+  channel.onmessage?.({ data: { index: 1 } });
+
+  expect(requests).toEqual([{ to: { index: 1 } }]);
+});
+
 it("does not echo forever when remote index equals current slide", async () => {
   const channel = mockChannel();
   const root = document.createElement("main");

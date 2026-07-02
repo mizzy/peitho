@@ -18,10 +18,17 @@ export type SlideChangeDetail = {
   previousIndex: number | null;
 };
 
+export type PresentationStartDetail = { total: number; startedAt: number };
+export type PresentationEndDetail = { endedAt: number; elapsedMs: number };
+export type TimerControlDetail = { action: "pause" | "resume" | "reset" };
+
 export type PresentShell = {
   manifest: Manifest | null;
   currentIndex: number;
   navigate(to: NavigateTarget): void;
+  elapsedMs(): number;
+  isPaused(): boolean;
+  startedAt(): number | null;
   destroy(): void;
 };
 
@@ -31,6 +38,8 @@ export type ShellOptions = {
   window?: Window;
   document?: Document;
   console?: Pick<Console, "error">;
+  bus?: EventTarget;
+  now?: () => number;
 };
 
 export type SlideView = {
@@ -53,6 +62,12 @@ class PresentShellController implements PresentShell {
   private readonly win: Window;
   private readonly doc: Document;
   private readonly log: Pick<Console, "error">;
+  private readonly bus: EventTarget;
+  private readonly now: () => number;
+  private startedAtValue: number | null = null;
+  private pausedAtValue: number | null = null;
+  private pausedTotalMs = 0;
+  private ended = false;
   private readonly onNavigate = (event: Event): void => {
     const detail = (event as CustomEvent<NavigateDetail>).detail;
     if (!detail || !("to" in detail)) {
@@ -61,6 +76,14 @@ class PresentShellController implements PresentShell {
     }
     this.navigate(detail.to);
   };
+  private readonly onTimerControl = (event: Event): void => {
+    const action = (event as CustomEvent<TimerControlDetail>).detail?.action;
+    if (action === "pause") this.pauseTimer();
+    else if (action === "resume") this.resumeTimer();
+    else if (action === "reset") this.resetTimer();
+    else this.log.error("Invalid peitho:timercontrol event");
+  };
+  private readonly onPageHide = (): void => this.endPresentation();
 
   constructor(options: ShellOptions) {
     this.root = options.root;
@@ -68,7 +91,11 @@ class PresentShellController implements PresentShell {
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
     this.log = options.console ?? console;
-    this.win.addEventListener("peitho:navigate", this.onNavigate);
+    this.bus = options.bus ?? this.win;
+    this.now = options.now ?? Date.now;
+    this.bus.addEventListener("peitho:navigate", this.onNavigate);
+    this.bus.addEventListener("peitho:timercontrol", this.onTimerControl);
+    this.win.addEventListener("pagehide", this.onPageHide);
   }
 
   async load(): Promise<void> {
@@ -87,6 +114,7 @@ class PresentShellController implements PresentShell {
         this.slides.push(view);
       }
       this.show(0);
+      this.startPresentation();
     } catch (error) {
       this.root.replaceChildren();
       this.root.textContent = error instanceof Error ? error.message : String(error);
@@ -99,8 +127,26 @@ class PresentShellController implements PresentShell {
     this.show(index);
   }
 
+  elapsedMs(): number {
+    if (this.startedAtValue === null) return 0;
+    const current = this.now();
+    const pausedNow = this.pausedAtValue === null ? 0 : current - this.pausedAtValue;
+    return Math.max(0, current - this.startedAtValue - this.pausedTotalMs - pausedNow);
+  }
+
+  isPaused(): boolean {
+    return this.pausedAtValue !== null;
+  }
+
+  startedAt(): number | null {
+    return this.startedAtValue;
+  }
+
   destroy(): void {
-    this.win.removeEventListener("peitho:navigate", this.onNavigate);
+    this.endPresentation();
+    this.bus.removeEventListener("peitho:navigate", this.onNavigate);
+    this.bus.removeEventListener("peitho:timercontrol", this.onTimerControl);
+    this.win.removeEventListener("pagehide", this.onPageHide);
   }
 
   private async fetchJson<T>(url: string): Promise<T> {
@@ -167,7 +213,7 @@ class PresentShellController implements PresentShell {
     const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
     this.currentIndex = index;
     const slide = this.slides[index];
-    this.win.dispatchEvent(
+    this.bus.dispatchEvent(
       new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
         detail: {
           key: slide.meta.key,
@@ -177,5 +223,47 @@ class PresentShellController implements PresentShell {
         }
       })
     );
+  }
+
+  private startPresentation(): void {
+    this.startedAtValue = this.now();
+    this.pausedAtValue = null;
+    this.pausedTotalMs = 0;
+    this.ended = false;
+    this.bus.dispatchEvent(
+      new CustomEvent<PresentationStartDetail>("peitho:presentationstart", {
+        detail: { total: this.slides.length, startedAt: this.startedAtValue }
+      })
+    );
+  }
+
+  private endPresentation(): void {
+    if (this.ended || this.startedAtValue === null) return;
+    const endedAt = this.now();
+    const elapsedMs = this.elapsedMs();
+    this.ended = true;
+    this.bus.dispatchEvent(
+      new CustomEvent<PresentationEndDetail>("peitho:presentationend", {
+        detail: { endedAt, elapsedMs }
+      })
+    );
+  }
+
+  private pauseTimer(): void {
+    if (this.startedAtValue === null || this.pausedAtValue !== null) return;
+    this.pausedAtValue = this.now();
+  }
+
+  private resumeTimer(): void {
+    if (this.pausedAtValue === null) return;
+    this.pausedTotalMs += this.now() - this.pausedAtValue;
+    this.pausedAtValue = null;
+  }
+
+  private resetTimer(): void {
+    this.startedAtValue = this.now();
+    this.pausedAtValue = null;
+    this.pausedTotalMs = 0;
+    this.ended = false;
   }
 }

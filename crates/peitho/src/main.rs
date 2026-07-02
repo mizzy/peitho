@@ -214,6 +214,11 @@ fn emit_present_cache(
         peitho_core::render_present_index(),
     )
     .into_diagnostic()?;
+    fs::write(
+        cache.join("presenter.html"),
+        peitho_core::render_presenter_index(),
+    )
+    .into_diagnostic()?;
     fs::copy(shell, cache.join("shell.js")).into_diagnostic()?;
     Ok(())
 }

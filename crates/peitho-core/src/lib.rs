@@ -17,6 +17,8 @@ pub use mapping::map_by_convention;
 pub use notes::{notes_json, Notes};
 pub use parser::parse_markdown;
 pub use phase::{require_checked_for_render, Deck, Mapped, Rendered};
-pub use render::{render_deck, render_distribution_index, render_present_index};
+pub use render::{
+    render_deck, render_distribution_index, render_present_index, render_presenter_index,
+};
 pub use template::parse_template;
 pub use theme::build_theme_css;

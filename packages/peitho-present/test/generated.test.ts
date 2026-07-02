@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
-import type { ShellOptions } from "../src/index";
+import type {
+  PresentationEndDetail,
+  PresentationStartDetail,
+  PresenterOptions,
+  ShellOptions,
+  TimerControlDetail
+} from "../src/index";
 
 describe("generated manifest contract", () => {
   it("uses the Rust-generated Manifest type shape", () => {
@@ -22,5 +28,20 @@ describe("generated manifest contract", () => {
 
     expect(manifest.slides[0].key).toBe("intro");
     expect(options.root.tagName).toBe("MAIN");
+  });
+
+  it("exports presenter and presentation event types", () => {
+    const start: PresentationStartDetail = { total: 3, startedAt: 1000 };
+    const end: PresentationEndDetail = { endedAt: 2000, elapsedMs: 1000 };
+    const control: TimerControlDetail = { action: "pause" };
+    const options: Pick<PresenterOptions, "root" | "notes"> = {
+      root: document.createElement("main"),
+      notes: { version: 1, notes: {} }
+    };
+
+    expect(start.total).toBe(3);
+    expect(end.elapsedMs).toBe(1000);
+    expect(control.action).toBe("pause");
+    expect(options.notes.version).toBe(1);
   });
 });

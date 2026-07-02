@@ -220,6 +220,7 @@ pub fn render_present_index() -> String {
   <title>Peitho Present</title>
 </head>
 <body>
+  <a id="peitho-presenter-link" href="presenter.html" target="_blank" rel="noopener">Presenter view</a>
   <main id="peitho-present-root"></main>
   <script type="module">
     import { installKeyboardNavigation, installSyncBridge, mountPresentShell } from './shell.js';
@@ -242,6 +243,56 @@ pub fn render_present_index() -> String {
         await mountPresentShell({ root });
         installKeyboardNavigation(window);
         installSyncBridge(window);
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>"#
+        .to_owned()
+}
+
+pub fn render_presenter_index() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho Presenter</title>
+  <style>
+    body { margin: 0; font: 14px system-ui, sans-serif; background: #111; color: #f5f5f5; }
+    #peitho-presenter-root { min-height: 100vh; }
+    .peitho-presenter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
+    [data-peitho-presenter="current"], [data-peitho-presenter="preview"] { background: #000; min-height: 220px; }
+    [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; }
+    [data-peitho-presenter="timer"] { display: block; font-size: 40px; font-variant-numeric: tabular-nums; margin: 16px 0; }
+    .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  </style>
+</head>
+<body>
+  <main id="peitho-presenter-root"></main>
+  <script type="module">
+    import { mountPresenterView } from './shell.js';
+
+    function showError(message) {
+      const root = document.getElementById('peitho-presenter-root');
+      root.textContent = message;
+    }
+
+    async function fetchOk(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Failed to load ${url}: ${response.status}`);
+      return response;
+    }
+
+    async function main() {
+      const root = document.getElementById('peitho-presenter-root');
+      try {
+        const notes = await fetchOk('notes.json').then((response) => response.json());
+        await mountPresenterView({ root, notes });
       } catch (error) {
         showError(error.message);
       }
@@ -384,6 +435,28 @@ mod tests {
         assert!(html.contains("installKeyboardNavigation(window)"));
         assert!(html.contains("installSyncBridge(window)"));
         assert!(!html.contains("fetchOk(slide.src)"));
+    }
+
+    #[test]
+    fn presenter_index_mounts_presenter_view_and_notes() {
+        let html = render_presenter_index();
+
+        assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
+        assert!(html.contains(r#"import { mountPresenterView } from './shell.js';"#));
+        assert!(html.contains("fetchOk('notes.json')"));
+        assert!(html.contains("await mountPresenterView({ root, notes })"));
+        assert!(html.contains("grid-template-columns"));
+        assert!(html.contains("Failed to load"));
+        assert!(!html.contains("fetchOk(slide.src)"));
+    }
+
+    #[test]
+    fn present_index_links_to_presenter_view() {
+        let html = render_present_index();
+
+        assert!(html.contains(r#"<a id="peitho-presenter-link" href="presenter.html" target="_blank" rel="noopener">Presenter view</a>"#));
+        assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
+        assert!(!html.contains("mountPresenterView"));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
