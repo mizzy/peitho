@@ -223,7 +223,10 @@ fn build_writes_fetching_index_without_embedded_slide_html() {
 
     assert!(index.contains("fetchOk('manifest.json')"));
     assert!(index.contains("fetchOk(slide.src)"));
-    assert!(index.contains(r#"<main id="peitho-slides"></main>"#));
+    assert!(index.contains(r#"<main id="peitho-slides">"#));
+    assert!(index.contains(r#"<div id="peitho-canvas"></div>"#));
+    assert!(index.contains("const CANVAS_WIDTH = 1280"));
+    assert!(!index.contains("shell.js"));
     assert!(!index.contains("Peitho Architecture"));
     assert!(!index.contains("data-slide-key=\"arch-1\""));
 }
@@ -363,6 +366,17 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
 
     assert_eq!(slide_fragment_count(&out), 1);
     assert!(out.join("slides/000-solo.html").exists());
+}
+
+#[test]
+fn base_theme_targets_fixed_canvas_size() {
+    let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
+
+    assert!(css.contains("width: 1280px;"));
+    assert!(css.contains("height: 720px;"));
+    assert!(css.contains("font-size: 56px;"));
+    assert!(!css.contains("min-height: 100vh"));
+    assert!(!css.contains("font-size: 1.4rem"));
 }
 
 fn workspace_root() -> PathBuf {

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
+import {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  calculateCanvasFit,
+  installCanvasClickNavigation,
+  installCanvasScaler,
+  installFullscreenShortcut,
+  installPresentationControls,
+  mountPresenterView,
+  mountPresentShell
+} from "../src/index";
 import type {
   PresentationEndDetail,
   PresentationStartDetail,
@@ -43,5 +54,17 @@ describe("generated manifest contract", () => {
     expect(end.elapsedMs).toBe(1000);
     expect(control.action).toBe("pause");
     expect(options.notes.version).toBe(1);
+  });
+
+  it("exports the presentation canvas public API", () => {
+    expect(CANVAS_WIDTH).toBe(1280);
+    expect(CANVAS_HEIGHT).toBe(720);
+    expect(calculateCanvasFit({ width: 1280, height: 720 }).scale).toBe(1);
+    expect(typeof installCanvasScaler).toBe("function");
+    expect(typeof installPresentationControls).toBe("function");
+    expect(typeof installCanvasClickNavigation).toBe("function");
+    expect(typeof installFullscreenShortcut).toBe("function");
+    expect(typeof mountPresentShell).toBe("function");
+    expect(typeof mountPresenterView).toBe("function");
   });
 });

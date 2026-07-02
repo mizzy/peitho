@@ -29,6 +29,13 @@ function formatElapsed(ms: number): string {
   return `${minutes}:${seconds}`;
 }
 
+function paneViewport(pane: HTMLElement): () => { width: number; height: number } {
+  return () => ({
+    width: pane.clientWidth,
+    height: pane.clientHeight
+  });
+}
+
 export async function mountPresenterView(options: PresenterOptions): Promise<PresenterView> {
   const win = options.window ?? window;
   const doc = options.document ?? document;
@@ -38,15 +45,16 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const previewBus = new EventTarget();
   options.root.innerHTML = `
     <section class="peitho-presenter">
-      <div data-peitho-presenter="current"></div>
+      <div class="peitho-presenter-pane" data-peitho-presenter="current"></div>
       <aside>
-        <div data-peitho-presenter="preview"></div>
+        <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
         <p data-peitho-presenter="preview-end" hidden>End of deck</p>
         <section data-peitho-presenter="notes"></section>
         <output data-peitho-presenter="timer">00:00</output>
         <div class="peitho-presenter-controls">
           <button type="button" data-peitho-action="prev">Prev</button>
           <button type="button" data-peitho-action="next">Next</button>
+          <button type="button" data-peitho-action="start">Start</button>
           <button type="button" data-peitho-action="pause">Pause</button>
           <button type="button" data-peitho-action="resume">Resume</button>
           <button type="button" data-peitho-action="reset">Reset</button>
@@ -68,7 +76,8 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     window: win,
     document: doc,
     bus,
-    now
+    now,
+    viewport: paneViewport(currentRoot)
   });
   const previewShell = await mountPresentShell({
     root: previewRoot,
@@ -76,7 +85,8 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     window: win,
     document: doc,
     bus: previewBus,
-    now
+    now,
+    viewport: paneViewport(previewRoot)
   });
   const keyboardCleanup = installKeyboardNavigation(win, bus);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
@@ -122,7 +132,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   options.root.querySelector('[data-peitho-action="next"]')?.addEventListener("click", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   });
-  for (const action of ["pause", "resume", "reset"] as const) {
+  for (const action of ["start", "pause", "resume", "reset"] as const) {
     options.root.querySelector(`[data-peitho-action="${action}"]`)?.addEventListener("click", () => {
       bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action } }));
       tick();

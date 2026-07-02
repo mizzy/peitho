@@ -74,9 +74,13 @@ fn present_no_serve_writes_presenter_html() {
     let cache = dir.path().join(".peitho/present-cache");
     let presenter = fs::read_to_string(cache.join("presenter.html")).unwrap();
     assert!(presenter.contains("mountPresenterView"));
+    assert!(presenter.contains(".peitho-presenter-pane"));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
-        .contains("Presenter view"));
+        .contains("installPresentationControls"));
+    assert!(!fs::read_to_string(cache.join("present.html"))
+        .unwrap()
+        .contains("peitho-presenter-link"));
 }
 
 #[test]
@@ -199,9 +203,17 @@ fn repository_example_present_no_serve_smoke() {
     assert!(fs::read_to_string(cache.join("presenter.html"))
         .unwrap()
         .contains("mountPresenterView"));
-    assert!(fs::read_to_string(cache.join("shell.js"))
-        .unwrap()
-        .contains("mountPresenterView"));
+    let present_html = fs::read_to_string(cache.join("present.html")).unwrap();
+    let presenter_html = fs::read_to_string(cache.join("presenter.html")).unwrap();
+    let shell_js = fs::read_to_string(cache.join("shell.js")).unwrap();
+    assert!(present_html.contains("installPresentationControls"));
+    assert!(present_html.contains("installCanvasClickNavigation"));
+    assert!(present_html.contains("installFullscreenShortcut"));
+    assert!(!present_html.contains("peitho-presenter-link"));
+    assert!(presenter_html.contains(".peitho-presenter-pane"));
+    assert!(shell_js.contains("CANVAS_WIDTH"));
+    assert!(shell_js.contains("installPresentationControls"));
+    assert!(shell_js.contains("mountPresenterView"));
 }
 
 struct Fixture {

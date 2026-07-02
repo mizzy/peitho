@@ -51,6 +51,11 @@ function mockSyncChannelFactory() {
   return { channel, factory };
 }
 
+function sizeElement(element: HTMLElement, width: number, height: number): void {
+  Object.defineProperty(element, "clientWidth", { value: width, configurable: true });
+  Object.defineProperty(element, "clientHeight", { value: height, configurable: true });
+}
+
 const views: PresenterView[] = [];
 const cleanups: Array<() => void> = [];
 
@@ -59,7 +64,7 @@ afterEach(() => {
   while (views.length > 0) views.pop()?.destroy();
 });
 
-it("renders current slide preview next slide note and timer", async () => {
+it("renders current slide preview next slide note and starts timer from Start button", async () => {
   let now = 1000;
   const root = document.createElement("main");
   const { factory } = mockSyncChannelFactory();
@@ -82,6 +87,8 @@ it("renders current slide preview next slide note and timer", async () => {
   expect(root.querySelector('[data-peitho-presenter="notes"]')?.textContent).toContain(
     "Opening note"
   );
+  expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("00:00");
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
   now = 65000;
   view.tick();
   expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("01:04");
@@ -110,6 +117,33 @@ it("updates preview and shows end of deck on the last slide", async () => {
   );
 });
 
+it("scales current and next preview shells to their pane sizes", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  const currentPane = root.querySelector<HTMLElement>('[data-peitho-presenter="current"]')!;
+  const previewPane = root.querySelector<HTMLElement>('[data-peitho-presenter="preview"]')!;
+  sizeElement(currentPane, 640, 360);
+  sizeElement(previewPane, 320, 180);
+  window.dispatchEvent(new Event("resize"));
+
+  expect(currentPane.querySelector<HTMLElement>(".peitho-slide")?.style.transform).toBe(
+    "translate(0px, 0px) scale(0.5)"
+  );
+  expect(previewPane.querySelector<HTMLElement>(".peitho-slide")?.style.transform).toBe(
+    "translate(0px, 0px) scale(0.25)"
+  );
+});
+
 it("buttons emit navigate and timercontrol requests only", async () => {
   const root = document.createElement("main");
   const { channel, factory } = mockSyncChannelFactory();
@@ -135,9 +169,15 @@ it("buttons emit navigate and timercontrol requests only", async () => {
   cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="pause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')?.click();
 
-  expect(events).toEqual([{ to: "next" }, { action: "pause" }, { action: "reset" }]);
+  expect(events).toEqual([
+    { to: "next" },
+    { action: "start" },
+    { action: "pause" },
+    { action: "reset" }
+  ]);
   expect(channel.sent).toEqual([{ index: 1 }]);
 });
