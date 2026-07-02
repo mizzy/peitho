@@ -211,6 +211,49 @@ pub fn render_distribution_index() -> String {
         .to_owned()
 }
 
+pub fn render_present_index() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho Present</title>
+</head>
+<body>
+  <main id="peitho-present-root"></main>
+  <script type="module">
+    import { installKeyboardNavigation, installSyncBridge, mountPresentShell } from './shell.js';
+
+    function showError(message) {
+      const root = document.getElementById('peitho-present-root');
+      root.textContent = message;
+    }
+
+    async function fetchOk(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Failed to load ${url}: ${response.status}`);
+      return response;
+    }
+
+    async function main() {
+      const root = document.getElementById('peitho-present-root');
+      try {
+        window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
+        await mountPresentShell({ root });
+        installKeyboardNavigation(window);
+        installSyncBridge(window);
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>"#
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +369,21 @@ mod tests {
         assert!(html.contains("response.ok"));
         assert!(html.contains(r#"id="peitho-slides""#));
         assert!(!html.contains("data-slide-key="));
+    }
+
+    #[test]
+    fn present_index_mounts_shell_keyboard_sync_and_notes() {
+        let html = render_present_index();
+
+        assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
+        assert!(html.contains(
+            r#"import { installKeyboardNavigation, installSyncBridge, mountPresentShell } from './shell.js';"#
+        ));
+        assert!(html.contains("fetchOk('notes.json')"));
+        assert!(html.contains("await mountPresentShell({ root })"));
+        assert!(html.contains("installKeyboardNavigation(window)"));
+        assert!(html.contains("installSyncBridge(window)"));
+        assert!(!html.contains("fetchOk(slide.src)"));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
