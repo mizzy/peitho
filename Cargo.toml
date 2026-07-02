@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/peitho-core", "crates/peitho"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+assert_cmd = "2"
+clap = { version = "4", features = ["derive"] }
+html-escape = "0.2"
+lol_html = "2"
+miette = { version = "7", features = ["fancy"] }
+predicates = "3"
+pulldown-cmark = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
