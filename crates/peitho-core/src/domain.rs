@@ -2,6 +2,8 @@ use std::{fmt, str::FromStr};
 
 use serde::Serialize;
 
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SlideKey(String);
 
