@@ -1,2 +1,5 @@
 /target
 /dist
+node_modules/
+packages/peitho-present/node_modules/
+packages/peitho-present/dist/

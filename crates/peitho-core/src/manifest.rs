@@ -6,6 +6,11 @@ use crate::{
     phase::{Checked, CheckedSlide, Deck},
 };
 
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Manifest {
     version: u8,
@@ -17,9 +22,15 @@ pub struct Manifest {
     slides: Vec<ManifestSlide>,
 }
 
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManifestSlide {
     index: usize,
+    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
     key: SlideKey,
     src: String,
     #[serde(rename = "hasNotes")]
@@ -190,5 +201,31 @@ mod tests {
                </section>"#,
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod ts_tests {
+    use std::{fs, path::Path};
+
+    use ts_rs::{Config, TS};
+
+    use super::{Manifest, ManifestSlide};
+
+    #[test]
+    fn exports_manifest_bindings_with_serde_field_names() {
+        let cfg = Config::from_env();
+        Manifest::export_all(&cfg).unwrap();
+        ManifestSlide::export_all(&cfg).unwrap();
+
+        let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
+        let manifest = fs::read_to_string(root_bindings.join("Manifest.ts")).unwrap();
+        let slide = fs::read_to_string(root_bindings.join("ManifestSlide.ts")).unwrap();
+
+        assert!(manifest.contains("peithoVersion: string"));
+        assert!(manifest.contains("slideCount: number"));
+        assert!(manifest.contains("slides: Array<ManifestSlide>"));
+        assert!(slide.contains("key: string"));
+        assert!(slide.contains("hasNotes: boolean"));
     }
 }
