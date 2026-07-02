@@ -20,6 +20,7 @@ const manifest = {
     { index: 1, key: "arch-1", src: "slides/001-arch-1.html", hasNotes: false }
   ]
 };
+const cssText = ".slot-title { color: rebeccapurple; }";
 
 const mountedShells: PresentShell[] = [];
 const windowListenerCleanups: Array<() => void> = [];
@@ -47,6 +48,7 @@ function listenWindow(type: string, listener: EventListener): void {
 function standardFetch(): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
+    if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
     return {
@@ -62,6 +64,7 @@ it("loads manifest and fragments into shadow roots", async () => {
   const root = document.createElement("main");
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
+    if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
     throw new Error(`unexpected ${url}`);
@@ -73,6 +76,20 @@ it("loads manifest and fragments into shadow roots", async () => {
   expect(hosts).toHaveLength(2);
   expect(hosts[0].shadowRoot?.innerHTML).toContain("<h1>Intro</h1>");
   expect(hosts[1].shadowRoot?.innerHTML).toContain("<pre>code</pre>");
+});
+
+it("injects peitho css into each shadow root before fragment html", async () => {
+  const root = document.createElement("main");
+  await mountForTest({ root, fetcher: standardFetch() });
+
+  const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-slide")];
+  for (const host of hosts) {
+    const firstChild = host.shadowRoot?.firstChild;
+    const style = host.shadowRoot?.querySelector("style");
+
+    expect(firstChild).toBe(style);
+    expect(style?.textContent).toContain(cssText);
+  }
 });
 
 it("puts shell handles on hosts and hides non-current slides", async () => {
@@ -185,6 +202,7 @@ it("shows a visible error when a fragment fetch fails", async () => {
   const root = document.createElement("main");
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
+    if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   });
@@ -193,6 +211,23 @@ it("shows a visible error when a fragment fetch fails", async () => {
 
   expect(shell.manifest).toBeNull();
   expect(root.textContent).toContain("Failed to load slides/001-arch-1.html: 404");
+  expect(root.querySelectorAll(".peitho-slide")).toHaveLength(0);
+});
+
+it("shows a visible error when peitho css fetch fails", async () => {
+  const root = document.createElement("main");
+  const fetcher = vi.fn(async (url: string) => {
+    if (url === "manifest.json") return okJson(manifest);
+    if (url === "peitho.css") return { ok: false, status: 503, text: async () => "" } as Response;
+    if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
+    if (url === "slides/001-arch-1.html") return okText("<section>Code</section>");
+    throw new Error(`unexpected ${url}`);
+  });
+
+  const shell = await mountForTest({ root, fetcher: fetcher as unknown as typeof fetch });
+
+  expect(shell.manifest).toBeNull();
+  expect(root.textContent).toContain("Failed to load peitho.css: 503");
   expect(root.querySelectorAll(".peitho-slide")).toHaveLength(0);
 });
 

@@ -74,10 +74,11 @@ class PresentShellController implements PresentShell {
   async load(): Promise<void> {
     try {
       const manifest = await this.fetchJson<Manifest>("manifest.json");
+      const css = await this.fetchText("peitho.css");
       const pending: SlideView[] = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);
-        const host = this.createSlideHost(slide, html);
+        const host = this.createSlideHost(slide, html, css);
         pending.push({ meta: slide, host });
       }
       this.manifest = manifest;
@@ -118,12 +119,18 @@ class PresentShellController implements PresentShell {
     return response;
   }
 
-  private createSlideHost(slide: ManifestSlide, html: string): HTMLElement {
+  private createSlideHost(slide: ManifestSlide, html: string, css: string): HTMLElement {
     const host = this.doc.createElement("section");
     host.classList.add("peitho-slide");
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
-    host.attachShadow({ mode: "open" }).innerHTML = html;
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = this.doc.createElement("style");
+    style.textContent = css;
+    shadow.appendChild(style);
+    const template = this.doc.createElement("template");
+    template.innerHTML = html;
+    shadow.appendChild(template.content.cloneNode(true));
     return host;
   }
 
