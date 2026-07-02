@@ -60,7 +60,10 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
 
 fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, template: &Template) -> Result<()> {
     for (slot, contract) in template.slots() {
-        let count = slots.get(slot).map(|mapped| mapped.fragments().len()).unwrap_or(0);
+        let count = slots
+            .get(slot)
+            .map(|mapped| mapped.fragments().len())
+            .unwrap_or(0);
         if !contract.arity.allows(count) {
             let line = slots
                 .get(slot)
@@ -129,9 +132,11 @@ mod tests {
                </section>"#,
         )
         .unwrap();
-        let mapped =
-            map_by_convention(parse_markdown("# Title\n\nBody paragraph").unwrap(), &template)
-                .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown("# Title\n\nBody paragraph").unwrap(),
+            &template,
+        )
+        .unwrap();
 
         let err = check_deck(mapped, &template).unwrap_err();
 

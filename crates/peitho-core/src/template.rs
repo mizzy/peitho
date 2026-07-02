@@ -70,7 +70,9 @@ pub fn parse_template(name: impl Into<String>, html: &str) -> Result<Template> {
         },
         |_chunk: &[u8]| {},
     );
-    rewriter.write(html.as_bytes()).map_err(template_parse_error)?;
+    rewriter
+        .write(html.as_bytes())
+        .map_err(template_parse_error)?;
     rewriter.end().map_err(template_parse_error)?;
 
     let section_count = Rc::try_unwrap(section_count).unwrap().into_inner();
@@ -183,10 +185,11 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Template);
-        assert!(err
-            .to_string()
-            .contains("unknown accepts value 'heading'"));
-        assert_eq!(err.help, "use one of inline, blocks, text, code, image, list");
+        assert!(err.to_string().contains("unknown accepts value 'heading'"));
+        assert_eq!(
+            err.help,
+            "use one of inline, blocks, text, code, image, list"
+        );
     }
 
     #[test]
