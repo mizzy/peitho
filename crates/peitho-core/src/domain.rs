@@ -1,6 +1,8 @@
 use std::{fmt, str::FromStr};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SlideKey(String);
 
 impl SlideKey {
@@ -293,6 +295,10 @@ impl RenderedSlide {
 
     pub fn html(&self) -> &str {
         &self.html
+    }
+
+    pub fn src(&self) -> String {
+        crate::manifest::fragment_src(self.index, &self.key)
     }
 }
 

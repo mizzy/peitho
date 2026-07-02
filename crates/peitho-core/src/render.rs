@@ -164,14 +164,8 @@ fn render_error(err: RewritingError) -> BuildError {
     }
 }
 
-pub fn render_index(slides: &[RenderedSlide]) -> String {
-    let body = slides
-        .iter()
-        .map(RenderedSlide::html)
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        r#"<!doctype html>
+pub fn render_distribution_index() -> String {
+    r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -180,10 +174,24 @@ pub fn render_index(slides: &[RenderedSlide]) -> String {
   <title>Peitho Deck</title>
 </head>
 <body>
-{body}
+  <main id="peitho-slides"></main>
+  <script>
+    async function loadDeck() {
+      const manifest = await fetch('manifest.json').then((response) => response.json());
+      document.title = manifest.title || 'Peitho Deck';
+      const root = document.getElementById('peitho-slides');
+      for (const slide of manifest.slides) {
+        const html = await fetch(slide.src).then((response) => response.text());
+        const holder = document.createElement('div');
+        holder.innerHTML = html;
+        while (holder.firstChild) root.appendChild(holder.firstChild);
+      }
+    }
+    loadDeck();
+  </script>
 </body>
 </html>"#
-    )
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -281,5 +289,38 @@ mod tests {
             .to_owned();
         assert!(atx_html.contains(r#"<span class="slot-title">Architecture</span>"#));
         assert!(!atx_html.contains("Architecture #"));
+    }
+
+    #[test]
+    fn rendered_slides_have_manifest_fragment_sources() {
+        let rendered = render_checked_deck("# Intro\n\n---\n# Details");
+
+        assert_eq!(rendered.slides()[0].src(), "slides/000-intro.html");
+        assert_eq!(rendered.slides()[1].src(), "slides/001-details.html");
+    }
+
+    #[test]
+    fn distribution_index_fetches_manifest_and_slide_sources_without_embedding_slides() {
+        let html = render_distribution_index();
+
+        assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
+        assert!(html.contains("fetch('manifest.json')"));
+        assert!(html.contains("fetch(slide.src)"));
+        assert!(html.contains(r#"id="peitho-slides""#));
+        assert!(!html.contains("data-slide-key="));
+    }
+
+    fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
+        let template = parse_template(
+            "title-only",
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap(),
+            &template,
+        )
+        .unwrap();
+        render_deck(checked, &template).unwrap()
     }
 }

@@ -60,6 +60,8 @@ fn build(
     let mapped = core(peitho_core::map_by_convention(parsed, &template))?;
     let checked = core(peitho_core::check_deck(mapped, &template))?;
     let slide_count = checked.slide_count();
+    let manifest = peitho_core::build_manifest(&checked);
+    let manifest_json = core(peitho_core::manifest_json(&manifest))?;
     let css = core(peitho_core::build_theme_css(
         &base_css,
         &overrides_css,
@@ -70,12 +72,26 @@ fn build(
 
     fs::create_dir_all(out).into_diagnostic()?;
     fs::write(out.join("peitho.css"), css).into_diagnostic()?;
+    write_slide_fragments(out, &rendered)?;
+    fs::write(out.join("manifest.json"), manifest_json).into_diagnostic()?;
     fs::write(
         out.join("index.html"),
-        peitho_core::render_index(rendered.slides()),
+        peitho_core::render_distribution_index(),
     )
     .into_diagnostic()?;
     println!("built {} slide(s) into {}", slide_count, out.display());
+    Ok(())
+}
+
+fn write_slide_fragments(
+    out: &Path,
+    rendered: &peitho_core::Deck<peitho_core::Rendered>,
+) -> miette::Result<()> {
+    let slides_dir = out.join("slides");
+    fs::create_dir_all(&slides_dir).into_diagnostic()?;
+    for slide in rendered.slides() {
+        fs::write(out.join(slide.src()), slide.html()).into_diagnostic()?;
+    }
     Ok(())
 }
 

@@ -12,10 +12,17 @@ pub struct Parsed {
     slides: Vec<ParsedSlide>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySource {
+    Explicit { line: usize },
+    Derived { line: Option<usize> },
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedSlide {
     pub index: usize,
     pub key: SlideKey,
+    pub key_source: KeySource,
     pub fragments: Vec<SourceFragment>,
 }
 
@@ -152,6 +159,14 @@ impl CheckedSlide {
     pub(crate) fn slots(&self) -> &BTreeMap<SlotName, Vec<SourceFragment>> {
         &self.slots
     }
+
+    pub(crate) fn title_text(&self) -> Option<String> {
+        let title = SlotName::new("title").ok()?;
+        self.slots
+            .get(&title)?
+            .iter()
+            .find_map(SourceFragment::heading_text)
+    }
 }
 
 impl Deck<Checked> {
@@ -167,6 +182,10 @@ impl Deck<Checked> {
 
     pub fn slide_keys(&self) -> impl Iterator<Item = &SlideKey> {
         self.phase.slides.iter().map(|slide| &slide.key)
+    }
+
+    pub(crate) fn checked_slides(&self) -> &[CheckedSlide] {
+        &self.phase.slides
     }
 
     pub(crate) fn into_checked_slides(self) -> Vec<CheckedSlide> {
@@ -213,6 +232,7 @@ mod tests {
         let deck = Deck::parsed(vec![ParsedSlide {
             key: SlideKey::new("arch-1").unwrap(),
             index: 0,
+            key_source: KeySource::Explicit { line: 1 },
             fragments: vec![SourceFragment::paragraph(3, "body")],
         }]);
 

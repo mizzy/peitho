@@ -3,37 +3,17 @@ use std::collections::BTreeMap;
 use crate::{
     domain::{Accepts, FragmentKind, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
-    phase::{Checked, CheckedSlide, Deck, Mapped, MappedSlot, UnassignedFragment},
+    phase::{Checked, CheckedSlide, Deck, Mapped, MappedSlide, MappedSlot, UnassignedFragment},
     template::Template,
 };
 
 pub fn check_deck(deck: Deck<Mapped>, template: &Template) -> Result<Deck<Checked>> {
     let mut slides = Vec::new();
     for slide in deck.into_mapped_slides() {
-        for (slot, mapped_slot) in &slide.slots {
-            let contract = mapped_slot.contract();
-            for fragment in mapped_slot.fragments() {
-                if !accepts_fragment(contract.accepts, fragment) {
-                    return Err(BuildError::new(
-                        ErrorKind::Accepts,
-                        Some(fragment.line()),
-                        format!(
-                            "slot '{}' accepts {}, but got {}",
-                            slot.as_str(),
-                            contract.accepts,
-                            fragment.kind()
-                        ),
-                        format!(
-                            "change the template accepts to '{}' or move this content to a {} slot",
-                            fragment.kind().default_accepts(),
-                            fragment.kind().default_accepts()
-                        ),
-                    ));
-                }
-            }
-        }
-        check_arity(&slide.slots, template)?;
-        check_no_unassigned(&slide.unassigned)?;
+        let slide_number = slide.index + 1;
+        let slide_key = slide.key.as_str().to_owned();
+        check_slide(&slide, template)
+            .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         let checked_slots = slide
             .slots
             .into_iter()
@@ -42,6 +22,38 @@ pub fn check_deck(deck: Deck<Mapped>, template: &Template) -> Result<Deck<Checke
         slides.push(CheckedSlide::new(slide.index, slide.key, checked_slots));
     }
     Ok(Deck::checked(slides))
+}
+
+fn check_slide(slide: &MappedSlide, template: &Template) -> Result<()> {
+    check_accepts(&slide.slots)?;
+    check_arity(&slide.slots, template)?;
+    check_no_unassigned(&slide.unassigned)
+}
+
+fn check_accepts(slots: &BTreeMap<SlotName, MappedSlot>) -> Result<()> {
+    for (slot, mapped_slot) in slots {
+        let contract = mapped_slot.contract();
+        for fragment in mapped_slot.fragments() {
+            if !accepts_fragment(contract.accepts, fragment) {
+                return Err(BuildError::new(
+                    ErrorKind::Accepts,
+                    Some(fragment.line()),
+                    format!(
+                        "slot '{}' accepts {}, but got {}",
+                        slot.as_str(),
+                        contract.accepts,
+                        fragment.kind()
+                    ),
+                    format!(
+                        "change the template accepts to '{}' or move this content to a {} slot",
+                        fragment.kind().default_accepts(),
+                        fragment.kind().default_accepts()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
@@ -232,5 +244,25 @@ mod tests {
             err.help,
             "add a 'body' slot to the template or remove the heading"
         );
+    }
+
+    #[test]
+    fn arity_error_in_second_slide_includes_slide_context() {
+        let markdown = "# Intro\n\n---\n<!-- {\"key\":\"code-slide\"} -->\n# Code\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```";
+        let template = parse_template(
+            "title-body-code",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert!(err.to_string().contains("slide 2 ('code-slide'), line 7"));
+        assert!(err.to_string().contains("slot 'code' got 2 item(s)"));
     }
 }
