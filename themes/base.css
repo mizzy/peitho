@@ -1,0 +1,24 @@
+.peitho-slide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.8fr);
+  gap: 2rem;
+  min-height: 100vh;
+  padding: 4rem;
+  box-sizing: border-box;
+}
+
+.slot-title {
+  display: inline-block;
+}
+
+.slot-body {
+  font-size: 1.4rem;
+  line-height: 1.5;
+}
+
+.slot-code {
+  display: block;
+  padding: 1rem;
+  background: #111;
+  color: #f7f7f7;
+}

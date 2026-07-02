@@ -1,0 +1,12 @@
+[package]
+name = "peitho-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+html-escape.workspace = true
+lol_html.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true

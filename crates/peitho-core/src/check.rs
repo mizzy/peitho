@@ -1,0 +1,231 @@
+use std::collections::BTreeMap;
+
+use crate::{
+    domain::{Accepts, FragmentKind, SlotName, SourceFragment},
+    error::{BuildError, ErrorKind, Result},
+    phase::{Checked, CheckedSlide, Deck, Mapped, MappedSlot, UnassignedFragment},
+    template::Template,
+};
+
+pub fn check_deck(deck: Deck<Mapped>, template: &Template) -> Result<Deck<Checked>> {
+    let mut slides = Vec::new();
+    for slide in deck.into_mapped_slides() {
+        for (slot, mapped_slot) in &slide.slots {
+            let contract = mapped_slot.contract();
+            for fragment in mapped_slot.fragments() {
+                if !accepts_fragment(contract.accepts, fragment) {
+                    return Err(BuildError::new(
+                        ErrorKind::Accepts,
+                        Some(fragment.line()),
+                        format!(
+                            "slot '{}' accepts {}, but got {}",
+                            slot.as_str(),
+                            contract.accepts,
+                            fragment.kind()
+                        ),
+                        format!(
+                            "change the template accepts to '{}' or move this content to a {} slot",
+                            fragment.kind().default_accepts(),
+                            fragment.kind().default_accepts()
+                        ),
+                    ));
+                }
+            }
+        }
+        check_arity(&slide.slots, template)?;
+        check_no_unassigned(&slide.unassigned)?;
+        let checked_slots = slide
+            .slots
+            .into_iter()
+            .map(|(slot, mapped_slot)| (slot, mapped_slot.fragments().to_vec()))
+            .collect();
+        slides.push(CheckedSlide::new(slide.index, slide.key, checked_slots));
+    }
+    Ok(Deck::checked(slides))
+}
+
+fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
+    matches!(
+        (accepts, fragment.kind()),
+        (Accepts::Inline, FragmentKind::Heading { .. })
+            | (Accepts::Blocks, FragmentKind::Heading { .. })
+            | (Accepts::Blocks, FragmentKind::Paragraph)
+            | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Text, FragmentKind::Text)
+            | (Accepts::Code, FragmentKind::Code)
+            | (Accepts::Image, FragmentKind::Image)
+            | (Accepts::List, FragmentKind::List)
+    )
+}
+
+fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, template: &Template) -> Result<()> {
+    for (slot, contract) in template.slots() {
+        let count = slots.get(slot).map(|mapped| mapped.fragments().len()).unwrap_or(0);
+        if !contract.arity.allows(count) {
+            let line = slots
+                .get(slot)
+                .and_then(|mapped| mapped.fragments().first())
+                .map(SourceFragment::line);
+            let help = if count == 0 && slot.as_str() == "title" {
+                "add a heading for the title slot".to_owned()
+            } else if count == 0 {
+                format!("add content for the {} slot", slot.as_str())
+            } else {
+                format!(
+                    "use a layout with more {} capacity or remove one {} block",
+                    slot.as_str(),
+                    slot.as_str()
+                )
+            };
+            return Err(BuildError::new(
+                ErrorKind::Arity,
+                line,
+                format!(
+                    "slot '{}' got {} item(s), but layout '{}' allows {}",
+                    slot.as_str(),
+                    count,
+                    template.name(),
+                    contract.arity
+                ),
+                help,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_no_unassigned(unassigned: &[UnassignedFragment]) -> Result<()> {
+    if let Some(unassigned) = unassigned.first() {
+        let fragment = unassigned.fragment();
+        let target = unassigned.expected_slot().as_str();
+        return Err(BuildError::new(
+            ErrorKind::ResidualContent,
+            Some(fragment.line()),
+            format!("unassigned content remains for missing '{target}' slot"),
+            format!(
+                "add a '{target}' slot to the template or remove the {}",
+                fragment.kind().removal_noun()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        error::ErrorKind, mapping::map_by_convention, parser::parse_markdown,
+        template::parse_template,
+    };
+
+    #[test]
+    fn rejects_paragraph_in_inline_slot_with_line_and_help() {
+        let template = parse_template(
+            "bad-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="inline" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let mapped =
+            map_by_convention(parse_markdown("# Title\n\nBody paragraph").unwrap(), &template)
+                .unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("slot 'body' accepts inline"));
+        assert_eq!(
+            err.help,
+            "change the template accepts to 'blocks' or move this content to a blocks slot"
+        );
+    }
+
+    #[test]
+    fn rejects_two_code_blocks_for_zero_or_one_code_slot() {
+        let markdown = "# Title\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```";
+        let template = parse_template(
+            "title-body-code",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("slot 'code' got 2 item(s)"));
+        assert_eq!(
+            err.help,
+            "use a layout with more code capacity or remove one code block"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_required_title_slot() {
+        let template = parse_template(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(parse_markdown("Body only").unwrap(), &template).unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert!(err.to_string().contains("slot 'title' got 0 item(s)"));
+        assert_eq!(err.help, "add a heading for the title slot");
+    }
+
+    #[test]
+    fn rejects_unassigned_code_when_template_has_no_code_slot() {
+        let template = parse_template(
+            "title-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let markdown = "# Title\n\n```rust\nfn lost() {}\n```";
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unassigned content remains"));
+        assert_eq!(
+            err.help,
+            "add a 'code' slot to the template or remove the code block"
+        );
+    }
+
+    #[test]
+    fn rejects_unassigned_secondary_heading_as_body_content() {
+        let template = parse_template(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let markdown = "# Title\n\n## Detail";
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+
+        let err = check_deck(mapped, &template).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.help,
+            "add a 'body' slot to the template or remove the heading"
+        );
+    }
+}
