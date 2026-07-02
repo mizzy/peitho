@@ -1,3 +1,21 @@
+export {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  calculateCanvasFit,
+  installCanvasScaler
+} from "./canvas";
+export type { CanvasFit, CanvasScalerOptions, CanvasViewport } from "./canvas";
+export {
+  installCanvasClickNavigation,
+  installFullscreenShortcut,
+  installPresentationControls,
+  toggleFullscreen
+} from "./controls";
+export type {
+  CanvasClickNavigationOptions,
+  FullscreenShortcutOptions,
+  PresentationControlsOptions
+} from "./controls";
 export { installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";

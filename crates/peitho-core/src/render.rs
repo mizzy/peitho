@@ -90,6 +90,10 @@ fn render_slide(
 }
 
 fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
+    if fragments.is_empty() {
+        return String::new();
+    }
+
     let class_name = slot.class_name();
     match fragments.first().map(SourceFragment::kind) {
         Some(FragmentKind::Heading { .. }) => {
@@ -172,10 +176,22 @@ pub fn render_distribution_index() -> String {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="peitho.css">
   <title>Peitho Deck</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #peitho-slides { position: fixed; inset: 0; overflow: hidden; background: #000; }
+    #peitho-canvas { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: top left; }
+  </style>
 </head>
 <body>
-  <main id="peitho-slides"></main>
+  <main id="peitho-slides">
+    <div id="peitho-canvas"></div>
+  </main>
   <script>
+    const CANVAS_WIDTH = 1280;
+    const CANVAS_HEIGHT = 720;
+    let slides = [];
+    let currentIndex = 0;
+
     function showError(message) {
       const root = document.getElementById('peitho-slides');
       root.textContent = message;
@@ -189,21 +205,67 @@ pub fn render_distribution_index() -> String {
       return response;
     }
 
+    function resizeCanvas() {
+      const canvas = document.getElementById('peitho-canvas');
+      const scale = Math.min(window.innerWidth / CANVAS_WIDTH, window.innerHeight / CANVAS_HEIGHT);
+      const width = CANVAS_WIDTH * scale;
+      const height = CANVAS_HEIGHT * scale;
+      const left = (window.innerWidth - width) / 2;
+      const top = (window.innerHeight - height) / 2;
+      canvas.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
+    }
+
+    function showSlide(index) {
+      if (slides.length === 0) {
+        document.getElementById('peitho-canvas').replaceChildren();
+        return;
+      }
+      const next = Math.max(0, Math.min(index, slides.length - 1));
+      currentIndex = next;
+      const canvas = document.getElementById('peitho-canvas');
+      canvas.innerHTML = slides[next].html;
+    }
+
+    function navigate(to) {
+      if (to === 'next') showSlide(currentIndex + 1);
+      if (to === 'prev') showSlide(currentIndex - 1);
+      if (to === 'first') showSlide(0);
+      if (to === 'last') showSlide(slides.length - 1);
+    }
+
     async function loadDeck() {
       try {
         const manifest = await fetchOk('manifest.json').then((response) => response.json());
         document.title = manifest.title || 'Peitho Deck';
-        const root = document.getElementById('peitho-slides');
-        for (const slide of manifest.slides) {
-          const html = await fetchOk(slide.src).then((response) => response.text());
-          const holder = document.createElement('div');
-          holder.innerHTML = html;
-          while (holder.firstChild) root.appendChild(holder.firstChild);
-        }
+        slides = await Promise.all(
+          manifest.slides.map(async (slide) => ({
+            key: slide.key,
+            html: await fetchOk(slide.src).then((response) => response.text())
+          }))
+        );
+        showSlide(0);
+        resizeCanvas();
       } catch (error) {
         showError(error.message);
       }
     }
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+        event.preventDefault();
+        navigate('next');
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+        event.preventDefault();
+        navigate('prev');
+      }
+      if (event.key === 'Home') navigate('first');
+      if (event.key === 'End') navigate('last');
+    });
+    document.addEventListener('click', (event) => {
+      navigate(event.clientX < window.innerWidth / 4 ? 'prev' : 'next');
+    });
+    window.addEventListener('resize', resizeCanvas);
     loadDeck();
   </script>
 </body>
@@ -218,12 +280,24 @@ pub fn render_present_index() -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Peitho Present</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
+    .peitho-control-bar { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; gap: 8px; align-items: center; padding: 8px; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 6px; }
+    .peitho-control-bar[hidden] { display: none; }
+  </style>
 </head>
 <body>
-  <a id="peitho-presenter-link" href="presenter.html" target="_blank" rel="noopener">Presenter view</a>
   <main id="peitho-present-root"></main>
   <script type="module">
-    import { installKeyboardNavigation, installSyncBridge, mountPresentShell } from './shell.js';
+    import {
+      installCanvasClickNavigation,
+      installFullscreenShortcut,
+      installKeyboardNavigation,
+      installPresentationControls,
+      installSyncBridge,
+      mountPresentShell
+    } from './shell.js';
 
     function showError(message) {
       const root = document.getElementById('peitho-present-root');
@@ -240,9 +314,12 @@ pub fn render_present_index() -> String {
       const root = document.getElementById('peitho-present-root');
       try {
         window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
-        await mountPresentShell({ root });
         installKeyboardNavigation(window);
         installSyncBridge(window);
+        installPresentationControls({ root, window, document });
+        installCanvasClickNavigation({ root, window });
+        installFullscreenShortcut({ window, document });
+        await mountPresentShell({ root });
       } catch (error) {
         showError(error.message);
       }
@@ -263,11 +340,14 @@ pub fn render_presenter_index() -> String {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Peitho Presenter</title>
   <style>
-    body { margin: 0; font: 14px system-ui, sans-serif; background: #111; color: #f5f5f5; }
+    html, body { margin: 0; width: 100%; min-height: 100%; background: #111; color: #f5f5f5; }
+    body { font: 14px system-ui, sans-serif; }
     #peitho-presenter-root { min-height: 100vh; }
     .peitho-presenter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
-    [data-peitho-presenter="current"], [data-peitho-presenter="preview"] { background: #000; min-height: 220px; }
-    [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; }
+    .peitho-presenter-pane { position: relative; overflow: hidden; background: #000; min-height: 180px; }
+    [data-peitho-presenter="current"] { min-height: calc(100vh - 32px); }
+    [data-peitho-presenter="preview"] { aspect-ratio: 16 / 9; }
+    [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; margin-top: 16px; }
     [data-peitho-presenter="timer"] { display: block; font-size: 40px; font-variant-numeric: tabular-nums; margin: 16px 0; }
     .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
   </style>
@@ -344,6 +424,31 @@ mod tests {
     }
 
     #[test]
+    fn renders_empty_optional_slot_as_no_slot_markup() {
+        let markdown = "# Architecture\n\nBody without code.";
+        let template = parse_template(
+            "title-body-code",
+            r#"<section class="slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <figure class="code"><slot name="code" accepts="code" arity="0..1"></slot></figure>
+</section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap(),
+            &template,
+        )
+        .unwrap();
+
+        let rendered = render_deck(checked, &template).unwrap();
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"<figure class="code"></figure>"#));
+        assert!(!html.contains(r#"class="slot-code""#));
+    }
+
+    #[test]
     fn renders_inline_markup_in_heading_slot() {
         let markdown = "# **Architecture** `Phase` [docs](https://example.com)";
         let template = parse_template(
@@ -411,51 +516,68 @@ mod tests {
     }
 
     #[test]
-    fn distribution_index_fetches_manifest_and_slide_sources_without_embedding_slides() {
+    fn distribution_index_uses_one_slide_canvas_without_shell_bundle() {
         let html = render_distribution_index();
 
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
+        assert!(html.contains(r#"id="peitho-canvas""#));
+        assert!(html.contains("const CANVAS_WIDTH = 1280"));
+        assert!(html.contains("const CANVAS_HEIGHT = 720"));
+        assert!(html.contains("function resizeCanvas()"));
+        assert!(html.contains("function showSlide(index)"));
+        assert!(html.contains("document.addEventListener('keydown'"));
+        assert!(html.contains("document.addEventListener('click'"));
         assert!(html.contains("fetchOk('manifest.json')"));
         assert!(html.contains("fetchOk(slide.src)"));
         assert!(html.contains("response.ok"));
-        assert!(html.contains(r#"id="peitho-slides""#));
+        assert!(!html.contains("shell.js"));
+        assert!(!html.contains("installPresentationControls"));
         assert!(!html.contains("data-slide-key="));
     }
 
     #[test]
-    fn present_index_mounts_shell_keyboard_sync_and_notes() {
+    fn present_index_mounts_shell_controls_keyboard_sync_and_notes() {
         let html = render_present_index();
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
-        assert!(html.contains(
-            r#"import { installKeyboardNavigation, installSyncBridge, mountPresentShell } from './shell.js';"#
-        ));
+        assert!(html.contains("installPresentationControls"));
+        assert!(html.contains("installCanvasClickNavigation"));
+        assert!(html.contains("installFullscreenShortcut"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await mountPresentShell({ root })"));
         assert!(html.contains("installKeyboardNavigation(window)"));
         assert!(html.contains("installSyncBridge(window)"));
+        let controls_index = html
+            .find("installPresentationControls({ root, window, document })")
+            .unwrap();
+        let mount_index = html.find("await mountPresentShell({ root })").unwrap();
+        assert!(controls_index < mount_index);
+        assert!(!html.contains("peitho-presenter-link"));
+        assert!(!html.contains(">Presenter view</a>"));
         assert!(!html.contains("fetchOk(slide.src)"));
     }
 
     #[test]
-    fn presenter_index_mounts_presenter_view_and_notes() {
+    fn presenter_index_mounts_presenter_view_with_canvas_panes_and_notes() {
         let html = render_presenter_index();
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
         assert!(html.contains(r#"import { mountPresenterView } from './shell.js';"#));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await mountPresenterView({ root, notes })"));
-        assert!(html.contains("grid-template-columns"));
+        assert!(html.contains(".peitho-presenter-pane"));
+        assert!(html.contains("overflow: hidden"));
         assert!(html.contains("Failed to load"));
         assert!(!html.contains("fetchOk(slide.src)"));
     }
 
     #[test]
-    fn present_index_links_to_presenter_view() {
+    fn present_index_has_no_static_presenter_link() {
         let html = render_present_index();
 
-        assert!(html.contains(r#"<a id="peitho-presenter-link" href="presenter.html" target="_blank" rel="noopener">Presenter view</a>"#));
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
+        assert!(!html.contains("peitho-presenter-link"));
+        assert!(!html.contains(">Presenter view</a>"));
         assert!(!html.contains("mountPresenterView"));
     }
 

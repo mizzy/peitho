@@ -1,24 +1,64 @@
 .peitho-slide {
+  width: 1280px;
+  height: 720px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.8fr);
-  gap: 2rem;
-  min-height: 100vh;
-  padding: 4rem;
+  grid-template-columns: minmax(0, 1fr) 470px;
+  grid-template-rows: auto minmax(0, 1fr);
+  column-gap: 56px;
+  row-gap: 32px;
+  padding: 64px 72px;
   box-sizing: border-box;
+  overflow: hidden;
+  background: #f7f7f2;
+  color: #181818;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.peitho-slide h1 {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 56px;
+  line-height: 1.05;
+  font-weight: 760;
 }
 
 .slot-title {
   display: inline-block;
 }
 
+.body {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .slot-body {
-  font-size: 1.4rem;
-  line-height: 1.5;
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.slot-body p {
+  margin: 0 0 24px;
+}
+
+.slot-body ul {
+  margin: 0;
+  padding-left: 34px;
+}
+
+.code {
+  min-width: 0;
+  margin: 0;
 }
 
 .slot-code {
   display: block;
-  padding: 1rem;
+  margin: 0;
+  padding: 24px;
+  max-height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
   background: #111;
   color: #f7f7f7;
+  font-size: 22px;
+  line-height: 1.35;
 }

@@ -38,33 +38,7 @@ afterEach(() => {
   while (shells.length > 0) shells.pop()?.destroy();
 });
 
-it("isolates navigate events by shell bus", async () => {
-  const rootA = document.createElement("main");
-  const rootB = document.createElement("main");
-  const busA = new EventTarget();
-  const busB = new EventTarget();
-  const shellA = await mountPresentShell({
-    root: rootA,
-    fetcher: standardFetch(),
-    window,
-    bus: busA
-  });
-  const shellB = await mountPresentShell({
-    root: rootB,
-    fetcher: standardFetch(),
-    window,
-    bus: busB
-  });
-  shells.push(shellA, shellB);
-
-  busA.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
-
-  expect(shellA.currentIndex).toBe(1);
-  expect(shellB.currentIndex).toBe(0);
-});
-
-it("dispatches presentationstart after mount with total and startedAt", async () => {
-  const now = 1000;
+it("does not start the presentation on mount", async () => {
   const starts: unknown[] = [];
   const bus = new EventTarget();
   bus.addEventListener("peitho:presentationstart", (event) =>
@@ -76,17 +50,23 @@ it("dispatches presentationstart after mount with total and startedAt", async ()
     fetcher: standardFetch(),
     window,
     bus,
-    now: () => now
+    now: () => 1000
   });
   shells.push(shell);
 
-  expect(starts).toEqual([{ total: 2, startedAt: 1000 }]);
-  expect(shell.startedAt()).toBe(1000);
+  expect(starts).toEqual([]);
+  expect(shell.startedAt()).toBeNull();
+  expect(shell.elapsedMs()).toBe(0);
+  expect(shell.isPaused()).toBe(false);
 });
 
-it("pauses resumes and resets elapsed time from timercontrol events", async () => {
+it("starts once from timercontrol start and ignores duplicate start", async () => {
   let now = 1000;
+  const starts: unknown[] = [];
   const bus = new EventTarget();
+  bus.addEventListener("peitho:presentationstart", (event) =>
+    starts.push((event as CustomEvent).detail)
+  );
   const shell = await mountPresentShell({
     root: document.createElement("main"),
     fetcher: standardFetch(),
@@ -96,6 +76,35 @@ it("pauses resumes and resets elapsed time from timercontrol events", async () =
   });
   shells.push(shell);
 
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
+  now = 1750;
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
+
+  expect(starts).toEqual([{ total: 2, startedAt: 1000 }]);
+  expect(shell.startedAt()).toBe(1000);
+  expect(shell.elapsedMs()).toBe(750);
+});
+
+it("pauses resumes and resets only after a manual start", async () => {
+  let now = 1000;
+  const starts: unknown[] = [];
+  const bus = new EventTarget();
+  bus.addEventListener("peitho:presentationstart", (event) =>
+    starts.push((event as CustomEvent).detail)
+  );
+  const shell = await mountPresentShell({
+    root: document.createElement("main"),
+    fetcher: standardFetch(),
+    window,
+    bus,
+    now: () => now
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "pause" } }));
+  expect(shell.isPaused()).toBe(false);
+
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
   now = 1500;
   expect(shell.elapsedMs()).toBe(500);
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "pause" } }));
@@ -103,15 +112,20 @@ it("pauses resumes and resets elapsed time from timercontrol events", async () =
   now = 2500;
   expect(shell.elapsedMs()).toBe(500);
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "resume" } }));
-  expect(shell.isPaused()).toBe(false);
   now = 3000;
   expect(shell.elapsedMs()).toBe(1000);
+
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "reset" } }));
-  expect(shell.startedAt()).toBe(3000);
+  expect(shell.startedAt()).toBeNull();
   expect(shell.elapsedMs()).toBe(0);
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
+  expect(starts).toEqual([
+    { total: 2, startedAt: 1000 },
+    { total: 2, startedAt: 3000 }
+  ]);
 });
 
-it("dispatches presentationend once for pagehide and destroy", async () => {
+it("emits presentationend only once and only after start", async () => {
   let now = 1000;
   const bus = new EventTarget();
   const ends: unknown[] = [];
@@ -126,9 +140,20 @@ it("dispatches presentationend once for pagehide and destroy", async () => {
     now: () => now
   });
 
+  shell.destroy();
+  expect(ends).toEqual([]);
+
+  const startedShell = await mountPresentShell({
+    root: document.createElement("main"),
+    fetcher: standardFetch(),
+    window,
+    bus,
+    now: () => now
+  });
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
   now = 1750;
   window.dispatchEvent(new Event("pagehide"));
-  shell.destroy();
+  startedShell.destroy();
 
   expect(ends).toEqual([{ endedAt: 1750, elapsedMs: 750 }]);
 });

@@ -103,6 +103,50 @@ it("puts shell handles on hosts and hides non-current slides", async () => {
   expect(hosts[1].hidden).toBe(true);
 });
 
+it("scales shell slide hosts as fixed canvases and cleans up resize listeners", async () => {
+  let viewport = { width: 1920, height: 1080 };
+  const root = document.createElement("main");
+  const shell = await mountForTest({
+    root,
+    fetcher: standardFetch(),
+    window,
+    viewport: () => viewport
+  });
+
+  const host = root.querySelector<HTMLElement>(".peitho-slide");
+  expect(root.classList.contains("peitho-shell-viewport")).toBe(true);
+  expect(host?.dataset.peithoCanvas).toBe("slide");
+  expect(host?.style.width).toBe("1280px");
+  expect(host?.style.height).toBe("720px");
+  expect(host?.style.transform).toBe("translate(0px, 0px) scale(1.5)");
+
+  viewport = { width: 1000, height: 1000 };
+  window.dispatchEvent(new Event("resize"));
+  expect(host?.style.transform).toBe("translate(0px, 218.75px) scale(0.78125)");
+
+  shell.destroy();
+  viewport = { width: 1280, height: 720 };
+  window.dispatchEvent(new Event("resize"));
+  expect(host?.style.transform).toBe("translate(0px, 218.75px) scale(0.78125)");
+});
+
+it("preserves a positioned shell root provided by the page", async () => {
+  const root = document.createElement("main");
+  root.style.position = "fixed";
+
+  await mountForTest({ root, fetcher: standardFetch(), window });
+
+  expect(root.style.position).toBe("fixed");
+});
+
+it("sets a static shell root to relative for absolute slide hosts", async () => {
+  const root = document.createElement("main");
+
+  await mountForTest({ root, fetcher: standardFetch(), window });
+
+  expect(root.style.position).toBe("relative");
+});
+
 it("navigates from DOM events for next prev first and last", async () => {
   const root = document.createElement("main");
   const shell = await mountForTest({ root, fetcher: standardFetch(), window });

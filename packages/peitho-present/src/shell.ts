@@ -1,5 +1,6 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
+import { installCanvasScaler, type CanvasViewport } from "./canvas";
 
 export type NavigateTarget =
   | "next"
@@ -20,7 +21,7 @@ export type SlideChangeDetail = {
 
 export type PresentationStartDetail = { total: number; startedAt: number };
 export type PresentationEndDetail = { endedAt: number; elapsedMs: number };
-export type TimerControlDetail = { action: "pause" | "resume" | "reset" };
+export type TimerControlDetail = { action: "start" | "pause" | "resume" | "reset" };
 
 export type PresentShell = {
   manifest: Manifest | null;
@@ -40,6 +41,7 @@ export type ShellOptions = {
   console?: Pick<Console, "error">;
   bus?: EventTarget;
   now?: () => number;
+  viewport?: () => CanvasViewport;
 };
 
 export type SlideView = {
@@ -64,6 +66,8 @@ class PresentShellController implements PresentShell {
   private readonly log: Pick<Console, "error">;
   private readonly bus: EventTarget;
   private readonly now: () => number;
+  private readonly viewport?: () => CanvasViewport;
+  private readonly canvasCleanups: Array<() => void> = [];
   private startedAtValue: number | null = null;
   private pausedAtValue: number | null = null;
   private pausedTotalMs = 0;
@@ -78,7 +82,8 @@ class PresentShellController implements PresentShell {
   };
   private readonly onTimerControl = (event: Event): void => {
     const action = (event as CustomEvent<TimerControlDetail>).detail?.action;
-    if (action === "pause") this.pauseTimer();
+    if (action === "start") this.startPresentation();
+    else if (action === "pause") this.pauseTimer();
     else if (action === "resume") this.resumeTimer();
     else if (action === "reset") this.resetTimer();
     else this.log.error("Invalid peitho:timercontrol event");
@@ -93,6 +98,14 @@ class PresentShellController implements PresentShell {
     this.log = options.console ?? console;
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
+    this.viewport = options.viewport;
+    this.root.classList.add("peitho-shell-viewport");
+    const rootPosition = this.win.getComputedStyle(this.root).position;
+    if (rootPosition === "static" || rootPosition === "") {
+      this.root.style.position = "relative";
+    }
+    this.root.style.overflow = "hidden";
+    this.root.style.background = "#000";
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:timercontrol", this.onTimerControl);
     this.win.addEventListener("pagehide", this.onPageHide);
@@ -114,7 +127,6 @@ class PresentShellController implements PresentShell {
         this.slides.push(view);
       }
       this.show(0);
-      this.startPresentation();
     } catch (error) {
       this.root.replaceChildren();
       this.root.textContent = error instanceof Error ? error.message : String(error);
@@ -144,6 +156,7 @@ class PresentShellController implements PresentShell {
 
   destroy(): void {
     this.endPresentation();
+    while (this.canvasCleanups.length > 0) this.canvasCleanups.pop()?.();
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:timercontrol", this.onTimerControl);
     this.win.removeEventListener("pagehide", this.onPageHide);
@@ -170,6 +183,17 @@ class PresentShellController implements PresentShell {
     host.classList.add("peitho-slide");
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
+    host.dataset.peithoCanvas = "slide";
+    host.style.position = "absolute";
+    host.style.left = "0";
+    host.style.top = "0";
+    this.canvasCleanups.push(
+      installCanvasScaler({
+        window: this.win,
+        target: host,
+        viewport: this.viewport
+      })
+    );
     const shadow = host.attachShadow({ mode: "open" });
     const style = this.doc.createElement("style");
     style.textContent = css;
@@ -226,6 +250,7 @@ class PresentShellController implements PresentShell {
   }
 
   private startPresentation(): void {
+    if (this.startedAtValue !== null) return;
     this.startedAtValue = this.now();
     this.pausedAtValue = null;
     this.pausedTotalMs = 0;
@@ -261,7 +286,7 @@ class PresentShellController implements PresentShell {
   }
 
   private resetTimer(): void {
-    this.startedAtValue = this.now();
+    this.startedAtValue = null;
     this.pausedAtValue = null;
     this.pausedTotalMs = 0;
     this.ended = false;
