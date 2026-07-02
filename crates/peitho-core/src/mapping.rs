@@ -98,4 +98,34 @@ mod tests {
         );
         assert!(slide.unassigned.is_empty());
     }
+
+    #[test]
+    fn maps_each_slide_independently() {
+        let markdown = "# Intro\n\nBody\n\n---\n# Architecture\n\n```rust\nfn main() {}\n```";
+        let template = parse_template(
+            "title-body-code",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+
+        assert_eq!(mapped.mapped_slides().len(), 2);
+        assert_eq!(
+            mapped.mapped_slides()[0].slots[&SlotName::new("body").unwrap()]
+                .fragments()
+                .len(),
+            1
+        );
+        assert_eq!(
+            mapped.mapped_slides()[1].slots[&SlotName::new("code").unwrap()]
+                .fragments()
+                .len(),
+            1
+        );
+    }
 }
