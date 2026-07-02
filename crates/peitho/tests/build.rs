@@ -72,7 +72,7 @@ fn build_fails_with_line_and_help_for_contract_violation() {
     .unwrap();
     fs::write(
         &template,
-        r#"<slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot>"#,
+        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
     )
     .unwrap();
     fs::write(&base, "").unwrap();
@@ -117,7 +117,7 @@ fn contract_error_uses_template_file_stem_as_layout_name() {
     .unwrap();
     fs::write(
         &template,
-        r#"<slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot>"#,
+        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
     )
     .unwrap();
     fs::write(&base, "").unwrap();

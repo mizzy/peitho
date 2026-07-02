@@ -4,7 +4,7 @@ use html_escape::encode_text;
 use lol_html::{
     element, errors::RewritingError, html_content::ContentType, HtmlRewriter, Settings,
 };
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
     domain::{FragmentKind, RenderedSlide, SlideKey, SlotName, SourceFragment},
@@ -76,7 +76,7 @@ fn render_slide(
         |chunk: &[u8]| output.extend_from_slice(chunk),
     );
     rewriter
-        .write(template.html.as_bytes())
+        .write(template.html().as_bytes())
         .map_err(render_error)?;
     rewriter.end().map_err(render_error)?;
     String::from_utf8(output).map_err(|err| {
@@ -93,12 +93,12 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
     let class_name = slot.class_name();
     match fragments.first().map(SourceFragment::kind) {
         Some(FragmentKind::Heading { .. }) => {
-            let text = fragments
+            let body = fragments
                 .iter()
-                .map(SourceFragment::plain_text)
+                .map(|fragment| render_heading_inline(fragment.markdown()))
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!(r#"<span class="{class_name}">{}</span>"#, encode_text(&text))
+            format!(r#"<span class="{class_name}">{body}</span>"#)
         }
         Some(FragmentKind::Code) => {
             let code = fragments
@@ -122,6 +122,22 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
             format!(r#"<div class="{class_name}">{body}</div>"#)
         }
     }
+}
+
+fn render_heading_inline(markdown: &str) -> String {
+    let mut events = Vec::new();
+    let mut in_heading = false;
+    for event in Parser::new_ext(markdown, Options::empty()) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => in_heading = true,
+            Event::End(TagEnd::Heading(_)) => break,
+            event if in_heading => events.push(event),
+            _ => {}
+        }
+    }
+    let mut rendered = String::new();
+    html::push_html(&mut rendered, events.into_iter());
+    rendered
 }
 
 fn box_build_error(err: BuildError) -> Box<dyn Error + Send + Sync> {
@@ -180,7 +196,7 @@ mod tests {
 
     #[test]
     fn renders_checked_slide_with_key_and_slot_classes() {
-        let markdown = "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody\n\n```rust\nfn main() {}\n```";
+        let markdown = "<!-- {\"key\":\"arch-1\"} -->\n# **Architecture** `Phase`\n\nBody\n\n```rust\nfn main() {}\n```";
         let template = parse_template(
             "title-body-code",
             r#"<section class="slide">
@@ -203,6 +219,64 @@ mod tests {
         assert!(html.contains(r#"class="slot-title""#));
         assert!(html.contains(r#"class="slot-body""#));
         assert!(html.contains(r#"class="slot-code""#));
+        assert!(html.contains("<strong>Architecture</strong>"));
+        assert!(html.contains("<code>Phase</code>"));
         assert!(html.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn renders_inline_markup_in_heading_slot() {
+        let markdown = "# **Architecture** `Phase` [docs](https://example.com)";
+        let template = parse_template(
+            "title-only",
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap(),
+            &template,
+        )
+        .unwrap();
+
+        let rendered = render_deck(checked, &template).unwrap();
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains("<strong>Architecture</strong>"));
+        assert!(html.contains("<code>Phase</code>"));
+        assert!(html.contains(r#"<a href="https://example.com">docs</a>"#));
+        assert!(!html.contains("<p><strong>Architecture</strong>"));
+    }
+
+    #[test]
+    fn renders_setext_and_atx_closing_hash_headings_as_inline_html() {
+        let template = parse_template(
+            "title-only",
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+
+        let setext = check_deck(
+            map_by_convention(parse_markdown("**Architecture** `Phase`\n====").unwrap(), &template)
+                .unwrap(),
+            &template,
+        )
+        .unwrap();
+        let setext_html = render_deck(setext, &template).unwrap().slides()[0]
+            .html()
+            .to_owned();
+        assert!(setext_html.contains("<strong>Architecture</strong>"));
+        assert!(setext_html.contains("<code>Phase</code>"));
+        assert!(!setext_html.contains(r#"<span class="slot-title"><h1>"#));
+
+        let atx = check_deck(
+            map_by_convention(parse_markdown("# Architecture #").unwrap(), &template).unwrap(),
+            &template,
+        )
+        .unwrap();
+        let atx_html = render_deck(atx, &template).unwrap().slides()[0]
+            .html()
+            .to_owned();
+        assert!(atx_html.contains(r#"<span class="slot-title">Architecture</span>"#));
+        assert!(!atx_html.contains("Architecture #"));
     }
 }

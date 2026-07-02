@@ -5,9 +5,6 @@
   min-height: 100vh;
   padding: 4rem;
   box-sizing: border-box;
-  font-family: system-ui, sans-serif;
-  background: #fafafa;
-  color: #171717;
 }
 
 .slot-title {
@@ -24,5 +21,4 @@
   padding: 1rem;
   background: #111;
   color: #f7f7f7;
-  overflow-x: auto;
 }

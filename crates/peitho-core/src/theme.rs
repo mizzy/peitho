@@ -25,7 +25,7 @@ fn validate_override_selectors(
     template: &Template,
 ) -> Result<()> {
     let known_slots = template
-        .slots
+        .slots()
         .keys()
         .map(SlotName::class_name)
         .collect::<BTreeSet<_>>();
@@ -33,7 +33,7 @@ fn validate_override_selectors(
     for (line_index, line) in css.lines().enumerate() {
         let line_no = line_index + 1;
         let selector = line.split('{').next().unwrap_or(line);
-        for key in extract_attr_values(selector, r#"[data-slide-key=""#, r#""]"#) {
+        for key in extract_slide_key_values(selector, line_no)? {
             if !known_keys.contains(&key) {
                 return Err(BuildError::new(
                     ErrorKind::Theme,
@@ -81,19 +81,88 @@ fn extract_slot_classes(selector: &str) -> Vec<String> {
         .collect()
 }
 
-fn extract_attr_values(selector: &str, prefix: &str, suffix: &str) -> Vec<String> {
+fn extract_slide_key_values(selector: &str, line_no: usize) -> Result<Vec<String>> {
+    const ATTR: &str = "[data-slide-key";
     let mut values = Vec::new();
-    let mut rest = selector;
-    while let Some(start) = rest.find(prefix) {
-        let after_prefix = &rest[start + prefix.len()..];
-        if let Some(end) = after_prefix.find(suffix) {
-            values.push(after_prefix[..end].to_owned());
-            rest = &after_prefix[end + suffix.len()..];
-        } else {
-            break;
+    let mut offset = 0;
+
+    while let Some(relative_start) = selector[offset..].find(ATTR) {
+        let attr_start = offset + relative_start;
+        let after_name_start = attr_start + ATTR.len();
+        let after_name = &selector[after_name_start..];
+        let Some(close_relative) = after_name.find(']') else {
+            return Err(malformed_selector(line_no));
+        };
+        let close_index = after_name_start + close_relative;
+        let body = &selector[after_name_start..close_index];
+        let body = body.trim_start();
+
+        if body.starts_with('-') || body.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        {
+            offset = after_name_start;
+            continue;
+        }
+
+        let Some(value_part) = strip_attr_operator(body) else {
+            if body.trim() == "]" || body.trim().is_empty() {
+                offset = close_index + 1;
+                continue;
+            }
+            return Err(malformed_selector(line_no));
+        };
+
+        let value = parse_attr_value(value_part, line_no)?;
+        values.push(value);
+        offset = close_index + 1;
+    }
+
+    Ok(values)
+}
+
+fn strip_attr_operator(body: &str) -> Option<&str> {
+    let body = body.trim_start();
+    for operator in ["~=", "|=", "^=", "$=", "*=", "="] {
+        if let Some(rest) = body.strip_prefix(operator) {
+            return Some(rest);
         }
     }
-    values
+    None
+}
+
+fn parse_attr_value(value_part: &str, line_no: usize) -> Result<String> {
+    let value_part = value_part.trim_start();
+    if value_part.is_empty() {
+        return Err(malformed_selector(line_no));
+    }
+
+    let mut chars = value_part.chars();
+    if let Some(quote @ ('"' | '\'')) = chars.next() {
+        let rest = chars.as_str();
+        if let Some(end) = rest.find(quote) {
+            return Ok(rest[..end].to_owned());
+        }
+        return Err(malformed_selector(line_no));
+    }
+
+    let value = value_part
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if value.is_empty() {
+        Err(malformed_selector(line_no))
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn malformed_selector(line_no: usize) -> BuildError {
+    BuildError::new(
+        ErrorKind::Theme,
+        Some(line_no),
+        "malformed selector for data-slide-key",
+        r#"write selectors like [data-slide-key="arch-1"] .slot-code"#,
+    )
 }
 
 #[cfg(test)]
@@ -109,8 +178,10 @@ mod tests {
     fn appends_valid_override_after_base_css() {
         let template = parse_template(
             "title-body-code",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>
-               <slot name="code" accepts="code" arity="0..1"></slot>"#,
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
         )
         .unwrap();
         let keys = [SlideKey::new("arch-1").unwrap()];
@@ -127,7 +198,7 @@ mod tests {
             css.ends_with(r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#)
         );
         assert!(template
-            .slots
+            .slots()
             .contains_key(&SlotName::new("code").unwrap()));
     }
 
@@ -135,7 +206,7 @@ mod tests {
     fn rejects_unknown_slide_key_in_override_selector() {
         let template = parse_template(
             "title",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>"#,
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
         let keys = [SlideKey::new("arch-1").unwrap()];
@@ -155,10 +226,98 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_single_quoted_slide_key_in_override_selector() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let err = build_theme_css(
+            "",
+            r#"[data-slide-key='missing'] .slot-title { color: red; }"#,
+            keys.iter(),
+            &template,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert_eq!(err.line, Some(1));
+        assert!(err.to_string().contains("unknown slide key 'missing'"));
+        assert_eq!(err.help, "use one of: arch-1");
+    }
+
+    #[test]
+    fn rejects_unknown_unquoted_slide_key_in_override_selector() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let err = build_theme_css(
+            "",
+            r#"[data-slide-key=missing] .slot-title { color: red; }"#,
+            keys.iter(),
+            &template,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert_eq!(err.line, Some(1));
+        assert!(err.to_string().contains("unknown slide key 'missing'"));
+        assert_eq!(err.help, "use one of: arch-1");
+    }
+
+    #[test]
+    fn accepts_known_single_quoted_slide_key_in_override_selector() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let css = build_theme_css(
+            ".slot-title { color: black; }",
+            r#"[data-slide-key='arch-1'] .slot-title { color: red; }"#,
+            keys.iter(),
+            &template,
+        )
+        .unwrap();
+
+        assert!(css.contains(r#"[data-slide-key='arch-1'] .slot-title"#));
+    }
+
+    #[test]
+    fn rejects_malformed_slide_key_selector() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let err = build_theme_css(
+            "",
+            r#"[data-slide-key='arch-1' .slot-title { color: red; }"#,
+            keys.iter(),
+            &template,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert_eq!(err.line, Some(1));
+        assert!(err.to_string().contains("malformed selector"));
+    }
+
+    #[test]
     fn rejects_unknown_slot_class_in_override_selector() {
         let template = parse_template(
             "title",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>"#,
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
         let keys = [SlideKey::new("arch-1").unwrap()];

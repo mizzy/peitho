@@ -67,9 +67,11 @@ mod tests {
             "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody\n\n```rust\nfn main() {}\n```";
         let template = parse_template(
             "title-body-code",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
                <slot name="body" accepts="blocks" arity="0..*"></slot>
-               <slot name="code" accepts="code" arity="0..1"></slot>"#,
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
         )
         .unwrap();
 

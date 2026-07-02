@@ -59,7 +59,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
 }
 
 fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, template: &Template) -> Result<()> {
-    for (slot, contract) in &template.slots {
+    for (slot, contract) in template.slots() {
         let count = slots.get(slot).map(|mapped| mapped.fragments().len()).unwrap_or(0);
         if !contract.arity.allows(count) {
             let line = slots
@@ -84,7 +84,7 @@ fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, template: &Template) -> R
                     "slot '{}' got {} item(s), but layout '{}' allows {}",
                     slot.as_str(),
                     count,
-                    template.name,
+                    template.name(),
                     contract.arity
                 ),
                 help,
@@ -123,8 +123,10 @@ mod tests {
     fn rejects_paragraph_in_inline_slot_with_line_and_help() {
         let template = parse_template(
             "bad-body",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>
-               <slot name="body" accepts="inline" arity="0..*"></slot>"#,
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="inline" arity="0..*"></slot>
+               </section>"#,
         )
         .unwrap();
         let mapped =
@@ -147,9 +149,11 @@ mod tests {
         let markdown = "# Title\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```";
         let template = parse_template(
             "title-body-code",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
                <slot name="body" accepts="blocks" arity="0..*"></slot>
-               <slot name="code" accepts="code" arity="0..1"></slot>"#,
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
         )
         .unwrap();
         let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
@@ -169,7 +173,7 @@ mod tests {
     fn rejects_missing_required_title_slot() {
         let template = parse_template(
             "title-only",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>"#,
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
         let mapped = map_by_convention(parse_markdown("Body only").unwrap(), &template).unwrap();
@@ -185,8 +189,10 @@ mod tests {
     fn rejects_unassigned_code_when_template_has_no_code_slot() {
         let template = parse_template(
             "title-body",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>
-               <slot name="body" accepts="blocks" arity="0..*"></slot>"#,
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
         )
         .unwrap();
         let markdown = "# Title\n\n```rust\nfn lost() {}\n```";
@@ -207,7 +213,7 @@ mod tests {
     fn rejects_unassigned_secondary_heading_as_body_content() {
         let template = parse_template(
             "title-only",
-            r#"<slot name="title" accepts="inline" arity="1"></slot>"#,
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
         let markdown = "# Title\n\n## Detail";

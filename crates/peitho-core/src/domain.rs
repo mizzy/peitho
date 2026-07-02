@@ -6,8 +6,11 @@ pub struct SlideKey(String);
 impl SlideKey {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
-        if value.is_empty() || value.contains('"') || value.chars().any(char::is_control) {
-            return Err("slide key must be nonempty and HTML-attribute safe".to_owned());
+        let valid = value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if value.is_empty() || !valid {
+            return Err("slide key must use lowercase ascii, digits, or '-'".to_owned());
         }
         Ok(Self(value))
     }
@@ -315,5 +318,12 @@ mod tests {
         assert!(!Arity::ZeroOrOne.allows(2));
         assert!(Arity::OneOrMore.allows(3));
         assert!(Arity::ZeroOrMore.allows(0));
+    }
+
+    #[test]
+    fn rejects_invalid_slide_key_characters() {
+        assert!(SlideKey::new("arch-1").is_ok());
+        let err = SlideKey::new("Arch 1]").unwrap_err();
+        assert_eq!(err, "slide key must use lowercase ascii, digits, or '-'");
     }
 }

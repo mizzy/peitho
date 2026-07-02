@@ -59,14 +59,16 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
                     }
                 }
             }
-            _ if list_depth > 0 => {}
             Event::Html(html) | Event::InlineHtml(html) => {
-                if let Some(key) = parse_key_comment(html.as_ref())? {
-                    explicit_key = Some(key);
-                } else if !html.trim().is_empty() {
+                if let Some(key) = parse_key_comment(html.as_ref(), line)? {
+                    if list_depth == 0 {
+                        explicit_key = Some(key);
+                    }
+                } else if !is_html_comment(html.as_ref()) && !html.trim().is_empty() {
                     return Err(unsupported_construct(line, "html"));
                 }
             }
+            _ if list_depth > 0 => {}
             Event::Start(Tag::Heading { level, .. }) => {
                 block = Some(OpenBlock::Heading {
                     level: heading_level_to_u8(level),
@@ -171,7 +173,7 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
     }]))
 }
 
-fn parse_key_comment(raw: &str) -> Result<Option<SlideKey>> {
+fn parse_key_comment(raw: &str, line: usize) -> Result<Option<SlideKey>> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
         return Ok(None);
@@ -180,17 +182,32 @@ fn parse_key_comment(raw: &str) -> Result<Option<SlideKey>> {
         .trim_start_matches("<!--")
         .trim_end_matches("-->")
         .trim();
+    if !json.starts_with('{') {
+        return Ok(None);
+    }
     let parsed: KeyComment = serde_json::from_str(json).map_err(|err| {
         BuildError::new(
             ErrorKind::Parse,
-            None,
+            Some(line),
             format!("invalid slide key comment: {err}"),
-            r#"use <!-- {"key":"arch-1"} --> before the slide heading"#,
+            r#"use <!-- {"key":"arch-1"} --> with a lowercase ascii, digit, or '-' key"#,
         )
     })?;
     SlideKey::new(parsed.key)
         .map(Some)
-        .map_err(|message| BuildError::new(ErrorKind::Parse, None, message, "change the key string"))
+        .map_err(|message| {
+            BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                message,
+                "use lowercase ascii, digits, or '-' in the key string",
+            )
+        })
+}
+
+fn is_html_comment(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.starts_with("<!--") && trimmed.ends_with("-->")
 }
 
 fn line_for_offset(source: &str, offset: usize) -> usize {
@@ -352,6 +369,49 @@ After list
         assert_eq!(
             err.help,
             "rewrite this slide using headings, paragraphs, lists, or fenced code blocks for milestone 1"
+        );
+    }
+
+    #[test]
+    fn rejects_inline_html_inside_list_items() {
+        let err = parse_markdown("# Title\n\n- item <b>raw</b>").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unsupported construct 'html'"));
+    }
+
+    #[test]
+    fn ignores_plain_html_comments() {
+        let deck = parse_markdown("<!-- TODO: polish copy -->\n# Title").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.key.as_str(), "title");
+        assert_eq!(slide.fragments.len(), 1);
+        assert_eq!(slide.fragments[0].line(), 2);
+    }
+
+    #[test]
+    fn rejects_broken_json_key_comments() {
+        let err = parse_markdown("<!-- {\"kye\":\"arch-1\"} -->\n# Title").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err.to_string().contains("invalid slide key comment"));
+    }
+
+    #[test]
+    fn rejects_explicit_keys_with_invalid_characters_and_line() {
+        let err = parse_markdown("<!-- {\"key\":\"bad key]\"} -->\n# Title").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err
+            .to_string()
+            .contains("slide key must use lowercase ascii, digits, or '-'"));
+        assert_eq!(
+            err.help,
+            "use lowercase ascii, digits, or '-' in the key string"
         );
     }
 
