@@ -193,16 +193,14 @@ fn parse_key_comment(raw: &str, line: usize) -> Result<Option<SlideKey>> {
             r#"use <!-- {"key":"arch-1"} --> with a lowercase ascii, digit, or '-' key"#,
         )
     })?;
-    SlideKey::new(parsed.key)
-        .map(Some)
-        .map_err(|message| {
-            BuildError::new(
-                ErrorKind::Parse,
-                Some(line),
-                message,
-                "use lowercase ascii, digits, or '-' in the key string",
-            )
-        })
+    SlideKey::new(parsed.key).map(Some).map_err(|message| {
+        BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            message,
+            "use lowercase ascii, digits, or '-' in the key string",
+        )
+    })
 }
 
 fn is_html_comment(raw: &str) -> bool {
@@ -211,7 +209,11 @@ fn is_html_comment(raw: &str) -> bool {
 }
 
 fn line_for_offset(source: &str, offset: usize) -> usize {
-    source[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1
+    source[..offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
 }
 
 fn source_slice(source: &str, start: usize, end: usize) -> String {
@@ -313,7 +315,10 @@ enum Phase { Parsed, Mapped, Checked }
         let slide = &deck.parsed_slides()[0];
 
         assert_eq!(slide.key.as_str(), "arch-1");
-        assert_eq!(slide.fragments[0].kind(), FragmentKind::Heading { level: 1 });
+        assert_eq!(
+            slide.fragments[0].kind(),
+            FragmentKind::Heading { level: 1 }
+        );
         assert_eq!(slide.fragments[0].line(), 2);
         assert_eq!(slide.fragments[0].markdown(), "# **Architecture** `Phase`");
         assert_eq!(slide.fragments[1].kind(), FragmentKind::Paragraph);
@@ -418,7 +423,10 @@ After list
     #[test]
     fn derives_key_from_first_heading_when_comment_is_absent() {
         let deck = parse_markdown("# Architecture Overview\n\nBody").unwrap();
-        assert_eq!(deck.parsed_slides()[0].key.as_str(), "architecture-overview");
+        assert_eq!(
+            deck.parsed_slides()[0].key.as_str(),
+            "architecture-overview"
+        );
     }
 
     #[test]

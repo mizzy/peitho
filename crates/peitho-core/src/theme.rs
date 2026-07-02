@@ -16,7 +16,11 @@ pub fn build_theme_css<'a>(
         .map(|key| key.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     validate_override_selectors(overrides_css, &known_keys, template)?;
-    Ok(format!("{}\n\n{}", base_css.trim_end(), overrides_css.trim()))
+    Ok(format!(
+        "{}\n\n{}",
+        base_css.trim_end(),
+        overrides_css.trim()
+    ))
 }
 
 fn validate_override_selectors(
@@ -97,7 +101,11 @@ fn extract_slide_key_values(selector: &str, line_no: usize) -> Result<Vec<String
         let body = &selector[after_name_start..close_index];
         let body = body.trim_start();
 
-        if body.starts_with('-') || body.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        if body.starts_with('-')
+            || body
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
         {
             offset = after_name_start;
             continue;

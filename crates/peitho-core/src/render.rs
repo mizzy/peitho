@@ -256,8 +256,11 @@ mod tests {
         .unwrap();
 
         let setext = check_deck(
-            map_by_convention(parse_markdown("**Architecture** `Phase`\n====").unwrap(), &template)
-                .unwrap(),
+            map_by_convention(
+                parse_markdown("**Architecture** `Phase`\n====").unwrap(),
+                &template,
+            )
+            .unwrap(),
             &template,
         )
         .unwrap();
