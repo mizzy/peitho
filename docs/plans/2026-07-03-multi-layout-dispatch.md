@@ -1,60 +1,60 @@
-# 複数レイアウトとハイブリッドディスパッチ
+# Multiple Layouts and Hybrid Dispatch
 
-## 目的
+## Purpose
 
-現状は1ビルド=レイアウト1枚で、デッキ内でレイアウトを切り替えられない（§18未決定事項だった）。著者判断が出た:
+Currently one build = one layout, and layouts can't be switched within a deck (this was an open item in §18). The author's decision has been made:
 
-- 方式は**ハイブリッド**: 基本は型駆動（スライドの内容の形とスロット契約の構造マッチ）で自動選択し、曖昧なときはビルドエラーにして明示指定で解消させる
-- [k1LoW/deck](https://github.com/k1LoW/deck)を参考にする（ページ設定はHTMLコメント内JSON、`layout`キーで明示指定。deckのCEL式defaultsに相当する部分を、peithoではスロット契約の構造マッチで置き換える）
-- 用語は`--template`ではなく`--layout`に改める
+- The approach is **hybrid**: by default, auto-select via type-driven matching (structural matching between the shape of the slide's content and the slot contract), and when ambiguous, raise a build error and resolve it via explicit specification
+- Take reference from [k1LoW/deck](https://github.com/k1LoW/deck) (page settings are JSON in an HTML comment, explicit specification via the `layout` key. The part corresponding to deck's CEL expression defaults is replaced in peitho by structural matching against the slot contract)
+- Change the terminology from `--template` to `--layout`
 
-## Phase A: リネーム（先行PR）
+## Phase A: Rename (preceding PR)
 
-deckに合わせ、ユーザー向け用語を「レイアウト」に統一する。
+Align with deck and unify the user-facing terminology to "layout".
 
 - CLI: `--template` → `--layout`
-- ディレクトリ: `templates/` → `layouts/`、サンプルの`template.html` → `layout.html`
-- コア: `Template`型 → `Layout`、`parse_template` → `parse_layout`、`template.rs` → `layout.rs`（エラーメッセージは元々"layout"表記なので整合する）
-- README / CLAUDE.md / Makefile追随。過去のdocs/plans/は履歴なので書き換えない
+- Directories: `templates/` → `layouts/`, sample's `template.html` → `layout.html`
+- Core: `Template` type → `Layout`, `parse_template` → `parse_layout`, `template.rs` → `layout.rs` (error messages already say "layout", so this brings them into alignment)
+- Follow through in README / CLAUDE.md / Makefile. Past docs/plans/ are history, so they are not rewritten.
 
-## Phase B: 複数レイアウト+ディスパッチ
+## Phase B: Multiple layouts + dispatch
 
-### 構文（deck互換のページ設定コメント）
+### Syntax (deck-compatible page settings comment)
 
 ```markdown
 <!-- {"key":"cover","layout":"cover"} -->
 ```
 
-`layout`は任意。指定があればそのレイアウトを使う（未知の名前は既知レイアウト一覧つきビルドエラー）。
+`layout` is optional. If specified, that layout is used (an unknown name is a build error listing the known layouts).
 
 ### CLI
 
-- `--layout <path>`を複数回指定可能（`Vec<PathBuf>`）。レイアウト名はファイルstem。名前重複はエラー
-- 未指定なら従来どおり内蔵`title-body-code`1枚
+- `--layout <path>` can be specified multiple times (`Vec<PathBuf>`). The layout name is the file stem. Duplicate names are an error
+- If unspecified, the built-in `title-body-code` single layout is used as before
 
-### ディスパッチ規則（決定論的）
+### Dispatch rule (deterministic)
 
-1. スライドに明示`layout`があればそれを使用。契約違反は従来どおりの行番号付きエラー
-2. レイアウトが1枚しかなければ無条件にそれを使用（現行動作の完全保存。エラーメッセージも従来のまま）
-3. 複数枚で明示なしの場合、各レイアウトに対して規約マッピング+契約検査（accepts/arity/未割当）を試行:
-   - ちょうど1枚通る → それを採用
-   - 複数通る → 曖昧エラー（候補一覧+「`{"layout":"…"}`で明示せよ」help）
-   - 0枚 → 全滅エラー（レイアウトごとの不一致理由を列挙）
-4. 順序はCLI指定順で安定
+1. If a slide has an explicit `layout`, use it. Contract violations produce the same line-numbered error as before
+2. If there is only one layout, use it unconditionally (full preservation of current behavior. Error messages also stay as they are)
+3. With multiple layouts and no explicit specification, attempt conventional mapping + contract checking (accepts/arity/unassigned) against each layout:
+   - Exactly one passes → adopt it
+   - Multiple pass → ambiguity error (list of candidates + help saying "specify explicitly with `{"layout":"…"}`")
+   - Zero pass → total-failure error (enumerate the mismatch reason for each layout)
+4. Order is stable, following CLI specification order
 
-### 型の通し方
+### How the type flows through
 
-`MappedSlide`が自分の`Layout`を保持する（dispatch時に解決済みのcloneを持たせる）。check/renderはレジストリ再参照をしない=後段でのlookup失敗経路を作らない。typestate `Parsed→Mapped→Checked→Rendered`は不変。
+`MappedSlide` holds its own `Layout` (given a resolved clone at dispatch time). check/render do not re-reference the registry — this avoids creating a lookup-failure path in later stages. The typestate `Parsed→Mapped→Checked→Rendered` remains unchanged.
 
-### テーマ検証
+### Theme validation
 
-overrides.cssの`[data-slide-key="k"] .slot-x`は「スライドkのレイアウトが持つスロット」に対して検証。キー無しセレクタのスロットクラスは全レイアウトの和集合に対して検証。
+`overrides.css`'s `[data-slide-key="k"] .slot-x` is validated against "the slots owned by slide k's layout". Keyless selector slot classes are validated against the union of all layouts.
 
-### サンプル
+### Sample
 
-keynoteを2レイアウト構成にする: `cover.html`（titleのみ）と`statement.html`（title+body必須）。表紙はタイトルだけ→型駆動でcoverに、本文スライドはstatementに一意に落ちる（構造マッチの実演）。明示指定の構文はREADMEに記載。
+Turn keynote into a 2-layout composition: `cover.html` (title only) and `statement.html` (title+body required). The cover slide has only a title → falls to cover via type-driven matching; body slides fall uniquely to statement (a demonstration of structural matching). The explicit-specification syntax is documented in the README.
 
-## 検証
+## Verification
 
-- 単体: 明示/一意/曖昧/全滅/1枚時の完全互換、パーサのlayoutフィールド、テーマのレイアウト別検証
-- E2E: keynote 2レイアウト構成をビルド+実ブラウザで確認。既存サンプル・既存テストが無変更のまま通ること（1枚時の互換保証）
+- Unit: explicit/unique/ambiguous/total-failure/full compatibility with a single layout, the parser's layout field, per-layout theme validation
+- E2E: build the keynote 2-layout composition and confirm in a real browser. Confirm existing samples and existing tests pass unchanged (guarantee of compatibility with a single layout)

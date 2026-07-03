@@ -5,9 +5,9 @@
 Milestone 9 fixes the two real-device failures found after Milestone 8:
 
 - Chrome app mode opened, but fullscreen was not reliable when Chrome was already running. The fix is to launch Chrome-family browsers with a dedicated profile at `$HOME/.peitho/chrome-profile`, plus `--no-first-run` and `--no-default-browser-check`, so `--app` and `--start-fullscreen` are applied by a fresh Chrome process. The profile is under the user home directory because browser permissions and first-run state are machine-level state, not project build artifacts.
-- Window placement failed after the first Window Management API permission prompt because `requestFullscreen({ screen })` also requires transient user activation. The fix is activation-aware: open the popup synchronously, request screen details, try placement, and if fullscreen fails with `NotAllowedError`, show a visible "Click to place windows / クリックで画面を配置" overlay. The overlay click creates a new user activation and retries the same placement function.
+- Window placement failed after the first Window Management API permission prompt because `requestFullscreen({ screen })` also requires transient user activation. The fix is activation-aware: open the popup synchronously, request screen details, try placement, and if fullscreen fails with `NotAllowedError`, show a visible "Click to place windows / クリックで画面を配置" overlay. Clicking the overlay creates a new user activation and retries the same placement function.
 
-This milestone does not add CLI-side display enumeration, Firefox/Safari multi-screen support, or new command flags. Existing `--no-open`, `--no-serve`, `--port`, and `--shell` behavior remains.
+This milestone does not add CLI-side display enumeration, Firefox/Safari multi-screen support, or new command flags. Existing `--no-open`, `--no-serve`, `--port`, and `--shell` behavior remains unchanged.
 
 ## File Structure Map
 

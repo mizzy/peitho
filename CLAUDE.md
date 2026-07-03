@@ -1,64 +1,64 @@
 # peitho
 
-Markdownをsource of truthとするHTMLネイティブなプレゼンツール。設計の正は `docs/PEITHO_KICKOFF.md`（キックオフ仕様書）。設計判断に迷ったら仕様書§18「未決定事項」を見て、載っていない新規判断は著者に確認する。
+An HTML-native presentation tool with Markdown as the source of truth. The authoritative design reference is `docs/PEITHO_KICKOFF.md` (the kickoff spec). When in doubt about a design decision, check §18 "Undecided Items" in the spec; for new decisions not covered there, check with the author.
 
-## 三本柱（壊してはいけない不変条件）
+## The three pillars (invariants that must not be broken)
 
-1. **コンテンツとデザインの分離**: コンテンツはMarkdown、デザインはレイアウトHTML+CSS。混ぜない
-2. **git管理可能なHTML/CSSレイアウト**: レイアウト自身がスキーマ（`<slot name accepts arity>`）。契約を別ファイルに分けない
-3. **型検査されるスロット契約とキー付きoverride**: スロット過不足・型不整合・参照切れ・未割当コンテンツは全て行番号+help付きビルドエラー。**サイレントドロップ絶対禁止**（パーサに`_ => {}`で未知構造を飲ませない）
+1. **Separation of content and design**: Content is Markdown, design is layout HTML+CSS. Do not mix them
+2. **Git-manageable HTML/CSS layouts**: The layout itself is the schema (`<slot name accepts arity>`). Do not split the contract into a separate file
+3. **Type-checked slot contracts and keyed overrides**: Slot excess/deficiency, type mismatches, broken references, and unassigned content are all build errors with line numbers + help. **Silent dropping is absolutely forbidden** (never let the parser swallow unknown structures with `_ => {}`)
 
-その他の不変条件:
-- typestate `Parsed→Mapped→Checked→Rendered`。相の構築子はcrate内私有。未検査デッキはレンダラに渡せない（compile_failドクテストで固定）
-- 複数レイアウトはハイブリッドディスパッチ（§18の型駆動を著者判断で採用、2026-07-03）: 明示`{"layout":"名前"}`＞1枚なら無条件＞構造マッチが一意。曖昧・0致は黙って解決せずビルドエラー。スライドは自分のLayoutをMapped以降携行し、後段にlookup失敗経路を作らない
-- シンタックスハイライトはsyntectでビルド時に実施（2026-07-03採用）。出力は`hl-*`クラスのspan、色はテーマCSS。未知言語タグはparse時に行番号付きエラー（タグ無しはプレーン）
-- 契約の単一source: ドメイン型はpeitho-core(Rust)が正。TS型は`bindings/*.ts`にts-rsで生成しコミット。CIでdrift検査
-- §16イベント契約: 遷移の実行主体はシェルのみ。UI部品は`peitho:navigate`/`peitho:timercontrol`等の要求イベント発行のみ。スライド本体はシェルの存在を知らない
-- 配布物(dist/)に発表シェル・ノートを混ぜない（publishが非混入検査で門番）
+Other invariants:
+- typestate `Parsed→Mapped→Checked→Rendered`. Phase constructors are private within the crate. An unchecked deck cannot be passed to the renderer (pinned down by a compile_fail doctest)
+- Multiple layouts use hybrid dispatch (type-driven approach from §18 adopted at the author's discretion, 2026-07-03): explicit `{"layout":"name"}` > unconditional if there's only one > unique structural match. Ambiguous or zero matches are never silently resolved — they are build errors. Slides carry their own Layout from Mapped onward, so no lookup-failure path is created downstream
+- Syntax highlighting is done at build time with syntect (adopted 2026-07-03). Output is spans with `hl-*` classes, colors come from the theme CSS. Unknown language tags are a parse-time error with a line number (no tag means plain text)
+- Single source for the contract: domain types are authoritative in peitho-core (Rust). TS types are generated into `bindings/*.ts` via ts-rs and committed. CI checks for drift
+- §16 event contract: only the shell executes transitions. UI components only emit request events like `peitho:navigate`/`peitho:timercontrol`. The slide body itself has no knowledge of the shell's existence
+- Do not mix the presentation shell or notes into distributed artifacts (dist/) (publish gatekeeps this with a contamination check)
 
-## 構成
-
-```
-crates/peitho-core/   契約・パイプライン(parser/layout/mapping/check/render/theme/manifest/notes)
-crates/peitho/        CLI(build/present/publish)、server.rs(配信+/syncロングポール)、browser.rs、displays.rs
-packages/peitho-present/  TS発表シェル(canvas/shell/controls/keyboard/sync/presenter)
-bindings/             ts-rs生成TS型（コミット対象）
-layouts/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのレイアウト/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）。`--layouts`/`--css`はファイルまたはディレクトリ（`*.html`/`*.css`をファイル名順に読む）。未指定時は**デッキの隣**の`layouts/`・`css/`を自動検出（ゼロコンフィグ規約、Issue #17の採用方針。無ければ内蔵デフォルト）。CSS検証は全ファイル一様: キー付きセレクタは当該スライドのレイアウトのスロットに対して、裸の`.slot-*`は提供レイアウトの和集合に対して検査
-docs/plans/           各マイルストーンの実装計画（履歴）
-```
-
-## ゲート（全部通ってからコミット）
+## Structure
 
 ```
-cargo test --workspace          # 3回連続（過去にテストレース事故あり）
+crates/peitho-core/   Contract & pipeline (parser/layout/mapping/check/render/theme/manifest/notes)
+crates/peitho/        CLI (build/present/publish), server.rs (serving + /sync long polling), browser.rs, displays.rs
+packages/peitho-present/  TS presentation shell (canvas/shell/controls/keyboard/sync/presenter)
+bindings/             ts-rs generated TS types (committed)
+layouts/ themes/ examples/  Shared layouts, base theme, samples (the default layouts/base.css/presentation shell dist/shell.js are embedded in the binary via include_str!. Used when no CLI flag is given. shell.js is a build artifact but, like bindings/, is committed + checked for CI drift). `--layouts`/`--css` can be a file or a directory (reads `*.html`/`*.css` in filename order). When not specified, auto-detects `layouts/`/`css/` **next to the deck** (zero-config convention, adopted per Issue #17; falls back to the built-in default if absent). CSS validation is uniform across all files: keyed selectors are checked against the slots of that slide's layout, and bare `.slot-*` are checked against the union of provided layouts
+docs/plans/           Implementation plans for each milestone (history)
+```
+
+## Gates (all must pass before committing)
+
+```
+cargo test --workspace          # run 3 times in a row (past test-race incidents)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-git diff --exit-code bindings/  # 契約drift
+git diff --exit-code bindings/  # contract drift
 cd packages/peitho-present && npm run build && npm test && npm run typecheck
-git diff --exit-code packages/peitho-present/dist/shell.js  # 内蔵シェルdrift（npm run build後に）
+git diff --exit-code packages/peitho-present/dist/shell.js  # embedded shell drift (after npm run build)
 ```
 
-UX変更は必ず実ブラウザ/実ディスプレイでE2E確認する（jsdomはレイアウト・フラッシュ・ウィンドウ挙動を検出できない。過去に真っ黒画面・SSE不達・無限再ビルドをE2Eでのみ検出）。presentの確認は `--port`固定+`curl POST /sync`+`screencapture -x -D <n>` が便利。
+Always verify UX changes end-to-end in a real browser/real display (jsdom cannot detect layout, flashing, or window behavior. Past incidents — a fully black screen, undelivered SSE, infinite rebuild loops — were only caught via E2E). For checking present, a fixed `--port` + `curl POST /sync` + `screencapture -x -D <n>` is handy.
 
-## ハマりどころ（実測で確定済みの事実。再調査不要）
+## Pitfalls (facts confirmed by measurement — no need to re-investigate)
 
-- **tiny_httpでSSEは不成立**: data_length Noneだと閾値以下のbodyをEOFまでバッファ、chunkエンコーダも小チャンクをflushしない。だから/syncはロングポーリング（`GET /sync?seq=N`、クエリ無しGETは現在seq即答=参加ハンドシェイク、`POST /sync`で`{index}|{close:true}`）
-- **Chrome既起動インスタンスへのフラグhandoffは`--app`しか効かない**: `--start-fullscreen`/`--window-position`/`--window-size`は無視される。確実に効かせるには別`--user-data-dir`で新規プロセス起動（だからslides/presenterは`~/.peitho/chrome-profile-{slides,presenter}`の2インスタンス）
-- **macOSのChromeは全ウィンドウを閉じてもプロセスが残る**: 前回presentのインスタンスがpeithoプロファイルを掴んだままだと次回起動がhandoffになり配置フラグが全滅する。だからpresent起動時に残存プロセスを終了してから開く
-- **Chromeの残存プロセスはSIGTERM killではなく正規終了させる**: SIGTERMはChrome的にクラッシュ（`exit_type: Crashed`）で、次回起動でクラッシュ復元が走り古いセッションの窓・boundsが復活する。`NSRunningApplication.terminate`（JXAではブリッジの都合で**括弧なし**アクセスで発火・実測）で終了させるとNormal。なお`exit_type`は起動中は常にCrashed表示（起動時に先書き→正常終了でNormalに戻す仕様）なので稼働中の読み取りは無意味。対象pidは`ps`からChromeメインプロセス（`--type=`なし）だけに絞る（`pgrep -f`はパターンを含むシェル自身まで拾う）
-- **Chromeの`--app`ウィンドウ位置復元はapp名にドットがあると壊れる**: 位置は`browser.app_window_placement`にURL由来のapp名（host+path）で保存されるが、名前中のドット（`127.0.0.1`や`.html`）が書き込み時にprefパスとして展開され、読み出しと不一致になり復元されない（Chromiumの実挙動、実測）。だからpresenterは`http://localhost:<port>/presenter`（拡張子なしルート）で開く。app名にポートは含まれないのでポートが毎回変わっても復元は効く
-- **配置フラグ無しの`--app`初回起動はウィンドウがどのディスプレイに出るか不定**: slides側ディスプレイに出るとフルスクリーンSpaceの裏に完全に隠れる（CGWindowListのOnScreenOnlyにも出ない）。だからwindowedモードは、保存placementが無い/不可視位置のときだけ`--window-position`+`--window-size`でプライマリ中央にシードし、可視な保存placementがあるときだけフラグ無しでChrome復元に任せる（判定はpeithoがプロファイルのPreferencesを読む）。Chromeは部分的に画面外の保存boundsを起動時にクランプする
-- **別プロファイル間はBroadcastChannelが届かない**: だから同期はサーバ経由（§15からの意図的拡張。層分け=DOMイベント⇔トランスポート橋渡しは不変）
-- **CLI起動のappウィンドウは`window.close()`で閉じられる**（履歴1エントリのため）。Escは`peitho:closerequest`→`{close:true}`全窓配信→各自close→サーバも猶予後にunblockして終了
-- **requestFullscreen/window.openはtransient user activation必須**: permission promptのawaitを挟むと失効する。ブラウザ内でのウィンドウ配置はこれで2敗した末にCLI主導へ転換した経緯（M8/M9/M10）
-- NSScreenはbottom-left原点。Chromeの`--window-position`はtop-left。変換は`displays.rs`（純関数+実測値テスト）
-- vitestテストではシェル/リスナーを必ずdestroy/cleanup（共有windowのリスナー汚染で多重発火する）
-- `.peitho/present-cache/`は毎回作り直し（§18キャッシュ方針の採用値）。`dist/slides/`もビルド毎にクリア（stale断片の公開漏れ防止）
+- **SSE does not work with tiny_http**: when data_length is None, bodies below a threshold are buffered until EOF, and the chunk encoder doesn't flush small chunks either. That's why /sync uses long polling (`GET /sync?seq=N`; a GET with no query returns the current seq immediately = join handshake; `POST /sync` sends `{index}|{close:true}`)
+- **Flag handoff to an already-running Chrome instance only works via `--app`**: `--start-fullscreen`/`--window-position`/`--window-size` are ignored. To reliably apply them, launch a new process with a separate `--user-data-dir` (which is why slides/presenter use two instances, `~/.peitho/chrome-profile-{slides,presenter}`)
+- **On macOS, Chrome's process lingers even after all windows are closed**: if the previous present instance is still holding the peitho profile, the next launch becomes a handoff and all placement flags are lost. That's why present terminates any lingering process before opening
+- **Lingering Chrome processes must be terminated normally, not killed with SIGTERM**: SIGTERM registers as a crash to Chrome (`exit_type: Crashed`), triggering crash recovery on the next launch which restores the old session's windows/bounds. Using `NSRunningApplication.terminate` (in JXA this fires via **parenthesis-less** access, due to the bridge — confirmed by testing) terminates it as Normal. Note that `exit_type` always shows Crashed while running (it's written up front at launch, then flipped back to Normal on clean exit), so reading it while the process is active is meaningless. Restrict target pids to the Chrome main process (no `--type=`) from `ps` (`pgrep -f` also catches the shell itself if it contains the pattern)
+- **Chrome's `--app` window position restoration breaks if the app name contains a dot**: the position is saved under `browser.app_window_placement` keyed by a URL-derived app name (host+path), but a dot in the name (as in `127.0.0.1` or `.html`) gets expanded as a pref path when written, causing a mismatch on read and preventing restoration (confirmed Chromium behavior, measured). That's why presenter opens at `http://localhost:<port>/presenter` (an extensionless route). Since the app name doesn't include the port, restoration still works even though the port changes each time
+- **On the first `--app` launch with no placement flags, which display the window appears on is undetermined**: if it appears on the slides-side display, it can end up completely hidden behind the fullscreen Space (it won't even show up in CGWindowList's OnScreenOnly). That's why windowed mode only seeds `--window-position`+`--window-size` to center on the primary display when there's no saved placement or the saved position is off-screen; when there is a visible saved placement, it's left flag-free and Chrome's own restoration is trusted (the check is peitho reading the profile's Preferences). Chrome clamps partially off-screen saved bounds at launch
+- **BroadcastChannel does not reach across different profiles**: that's why sync goes through the server (a deliberate extension from §15; the layering — DOM events bridged to a transport — remains unchanged)
+- **A CLI-launched app window is closed via `window.close()`** (because it has only 1 history entry). Esc triggers `peitho:closerequest` → `{close:true}` broadcast to all windows → each closes itself → the server also unblocks and exits after a grace period
+- **requestFullscreen/window.open require transient user activation**: awaiting a permission prompt in between invalidates it. In-browser window placement failed twice this way before the switch to CLI-driven placement (M8/M9/M10)
+- NSScreen has a bottom-left origin. Chrome's `--window-position` uses top-left. The conversion lives in `displays.rs` (pure functions + tests against measured values)
+- In vitest tests, always destroy/clean up the shell/listeners (listener contamination on the shared window causes multiple firings)
+- `.peitho/present-cache/` is recreated every time (the adopted value from the §18 cache policy). `dist/slides/` is also cleared on every build (to prevent stale fragments from leaking into publish)
 
-## 未決定・著者判断待ち（勝手に決めない）
+## Undecided — awaiting author's judgment (do not decide unilaterally)
 
-- スピーカーノートのMarkdown記法（notes.jsonスキーマ・TS型・presenter表示配線は実装済み、常に空）
-- fenced div明示スロット記法 `::: {slot=...}`（§18）
-- peitho.toml（カスタマイズの必要性が出てから。現状はゼロコンフィグ規約で運用）とpeitho.gosu.keデプロイ
+- Markdown notation for speaker notes (the notes.json schema, TS types, and presenter display wiring are implemented, but always empty)
+- Explicit fenced div slot notation `::: {slot=...}` (§18)
+- peitho.toml (once the need for customization arises; currently operating on the zero-config convention) and peitho.gosu.ke deployment
 
-残タスクはGitHub Issuesに登録済み。着手時は`docs/plans/`に計画を書いてから実装する。
+Remaining tasks are registered in GitHub Issues. Before starting work, write a plan in `docs/plans/` and then implement.
