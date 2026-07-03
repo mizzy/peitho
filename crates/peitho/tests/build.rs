@@ -12,8 +12,10 @@ fn build_writes_index_html_and_css() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let layout = dir.path().join("title-body-code.html");
-    let base = dir.path().join("base.css");
-    let overrides = dir.path().join("overrides.css");
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    let base = css_dir.join("base.css");
+    let overrides = css_dir.join("overrides.css");
     let out = dir.path().join("dist");
 
     fs::write(
@@ -38,12 +40,10 @@ fn build_writes_index_html_and_css() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -66,8 +66,10 @@ fn build_fails_with_line_and_help_for_contract_violation() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let layout = dir.path().join("title-body-code.html");
-    let base = dir.path().join("base.css");
-    let overrides = dir.path().join("overrides.css");
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    let base = css_dir.join("base.css");
+    let overrides = css_dir.join("overrides.css");
     let out = dir.path().join("dist");
 
     fs::write(
@@ -88,12 +90,10 @@ fn build_fails_with_line_and_help_for_contract_violation() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -111,8 +111,10 @@ fn contract_error_uses_layout_file_stem_as_layout_name() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let layout = dir.path().join("custom-layout.html");
-    let base = dir.path().join("base.css");
-    let overrides = dir.path().join("overrides.css");
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    let base = css_dir.join("base.css");
+    let overrides = css_dir.join("overrides.css");
     let out = dir.path().join("dist");
 
     fs::write(
@@ -133,12 +135,10 @@ fn contract_error_uses_layout_file_stem_as_layout_name() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -159,34 +159,30 @@ fn build_dispatches_slides_across_multiple_layouts() {
         "<!-- {\"key\":\"cover\"} -->\n# Cover Only\n\n---\n<!-- {\"key\":\"body\"} -->\n# Statement\n\nBody paragraph\n",
     )
     .unwrap();
-    let cover = dir.path().join("cover.html");
+    let layouts_dir = dir.path().join("layouts");
+    fs::create_dir_all(&layouts_dir).unwrap();
     fs::write(
-        &cover,
+        layouts_dir.join("cover.html"),
         r#"<section class="cover"><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
     )
     .unwrap();
-    let statement = dir.path().join("statement.html");
     fs::write(
-        &statement,
+        layouts_dir.join("statement.html"),
         r#"<section class="statement"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
     )
     .unwrap();
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(dir.path(), "");
+    write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
         .unwrap()
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
-            cover.to_str().unwrap(),
-            "--layout",
-            statement.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--layouts",
+            layouts_dir.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -205,31 +201,27 @@ fn build_rejects_ambiguous_slide_with_disambiguation_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     fs::write(&deck, "# Title Only\n").unwrap();
-    let a = dir.path().join("cover-a.html");
-    let b = dir.path().join("cover-b.html");
-    for path in [&a, &b] {
+    let layouts_dir = dir.path().join("layouts");
+    fs::create_dir_all(&layouts_dir).unwrap();
+    for name in ["cover-a.html", "cover-b.html"] {
         fs::write(
-            path,
+            layouts_dir.join(name),
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
     }
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(dir.path(), "");
+    write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
         .unwrap()
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
-            a.to_str().unwrap(),
-            "--layout",
-            b.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--layouts",
+            layouts_dir.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             dir.path().join("dist").to_str().unwrap(),
         ])
@@ -249,7 +241,7 @@ fn build_writes_slide_fragments_in_slides_directory() {
     write_multi_slide_fixture(&deck);
     let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(
+    write_overrides_css(
         dir.path(),
         r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#,
     );
@@ -259,12 +251,10 @@ fn build_writes_slide_fragments_in_slides_directory() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -340,7 +330,7 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
     fs::write(&deck, "# Intro\n\n---\n# Intro").unwrap();
     let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(dir.path(), "");
+    write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
 
     Command::cargo_bin("peitho")
@@ -348,12 +338,10 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -376,12 +364,10 @@ fn repository_example_builds_three_slide_distribution() {
         .args([
             "build",
             "examples/deck.md",
-            "--layout",
+            "--layouts",
             "layouts/title-body-code.html",
-            "--base-css",
+            "--css",
             "themes/base.css",
-            "--overrides-css",
-            "themes/overrides.css",
             "--out",
             out.path().to_str().unwrap(),
         ])
@@ -416,7 +402,7 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
     let deck = dir.path().join("deck.md");
     let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(dir.path(), "");
+    write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
 
     write_multi_slide_fixture(&deck);
@@ -425,12 +411,10 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -444,12 +428,10 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -519,16 +501,32 @@ fn write_layout(dir: &Path) -> PathBuf {
     path
 }
 
+/// Accepts either a css file (manual fixtures) or the css dir itself
+/// (helper fixtures) and returns the directory to pass to --css.
+fn css_dir_for(path: &Path) -> PathBuf {
+    if path.extension().is_some() {
+        path.parent().unwrap().to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn write_base_css(dir: &Path) -> PathBuf {
-    let path = dir.join("base.css");
-    fs::write(&path, ".slot-title { font-weight: 700; }").unwrap();
-    path
+    let css_dir = dir.join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(
+        css_dir.join("base.css"),
+        ".slot-title { font-weight: 700; }",
+    )
+    .unwrap();
+    css_dir
 }
 
 fn write_overrides_css(dir: &Path, css: &str) -> PathBuf {
-    let path = dir.join("overrides.css");
-    fs::write(&path, css).unwrap();
-    path
+    let css_dir = dir.join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(css_dir.join("overrides.css"), css).unwrap();
+    css_dir
 }
 
 fn slide_fragment_count(out: &Path) -> usize {
@@ -547,7 +545,7 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
     write_multi_slide_fixture(&deck);
     let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
-    let overrides = write_overrides_css(dir.path(), override_css);
+    write_overrides_css(dir.path(), override_css);
     let out = dir.path().join("dist");
 
     Command::cargo_bin("peitho")
@@ -555,12 +553,10 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layout",
+            "--layouts",
             layout.to_str().unwrap(),
-            "--base-css",
-            base.to_str().unwrap(),
-            "--overrides-css",
-            overrides.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])

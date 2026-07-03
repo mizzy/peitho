@@ -22,7 +22,7 @@ crates/peitho-core/   契約・パイプライン(parser/layout/mapping/check/re
 crates/peitho/        CLI(build/present/publish)、server.rs(配信+/syncロングポール)、browser.rs、displays.rs
 packages/peitho-present/  TS発表シェル(canvas/shell/controls/keyboard/sync/presenter)
 bindings/             ts-rs生成TS型（コミット対象）
-layouts/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのレイアウト/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）
+layouts/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのレイアウト/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）。`--layouts`/`--css`はファイルまたはディレクトリ（`*.html`/`*.css`をファイル名順に読む）。CSS検証は全ファイル一様: キー付きセレクタは当該スライドのレイアウトのスロットに対して、裸の`.slot-*`は提供レイアウトの和集合に対して検査
 docs/plans/           各マイルストーンの実装計画（履歴）
 ```
 
