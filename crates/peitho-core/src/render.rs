@@ -293,6 +293,7 @@ pub fn render_present_index() -> String {
   <script type="module">
     import {
       installCanvasClickNavigation,
+      installCloseOnEscape,
       installFullscreenShortcut,
       installKeyboardNavigation,
       installPresentationControls,
@@ -316,6 +317,7 @@ pub fn render_present_index() -> String {
       const root = document.getElementById('peitho-present-root');
       try {
         window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
+        installCloseOnEscape(window);
         installKeyboardNavigation(window);
         installSyncBridge(window, serverSyncChannelFactory());
         installPresentationControls({ root, window, document });
@@ -358,7 +360,7 @@ pub fn render_presenter_index() -> String {
   <main id="peitho-presenter-root"></main>
   <!-- Runtime presenter controls include data-peitho-action="close". -->
   <script type="module">
-    import { mountPresenterView, serverSyncChannelFactory } from './shell.js';
+    import { installCloseOnEscape, mountPresenterView, serverSyncChannelFactory } from './shell.js';
 
     function showError(message) {
       const root = document.getElementById('peitho-presenter-root');
@@ -375,6 +377,7 @@ pub fn render_presenter_index() -> String {
       const root = document.getElementById('peitho-presenter-root');
       try {
         const notes = await fetchOk('notes.json').then((response) => response.json());
+        installCloseOnEscape(window);
         await mountPresenterView({
           root,
           notes,
@@ -550,6 +553,7 @@ mod tests {
         assert!(html.contains("installPresentationControls"));
         assert!(html.contains("installCanvasClickNavigation"));
         assert!(html.contains("installFullscreenShortcut"));
+        assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await mountPresentShell({ root })"));
         assert!(html.contains("installKeyboardNavigation(window)"));
@@ -571,9 +575,10 @@ mod tests {
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
         assert!(html.contains(
-            r#"import { mountPresenterView, serverSyncChannelFactory } from './shell.js';"#
+            r#"import { installCloseOnEscape, mountPresenterView, serverSyncChannelFactory } from './shell.js';"#
         ));
         assert!(html.contains("fetchOk('notes.json')"));
+        assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("await mountPresenterView({"));
         assert!(html.contains("syncChannelFactory: serverSyncChannelFactory()"));
         assert!(html.contains(r#"data-peitho-action="close""#));

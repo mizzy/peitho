@@ -23,3 +23,13 @@ export function installKeyboardNavigation(
   win.addEventListener("keydown", onKeyDown);
   return () => win.removeEventListener("keydown", onKeyDown);
 }
+
+export function installCloseOnEscape(win: Window = window, bus: EventTarget = win): () => void {
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}

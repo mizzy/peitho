@@ -60,6 +60,9 @@ fn present_no_serve_writes_clean_present_cache() {
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
         .contains("installSyncBridge(window, serverSyncChannelFactory())"));
+    assert!(fs::read_to_string(cache.join("present.html"))
+        .unwrap()
+        .contains("installCloseOnEscape(window)"));
 }
 
 #[test]
@@ -154,13 +157,7 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
     poll.write_all(b"GET /sync?seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
 
-    let mut post = TcpStream::connect(addr).unwrap();
-    post.write_all(
-        b"POST /sync HTTP/1.0\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n{\"index\":1}",
-    )
-    .unwrap();
-    let mut post_response = String::new();
-    post.read_to_string(&mut post_response).unwrap();
+    let post_response = post_sync(addr, r#"{"index":1}"#);
     assert!(post_response.contains("204 No Content"));
 
     let event = read_until_contains(&mut poll, r#""message":{"index":1}"#);
@@ -170,8 +167,66 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
     assert!(event.contains(r#""message":{"index":1}"#));
 
     drop(poll);
-    drop(post);
     drop(handle);
+}
+
+#[test]
+fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let mut poll = TcpStream::connect(addr).unwrap();
+    poll.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    poll.write_all(b"GET /sync?seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+
+    let post_response = post_sync(addr, r#"{"close":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    let event = read_until_contains(&mut poll, r#""message":{"close":true}"#);
+    assert!(event.contains("200 OK"));
+    assert!(event.contains(r#""seq":1"#));
+    assert!(event.contains(r#""message":{"close":true}"#));
+
+    drop(poll);
+    drop(handle);
+}
+
+#[test]
+fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_message() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || {
+        server.handle_one();
+        server.handle_one();
+    });
+
+    let post_response = post_sync(addr, r#"{"close":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .write_all(b"GET /sync HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+
+    assert!(response.contains("200 OK"));
+    assert!(response.contains(r#""seq":1"#));
+    assert!(response.contains(r#""message":null"#));
+    assert!(!response.contains(r#""close":true"#));
+    handle.join().unwrap();
 }
 
 #[test]
@@ -185,13 +240,24 @@ fn present_server_rejects_invalid_sync_post_body() {
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
-    let mut post = TcpStream::connect(addr).unwrap();
-    post.write_all(
-        b"POST /sync HTTP/1.0\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n{\"key\":\"x\"}",
-    )
-    .unwrap();
-    let mut response = String::new();
-    post.read_to_string(&mut response).unwrap();
+    let response = post_sync(addr, r#"{"key":"x"}"#);
+
+    assert!(response.contains("400 Bad Request"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_rejects_mixed_sync_post_body() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = post_sync(addr, r#"{"index":1,"close":true}"#);
 
     assert!(response.contains("400 Bad Request"));
     handle.join().unwrap();
@@ -278,13 +344,16 @@ fn repository_example_present_no_serve_smoke() {
     assert!(present_html.contains("installPresentationControls"));
     assert!(present_html.contains("installCanvasClickNavigation"));
     assert!(present_html.contains("installFullscreenShortcut"));
+    assert!(present_html.contains("installCloseOnEscape(window)"));
     assert!(present_html.contains("serverSyncChannelFactory"));
     assert!(present_html.contains("data-peitho-action=\"close\""));
     assert!(!present_html.contains("peitho-presenter-link"));
     assert!(presenter_html.contains(".peitho-presenter-pane"));
+    assert!(presenter_html.contains("installCloseOnEscape(window)"));
     assert!(presenter_html.contains("serverSyncChannelFactory"));
     assert!(shell_js.contains("CANVAS_WIDTH"));
     assert!(shell_js.contains("installPresentationControls"));
+    assert!(shell_js.contains("installCloseOnEscape"));
     assert!(shell_js.contains("openPresenterPopup"));
     assert!(shell_js.contains("serverSyncChannelFactory"));
     assert!(shell_js.contains(r#"data-peitho-action="close""#));
@@ -364,4 +433,18 @@ fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
         out.push_str(&String::from_utf8_lossy(&buf[..len]));
     }
     out
+}
+
+fn post_sync(addr: std::net::SocketAddr, body: &str) -> String {
+    let mut post = TcpStream::connect(addr).unwrap();
+    write!(
+        post,
+        "POST /sync HTTP/1.0\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .unwrap();
+    let mut response = String::new();
+    post.read_to_string(&mut response).unwrap();
+    response
 }

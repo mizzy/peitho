@@ -22,7 +22,7 @@ export {
   PRESENTER_URL
 } from "./presentDisplay";
 export type { OpenPresenterPopupOptions } from "./presentDisplay";
-export { installKeyboardNavigation } from "./keyboard";
+export { installCloseOnEscape, installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";

@@ -1,4 +1,4 @@
-export type SyncMessage = { index: number };
+export type SyncMessage = { index: number } | { close: true };
 
 export type SyncChannel = {
   onmessage: ((event: { data: unknown }) => void) | null;
@@ -21,6 +21,18 @@ type ServerSyncPollResponse = {
   seq: number;
   message: unknown;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isCloseSyncMessage(value: unknown): value is { close: true } {
+  return isRecord(value) && value.close === true;
+}
+
+function isIndexSyncMessage(value: unknown): value is { index: number } {
+  return isRecord(value) && typeof value.index === "number";
+}
 
 function defaultChannelFactory(name: string): SyncChannel {
   const channel = new BroadcastChannel(name);
@@ -67,7 +79,36 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
         }, retryMs);
       });
 
+    const handshake = async (): Promise<boolean> => {
+      try {
+        const response = await fetcher(url);
+        if (closed) return false;
+        if (!response.ok) {
+          console.error(`Failed to start sync polling: ${response.status}`);
+          await delay();
+          return false;
+        }
+        const body = (await response.json()) as Partial<ServerSyncPollResponse>;
+        if (typeof body.seq !== "number") {
+          console.error("Invalid peitho sync handshake");
+          await delay();
+          return false;
+        }
+        seq = body.seq;
+        return true;
+      } catch (error: unknown) {
+        if (!closed) {
+          console.error(`Failed to start sync polling: ${String(error)}`);
+          await delay();
+        }
+        return false;
+      }
+    };
+
     const poll = async (): Promise<void> => {
+      while (!closed && !(await handshake())) {
+        continue;
+      }
       while (!closed) {
         abortController = new AbortControllerCtor();
         try {
@@ -110,7 +151,8 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
         void fetcher(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message)
+          body: JSON.stringify(message),
+          keepalive: true
         })
           .then((response) => {
             if (!response.ok) console.error(`Failed to post sync message: ${response.status}`);
@@ -134,7 +176,8 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
 export function installSyncBridge(
   win: Window = window,
   channelFactory: SyncChannelFactory = defaultChannelFactory,
-  bus: EventTarget = win
+  bus: EventTarget = win,
+  closeWindow: () => void = () => win.close()
 ): () => void {
   const channel = channelFactory("peitho-sync");
   const onSlideChange = (event: Event): void => {
@@ -142,17 +185,28 @@ export function installSyncBridge(
     if (typeof detail?.index !== "number") return;
     channel.postMessage({ index: detail.index });
   };
+  const onCloseRequest = (): void => {
+    channel.postMessage({ close: true });
+  };
   channel.onmessage = (event: { data: unknown }): void => {
-    const data = event.data as Partial<SyncMessage>;
-    if (typeof data.index !== "number") {
-      console.error("Invalid peitho sync message");
+    const data = event.data;
+    if (isCloseSyncMessage(data)) {
+      closeWindow();
       return;
     }
-    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } }));
+    if (isIndexSyncMessage(data)) {
+      bus.dispatchEvent(
+        new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } })
+      );
+      return;
+    }
+    console.error("Invalid peitho sync message");
   };
   bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:closerequest", onCloseRequest);
   return () => {
     bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:closerequest", onCloseRequest);
     channel.onmessage = null;
     channel.close();
   };

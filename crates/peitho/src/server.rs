@@ -53,6 +53,11 @@ impl SyncHub {
             message: state.latest.clone().expect("latest sync message"),
         })
     }
+
+    fn current_seq(&self) -> u64 {
+        let (lock, _) = &*self.state;
+        lock.lock().expect("sync hub mutex").seq
+    }
 }
 
 pub(crate) fn resolve_request_path(root: &Path, url: &str) -> Option<PathBuf> {
@@ -135,7 +140,7 @@ impl PresentServer {
         let path = request.url().split('?').next().unwrap_or(request.url());
         match (request.method(), path) {
             (&Method::Get, "/sync") => {
-                self.respond_sync_poll(request);
+                self.respond_sync_get(request);
                 return;
             }
             (&Method::Post, "/sync") => {
@@ -152,11 +157,18 @@ impl PresentServer {
         self.respond_static(request);
     }
 
-    fn respond_sync_poll(&self, request: tiny_http::Request) {
-        let Some(seq) = sync_seq(request.url()) else {
+    fn respond_sync_get(&self, request: tiny_http::Request) {
+        let Some(sync_get) = sync_get(request.url()) else {
             send_response(
                 request,
                 Response::from_string("invalid sync seq\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+        let SyncGet::Poll(seq) = sync_get else {
+            send_json_response(
+                request,
+                format!(r#"{{"seq":{},"message":null}}"#, self.sync.current_seq()),
             );
             return;
         };
@@ -164,14 +176,8 @@ impl PresentServer {
         thread::spawn(
             move || match sync.wait_after(seq, Duration::from_secs(30)) {
                 Some(event) => {
-                    let Ok(header) =
-                        Header::from_bytes("Content-Type", "application/json; charset=utf-8")
-                    else {
-                        eprintln!("warning: failed to build Content-Type header");
-                        return;
-                    };
                     let body = format!(r#"{{"seq":{},"message":{}}}"#, event.seq, event.message);
-                    send_response(request, Response::from_string(body).with_header(header));
+                    send_json_response(request, body);
                 }
                 None => send_response(request, Response::empty(StatusCode(204))),
             },
@@ -194,6 +200,13 @@ impl PresentServer {
             );
             return;
         };
+        if !message.is_valid() {
+            send_response(
+                request,
+                Response::from_string("invalid sync body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        }
         let json = serde_json::to_string(&message).expect("SyncMessage serializes");
         self.sync.broadcast(&json);
         send_response(request, Response::empty(StatusCode(204)));
@@ -226,27 +239,62 @@ impl PresentServer {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SyncMessage {
+    Index(SyncIndexMessage),
+    Close(SyncCloseMessage),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SyncMessage {
+struct SyncIndexMessage {
     index: usize,
 }
 
-fn sync_seq(url: &str) -> Option<u64> {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncCloseMessage {
+    close: bool,
+}
+
+impl SyncMessage {
+    fn is_valid(&self) -> bool {
+        !matches!(self, Self::Close(message) if !message.close)
+    }
+}
+
+enum SyncGet {
+    Handshake,
+    Poll(u64),
+}
+
+fn sync_get(url: &str) -> Option<SyncGet> {
     let Some((_, query)) = url.split_once('?') else {
-        return Some(0);
+        return Some(SyncGet::Handshake);
     };
     if query.is_empty() {
-        return Some(0);
+        return Some(SyncGet::Handshake);
     }
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
         if key == "seq" {
-            return value.parse().ok();
+            if value.is_empty() || value == "now" {
+                return Some(SyncGet::Handshake);
+            }
+            return value.parse().ok().map(SyncGet::Poll);
         }
     }
-    Some(0)
+    Some(SyncGet::Handshake)
+}
+
+fn send_json_response(request: tiny_http::Request, body: String) {
+    let Ok(header) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") else {
+        eprintln!("warning: failed to build Content-Type header");
+        return;
+    };
+    send_response(request, Response::from_string(body).with_header(header));
 }
 
 fn send_response<R>(request: tiny_http::Request, response: Response<R>)
@@ -321,10 +369,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_sync_seq_query() {
-        assert_eq!(sync_seq("/sync"), Some(0));
-        assert_eq!(sync_seq("/sync?seq=42"), Some(42));
-        assert_eq!(sync_seq("/sync?other=x&seq=7"), Some(7));
-        assert_eq!(sync_seq("/sync?seq=nope"), None);
+    fn parses_sync_get_query() {
+        assert!(matches!(sync_get("/sync"), Some(SyncGet::Handshake)));
+        assert!(matches!(sync_get("/sync?seq="), Some(SyncGet::Handshake)));
+        assert!(matches!(
+            sync_get("/sync?seq=now"),
+            Some(SyncGet::Handshake)
+        ));
+        assert!(matches!(sync_get("/sync?seq=42"), Some(SyncGet::Poll(42))));
+        assert!(matches!(
+            sync_get("/sync?other=x&seq=7"),
+            Some(SyncGet::Poll(7))
+        ));
+        assert!(sync_get("/sync?seq=nope").is_none());
     }
 }
