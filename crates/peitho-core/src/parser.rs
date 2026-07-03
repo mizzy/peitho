@@ -515,6 +515,18 @@ mod tests {
     use crate::{domain::FragmentKind, error::ErrorKind, phase::KeySource};
 
     #[test]
+    fn deck_frontmatter_yaml_dependency_is_available() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Probe {
+            time: String,
+        }
+
+        let parsed: Probe = serde_norway::from_str("time: 15m\n").unwrap();
+
+        assert_eq!(parsed.time, "15m");
+    }
+
+    #[test]
     fn preserves_inline_markdown_and_generates_list_fragments() {
         let markdown = r#"<!-- {"key":"arch-1"} -->
 # **Architecture** `Phase`
