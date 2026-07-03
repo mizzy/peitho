@@ -14,6 +14,7 @@ export type PresentationControlsOptions = {
   getScreenDetails?: OpenPresenterWithDisplayOptions["getScreenDetails"];
   openPresenterWindow?: OpenPresenterWithDisplayOptions["openWindow"];
   requestFullscreen?: OpenPresenterWithDisplayOptions["requestFullscreen"];
+  showPlacementOverlay?: OpenPresenterWithDisplayOptions["showPlacementOverlay"];
 };
 
 export type CanvasClickNavigationOptions = {
@@ -40,7 +41,8 @@ export function installPresentationControls(options: PresentationControlsOptions
         document: doc,
         getScreenDetails: options.getScreenDetails,
         openWindow: options.openPresenterWindow,
-        requestFullscreen: options.requestFullscreen
+        requestFullscreen: options.requestFullscreen,
+        showPlacementOverlay: options.showPlacementOverlay
       }));
 
   const bar = doc.createElement("nav");

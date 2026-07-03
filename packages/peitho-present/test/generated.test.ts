@@ -12,13 +12,19 @@ import {
   installPresentationControls,
   mountPresenterView,
   mountPresentShell,
-  openPresenterWithDisplay
+  openPresenterWithDisplay,
+  placeWindows,
+  showPlacementOverlay
 } from "../src/index";
 import type {
+  PlacementOverlay,
+  PlaceWindowsOptions,
   PresentationEndDetail,
   PresentationStartDetail,
   PresenterOptions,
+  RequestFullscreen,
   ShellOptions,
+  ShowPlacementOverlay,
   TimerControlDetail
 } from "../src/index";
 
@@ -75,5 +81,24 @@ describe("generated manifest contract", () => {
     expect(typeof buildPresenterFeatures).toBe("function");
     expect(typeof chooseOtherScreen).toBe("function");
     expect(typeof openPresenterWithDisplay).toBe("function");
+  });
+
+  it("exports display placement retry helpers", () => {
+    const overlay: PlacementOverlay = { remove: () => undefined };
+    const fullscreen: RequestFullscreen = () => undefined;
+    const show: ShowPlacementOverlay = () => overlay;
+    const options: PlaceWindowsOptions = {
+      details: {
+        currentScreen: { availLeft: 0, availTop: 0, availWidth: 1, availHeight: 1 },
+        screens: [{ availLeft: 0, availTop: 0, availWidth: 1, availHeight: 1 }]
+      },
+      popup: null,
+      requestFullscreen: fullscreen
+    };
+
+    expect(typeof placeWindows).toBe("function");
+    expect(typeof showPlacementOverlay).toBe("function");
+    expect(show).toBeTypeOf("function");
+    expect(options.popup).toBeNull();
   });
 });

@@ -21,9 +21,18 @@ export {
   chooseOtherScreen,
   fallbackFeatures,
   openPresenterWithDisplay,
-  PRESENTER_URL
+  placeWindows,
+  PRESENTER_URL,
+  showPlacementOverlay
 } from "./presentDisplay";
-export type { OpenPresenterWithDisplayOptions, PresenterPopup } from "./presentDisplay";
+export type {
+  OpenPresenterWithDisplayOptions,
+  PlacementOverlay,
+  PlaceWindowsOptions,
+  PresenterPopup,
+  RequestFullscreen,
+  ShowPlacementOverlay
+} from "./presentDisplay";
 export { installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
