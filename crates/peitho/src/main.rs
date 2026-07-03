@@ -12,7 +12,7 @@ use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
 
-use peitho::{browser, displays, server};
+use peitho::{browser, server};
 
 struct BuildArtifacts {
     slide_count: usize,
@@ -648,35 +648,35 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         effective_asset_path(&options.layouts, &options.input, "layouts").as_deref(),
         effective_asset_path(&options.css, &options.input, "css").as_deref(),
     )?;
-    emit_present_cache(&cache, &artifacts, options.shell.as_deref())?;
     if options.no_serve {
+        emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false)?;
         println!("generated present cache at {}", cache.display());
         return Ok(());
     }
 
-    let server = server::PresentServer::bind(cache, options.port)?;
+    let server = server::PresentServer::bind(cache.clone(), options.port)?;
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
-    println!("serving presentation at {url}");
-    std::io::stdout().flush().into_diagnostic()?;
-    if !options.no_open {
-        let presenter_mode = if options.presenter_windowed {
-            displays::PresenterMode::Windowed {
-                saved: browser::chrome_profiles_from_home(std::env::var_os("HOME"))
-                    .as_ref()
-                    .and_then(browser::saved_presenter_bounds),
-            }
-        } else {
-            displays::PresenterMode::Fullscreen
-        };
-        browser::open_browser_with_request(
+    let browser_plan = if options.no_open {
+        None
+    } else {
+        Some(browser::plan_browser_with_request(
             browser::BrowserOpenRequest {
                 slides_url: &url,
                 presenter_url: &presenter_url,
                 no_presenter: options.no_presenter,
             },
-            displays::detect_presentation_layout(presenter_mode),
-        );
+            options.presenter_windowed,
+        ))
+    };
+    let presenter_open = browser_plan
+        .as_ref()
+        .is_some_and(|plan| plan.opens_presenter);
+    emit_present_cache(&cache, &artifacts, options.shell.as_deref(), presenter_open)?;
+    println!("serving presentation at {url}");
+    std::io::stdout().flush().into_diagnostic()?;
+    if let Some(plan) = browser_plan {
+        browser::open_browser_plan(plan);
     }
     let result = server.serve_forever();
     if !options.no_open {
@@ -689,6 +689,7 @@ fn emit_present_cache(
     cache: &Path,
     artifacts: &BuildArtifacts,
     shell: Option<&Path>,
+    presenter_open: bool,
 ) -> miette::Result<()> {
     if let Some(shell) = shell {
         ensure_shell_bundle(shell)?;
@@ -699,6 +700,13 @@ fn emit_present_cache(
     fs::write(
         cache.join("notes.json"),
         core(peitho_core::notes_json(&peitho_core::Notes::empty()))?,
+    )
+    .into_diagnostic()?;
+    fs::write(
+        cache.join("present.json"),
+        core(peitho_core::present_config_json(
+            &peitho_core::PresentConfig::new(presenter_open),
+        ))?,
     )
     .into_diagnostic()?;
     fs::write(
@@ -1060,6 +1068,23 @@ mod tests {
                 panic!("expected present command");
             }
         }
+    }
+
+    #[test]
+    fn emit_present_cache_writes_present_json() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(
+            &fixture.options.input,
+            fixture.options.effective_layouts().as_deref(),
+            fixture.options.effective_css().as_deref(),
+        )
+        .unwrap();
+
+        fs::create_dir_all(&fixture.options.out).unwrap();
+        emit_present_cache(&fixture.options.out, &artifacts, None, true).unwrap();
+
+        let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
+        assert!(json.contains(r#""presenterOpen": true"#));
     }
 
     #[test]
