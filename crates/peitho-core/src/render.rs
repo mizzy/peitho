@@ -297,22 +297,18 @@ pub fn render_present_index() -> String {
     #peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
     .peitho-control-bar { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; gap: 8px; align-items: center; padding: 8px; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 6px; }
     .peitho-control-bar[hidden] { display: none; }
+    .peitho-time-tracker { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; z-index: 5; pointer-events: none; background: rgba(255, 255, 255, 0.18); }
+    .peitho-time-tracker [data-peitho-marker] { position: absolute; transform: translateX(-50%); transition: left 120ms linear; font-size: 18px; line-height: 1; }
+    .peitho-time-tracker [data-peitho-marker="rabbit"] { bottom: 20px; }
+    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: 2px; }
+    .peitho-time-tracker[data-peitho-overrun] { background: rgba(255, 92, 92, 0.35); }
   </style>
 </head>
 <body>
   <main id="peitho-present-root"></main>
   <!-- Runtime controls include data-peitho-action="close". -->
   <script type="module">
-    import {
-      installCanvasClickNavigation,
-      installCloseOnEscape,
-      installFullscreenShortcut,
-      installKeyboardNavigation,
-      installPresentationControls,
-      installSyncBridge,
-      mountPresentShell,
-      serverSyncChannelFactory
-    } from './shell.js';
+    import * as peitho from './shell.js';
 
     function showError(message) {
       const root = document.getElementById('peitho-present-root');
@@ -329,13 +325,45 @@ pub fn render_present_index() -> String {
       const root = document.getElementById('peitho-present-root');
       try {
         window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
-        installCloseOnEscape(window);
-        installKeyboardNavigation(window);
-        installSyncBridge(window, serverSyncChannelFactory());
-        installPresentationControls({ root, window, document });
-        installCanvasClickNavigation({ root, window });
-        installFullscreenShortcut({ window, document });
-        await mountPresentShell({ root });
+        peitho.installCloseOnEscape(window);
+        peitho.installKeyboardNavigation(window);
+        peitho.installSyncBridge(window, peitho.serverSyncChannelFactory());
+        peitho.installPresentationControls({ root, window, document });
+        peitho.installCanvasClickNavigation({ root, window });
+        peitho.installFullscreenShortcut({ window, document });
+        const shell = await peitho.mountPresentShell({ root });
+        const rawPlannedDurationMs = shell.manifest?.plannedDurationMs ?? null;
+        const plannedDurationMs =
+          rawPlannedDurationMs != null &&
+          Number.isFinite(rawPlannedDurationMs) &&
+          rawPlannedDurationMs > 0
+            ? rawPlannedDurationMs
+            : null;
+        if (rawPlannedDurationMs != null && plannedDurationMs == null) {
+          console.error("Invalid plannedDurationMs in manifest.json");
+        }
+        if (plannedDurationMs != null) {
+          if (typeof peitho.installTimeTracker === 'function') {
+            let config = null;
+            try {
+              config = await fetchOk('present.json').then((response) => response.json());
+            } catch (_error) {
+              console.error("failed to load present.json; time tracker disabled");
+            }
+            if (config != null && !config.presenterOpen) {
+              peitho.installTimeTracker({
+                root,
+                shell,
+                plannedDurationMs,
+                window,
+                document,
+                variant: 'present'
+              });
+            }
+          } else {
+            console.error("shell bundle does not provide installTimeTracker; time tracker disabled");
+          }
+        }
       } catch (error) {
         showError(error.message);
       }
@@ -366,13 +394,19 @@ pub fn render_presenter_index() -> String {
     [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; margin-top: 16px; }
     [data-peitho-presenter="timer"] { display: block; font-size: 40px; font-variant-numeric: tabular-nums; margin: 16px 0; }
     .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    .peitho-time-tracker[data-peitho-time-tracker="presenter"] { position: relative; height: 26px; margin: 12px 0; z-index: 20; pointer-events: none; background: rgba(255, 255, 255, 0.16); }
+    .peitho-time-tracker [data-peitho-marker] { position: absolute; transform: translateX(-50%); transition: left 120ms linear; font-size: 18px; line-height: 1; }
+    .peitho-time-tracker [data-peitho-marker="rabbit"] { top: -18px; }
+    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: -18px; }
+    .peitho-time-tracker[data-peitho-overrun] { background: rgba(255, 92, 92, 0.35); }
+    [data-peitho-presenter="timer"][data-peitho-overrun] { color: #ff8a8a; }
   </style>
 </head>
 <body>
   <main id="peitho-presenter-root"></main>
   <!-- Runtime presenter controls include data-peitho-action="close". -->
   <script type="module">
-    import { installCloseOnEscape, mountPresenterView, serverSyncChannelFactory } from './shell.js';
+    import * as peitho from './shell.js';
 
     function showError(message) {
       const root = document.getElementById('peitho-presenter-root');
@@ -389,11 +423,11 @@ pub fn render_presenter_index() -> String {
       const root = document.getElementById('peitho-presenter-root');
       try {
         const notes = await fetchOk('notes.json').then((response) => response.json());
-        installCloseOnEscape(window);
-        await mountPresenterView({
+        peitho.installCloseOnEscape(window);
+        await peitho.mountPresenterView({
           root,
           notes,
-          syncChannelFactory: serverSyncChannelFactory()
+          syncChannelFactory: peitho.serverSyncChannelFactory()
         });
       } catch (error) {
         showError(error.message);
@@ -578,14 +612,16 @@ mod tests {
         assert!(html.contains("installFullscreenShortcut"));
         assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("fetchOk('notes.json')"));
-        assert!(html.contains("await mountPresentShell({ root })"));
+        assert!(html.contains("await peitho.mountPresentShell({ root })"));
         assert!(html.contains("installKeyboardNavigation(window)"));
-        assert!(html.contains("installSyncBridge(window, serverSyncChannelFactory())"));
+        assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
         assert!(html.contains(r#"data-peitho-action="close""#));
         let controls_index = html
-            .find("installPresentationControls({ root, window, document })")
+            .find("peitho.installPresentationControls({ root, window, document })")
             .unwrap();
-        let mount_index = html.find("await mountPresentShell({ root })").unwrap();
+        let mount_index = html
+            .find("await peitho.mountPresentShell({ root })")
+            .unwrap();
         assert!(controls_index < mount_index);
         assert!(!html.contains("peitho-presenter-link"));
         assert!(!html.contains(">Presenter view</a>"));
@@ -593,17 +629,47 @@ mod tests {
     }
 
     #[test]
+    fn present_index_fetches_present_config_and_mounts_time_tracker_conditionally() {
+        let html = render_present_index();
+
+        assert!(html.contains("import * as peitho from './shell.js';"));
+        assert!(html.contains("fetchOk('present.json')"));
+        assert!(html.contains("typeof peitho.installTimeTracker === 'function'"));
+        assert!(html.contains("peitho.installTimeTracker"));
+        assert!(html.contains("!config.presenterOpen"));
+        assert!(html.contains("rawPlannedDurationMs = shell.manifest?.plannedDurationMs ?? null"));
+        assert!(html.contains("Number.isFinite(rawPlannedDurationMs)"));
+        assert!(html.contains(r#""Invalid plannedDurationMs in manifest.json""#));
+        assert!(html.contains(
+            r#""shell bundle does not provide installTimeTracker; time tracker disabled""#
+        ));
+        assert!(html.contains(r#""failed to load present.json; time tracker disabled""#));
+        assert!(html.contains("variant: 'present'"));
+        assert!(html.contains(".peitho-time-tracker"));
+        assert!(html.contains("z-index: 5"));
+        assert!(html.contains(r#"[data-peitho-marker="rabbit"]"#));
+        assert!(html.contains(r#"[data-peitho-marker="turtle"]"#));
+        assert!(html.contains(r#"[data-peitho-marker="rabbit"] { bottom: 20px; }"#));
+        assert!(html.contains(r#"[data-peitho-marker="turtle"] { bottom: 2px; }"#));
+        assert!(!html.contains("bottom: -18px"));
+        assert!(!html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
+        let mount_index = html
+            .find("await peitho.mountPresentShell({ root })")
+            .unwrap();
+        let config_index = html.find("fetchOk('present.json')").unwrap();
+        assert!(mount_index < config_index);
+    }
+
+    #[test]
     fn presenter_index_mounts_presenter_view_with_canvas_panes_and_notes() {
         let html = render_presenter_index();
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
-        assert!(html.contains(
-            r#"import { installCloseOnEscape, mountPresenterView, serverSyncChannelFactory } from './shell.js';"#
-        ));
+        assert!(html.contains("import * as peitho from './shell.js';"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("installCloseOnEscape(window)"));
-        assert!(html.contains("await mountPresenterView({"));
-        assert!(html.contains("syncChannelFactory: serverSyncChannelFactory()"));
+        assert!(html.contains("await peitho.mountPresenterView({"));
+        assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
         assert!(html.contains(r#"data-peitho-action="close""#));
         assert!(html.contains(".peitho-presenter-pane"));
         assert!(html.contains("overflow: hidden"));
@@ -612,11 +678,35 @@ mod tests {
     }
 
     #[test]
+    fn presenter_index_includes_time_tracker_css() {
+        let html = render_presenter_index();
+
+        assert!(html.contains(".peitho-time-tracker"));
+        assert!(html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
+        assert!(html.contains("height: 26px"));
+        assert!(html.contains("transform: translateX(-50%)"));
+        assert!(html.contains(r#"[data-peitho-marker="rabbit"]"#));
+        assert!(html.contains(r#"[data-peitho-marker="turtle"]"#));
+        assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
+        assert!(!html.contains(".peitho-time-tracker { position: absolute"));
+        assert!(!html.contains("bottom: 0; height: 6px"));
+    }
+
+    #[test]
+    fn distribution_index_does_not_include_time_tracker() {
+        let html = render_distribution_index();
+
+        assert!(!html.contains("installTimeTracker"));
+        assert!(!html.contains("peitho-time-tracker"));
+        assert!(!html.contains("present.json"));
+    }
+
+    #[test]
     fn present_index_uses_server_sync_factory() {
         let html = render_present_index();
 
         assert!(html.contains("serverSyncChannelFactory"));
-        assert!(html.contains("installSyncBridge(window, serverSyncChannelFactory())"));
+        assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
         assert!(!html.contains("installSyncBridge(window);"));
     }
 
@@ -625,7 +715,7 @@ mod tests {
         let html = render_presenter_index();
 
         assert!(html.contains("serverSyncChannelFactory"));
-        assert!(html.contains("syncChannelFactory: serverSyncChannelFactory()"));
+        assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
     }
 
     #[test]
@@ -643,11 +733,13 @@ mod tests {
         let html = render_present_index();
 
         let controls_index = html
-            .find("installPresentationControls({ root, window, document })")
+            .find("peitho.installPresentationControls({ root, window, document })")
             .unwrap();
-        let mount_index = html.find("await mountPresentShell({ root })").unwrap();
+        let mount_index = html
+            .find("await peitho.mountPresentShell({ root })")
+            .unwrap();
         assert!(controls_index < mount_index);
-        assert!(html.contains("installPresentationControls({ root, window, document })"));
+        assert!(html.contains("peitho.installPresentationControls({ root, window, document })"));
         assert!(!html.contains("openPresenter"));
     }
 

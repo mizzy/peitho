@@ -63,7 +63,7 @@ fn present_no_serve_writes_clean_present_cache() {
         .contains(r#""presenterOpen": false"#));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
-        .contains("installSyncBridge(window, serverSyncChannelFactory())"));
+        .contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
         .contains("installCloseOnEscape(window)"));
