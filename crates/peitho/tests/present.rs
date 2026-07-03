@@ -53,10 +53,14 @@ fn present_no_serve_writes_clean_present_cache() {
     assert!(cache.join("peitho.css").exists());
     assert!(cache.join("manifest.json").exists());
     assert!(cache.join("notes.json").exists());
+    assert!(cache.join("present.json").exists());
     assert!(cache.join("slides/000-arch-1.html").exists());
     assert!(fs::read_to_string(cache.join("notes.json"))
         .unwrap()
         .contains(r#""notes": {}"#));
+    assert!(fs::read_to_string(cache.join("present.json"))
+        .unwrap()
+        .contains(r#""presenterOpen": false"#));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
         .contains("installSyncBridge(window, serverSyncChannelFactory())"));

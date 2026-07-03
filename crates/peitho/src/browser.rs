@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use crate::displays::{PresentationLayout, SavedWindowBounds, WindowPlacement};
+use crate::displays::{self, PresentationLayout, SavedWindowBounds, WindowPlacement};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserPlatform {
@@ -30,8 +30,21 @@ pub struct BrowserEnvironment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserCommand {
+    pub role: WindowRole,
     pub program: OsString,
     pub args: Vec<OsString>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    Slides,
+    Presenter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserPlan {
+    pub commands: Vec<BrowserCommand>,
+    pub opens_presenter: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,7 +125,7 @@ fn chrome_presenter_args(
     args
 }
 
-fn macos_chrome_command(args: Vec<OsString>) -> BrowserCommand {
+fn macos_chrome_command(role: WindowRole, args: Vec<OsString>) -> BrowserCommand {
     let mut full_args = vec![
         OsString::from("-na"),
         OsString::from("Google Chrome"),
@@ -120,6 +133,7 @@ fn macos_chrome_command(args: Vec<OsString>) -> BrowserCommand {
     ];
     full_args.extend(args);
     BrowserCommand {
+        role,
         program: OsString::from("open"),
         args: full_args,
     }
@@ -133,31 +147,38 @@ pub fn plan_browser_commands(
         BrowserPlatform::Macos if env.mac_google_chrome_available => {
             let Some(profiles) = env.chrome_profiles.as_ref() else {
                 return vec![BrowserCommand {
+                    role: WindowRole::Slides,
                     program: OsString::from("open"),
                     args: vec![OsString::from(request.slides_url)],
                 }];
             };
             if let Some(layout) = env.layout.filter(|_| !request.no_presenter) {
                 return vec![
-                    macos_chrome_command(chrome_slides_args(
-                        &profiles.slides,
-                        request.slides_url,
-                        Some(layout.slides),
-                    )),
-                    macos_chrome_command(chrome_presenter_args(
-                        &profiles.presenter,
-                        request.presenter_url,
-                        layout.presenter,
-                    )),
+                    macos_chrome_command(
+                        WindowRole::Slides,
+                        chrome_slides_args(
+                            &profiles.slides,
+                            request.slides_url,
+                            Some(layout.slides),
+                        ),
+                    ),
+                    macos_chrome_command(
+                        WindowRole::Presenter,
+                        chrome_presenter_args(
+                            &profiles.presenter,
+                            request.presenter_url,
+                            layout.presenter,
+                        ),
+                    ),
                 ];
             }
-            vec![macos_chrome_command(chrome_slides_args(
-                &profiles.slides,
-                request.slides_url,
-                None,
-            ))]
+            vec![macos_chrome_command(
+                WindowRole::Slides,
+                chrome_slides_args(&profiles.slides, request.slides_url, None),
+            )]
         }
         BrowserPlatform::Macos => vec![BrowserCommand {
+            role: WindowRole::Slides,
             program: OsString::from("open"),
             args: vec![OsString::from(request.slides_url)],
         }],
@@ -172,12 +193,14 @@ fn linux_browser_commands(
 ) -> Vec<BrowserCommand> {
     let Some(program) = env.linux_browser.as_deref() else {
         return vec![BrowserCommand {
+            role: WindowRole::Slides,
             program: OsString::from("xdg-open"),
             args: vec![OsString::from(request.slides_url)],
         }];
     };
     let Some(profiles) = env.chrome_profiles.as_ref() else {
         return vec![BrowserCommand {
+            role: WindowRole::Slides,
             program: OsString::from("xdg-open"),
             args: vec![OsString::from(request.slides_url)],
         }];
@@ -186,10 +209,12 @@ fn linux_browser_commands(
     if let Some(layout) = env.layout.filter(|_| !request.no_presenter) {
         return vec![
             BrowserCommand {
+                role: WindowRole::Slides,
                 program: program.to_owned(),
                 args: chrome_slides_args(&profiles.slides, request.slides_url, Some(layout.slides)),
             },
             BrowserCommand {
+                role: WindowRole::Presenter,
                 program: program.to_owned(),
                 args: chrome_presenter_args(
                     &profiles.presenter,
@@ -201,9 +226,26 @@ fn linux_browser_commands(
     }
 
     vec![BrowserCommand {
+        role: WindowRole::Slides,
         program: program.to_owned(),
         args: chrome_slides_args(&profiles.slides, request.slides_url, None),
     }]
+}
+
+pub fn plan_browser(request: &BrowserOpenRequest<'_>, env: &BrowserEnvironment) -> BrowserPlan {
+    BrowserPlan::from_commands(plan_browser_commands(request, env))
+}
+
+impl BrowserPlan {
+    fn from_commands(commands: Vec<BrowserCommand>) -> Self {
+        let opens_presenter = commands
+            .iter()
+            .any(|command| command.role == WindowRole::Presenter);
+        Self {
+            commands,
+            opens_presenter,
+        }
+    }
 }
 
 fn chrome_app_exists() -> bool {
@@ -389,12 +431,28 @@ fn prepare_profile_dirs(profiles: Option<&ChromeProfiles>) -> bool {
     true
 }
 
-pub fn open_browser_with_request(
+fn presenter_mode(
+    presenter_windowed: bool,
+    profiles: Option<&ChromeProfiles>,
+) -> displays::PresenterMode {
+    if presenter_windowed {
+        displays::PresenterMode::Windowed {
+            saved: profiles.and_then(saved_presenter_bounds),
+        }
+    } else {
+        displays::PresenterMode::Fullscreen
+    }
+}
+
+pub fn plan_browser_with_request(
     request: BrowserOpenRequest<'_>,
-    layout: Option<PresentationLayout>,
-) {
+    presenter_windowed: bool,
+) -> BrowserPlan {
     let mut env = current_environment();
-    env.layout = layout;
+    env.layout = displays::detect_presentation_layout(presenter_mode(
+        presenter_windowed,
+        env.chrome_profiles.as_ref(),
+    ));
     if !prepare_profile_dirs(env.chrome_profiles.as_ref()) {
         env.chrome_profiles = None;
     }
@@ -402,12 +460,15 @@ pub fn open_browser_with_request(
         terminate_stale_profile_instances(profiles);
     }
 
-    let commands = plan_browser_commands(&request, &env);
-    if commands.is_empty() {
+    plan_browser(&request, &env)
+}
+
+pub fn open_browser_plan(plan: BrowserPlan) {
+    if plan.commands.is_empty() {
         eprintln!("warning: browser auto-open is not supported on this platform");
         return;
     }
-    for command in commands {
+    for command in plan.commands {
         if let Err(err) = Command::new(&command.program).args(&command.args).spawn() {
             eprintln!(
                 "warning: failed to open browser with {}: {err}",
@@ -501,6 +562,8 @@ mod tests {
         let commands = plan_browser_commands(&test_request(false), &env);
 
         assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].role, WindowRole::Slides);
+        assert_eq!(commands[1].role, WindowRole::Presenter);
         assert_eq!(
             commands[0].args,
             vec![
@@ -649,6 +712,7 @@ mod tests {
         let commands = plan_browser_commands(&test_request(true), &env);
 
         assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].role, WindowRole::Slides);
         assert!(commands[0]
             .args
             .contains(&OsString::from("--start-fullscreen")));
@@ -656,6 +720,57 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--window-size=1200,800"));
+    }
+
+    #[test]
+    fn browser_plan_reports_presenter_open_for_two_display_chrome_plan() {
+        let env = BrowserEnvironment {
+            platform: BrowserPlatform::Macos,
+            mac_google_chrome_available: true,
+            linux_browser: None,
+            chrome_profiles: Some(test_profiles()),
+            layout: Some(test_layout()),
+        };
+
+        let plan = plan_browser(&test_request(false), &env);
+
+        assert!(plan.opens_presenter);
+        assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.commands[1].role, WindowRole::Presenter);
+    }
+
+    #[test]
+    fn browser_plan_reports_no_presenter_when_chrome_is_unavailable() {
+        let env = BrowserEnvironment {
+            platform: BrowserPlatform::Macos,
+            mac_google_chrome_available: false,
+            linux_browser: None,
+            chrome_profiles: Some(test_profiles()),
+            layout: Some(test_layout()),
+        };
+
+        let plan = plan_browser(&test_request(false), &env);
+
+        assert!(!plan.opens_presenter);
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0].role, WindowRole::Slides);
+    }
+
+    #[test]
+    fn browser_plan_reports_no_presenter_when_disabled_by_flag() {
+        let env = BrowserEnvironment {
+            platform: BrowserPlatform::Macos,
+            mac_google_chrome_available: true,
+            linux_browser: None,
+            chrome_profiles: Some(test_profiles()),
+            layout: Some(test_layout()),
+        };
+
+        let plan = plan_browser(&test_request(true), &env);
+
+        assert!(!plan.opens_presenter);
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0].role, WindowRole::Slides);
     }
 
     #[test]

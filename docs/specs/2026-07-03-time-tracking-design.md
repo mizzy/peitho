@@ -88,13 +88,13 @@ Rejected alternatives:
 
 ### D4: The display destination decision is finalized by the CLI at launch time (`presenter_open`)
 
-`presenter_open = !no_open && !no_presenter && display layout detection is Some`
+`presenter_open` = the launch plan (`BrowserPlan`) contains a command that opens the presenter window. **Refined during Task 9 implementation (2026-07-04)**: the original formula `!no_open && !no_presenter && detection is Some` re-derived the decision from fewer inputs than the code that actually opens windows (`browser.rs` also falls back to slides-only when Chrome is unavailable or profile preparation fails), so present.json could claim a presenter that never opens. The single source of truth is the browser launch plan itself; `opens_presenter` is derived structurally from the planned commands, not re-computed from flags.
 
-- 2 displays (presenter window present) → `true` → tracker shows **only on the presenter screen**
+- 2 displays (presenter window planned) → `true` → tracker shows **only on the presenter screen**
 - 1 display + default Fullscreen (no presenter window) → `false` → tracker shows **on the presentation screen**
 - `--presenter-windowed` (1-screen debugging, both windows) → `true` → presenter screen only
-- `--no-presenter` → `false` → presentation screen
-- Implementation-wise, the layout detection inside `present()` runs once, before `emit_present_cache`, so both the config write-out and the browser launch use the same detection result
+- `--no-presenter`, Chrome unavailable, or profile preparation failure → `false` → presentation screen
+- Ordering inside `present()`: build → (`--no-serve`: emit with `false` and return) → server bind → detect+plan once → emit present.json from the plan → announce URL → execute the plan → serve. Binding first keeps early `/sync` clients in the listener backlog instead of connection-refused during the JXA detection window, and a bind failure never leaves a cache claiming a presenter that was not opened
 
 Frontend display rules:
 - presenter.html: show the tracker if `manifest.plannedDurationMs != null`
