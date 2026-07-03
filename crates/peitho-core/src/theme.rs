@@ -23,11 +23,39 @@ pub fn build_theme_css<'a>(
     ))
 }
 
+/// Blank out `/* ... */` comments while keeping newlines, so selector
+/// validation neither trips over example selectors inside comments nor
+/// shifts the line numbers it reports.
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    let mut in_comment = false;
+    while let Some(c) = chars.next() {
+        if in_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                out.push_str("  ");
+                in_comment = false;
+            } else {
+                out.push(if c == '\n' { '\n' } else { ' ' });
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            out.push_str("  ");
+            in_comment = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn validate_override_selectors(
     css: &str,
     known_keys: &BTreeSet<String>,
     template: &Template,
 ) -> Result<()> {
+    let css = &strip_css_comments(css);
     let known_slots = template
         .slots()
         .keys()
@@ -208,6 +236,46 @@ mod tests {
         assert!(template
             .slots()
             .contains_key(&SlotName::new("code").unwrap()));
+    }
+
+    #[test]
+    fn ignores_selectors_inside_css_comments() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let css = build_theme_css(
+            "",
+            "/* example: [data-slide-key=\"...\"] .slot-nope { } */\n/* spans\n[data-slide-key=\"also-ignored\"] .slot-ghost { }\nlines */\n[data-slide-key=\"arch-1\"] .slot-title { color: red; }",
+            keys.iter(),
+            &template,
+        )
+        .unwrap();
+
+        assert!(css.contains(r#"[data-slide-key="arch-1"] .slot-title { color: red; }"#));
+    }
+
+    #[test]
+    fn reports_correct_line_number_after_multiline_comment() {
+        let template = parse_template(
+            "title",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let keys = [SlideKey::new("arch-1").unwrap()];
+
+        let err = build_theme_css(
+            "",
+            "/* comment\nstill comment */\n[data-slide-key=\"missing\"] .slot-title { color: red; }",
+            keys.iter(),
+            &template,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(3));
     }
 
     #[test]
