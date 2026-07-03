@@ -62,11 +62,19 @@ fn chrome_base_args(profile_dir: &Path, url: &str) -> Vec<OsString> {
     ]
 }
 
-fn push_window_position(args: &mut Vec<OsString>, placement: WindowPlacement) {
+fn push_placement_args(args: &mut Vec<OsString>, placement: WindowPlacement) {
     args.push(OsString::from(format!(
         "--window-position={},{}",
         placement.x, placement.y
     )));
+    if placement.fullscreen {
+        args.push(OsString::from("--start-fullscreen"));
+    } else {
+        args.push(OsString::from(format!(
+            "--window-size={},{}",
+            placement.width, placement.height
+        )));
+    }
 }
 
 fn chrome_slides_args(
@@ -75,10 +83,10 @@ fn chrome_slides_args(
     placement: Option<WindowPlacement>,
 ) -> Vec<OsString> {
     let mut args = chrome_base_args(profile_dir, url);
-    if let Some(placement) = placement {
-        push_window_position(&mut args, placement);
+    match placement {
+        Some(placement) => push_placement_args(&mut args, placement),
+        None => args.push(OsString::from("--start-fullscreen")),
     }
-    args.push(OsString::from("--start-fullscreen"));
     args
 }
 
@@ -88,8 +96,7 @@ fn chrome_presenter_args(
     placement: WindowPlacement,
 ) -> Vec<OsString> {
     let mut args = chrome_base_args(profile_dir, url);
-    push_window_position(&mut args, placement);
-    args.push(OsString::from("--start-fullscreen"));
+    push_placement_args(&mut args, placement);
     args
 }
 
@@ -223,6 +230,44 @@ fn current_environment() -> BrowserEnvironment {
     }
 }
 
+fn stale_profile_patterns(profiles: &ChromeProfiles) -> [String; 2] {
+    [
+        format!("--user-data-dir={}", profiles.slides.display()),
+        format!("--user-data-dir={}", profiles.presenter.display()),
+    ]
+}
+
+/// Chrome on macOS keeps running after its last window closes, so a previous
+/// `present` session leaves processes holding the peitho profiles. Launching
+/// into such a process hands off the URL and drops every flag except `--app`
+/// (window position, size, and fullscreen are silently ignored). Kill the
+/// stale processes so each session starts fresh ones that honor the flags.
+fn terminate_stale_profile_instances(profiles: &ChromeProfiles) {
+    let patterns = stale_profile_patterns(profiles);
+    let mut killed_any = false;
+    for pattern in &patterns {
+        if let Ok(status) = Command::new("pkill").args(["-f", "--", pattern]).status() {
+            killed_any |= status.success();
+        }
+    }
+    if !killed_any {
+        return;
+    }
+    for _ in 0..20 {
+        let any_alive = patterns.iter().any(|pattern| {
+            Command::new("pgrep")
+                .args(["-f", "--", pattern])
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        });
+        if !any_alive {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn prepare_profile_dirs(profiles: Option<&ChromeProfiles>) -> bool {
     let Some(profiles) = profiles else {
         return false;
@@ -247,6 +292,9 @@ pub fn open_browser_with_request(
     env.layout = layout;
     if !prepare_profile_dirs(env.chrome_profiles.as_ref()) {
         env.chrome_profiles = None;
+    }
+    if let Some(profiles) = env.chrome_profiles.as_ref() {
+        terminate_stale_profile_instances(profiles);
     }
 
     let commands = plan_browser_commands(&request, &env);
@@ -291,9 +339,15 @@ mod tests {
                 y: 91,
                 width: 1200,
                 height: 800,
-                fullscreen: false,
+                fullscreen: true,
             },
         }
+    }
+
+    fn windowed_presenter_layout() -> PresentationLayout {
+        let mut layout = test_layout();
+        layout.presenter.fullscreen = false;
+        layout
     }
 
     fn test_request(no_presenter: bool) -> BrowserOpenRequest<'static> {
@@ -385,6 +439,33 @@ mod tests {
     }
 
     #[test]
+    fn windowed_presenter_placement_opens_sized_window_instead_of_fullscreen() {
+        let env = BrowserEnvironment {
+            platform: BrowserPlatform::Macos,
+            mac_google_chrome_available: true,
+            linux_browser: None,
+            chrome_profiles: Some(test_profiles()),
+            layout: Some(windowed_presenter_layout()),
+        };
+
+        let commands = plan_browser_commands(&test_request(false), &env);
+
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0]
+            .args
+            .contains(&OsString::from("--start-fullscreen")));
+        assert!(commands[1]
+            .args
+            .contains(&OsString::from("--window-position=156,91")));
+        assert!(commands[1]
+            .args
+            .contains(&OsString::from("--window-size=1200,800")));
+        assert!(!commands[1]
+            .args
+            .contains(&OsString::from("--start-fullscreen")));
+    }
+
+    #[test]
     fn no_presenter_forces_single_slides_window() {
         let env = BrowserEnvironment {
             platform: BrowserPlatform::Macos,
@@ -430,6 +511,17 @@ mod tests {
         assert_eq!(
             presenter_url("http://127.0.0.1:49152/present.html"),
             "http://127.0.0.1:49152/presenter.html"
+        );
+    }
+
+    #[test]
+    fn stale_profile_patterns_target_only_peitho_profile_dirs() {
+        assert_eq!(
+            stale_profile_patterns(&test_profiles()),
+            [
+                String::from("--user-data-dir=/Users/alice/.peitho/chrome-profile-slides"),
+                String::from("--user-data-dir=/Users/alice/.peitho/chrome-profile-presenter"),
+            ]
         );
     }
 

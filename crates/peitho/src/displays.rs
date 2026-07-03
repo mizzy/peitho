@@ -76,7 +76,10 @@ fn convert_nsscreen_frames(frames: &[NsscreenFrame]) -> Vec<ChromeDisplay> {
         .collect()
 }
 
-pub fn plan_presentation_layout(displays: &[ChromeDisplay]) -> Option<PresentationLayout> {
+pub fn plan_presentation_layout(
+    displays: &[ChromeDisplay],
+    presenter_windowed: bool,
+) -> Option<PresentationLayout> {
     let primary = displays.iter().find(|display| display.primary)?;
     let slides = displays.iter().find(|display| !display.primary)?;
 
@@ -98,17 +101,20 @@ pub fn plan_presentation_layout(displays: &[ChromeDisplay]) -> Option<Presentati
             y: presenter_y,
             width: presenter_width,
             height: presenter_height,
-            fullscreen: false,
+            fullscreen: !presenter_windowed,
         },
     })
 }
 
-pub fn layout_from_jxa_output(stdout: &str) -> Option<PresentationLayout> {
+pub fn layout_from_jxa_output(
+    stdout: &str,
+    presenter_windowed: bool,
+) -> Option<PresentationLayout> {
     let displays = parse_nsscreen_json(stdout).ok()?;
-    plan_presentation_layout(&displays)
+    plan_presentation_layout(&displays, presenter_windowed)
 }
 
-pub fn detect_presentation_layout() -> Option<PresentationLayout> {
+pub fn detect_presentation_layout(presenter_windowed: bool) -> Option<PresentationLayout> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -120,7 +126,7 @@ pub fn detect_presentation_layout() -> Option<PresentationLayout> {
         return None;
     }
     let stdout = String::from_utf8(output.stdout).ok()?;
-    layout_from_jxa_output(&stdout)
+    layout_from_jxa_output(&stdout, presenter_windowed)
 }
 
 #[cfg(test)]
@@ -158,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_slides_on_external_and_presenter_on_primary() {
+    fn plans_slides_on_external_and_presenter_fullscreen_on_primary() {
         let displays = vec![
             ChromeDisplay {
                 x: 0,
@@ -176,7 +182,7 @@ mod tests {
             },
         ];
 
-        let layout = plan_presentation_layout(&displays).unwrap();
+        let layout = plan_presentation_layout(&displays, false).unwrap();
 
         assert_eq!(
             layout.slides,
@@ -195,13 +201,47 @@ mod tests {
                 y: 91,
                 width: 1200,
                 height: 800,
-                fullscreen: false,
+                fullscreen: true,
             }
         );
     }
 
     #[test]
-    fn clamps_presenter_to_small_primary_display() {
+    fn windowed_mode_plans_presenter_without_fullscreen() {
+        let displays = vec![
+            ChromeDisplay {
+                x: 0,
+                y: 0,
+                width: 1512,
+                height: 982,
+                primary: true,
+            },
+            ChromeDisplay {
+                x: -1055,
+                y: 0,
+                width: 1055,
+                height: 666,
+                primary: false,
+            },
+        ];
+
+        let layout = plan_presentation_layout(&displays, true).unwrap();
+
+        assert_eq!(
+            layout.presenter,
+            WindowPlacement {
+                x: 156,
+                y: 91,
+                width: 1200,
+                height: 800,
+                fullscreen: false,
+            }
+        );
+        assert!(layout.slides.fullscreen);
+    }
+
+    #[test]
+    fn clamps_windowed_presenter_to_small_primary_display() {
         let displays = vec![
             ChromeDisplay {
                 x: 0,
@@ -219,7 +259,7 @@ mod tests {
             },
         ];
 
-        let layout = plan_presentation_layout(&displays).unwrap();
+        let layout = plan_presentation_layout(&displays, true).unwrap();
 
         assert_eq!(
             layout.presenter,
@@ -243,7 +283,7 @@ mod tests {
             primary: true,
         }];
 
-        assert_eq!(plan_presentation_layout(&displays), None);
+        assert_eq!(plan_presentation_layout(&displays, false), None);
     }
 
     #[test]
@@ -255,7 +295,7 @@ mod tests {
 
     #[test]
     fn layout_from_jxa_output_returns_none_for_invalid_json() {
-        assert_eq!(layout_from_jxa_output("not json"), None);
+        assert_eq!(layout_from_jxa_output("not json", false), None);
     }
 
     #[test]
@@ -263,7 +303,7 @@ mod tests {
         let json = r#"[{"x":0,"y":0,"width":1512,"height":982},{"x":-1055,"y":316,"width":1055,"height":666}]"#;
 
         assert_eq!(
-            layout_from_jxa_output(json).unwrap().slides,
+            layout_from_jxa_output(json, false).unwrap().slides,
             WindowPlacement {
                 x: -1055,
                 y: 0,
@@ -271,6 +311,18 @@ mod tests {
                 height: 666,
                 fullscreen: true,
             }
+        );
+    }
+
+    #[test]
+    fn layout_from_jxa_output_passes_windowed_mode_through() {
+        let json = r#"[{"x":0,"y":0,"width":1512,"height":982},{"x":-1055,"y":316,"width":1055,"height":666}]"#;
+
+        assert!(
+            !layout_from_jxa_output(json, true)
+                .unwrap()
+                .presenter
+                .fullscreen
         );
     }
 }

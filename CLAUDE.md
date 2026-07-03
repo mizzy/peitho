@@ -41,6 +41,7 @@ UX変更は必ず実ブラウザ/実ディスプレイでE2E確認する（jsdom
 
 - **tiny_httpでSSEは不成立**: data_length Noneだと閾値以下のbodyをEOFまでバッファ、chunkエンコーダも小チャンクをflushしない。だから/syncはロングポーリング（`GET /sync?seq=N`、クエリ無しGETは現在seq即答=参加ハンドシェイク、`POST /sync`で`{index}|{close:true}`）
 - **Chrome既起動インスタンスへのフラグhandoffは`--app`しか効かない**: `--start-fullscreen`/`--window-position`/`--window-size`は無視される。確実に効かせるには別`--user-data-dir`で新規プロセス起動（だからslides/presenterは`~/.peitho/chrome-profile-{slides,presenter}`の2インスタンス）
+- **macOSのChromeは全ウィンドウを閉じてもプロセスが残る**: 前回presentのインスタンスがpeithoプロファイルを掴んだままだと次回起動がhandoffになり配置フラグが全滅する。だからpresent起動時に残存プロセスを`pkill -f -- "--user-data-dir=<profile>"`でkillしてから開く（pkillはパターンが`--`始まりだと`--`セパレータ必須）
 - **別プロファイル間はBroadcastChannelが届かない**: だから同期はサーバ経由（§15からの意図的拡張。層分け=DOMイベント⇔トランスポート橋渡しは不変）
 - **CLI起動のappウィンドウは`window.close()`で閉じられる**（履歴1エントリのため）。Escは`peitho:closerequest`→`{close:true}`全窓配信→各自close→サーバも猶予後にunblockして終了
 - **requestFullscreen/window.openはtransient user activation必須**: permission promptのawaitを挟むと失効する。ブラウザ内でのウィンドウ配置はこれで2敗した末にCLI主導へ転換した経緯（M8/M9/M10）

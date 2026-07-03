@@ -62,6 +62,7 @@ struct PresentOptions {
     no_open: bool,
     no_serve: bool,
     no_presenter: bool,
+    presenter_windowed: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -105,6 +106,8 @@ enum Command {
         no_serve: bool,
         #[arg(long)]
         no_presenter: bool,
+        #[arg(long)]
+        presenter_windowed: bool,
     },
     Publish {
         #[arg(long, default_value = "dist")]
@@ -152,6 +155,7 @@ fn main() -> miette::Result<()> {
             no_open,
             no_serve,
             no_presenter,
+            presenter_windowed,
         } => present(PresentOptions {
             input,
             template,
@@ -162,6 +166,7 @@ fn main() -> miette::Result<()> {
             no_open,
             no_serve,
             no_presenter,
+            presenter_windowed,
         }),
         Command::Publish { dist, command } => {
             let code = publish(&dist, &command)?;
@@ -547,7 +552,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
                 presenter_url: &presenter_url,
                 no_presenter: options.no_presenter,
             },
-            displays::detect_presentation_layout(),
+            displays::detect_presentation_layout(options.presenter_windowed),
         );
     }
     server.serve_forever()
@@ -804,6 +809,25 @@ mod tests {
     #[test]
     fn watch_build_function_is_available_for_cli_dispatch() {
         let _watch: fn(BuildOptions) -> miette::Result<()> = watch_build;
+    }
+
+    #[test]
+    fn present_command_accepts_presenter_windowed_flag() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--presenter-windowed"]);
+
+        match cli.command {
+            Command::Present {
+                input,
+                presenter_windowed,
+                ..
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert!(presenter_windowed);
+            }
+            Command::Build { .. } | Command::Publish { .. } => {
+                panic!("expected present command");
+            }
+        }
     }
 
     #[test]
