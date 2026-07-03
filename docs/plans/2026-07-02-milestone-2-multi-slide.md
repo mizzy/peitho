@@ -1,33 +1,33 @@
 # Peitho Milestone 2 Multi-Slide Distribution Plan
 
-<!-- constrained-by ../PEITHO_KICKOFF.md#13-共通中間表現から-emit-で射影する -->
-<!-- constrained-by ../PEITHO_KICKOFF.md#14-2エントリポイント構成実体は単一 -->
-<!-- constrained-by ../PEITHO_KICKOFF.md#17-manifest--notes-スキーマと契約の単一-source -->
+<!-- constrained-by ../PEITHO_KICKOFF.md#13-projecting-via-emit-from-a-shared-intermediate-representation -->
+<!-- constrained-by ../PEITHO_KICKOFF.md#14-two-entry-point-structure-single-underlying-substance -->
+<!-- constrained-by ../PEITHO_KICKOFF.md#17-the-manifest--notes-schema-and-the-single-source-of-truth-for-the-contract -->
 
 ## Purpose
 
-マイルストーン2は、1つの Markdown deck から複数スライドを解析・検査し、§14 の配布用 `dist/` 構成を生成する。解析・マッピング・検査は1回だけ行い、その検査済みモデルから `slides/` 断片、`manifest.json`、配布用 `index.html`、`peitho.css` を emit する。
+Milestone 2 parses and checks multiple slides from a single Markdown deck, and generates the §14 distribution `dist/` layout. Parsing, mapping, and checking happen only once, and `slides/` fragments, `manifest.json`, the distribution `index.html`, and `peitho.css` are emitted from that checked model.
 
-スコープは Rust 側の `build` のみ。`present.html`、`notes.json`、`present` / `publish` コマンド、`--watch`、fenced div 明示スロット、複数テンプレート選択、`ts-rs` / `schemars` 生成は作らない。
+Scope is limited to the Rust-side `build`. `present.html`, `notes.json`, the `present` / `publish` commands, `--watch`, explicit fenced div slots, multiple template selection, and `ts-rs` / `schemars` generation are not built here.
 
 ## File Structure Map
 
 | Path | Responsibility | Depends on |
 | --- | --- | --- |
-| `crates/peitho-core/src/domain.rs` | `SlideKey` の slug 制約、fragment と `RenderedSlide` の accessor | none |
-| `crates/peitho-core/src/error.rs` | slide context 付き `BuildError` 表示 | `domain.rs` |
-| `crates/peitho-core/src/phase.rs` | `Deck<Parsed/Mapped/Checked/Rendered>` の複数 slide accessor、checked title extraction | `domain.rs` |
-| `crates/peitho-core/src/parser.rs` | `---` top-level thematic break による slide 分割、key ownership、重複 key 検査 | `domain.rs`, `error.rs`, `phase.rs` |
-| `crates/peitho-core/src/mapping.rs` | 各 slide を convention mapping | `phase.rs`, `template.rs` |
-| `crates/peitho-core/src/check.rs` | 各 slide の4段検査と slide context 付与 | `error.rs`, `phase.rs`, `template.rs` |
-| `crates/peitho-core/src/render.rs` | checked slides を HTML 断片へ render、配布 `index.html` 生成 | `domain.rs`, `phase.rs`, `template.rs` |
-| `crates/peitho-core/src/manifest.rs` | §17 `manifest.json` の Rust source of truth と JSON 生成 | `phase.rs`, `domain.rs`, `serde` |
-| `crates/peitho-core/src/theme.rs` | 全 slide key と template slot に対する override 検査 | `phase.rs`, `template.rs` |
-| `crates/peitho-core/src/lib.rs` | `manifest` exports、distribution index export | all core modules |
-| `crates/peitho/src/main.rs` | `peitho build` が `dist/slides/*.html`, `manifest.json`, `index.html`, `peitho.css` を書く | `peitho-core` |
+| `crates/peitho-core/src/domain.rs` | `SlideKey` slug constraints, accessors for fragment and `RenderedSlide` | none |
+| `crates/peitho-core/src/error.rs` | `BuildError` display with slide context | `domain.rs` |
+| `crates/peitho-core/src/phase.rs` | Multi-slide accessors for `Deck<Parsed/Mapped/Checked/Rendered>`, checked title extraction | `domain.rs` |
+| `crates/peitho-core/src/parser.rs` | Slide splitting on `---` top-level thematic breaks, key ownership, duplicate key checking | `domain.rs`, `error.rs`, `phase.rs` |
+| `crates/peitho-core/src/mapping.rs` | Convention mapping per slide | `phase.rs`, `template.rs` |
+| `crates/peitho-core/src/check.rs` | Four-stage check per slide with slide context attached | `error.rs`, `phase.rs`, `template.rs` |
+| `crates/peitho-core/src/render.rs` | Render checked slides into HTML fragments, generate distribution `index.html` | `domain.rs`, `phase.rs`, `template.rs` |
+| `crates/peitho-core/src/manifest.rs` | §17 `manifest.json` Rust source of truth and JSON generation | `phase.rs`, `domain.rs`, `serde` |
+| `crates/peitho-core/src/theme.rs` | Override checking against every slide key and template slot | `phase.rs`, `template.rs` |
+| `crates/peitho-core/src/lib.rs` | `manifest` exports, distribution index export | all core modules |
+| `crates/peitho/src/main.rs` | `peitho build` writes `dist/slides/*.html`, `manifest.json`, `index.html`, `peitho.css` | `peitho-core` |
 | `crates/peitho/tests/build.rs` | CLI black-box tests: multi-slide dist, manifest markers, error context | CLI binary |
-| `examples/deck.md` | 3-slide deck fixture: explicit key, derived key, delimiter直後 key comment | parser, CLI |
-| `themes/overrides.css` | multi-slide deck 内の既知 key を狙う override | manifest keys |
+| `examples/deck.md` | 3-slide deck fixture: explicit key, derived key, key comment immediately after a delimiter | parser, CLI |
+| `themes/overrides.css` | Override targeting known keys within the multi-slide deck | manifest keys |
 
 Dependency direction remains one-way: CLI writes files, `peitho-core` owns parsing, typestate, checking, rendering, manifest schema, and distribution index string generation. `manifest.json` is serialized from `peitho-core` types, not assembled as ad hoc CLI strings.
 
@@ -1733,4 +1733,4 @@ cargo run -p peitho -- build examples/deck.md --template templates/title-body-co
 
 ## Summary
 
-全20タスクで、まず error と parsed slide metadata を複数スライド向けに整え、`---` 区切り・slide key ownership・重複 key 検査を parser に入れる。次に mapping/check の multi-slide error context を固定し、`peitho-core` に manifest schema と JSON 生成、fragment path、fetch-only distribution index を追加する。最後に CLI を `slides/` 断片 + `manifest.json` + `index.html` emit に切り替え、3枚の example deck と integration tests で §14 の「実体は slides/ に一度だけ」を確認する。
+Across all 20 tasks, we first shape errors and parsed slide metadata for multiple slides, and add `---` delimiter splitting, slide key ownership, and duplicate key checking to the parser. Next, we lock down multi-slide error context for mapping/check, and add the manifest schema, JSON generation, fragment paths, and the fetch-only distribution index to `peitho-core`. Finally, we switch the CLI to emit `slides/` fragments + `manifest.json` + `index.html`, and confirm with a 3-slide example deck and integration tests that §14's "the entity lives in `slides/` exactly once" holds.

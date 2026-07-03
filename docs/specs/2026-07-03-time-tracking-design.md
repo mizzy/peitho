@@ -1,161 +1,161 @@
-# 発表時間トラッキング（うさぎとかめ）設計書
+# Presentation Time Tracking (Rabbit and Turtle) Design Document
 
-日付: 2026-07-03
-ステータス: 設計確定（時間の指定方法は著者指示「ゼロコンフィグにしつつ、Markdown frontmatterで設定を書く。そこにプレゼン時間を設定できるとよい」2026-07-03に従う）
+Date: 2026-07-03
+Status: Design finalized (the method for specifying time follows the author's instruction, "make it zero-config, and write the setting in Markdown frontmatter. It would be good if presentation time could be set there," 2026-07-03)
 
-## ゴール
+## Goal
 
-slidev-rabbit-turtle（https://zenn.dev/kaakaa/articles/slidev-rabbit-turtle）と同等の時間管理機能を追加する。
+Add time management functionality equivalent to slidev-rabbit-turtle (https://zenn.dev/kaakaa/articles/slidev-rabbit-turtle).
 
-- **うさぎ**: スライドの進行率（現在インデックス/最終インデックス）を示すマーカー
-- **かめ**: 時間の進行率（経過時間/発表予定時間）を示すマーカー
-- 両者を同一トラック上で右に移動させ、うさぎがかめより先行していれば予定内、かめが先行していれば時間超過ペースだと一目で分かる
+- **Rabbit**: a marker showing slide progress (current index / final index)
+- **Turtle**: a marker showing time progress (elapsed time / planned presentation time)
+- Move both along the same track to the right; if the rabbit is ahead of the turtle, you're on schedule at a glance, and if the turtle is ahead, you're pacing over time
 
-**表示先の要件（ユーザー指定）**: 他のツールはプレゼン画面に表示するが、peithoでは**発表者画面に表示する**。1スクリーンで発表者画面がない場合のみ**プレゼン画面に表示する**。
+**Display destination requirement (user-specified)**: other tools display this on the presentation screen, but peitho displays it **on the presenter screen**. Only when there is a single screen with no presenter screen does it display **on the presentation screen**.
 
-## 決定事項
+## Decisions
 
-### D1: 発表予定時間はデッキ先頭のYAML frontmatterで指定する（著者指示）
+### D1: The planned presentation time is specified in YAML frontmatter at the top of the deck (author's instruction)
 
 ```markdown
 ---
 time: 15m
 ---
 
-# 最初のスライド
+# First slide
 ```
 
-- これは**デッキレベル設定の一般機構**の初出。ゼロコンフィグ方針（peitho.toml等の別ファイルを作らない）のもと、デッキ自身が設定を携行する。`time`が最初のキー
-- 受理形式: `15m` / `90s` / `1h` / `1h30m`（文字列）、または裸の整数`15`（分と解釈。slidevの`?time=10`と同じ感覚）
-- `time`未指定・frontmatter自体なし → 時間トラッキング表示なし（従来どおり）。既存デッキは無変更で動く
-- CLIフラグは追加しない（ゼロコンフィグ。同一デッキの15分版/30分版のような上書きが必要になったら別Issue）
+- This is the first instance of a **general mechanism for deck-level settings**. Under the zero-config policy (not creating separate files like peitho.toml), the deck itself carries its settings. `time` is the first key
+- Accepted forms: `15m` / `90s` / `1h` / `1h30m` (string), or a bare integer `15` (interpreted as minutes, the same feel as slidev's `?time=10`)
+- If `time` is unspecified, or frontmatter itself is absent → no time tracking display (as before). Existing decks work unchanged
+- No CLI flag will be added (zero-config. If an override becomes necessary, like a 15-minute/30-minute version of the same deck, that's a separate Issue)
 
-**エラー（サイレントドロップ絶対禁止）**:
-- 未知キー → `deny_unknown_fields`で行番号+help付きビルドエラー（PageCommentと同じ流儀）
-- 不正なtime値（`0`、負、単位なし文字列`abc`、空）→ 行番号+help付きビルドエラー
-- YAMLとして壊れている → 行番号+help付きビルドエラー
+**Errors (silent dropping is strictly forbidden)**:
+- Unknown key → build error with line number + help via `deny_unknown_fields` (same convention as PageComment)
+- Invalid time value (`0`, negative, unit-less string `abc`, empty) → build error with line number + help
+- Malformed YAML → build error with line number + help
 
-### D2: frontmatterのパースはpulldown-cmarkのmetadata blockで字句解析する
+### D2: Frontmatter parsing is lexed via pulldown-cmark's metadata block
 
-スライド区切りも`---`（thematic break）なので、frontmatterの`---`との弁別が核心。自前の文字列前処理ではなく、`parser_options()`に`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`を追加し、pulldown-cmark 0.10（既存依存）に文書先頭のYAMLブロックを`Tag::MetadataBlock`としてトークナイズさせる。
+Since slide separators are also `---` (thematic break), distinguishing them from frontmatter's `---` is the core challenge. Rather than custom string preprocessing, add `Options::ENABLE_YAML_STYLE_METADATA_BLOCKS` to `parser_options()`, letting pulldown-cmark 0.10 (existing dependency) tokenize the YAML block at the top of the document as `Tag::MetadataBlock`.
 
-- CommonMark的にfrontmatterは**文書先頭のみ**。2枚目以降の`---`は従来どおりスライド区切り。`time: 15m`の直後の`---`がsetext見出しに化ける事故も字句レベルで消える
-- `split_slide_ranges`が`MetadataBlock`イベント（Start/Text/End）を捕捉して生YAMLと行番号を取り出し、スライド範囲はブロック終端の後から始める
-- `parse_slide`側は`MetadataBlock`イベントに遭遇したら明示エラー（先頭以外のfrontmatter。`_ => {}`に飲ませない）
-- YAML本体は新規`DeckFrontmatter`（serde、`deny_unknown_fields`）にデシリアライズ。YAML crateは保守が継続しているserde互換のもの（serde_norway）をworkspace依存に追加
-- `time`値は専用の型（例: `PlannedTime`）にカスタムDeserializeで解釈し、文字列/整数の両形式と不正値エラーを型の構築点で一元化する（消費側に検証を分散させない）
-- パース結果は`Deck<Parsed>`にデッキ設定として載り、以降の相（Mapped/Checked/Rendered）へ携行される
+- In CommonMark terms, frontmatter is **only at the top of the document**. Any `---` from the second slide onward remains a slide separator as before. The mishap where the `---` right after `time: 15m` turns into a setext heading is also eliminated at the lexical level
+- `split_slide_ranges` captures the `MetadataBlock` events (Start/Text/End) to extract the raw YAML and line numbers, and slide ranges start after the block's end
+- On the `parse_slide` side, encountering a `MetadataBlock` event is an explicit error (frontmatter anywhere but the top; not swallowed by `_ => {}`)
+- The YAML body is deserialized into a new `DeckFrontmatter` (serde, `deny_unknown_fields`). The YAML crate is a serde-compatible one that's still actively maintained (serde_norway), added as a workspace dependency
+- The `time` value is interpreted via a custom Deserialize into a dedicated type (e.g., `PlannedTime`), centralizing handling of both string/integer forms and invalid-value errors at the type's construction point (not scattering validation across consumers)
+- The parse result rides on `Deck<Parsed>` as deck configuration, and is carried forward through subsequent phases (Mapped/Checked/Rendered)
 
-### D3: フロントへの配線はmanifest.json（予定時間）+present.json（表示先）
+### D3: Wiring to the frontend is via manifest.json (planned time) + present.json (display destination)
 
-**予定時間はManifestに載せる**。frontmatter由来のデッキメタデータなので、デッキを記述するmanifestが自然な運搬役。シェルは既にmanifest.jsonをfetchしている。
+**The planned time is carried on the Manifest**. Since it's deck metadata originating from frontmatter, the manifest that describes the deck is the natural carrier. The shell already fetches manifest.json.
 
 ```rust
-// crates/peitho-core/src/manifest.rs（既存構造体にフィールド追加）
+// crates/peitho-core/src/manifest.rs (add field to existing struct)
 pub struct Manifest {
-    // 既存: version, peitho_version, title, slide_count, slides
-    pub planned_duration_ms: Option<u64>,  // frontmatter time未指定ならNone
+    // existing: version, peitho_version, title, slide_count, slides
+    pub planned_duration_ms: Option<u64>,  // None if frontmatter time is unspecified
 }
 ```
 
-**表示先の判定材料はpresent.jsonに載せる**。「発表者ウィンドウを開くか」は起動時のランタイム知識であってデッキメタデータではないため、manifestには混ぜない。
+**The material for deciding the display destination is carried on present.json**. "Whether to open the presenter window" is runtime knowledge at launch time, not deck metadata, so it's not mixed into the manifest.
 
 ```rust
-// crates/peitho-core/src/present_config.rs（新規、manifest.rsと同型のパターン）
+// crates/peitho-core/src/present_config.rs (new, same pattern as manifest.rs)
 pub struct PresentConfig {
     pub version: u32,
     pub presenter_open: bool,
 }
 ```
 
-- どちらもts-rsで`bindings/*.ts`を生成・コミット（契約の単一source原則、CI drift検査）
-- present.jsonは`emit_present_cache`で常に書き出す。**present-cache専用**で配布物dist/には含めない（非混入不変条件）。manifest.jsonは従来どおりdist/にも入るが、`plannedDurationMs`は単なるデッキメタデータで発表シェルではないので非混入条件に抵触しない
+- Both generate and commit `bindings/*.ts` via ts-rs (single-source-of-contract principle, CI drift check)
+- present.json is always written out by `emit_present_cache`. It is **present-cache only** and not included in the distributable dist/ (non-contamination invariant). manifest.json continues to go into dist/ as before; since `plannedDurationMs` is merely deck metadata and not part of the presentation shell, it doesn't violate the non-contamination condition
 
-却下した代替案:
-- **CLIフラグ`--time`**（初版設計）: 著者指示によりfrontmatter方式へ変更
-- **予定時間もpresent.jsonに載せる**: 時間はデッキ由来の値なのでmanifestが正。present.jsonはランタイム構成のみに限定する
-- **エントリHTMLへのJSON埋め込み**: 文字列組み立てになり型契約から外れる
+Rejected alternatives:
+- **CLI flag `--time`** (initial design): changed to the frontmatter approach per the author's instruction
+- **Also carrying the planned time on present.json**: since time is a value originating from the deck, the manifest is authoritative. present.json is limited to runtime configuration only
+- **Embedding JSON into the entry HTML**: this would become string assembly and fall outside the type contract
 
-### D4: 表示先の判定はCLIが起動時に確定する（`presenter_open`）
+### D4: The display destination decision is finalized by the CLI at launch time (`presenter_open`)
 
-`presenter_open = !no_open && !no_presenter && ディスプレイレイアウト検出がSome`
+`presenter_open = !no_open && !no_presenter && display layout detection is Some`
 
-- 2ディスプレイ（発表者ウィンドウあり）→ `true` → トラッカーは**発表者画面のみ**
-- 1ディスプレイ＋既定Fullscreen（発表者ウィンドウなし）→ `false` → トラッカーは**プレゼン画面**
-- `--presenter-windowed`（1画面デバッグ、両ウィンドウ）→ `true` → 発表者画面のみ
-- `--no-presenter` → `false` → プレゼン画面
-- 実装上、`present()`内のレイアウト検出を`emit_present_cache`より前に1回だけ行い、config書き出しとブラウザ起動の両方で同じ検出結果を使う
+- 2 displays (presenter window present) → `true` → tracker shows **only on the presenter screen**
+- 1 display + default Fullscreen (no presenter window) → `false` → tracker shows **on the presentation screen**
+- `--presenter-windowed` (1-screen debugging, both windows) → `true` → presenter screen only
+- `--no-presenter` → `false` → presentation screen
+- Implementation-wise, the layout detection inside `present()` runs once, before `emit_present_cache`, so both the config write-out and the browser launch use the same detection result
 
-フロント側の表示規則:
-- presenter.html: `manifest.plannedDurationMs != null`ならトラッカー表示
-- present.html: `manifest.plannedDurationMs != null && !config.presenterOpen`ならトラッカー表示
+Frontend display rules:
+- presenter.html: show the tracker if `manifest.plannedDurationMs != null`
+- present.html: show the tracker if `manifest.plannedDurationMs != null && !config.presenterOpen`
 
-**エッジケース（保守的判断）**: `--no-open`時は検出が走らないため`presenter_open=false`となり、ユーザーが手動で発表者画面も開くと両画面に表示され得る。また起動後にコントロールバーの「Presenter」ボタンで発表者画面を後から開いた場合もプレゼン画面側の表示は消えない。どちらも「配置は起動時に確定」という単純なモデルの帰結として許容する（動的なpresenter接続検出は/syncプロトコルへのロール概念追加が必要で過剰。必要になったら別Issue）。
+**Edge case (conservative decision)**: with `--no-open`, detection doesn't run, so `presenter_open=false`; if the user then manually opens the presenter screen too, it can end up displayed on both screens. Also, if the presenter screen is opened later via the "Presenter" button on the control bar after launch, the display on the presentation screen side doesn't disappear either. Both are accepted as consequences of the simple model "placement is finalized at launch time" (dynamic presenter-connection detection would require adding a role concept to the /sync protocol, which is excessive; a separate Issue if it becomes necessary).
 
-### D5: トラッカーはシェル層のUI部品（§16イベント契約に準拠）
+### D5: The tracker is a shell-layer UI component (conforms to the §16 event contract)
 
-新規`packages/peitho-present/src/timeTracker.ts`に`installTimeTracker(options)`を実装。
+Implement `installTimeTracker(options)` in the new `packages/peitho-present/src/timeTracker.ts`.
 
-- **読むだけ**: `peitho:slidechange`イベントでうさぎ位置を更新、`setInterval`（250ms、presenterタイマーと同じ）で`shell.elapsedMs()`を読んでかめ位置を更新
-- **要求イベントのみ発行**: タイマー自動開始（D6）は`peitho:timercontrol {action:"start"}`のdispatchで行う。遷移・タイマーの実行主体はシェルのまま
-- スライド本体（レイアウトHTML/テーマCSS）には一切触れない。オーバーレイはシェルのDOM
-- 戻り値はcleanup関数（vitestのリスナー汚染対策の既存慣行どおり）
+- **Read-only**: update the rabbit's position on the `peitho:slidechange` event; update the turtle's position via `setInterval` (250ms, same as the presenter timer) reading `shell.elapsedMs()`
+- **Only issues request events**: automatic timer start (D6) is done by dispatching `peitho:timercontrol {action:"start"}`. The shell remains the executor of transitions and the timer
+- Never touches the slide body itself (layout HTML / theme CSS). The overlay is shell DOM
+- Return value is a cleanup function (per the existing convention for guarding against listener contamination in vitest)
 
-位置計算:
-- うさぎ: `index / (total - 1)`（最終スライドで右端）。`total <= 1`のときは0%に固定（ゼロ除算ガード）
-- かめ: `min(elapsedMs / plannedDurationMs, 1)`。超過時は右端に張り付き、トラッカーに超過状態属性（`data-peitho-overrun`）を付与して警告色にする
+Position calculation:
+- Rabbit: `index / (total - 1)` (right edge on the final slide). Fixed at 0% when `total <= 1` (division-by-zero guard)
+- Turtle: `min(elapsedMs / plannedDurationMs, 1)`. Pins to the right edge on overrun, and adds an overrun state attribute (`data-peitho-overrun`) to the tracker to turn it a warning color
 
-### D6: タイマーの自動開始
+### D6: Automatic timer start
 
-`time`設定時、**最初の前進ナビゲーション**（`peitho:slidechange`で`previousIndex !== null && index > previousIndex`）でトラッカーが`peitho:timercontrol start`をdispatchする。
+When `time` is set, on the **first forward navigation** (`peitho:slidechange` where `previousIndex !== null && index > previousIndex`), the tracker dispatches `peitho:timercontrol start`.
 
-- `startPresentation()`は開始済みなら何もしない（既存実装が冪等）ので、発表者画面の手動Startと競合しない
-- 発表者画面の手動Start/Pause/Resume/Resetは従来どおり全て有効
-- 理由: プレゼン画面のみの1スクリーン運用にはStartボタンが存在せず、自動開始がないとかめが永遠に0%のまま。スライドを進めた瞬間=発表開始とみなすのが最も自然
+- `startPresentation()` does nothing if already started (existing implementation is idempotent), so it doesn't conflict with a manual Start on the presenter screen
+- Manual Start/Pause/Resume/Reset on the presenter screen all remain fully functional as before
+- Rationale: in single-screen operation with only the presentation screen, there is no Start button, and without auto-start the turtle would stay at 0% forever. Treating "the moment the slide advances" as "the presentation has begun" is the most natural interpretation
 
-### D7: 見た目
+### D7: Appearance
 
-- **トラック**: 画面下端の細いバー（プレゼン画面では高さ約6px・半透明でスライドの邪魔をしない。発表者画面ではサイドバー内にやや大きめに表示）
-- **マーカー**: 🐰と🐢の絵文字（アセット不要、rabbit-turtleへのオマージュ）。重なったときも判別できるよううさぎを上段・かめを下段に僅かにずらす
-- **発表者画面の数値表示**: 既存タイマー`MM:SS`を`time`設定時は`MM:SS / MM:SS`（経過/予定）に拡張し、超過時は`+MM:SS`の超過分を警告色で併記
-- CSSは既存慣行どおりエントリHTML（render.rs）の`<style>`ブロックに追加。テーマCSS（themes/）には触れない（デザイン分離）
-- 配布物dist/のビューアにはトラッカーを出さない（発表時の機能）
+- **Track**: a thin bar at the bottom edge of the screen (about 6px tall and semi-transparent on the presentation screen so it doesn't interfere with the slide; shown somewhat larger inside the sidebar on the presenter screen)
+- **Markers**: 🐰 and 🐢 emoji (no assets needed, an homage to rabbit-turtle). Rabbit offset slightly to the upper row and turtle to the lower row so they remain distinguishable even when overlapping
+- **Presenter screen numeric display**: the existing timer `MM:SS` is extended to `MM:SS / MM:SS` (elapsed/planned) when `time` is set, and on overrun the excess is shown alongside as `+MM:SS` in a warning color
+- CSS is added to the `<style>` block in the entry HTML (render.rs), per existing convention. Theme CSS (themes/) is not touched (design separation)
+- The tracker is not shown in the dist/ viewer (this is a presentation-time feature)
 
-## 変更ファイル一覧
+## List of changed files
 
-| ファイル | 変更 |
+| File | Change |
 |---|---|
-| `Cargo.toml`（workspace） | YAML crate（serde_norway）追加 |
-| `crates/peitho-core/src/parser.rs` | `ENABLE_YAML_STYLE_METADATA_BLOCKS`有効化、`DeckFrontmatter`+`PlannedTime`、`split_slide_ranges`のmetadata block捕捉、`parse_slide`の先頭以外frontmatter明示エラー |
-| `crates/peitho-core/src/phase.rs` | `Deck<Parsed>`以降にデッキ設定を携行 |
-| `crates/peitho-core/src/manifest.rs` | `Manifest.planned_duration_ms`追加 |
-| `crates/peitho-core/src/present_config.rs` | 新規: `PresentConfig`＋JSON化＋ts-rs export＋テスト |
-| `crates/peitho-core/src/lib.rs` | モジュール公開 |
-| `bindings/Manifest.ts` / `bindings/PresentConfig.ts` | ts-rs生成（コミット） |
-| `crates/peitho/src/main.rs` | `present()`のレイアウト検出前倒し＋`emit_present_cache`でpresent.json書き出し |
-| `crates/peitho-core/src/render.rs` | present.html/presenter.htmlのエントリスクリプトでmanifest/present.json取得→トラッカー配線、CSS追加 |
-| `packages/peitho-present/src/timeTracker.ts` | 新規: `installTimeTracker` |
-| `packages/peitho-present/src/presenter.ts` | タイマー表示拡張（経過/予定）、トラッカー設置 |
-| `packages/peitho-present/src/index.ts` | export追加 |
-| `packages/peitho-present/dist/shell.js` | 再ビルドしてコミット（drift検査） |
-| `CLAUDE.md` | 著者判断の記録: ゼロコンフィグ+frontmatter設定方針（2026-07-03）、§18待ちリストからpeitho.toml前提を更新 |
-| テスト | vitest（timeTracker単体・presenter統合）、Rust（frontmatterパース・PlannedTime・manifest・present_config・presenter_open判定） |
+| `Cargo.toml` (workspace) | Add YAML crate (serde_norway) |
+| `crates/peitho-core/src/parser.rs` | Enable `ENABLE_YAML_STYLE_METADATA_BLOCKS`, `DeckFrontmatter`+`PlannedTime`, metadata block capture in `split_slide_ranges`, explicit error in `parse_slide` for non-leading frontmatter |
+| `crates/peitho-core/src/phase.rs` | Carry deck configuration on `Deck<Parsed>` and later phases |
+| `crates/peitho-core/src/manifest.rs` | Add `Manifest.planned_duration_ms` |
+| `crates/peitho-core/src/present_config.rs` | New: `PresentConfig` + JSON serialization + ts-rs export + tests |
+| `crates/peitho-core/src/lib.rs` | Expose module |
+| `bindings/Manifest.ts` / `bindings/PresentConfig.ts` | ts-rs generated (commit) |
+| `crates/peitho/src/main.rs` | Move layout detection in `present()` earlier + write out present.json via `emit_present_cache` |
+| `crates/peitho-core/src/render.rs` | present.html/presenter.html entry scripts fetch manifest/present.json → wire up tracker, add CSS |
+| `packages/peitho-present/src/timeTracker.ts` | New: `installTimeTracker` |
+| `packages/peitho-present/src/presenter.ts` | Extend timer display (elapsed/planned), install tracker |
+| `packages/peitho-present/src/index.ts` | Add export |
+| `packages/peitho-present/dist/shell.js` | Rebuild and commit (drift check) |
+| `CLAUDE.md` | Record of author's decision: zero-config + frontmatter configuration policy (2026-07-03), update the peitho.toml premise on the §18 pending list |
+| Tests | vitest (timeTracker unit, presenter integration), Rust (frontmatter parsing, PlannedTime, manifest, present_config, presenter_open determination) |
 
-## テスト方針
+## Test policy
 
-- **frontmatterパース**: `time: 15m`/`time: 90s`/`time: 1h30m`/`time: 15`（整数分）/frontmatterなし/空frontmatter/未知キー（エラー+行番号+help）/不正time値（`0`、負、`abc`、空。エラー+help）/YAML壊れ（エラー）/**2枚目スライド以降の`---`が従来どおり区切りとして機能**/先頭以外のmetadata blockはエラー
-- **Manifest/PresentConfig**: serdeラウンドトリップ、camelCaseフィールド名、ts-rs drift（既存`ts_tests`と同型）
-- **timeTracker（vitest）**: うさぎ位置（先頭/中間/最終/1枚デッキ）、かめ位置（0%/50%/超過張り付き＋overrun属性）、自動開始dispatch（前進で発火・後退で発火しない・二重発火しない）、cleanup後にリスナーが残らない
-- **presenter統合**: `time`あり→`MM:SS / MM:SS`表示、なし→従来表示
-- **E2E（実ブラウザ必須）**: 1画面（トラッカーがプレゼン画面下端）/`--presenter-windowed`（発表者画面のみに表示、プレゼン画面に出ない）/`time`なし（どこにも出ない）を`--port`固定＋`curl POST /sync`＋`screencapture`で確認
+- **Frontmatter parsing**: `time: 15m`/`time: 90s`/`time: 1h30m`/`time: 15` (integer minutes)/no frontmatter/empty frontmatter/unknown key (error + line number + help)/invalid time value (`0`, negative, `abc`, empty; error + help)/malformed YAML (error)/**`---` from the second slide onward still functions as a separator as before**/metadata block anywhere but the top is an error
+- **Manifest/PresentConfig**: serde round-trip, camelCase field names, ts-rs drift (same pattern as the existing `ts_tests`)
+- **timeTracker (vitest)**: rabbit position (first/middle/last/single-slide deck), turtle position (0%/50%/overrun pinning + overrun attribute), auto-start dispatch (fires on forward, does not fire on backward, does not fire twice), no leftover listeners after cleanup
+- **presenter integration**: with `time` → `MM:SS / MM:SS` display, without → display as before
+- **E2E (real browser required)**: confirm 1 screen (tracker at the bottom of the presentation screen) / `--presenter-windowed` (shown only on the presenter screen, not on the presentation screen) / no `time` (shown nowhere), using `--port` fixed + `curl POST /sync` + `screencapture`
 
-## 壊してはいけないもの（セルフチェック）
+## Things that must not be broken (self-check)
 
-- 三本柱1: 時間設定はデッキメタデータ（frontmatter）であってデザインではない。レイアウト/テーマに混ぜない
-- 三本柱3: frontmatterの未知キー・不正値・位置違反をサイレントに飲まない。`_ => {}`禁止
-- §16: トラッカーは要求イベント発行と状態読み取りのみ。実行主体はシェル
-- typestate: デッキ設定は`Parsed`で確定し以降の相に携行（後段でのlookup失敗経路を作らない）
-- dist/非混入: present.jsonはpresent-cacheのみ
-- 契約単一source: Manifest/PresentConfigはRustが正、TSはts-rs生成
-- 既存の発表者タイマー（Start/Pause/Resume/Reset）の挙動を変えない
-- frontmatterなしの既存デッキ・examplesが無変更でビルドできる
+- Pillar 1: the time setting is deck metadata (frontmatter), not design. Don't mix it into layout/theme
+- Pillar 3: don't silently swallow unknown keys, invalid values, or positional violations in frontmatter. `_ => {}` is forbidden
+- §16: the tracker only issues request events and reads state. The shell remains the executor
+- typestate: deck configuration is finalized at `Parsed` and carried through subsequent phases (don't create a lookup-failure path further down the pipeline)
+- dist/ non-contamination: present.json is present-cache only
+- Single source of contract: Manifest/PresentConfig are authoritative in Rust, TS is ts-rs generated
+- Don't change the behavior of the existing presenter timer (Start/Pause/Resume/Reset)
+- Existing decks/examples without frontmatter must build unchanged

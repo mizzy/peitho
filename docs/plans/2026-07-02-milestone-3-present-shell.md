@@ -1335,4 +1335,4 @@ rg -n "attachShadow|peitho:navigate|peitho:slidechange|fetchOk" dist/shell.js
 
 ## Summary
 
-全15タスクで、まず `peitho-core` に `ts-rs` を配線し、`Manifest` / `ManifestSlide` / `Notes` から committed `bindings/*.ts` を生成する。次に `packages/peitho-present` をnpm+TypeScript+esbuild+vitestで新設し、生成型をimportする発表シェルを実装する。シェルはmanifestと断片をfetchし、Shadow DOMホストに取っ手を出し、DOMイベントだけでnavigate/slidechangeを扱い、fetch失敗や不正navigateを可視またはconsole errorで表面化する。最後にCIへbindings drift checkとNode jobを追加して、Rust契約とTS shellのdriftを止める。
+Across all 15 tasks, we first wire `ts-rs` into `peitho-core` and generate committed `bindings/*.ts` from `Manifest` / `ManifestSlide` / `Notes`. Next, we newly set up `packages/peitho-present` with npm+TypeScript+esbuild+vitest and implement a presentation shell that imports the generated types. The shell fetches the manifest and fragments, exposes handles on Shadow DOM hosts, handles navigate/slidechange purely through DOM events, and surfaces fetch failures or invalid navigate targets either visibly or via console error. Finally, we add a bindings drift check and a Node job to CI, to stop drift between the Rust contract and the TS shell.

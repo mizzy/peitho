@@ -1,21 +1,21 @@
-# 発表時間トラッキング実装計画
+# Presentation Time Tracking Implementation Plan
 
 <!-- constrained-by ../specs/2026-07-03-time-tracking-design.md -->
 <!-- constrained-by ../../CLAUDE.md -->
 
-## 前提
+## Premises
 
-- 設計書 `docs/specs/2026-07-03-time-tracking-design.md` の D1〜D7 を変更しない
-- `time` はデッキ先頭の YAML frontmatter だけで指定する
-- frontmatter の未知キー、不正 `time`、先頭以外の metadata block は行番号と help 付きのビルドエラーにする
-- デッキ設定は `Deck<Parsed>` で確定し、`Mapped`、`Checked`、`Rendered` へ携行する
-- トラッカーは `peitho:timercontrol` を発行し、`PresentShell.elapsedMs()` と `peitho:slidechange` を読む
-- `manifest.json` と `present.json` の Rust 型を単一 source にし、`bindings/*.ts` は生成物をコミットする
-- `present.json` とトラッカーは present-cache 専用にし、publish 用 `dist/` へ混ぜない
+- Do not change D1–D7 of the design document `docs/specs/2026-07-03-time-tracking-design.md`
+- `time` is specified only in the YAML frontmatter at the top of the deck
+- Unknown keys in frontmatter, invalid `time`, and metadata blocks other than at the top are all build errors with line numbers and help
+- Deck settings are fixed at `Deck<Parsed>` and carried through to `Mapped`, `Checked`, and `Rendered`
+- The tracker emits `peitho:timercontrol` and reads `PresentShell.elapsedMs()` and `peitho:slidechange`
+- The Rust types for `manifest.json` and `present.json` are the single source, and `bindings/*.ts` generated artifacts are committed
+- `present.json` and the tracker are present-cache only, and must not be mixed into the publish `dist/`
 
-## Task 1: `serde_norway` を workspace 依存へ追加
+## Task 1: Add `serde_norway` as a workspace dependency
 
-Goal: YAML frontmatter を serde で読む crate を workspace 依存として固定し、`peitho-core` から使える状態にする。
+Goal: Pin the crate that reads YAML frontmatter with serde as a workspace dependency, so it is usable from `peitho-core`.
 
 Files:
 - `Cargo.toml`
@@ -57,9 +57,9 @@ Verification:
 cargo test -p peitho-core deck_frontmatter_yaml_dependency_is_available
 ```
 
-## Task 2: pulldown-cmark metadata block で先頭 frontmatter を捕捉
+## Task 2: Capture the top-of-file frontmatter with pulldown-cmark's metadata block
 
-Goal: `ENABLE_YAML_STYLE_METADATA_BLOCKS` を有効にし、文書先頭の YAML block をスライド範囲から除外する。2枚目以降の `---` は従来どおりスライド区切りにする。
+Goal: Enable `ENABLE_YAML_STYLE_METADATA_BLOCKS` and exclude the YAML block at the top of the document from the slide range. `---` from the second occurrence onward continues to act as a slide separator as before.
 
 Files:
 - `crates/peitho-core/src/parser.rs`
@@ -149,9 +149,9 @@ Verification:
 cargo test -p peitho-core frontmatter_is_not_a_slide_and_later_rules_still_split_slides
 ```
 
-## Task 3: `DeckFrontmatter` と `PlannedTime` の受理形式を実装
+## Task 3: Implement `DeckFrontmatter` and the accepted `PlannedTime` formats
 
-Goal: `time: 15m`、`90s`、`1h`、`1h30m`、裸整数 `15` をミリ秒へ変換する。検証は `PlannedTime` の構築点に集約する。
+Goal: Convert `time: 15m`, `90s`, `1h`, `1h30m`, and a bare integer `15` into milliseconds. Concentrate validation at the point where `PlannedTime` is constructed.
 
 Files:
 - `crates/peitho-core/src/parser.rs`
@@ -304,9 +304,9 @@ Verification:
 cargo test -p peitho-core parses_planned_time_values_from_frontmatter
 ```
 
-## Task 4: frontmatter のエラー系をサイレントドロップなしで固定
+## Task 4: Pin down frontmatter error paths with no silent drops
 
-Goal: 未知キー、不正 `time`、壊れた YAML、先頭以外の metadata block を `ErrorKind::Parse`、行番号、help 付きで失敗させる。
+Goal: Fail with `ErrorKind::Parse`, a line number, and help text for unknown keys, invalid `time`, malformed YAML, and metadata blocks placed anywhere other than the top.
 
 Files:
 - `crates/peitho-core/src/parser.rs`
@@ -438,9 +438,9 @@ cargo test -p peitho-core rejects_broken_frontmatter_yaml_with_line_and_help
 cargo test -p peitho-core rejects_metadata_block_inside_a_slide
 ```
 
-## Task 5: typestate の `Deck` にデッキ設定を携行させる
+## Task 5: Have the typestate `Deck` carry deck settings
 
-Goal: `Deck<Parsed>` で確定した `planned_duration_ms` を `Mapped`、`Checked`、`Rendered` へ失敗経路なしで運ぶ。
+Goal: Carry the `planned_duration_ms` fixed at `Deck<Parsed>` through to `Mapped`, `Checked`, and `Rendered` with no failure path.
 
 Files:
 - `crates/peitho-core/src/phase.rs`
@@ -625,9 +625,9 @@ Verification:
 cargo test -p peitho-core deck_settings_survive_all_typestate_transitions
 ```
 
-## Task 6: `Manifest.planned_duration_ms` を追加
+## Task 6: Add `Manifest.planned_duration_ms`
 
-Goal: デッキ由来の予定時間を `manifest.json` の `plannedDurationMs` に載せる。`time` なしは `null` にする。
+Goal: Carry the deck's planned duration into `manifest.json`'s `plannedDurationMs`. When there is no `time`, it becomes `null`.
 
 Files:
 - `crates/peitho-core/src/manifest.rs`
@@ -713,9 +713,9 @@ cargo test -p peitho-core manifest_serializes_planned_duration_ms
 cargo test -p peitho-core build_manifest_reads_planned_duration_from_checked_deck
 ```
 
-## Task 7: `PresentConfig` と `present_config_json` を追加
+## Task 7: Add `PresentConfig` and `present_config_json`
 
-Goal: 起動時の表示先判定を `present.json` に運ぶ Rust 型を作り、camelCase JSON と ts-rs export を固定する。
+Goal: Create a Rust type that carries the startup-time display-target decision into `present.json`, and pin down the camelCase JSON and the ts-rs export.
 
 Files:
 - `crates/peitho-core/src/present_config.rs`
@@ -808,9 +808,9 @@ cargo test -p peitho-core serializes_present_config_schema_exactly
 cargo test -p peitho-core exports_present_config_binding_with_serde_field_names
 ```
 
-## Task 8: ts-rs bindings を再生成して型契約を更新
+## Task 8: Regenerate the ts-rs bindings to update the type contract
 
-Goal: `Manifest.ts` に `plannedDurationMs`、`PresentConfig.ts` に `presenterOpen` を反映し、生成物をコミット対象にする。
+Goal: Reflect `plannedDurationMs` in `Manifest.ts` and `presenterOpen` in `PresentConfig.ts`, and make the generated artifacts committed.
 
 Files:
 - `bindings/Manifest.ts`
@@ -864,9 +864,9 @@ Verification:
 cargo test -p peitho-core ts_tests
 ```
 
-## Task 9: CLI で `presenter_open` を確定し `present.json` を書き出す
+## Task 9: Fix `presenter_open` in the CLI and emit `present.json`
 
-Goal: `present()` のレイアウト検出を `emit_present_cache` より前へ移し、同じ検出結果から browser open と `present.json` を作る。
+Goal: Move the layout detection in `present()` to before `emit_present_cache`, and produce both the browser open call and `present.json` from the same detection result.
 
 Files:
 - `crates/peitho/src/main.rs`
@@ -987,9 +987,9 @@ cargo test -p peitho presenter_open_uses_startup_layout_result
 cargo test -p peitho emit_present_cache_writes_present_json
 ```
 
-## Task 10: `timeTracker.ts` を UI 部品として追加
+## Task 10: Add `timeTracker.ts` as a UI component
 
-Goal: うさぎのスライド進行率とかめの時間進行率を同一トラックへ描画し、最初の前進時に `peitho:timercontrol start` を1回だけ発行する。
+Goal: Draw the rabbit's slide-progress ratio and the turtle's time-progress ratio on the same track, and emit `peitho:timercontrol start` exactly once on the first forward advance.
 
 Files:
 - `packages/peitho-present/src/timeTracker.ts`
@@ -1146,9 +1146,9 @@ Verification:
 cd packages/peitho-present && npx vitest run test/timeTracker.test.ts
 ```
 
-## Task 11: presenter のタイマー表示とトラッカー設置を統合
+## Task 11: Integrate the presenter timer display with the tracker installation
 
-Goal: `plannedDurationMs` がある発表者画面でトラッカーを出し、既存タイマーを `MM:SS / MM:SS` と超過表示へ拡張する。手動 Start/Pause/Resume/Reset は既存の dispatch のまま維持する。
+Goal: Show the tracker on the presenter screen when `plannedDurationMs` is present, and extend the existing timer to `MM:SS / MM:SS` plus an overrun display. Keep manual Start/Pause/Resume/Reset on their existing dispatch as-is.
 
 Files:
 - `packages/peitho-present/src/presenter.ts`
@@ -1278,9 +1278,9 @@ Verification:
 cd packages/peitho-present && npx vitest run test/presenter.test.ts
 ```
 
-## Task 12: present/presenter HTML エントリを配線し CSS を追加
+## Task 12: Wire up the present/presenter HTML entries and add CSS
 
-Goal: `present.html` は `present.json` の `presenterOpen` が false のときだけトラッカーを出す。`presenter.html` は `mountPresenterView` 側の判定に任せる。`render_distribution_index` にはトラッカーを入れない。
+Goal: `present.html` shows the tracker only when `present.json`'s `presenterOpen` is false. `presenter.html` leaves the decision to the `mountPresenterView` side. `render_distribution_index` does not include the tracker.
 
 Files:
 - `crates/peitho-core/src/render.rs`
@@ -1363,9 +1363,9 @@ cargo test -p peitho-core present_index_fetches_present_config_and_mounts_time_t
 cargo test -p peitho-core distribution_index_does_not_include_time_tracker
 ```
 
-## Task 13: shell.js を再ビルドし generated TS API を固定
+## Task 13: Rebuild shell.js and pin down the generated TS API
 
-Goal: `installTimeTracker` を public API と bundle に反映し、`bindings/` と `dist/shell.js` の drift を検査する。
+Goal: Reflect `installTimeTracker` in the public API and bundle, and check for drift between `bindings/` and `dist/shell.js`.
 
 Files:
 - `packages/peitho-present/src/index.ts`
@@ -1404,9 +1404,9 @@ git diff --exit-code bindings/
 git diff --exit-code packages/peitho-present/dist/shell.js
 ```
 
-## Task 14: `CLAUDE.md` に frontmatter 設定方針を追記
+## Task 14: Add the frontmatter configuration policy to `CLAUDE.md`
 
-Goal: ゼロコンフィグとデッキ先頭 frontmatter をデッキレベル設定の初出として記録し、`peitho.toml` 前提を待ちリストから外す。
+Goal: Record zero-config and the deck-top frontmatter as the first instance of deck-level settings, and drop the `peitho.toml` premise from the pending list.
 
 Files:
 - `CLAUDE.md`
@@ -1414,30 +1414,30 @@ Files:
 Test:
 
 ```bash
-rg -q "デッキレベル設定はMarkdown frontmatter" CLAUDE.md
-rg -q "timeはデッキ先頭frontmatterで指定" CLAUDE.md
-rg -q "peitho.toml（現状は導入しない" CLAUDE.md
+rg -q "Deck-level settings are carried in Markdown frontmatter" CLAUDE.md
+rg -q "time is specified in the deck's leading frontmatter" CLAUDE.md
+rg -q "peitho.toml (not introduced for now" CLAUDE.md
 ```
 
 Implementation:
 
 ```markdown
-- デッキレベル設定はMarkdown frontmatterで携行する（2026-07-03採用）。初出キーは`time`で、予定時間はデッキ先頭frontmatterにだけ書く。frontmatter未知キー・不正値・位置違反は行番号+help付きビルドエラー
+- Deck-level settings are carried in Markdown frontmatter (adopted 2026-07-03). The first key is `time`, and the planned duration is written only in the deck's leading frontmatter. Unknown frontmatter keys, invalid values, and misplacement are build errors with line numbers + help
 ```
 
 ```markdown
-- peitho.toml（現状は導入しない。デッキレベル設定はfrontmatterで運用し、frontmatterで表現できないカスタマイズ要求が出た時点で著者判断）
+- peitho.toml (not introduced for now. Deck-level settings run on frontmatter; the author decides once a customization need arises that frontmatter cannot express)
 ```
 
 Verification:
 
 ```bash
-rg -n "frontmatter|peitho.toml|timeはデッキ先頭" CLAUDE.md
+rg -n "frontmatter|peitho.toml|deck's leading frontmatter" CLAUDE.md
 ```
 
-## Task 15: 全ゲートと実ブラウザ E2E を通す
+## Task 15: Pass all gates and a real-browser E2E check
 
-Goal: CLAUDE.md のゲートを全て通し、実ブラウザで表示先と time なし互換を確認する。
+Goal: Pass all the gates in CLAUDE.md, and confirm the display target and no-`time` compatibility in a real browser.
 
 Files:
 - `CLAUDE.md`
@@ -1447,28 +1447,28 @@ Files:
 Test:
 
 ```markdown
-E2E合格条件:
-- 1画面構成: `time` ありでトラッカーはプレゼン画面下端に出る
-- `--presenter-windowed`: `time` ありでトラッカーは発表者画面だけに出て、プレゼン画面には出ない
-- `time` なし: プレゼン画面にも発表者画面にもトラッカーが出ない
-- `curl POST /sync` で2枚目へ進めたあと、かめが0%から進む
+E2E pass criteria:
+- Single-screen setup: with `time` present, the tracker appears at the bottom edge of the presentation screen
+- `--presenter-windowed`: with `time` present, the tracker appears only on the presenter screen, not on the presentation screen
+- Without `time`: the tracker appears on neither the presentation screen nor the presenter screen
+- After advancing to the second slide via `curl POST /sync`, the turtle progresses from 0%
 ```
 
 Implementation:
 
 ```markdown
-このタスクは実装ファイルを変更しない。ゲートとE2Eの失敗だけを前タスクへ戻して修正する。
+This task does not change any implementation files. Only gate and E2E failures are sent back to earlier tasks for fixing.
 ```
 
 Verification:
 
 ```bash
-cargo test --workspace          # 3回連続（過去にテストレース事故あり）
+cargo test --workspace          # run 3 times in a row (there has been a test-race incident in the past)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-git diff --exit-code bindings/  # 契約drift
+git diff --exit-code bindings/  # contract drift
 cd packages/peitho-present && npm run build && npm test && npm run typecheck
-git diff --exit-code packages/peitho-present/dist/shell.js  # 内蔵シェルdrift（npm run build後に）
+git diff --exit-code packages/peitho-present/dist/shell.js  # built-in shell drift (after npm run build)
 ```
 
 ```bash
@@ -1541,4 +1541,4 @@ wait "$PEITHO_PID"
 <!-- derived-from #task-10-timetrackerts-ui- -->
 <!-- derived-from #task-15-e2e- -->
 
-この計画は依存追加から parser、typestate、Rust/TS 型契約、present-cache、発表シェル UI、HTML 配線、ドキュメント更新、ゲート、実ブラウザ E2E までを依存順に進める。実装中に判断が必要になった場合は設計書 D1〜D7 と CLAUDE.md の不変条件を優先し、計画内の型名と関数名をずらさない。
+This plan proceeds in dependency order from adding the dependency, through the parser, typestate, Rust/TS type contract, present-cache, presentation shell UI, HTML wiring, documentation updates, gates, and real-browser E2E. If a decision is needed during implementation, prioritize D1–D7 of the design document and the invariants in CLAUDE.md, and do not deviate from the type names and function names in this plan.

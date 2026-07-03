@@ -1,12 +1,12 @@
 # Peitho Milestone 1 Vertical Slice Implementation Plan
 
-この計画は `/Users/mizzy/Downloads/PEITHO_KICKOFF.md` 全文を唯一の設計正として書く。
+This plan is written with the full text of `/Users/mizzy/Downloads/PEITHO_KICKOFF.md` as the sole source of design truth.
 
 ## Purpose
 
-マイルストーン1は、Markdown 1枚から契約検査済み HTML を出す最小の縦切りを通す。実証対象は、Markdown と HTML/CSS テンプレートの分離、テンプレート自身から抽出するスロット契約、安定キーを狙う override CSS、契約違反のビルド時エラーである。
+Milestone 1 delivers the smallest vertical slice that turns a single Markdown file into contract-checked HTML. What it demonstrates is the separation of Markdown from HTML/CSS templates, slot contracts extracted from the template itself, override CSS targeting stable keys, and build-time errors on contract violations.
 
-対象は Rust 側のみ。`packages/peitho-present`、`bindings`、`ts-rs`、`schemars`、`present`、`publish`、fenced div 明示スロット記法、型駆動レイアウト探索、watch は作らない。
+The scope is the Rust side only. `packages/peitho-present`, `bindings`, `ts-rs`, `schemars`, `present`, `publish`, the fenced div explicit slot notation, type-driven layout resolution, and watch are not built.
 
 ## File Structure Map
 
@@ -2585,4 +2585,4 @@ rg -n '\[data-slide-key="arch-1"\] \.slot-code' dist/peitho.css
 
 ## Summary
 
-全18タスクで、まず `.gitignore` と完全な Cargo workspace ファイルを作り、`peitho-core` に契約型、line/help エラー、外部から `Checked` を構築できない typestate を置く。その後、raw Markdown slice と list depth を保持する parser、`RewritingError::ContentHandlerError` から `BuildError` を直接復元する template/render、契約を運ぶ mapping、4段 check、checked-only render、theme override 検査を順に足し、最後に `peitho build` と `examples/deck.md` で `arch-1` の override が HTML/CSS に到達することを確認する。
+Across all 18 tasks, we first create `.gitignore` and the complete Cargo workspace files, then place in `peitho-core` the contract types, line/help-bearing errors, and a typestate whose `Checked` cannot be constructed from outside. After that, we add in order: a parser that preserves raw Markdown slices and list depth, template/render that reconstructs `BuildError` directly from `RewritingError::ContentHandlerError`, mapping that carries the contract, a four-stage check, checked-only render, and theme override validation. Finally, we confirm with `peitho build` and `examples/deck.md` that the `arch-1` override reaches the HTML/CSS.
