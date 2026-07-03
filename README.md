@@ -93,6 +93,8 @@ peitho present examples/keynote/deck.md \
   --overrides-css examples/keynote/overrides.css
 ```
 
+動作確認にはMakefileのターゲットが便利（`make help`で一覧。`make keynote`、`make lightning-talk`等。シェルバンドルのビルド込みで`cargo run`する）。
+
 ## アーキテクチャ
 
 ```
