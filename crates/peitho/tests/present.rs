@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assert_cmd::Command;
@@ -199,6 +199,23 @@ fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
 }
 
 #[test]
+fn present_server_shuts_down_after_close_sync_post() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let post_response = post_sync(addr, r#"{"close":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    join_present_server(handle, Duration::from_secs(3));
+}
+
+#[test]
 fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_message() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache");
@@ -285,11 +302,13 @@ fn present_no_open_server_prints_assigned_url() {
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
     let reader = std::thread::spawn(move || {
+        let mut tx = Some(tx);
         for line in BufReader::new(stdout).lines() {
             let line = line.unwrap();
             if line.contains("serving presentation at") {
-                tx.send(line).unwrap();
-                break;
+                if let Some(tx) = tx.take() {
+                    tx.send(line).unwrap();
+                }
             }
         }
     });
@@ -302,6 +321,61 @@ fn present_no_open_server_prints_assigned_url() {
 
     assert!(line.contains("http://127.0.0.1:"));
     assert!(line.contains("/present.html"));
+}
+
+#[test]
+fn present_process_exits_after_close_sync_post() {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-open", "--port", "0"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut tx = Some(tx);
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line.contains("serving presentation at") {
+                if let Some(tx) = tx.take() {
+                    tx.send(line).unwrap();
+                }
+            }
+        }
+    });
+    let line = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("present server did not print serving URL within 5 seconds");
+    let addr = serving_addr(&line);
+
+    let post_response = post_sync(addr, r#"{"close":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "present process did not exit after close sync post"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    reader.join().unwrap();
 }
 
 #[test]
@@ -447,4 +521,27 @@ fn post_sync(addr: std::net::SocketAddr, body: &str) -> String {
     let mut response = String::new();
     post.read_to_string(&mut response).unwrap();
     response
+}
+
+fn join_present_server(handle: thread::JoinHandle<miette::Result<()>>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "present server did not stop within {timeout:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    handle.join().unwrap().unwrap();
+}
+
+fn serving_addr(line: &str) -> std::net::SocketAddr {
+    let prefix = "serving presentation at http://";
+    let rest = line
+        .strip_prefix(prefix)
+        .unwrap_or_else(|| panic!("unexpected serving URL line: {line}"));
+    let host_port = rest
+        .strip_suffix("/present.html")
+        .unwrap_or_else(|| panic!("unexpected serving URL line: {line}"));
+    host_port.parse().unwrap()
 }
