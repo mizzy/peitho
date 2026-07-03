@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho — demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #faf6ee;
+      color: #211f1c;
+      font-family: "Iowan Old Style", "Hiragino Mincho ProN", ui-serif, Georgia, serif;
+      min-height: 100svh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 24px;
+    }
+    main { max-width: 720px; width: 100%; }
+    h1 {
+      font-size: 56px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-align: center;
+    }
+    h1::after {
+      content: "";
+      display: block;
+      width: 72px;
+      height: 1px;
+      margin: 28px auto 0;
+      background: #9c8f76;
+    }
+    .lead {
+      margin: 28px auto 48px;
+      max-width: 34em;
+      text-align: center;
+      font-size: 17px;
+      line-height: 2;
+      color: #4c463d;
+    }
+    ul { list-style: none; }
+    li + li { margin-top: 16px; }
+    a.deck {
+      display: block;
+      padding: 20px 24px;
+      border: 1px solid #ddd3c0;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s ease;
+    }
+    a.deck:hover { border-color: #211f1c; }
+    a.deck .name {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    a.deck .desc {
+      margin-top: 6px;
+      font-size: 14.5px;
+      line-height: 1.8;
+      color: #4c463d;
+    }
+    footer {
+      margin-top: 48px;
+      text-align: center;
+      font-size: 14px;
+      color: #4c463d;
+    }
+    footer a { color: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Peitho</h1>
+    <p class="lead">Markdownをsource of truthにする、HTMLネイティブなプレゼンテーションツール。以下はサンプルデッキをそのまま<code>peitho build</code>して配信したデモです。</p>
+    <ul>
+      <li><a class="deck" href="./keynote/">
+        <span class="name">Keynote</span>
+        <span class="desc">セリフ体・中央寄せのキーノート。タイトルだけのスライドはcoverレイアウトへ、本文のあるスライドはstatementレイアウトへ、内容の形から自動でディスパッチされる。</span>
+      </a></li>
+      <li><a class="deck" href="./code-walkthrough/">
+        <span class="name">Code Walkthrough</span>
+        <span class="desc">ターミナル風2カラムのコード解説。毎スライドにコード必須の契約（arity="1"）、syntectによるビルド時シンタックスハイライト、キー付きCSS overrideの実例。</span>
+      </a></li>
+      <li><a class="deck" href="./lightning-talk/">
+        <span class="name">Lightning Talk</span>
+        <span class="desc">ダーク+大型タイポのLT向けデザイン。レイアウトにcodeスロットが無いので、コードを書くとビルドエラーになる。</span>
+      </a></li>
+      <li><a class="deck" href="./minimal/">
+        <span class="name">Minimal</span>
+        <span class="desc">バイナリ内蔵のデフォルトレイアウトとテーマだけで、deck.md単体からビルドした最小構成。</span>
+      </a></li>
+    </ul>
+    <footer><a href="https://github.com/mizzy/peitho">github.com/mizzy/peitho</a></footer>
+  </main>
+</body>
+</html>
