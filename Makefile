@@ -37,21 +37,21 @@ minimal: shell
 
 lightning-talk: shell
 	$(PRESENT) examples/lightning-talk/deck.md \
-		--template examples/lightning-talk/template.html \
+		--layout examples/lightning-talk/layout.html \
 		--base-css examples/lightning-talk/base.css \
 		--overrides-css examples/lightning-talk/overrides.css \
 		$(PRESENT_FLAGS)
 
 code-walkthrough: shell
 	$(PRESENT) examples/code-walkthrough/deck.md \
-		--template examples/code-walkthrough/template.html \
+		--layout examples/code-walkthrough/layout.html \
 		--base-css examples/code-walkthrough/base.css \
 		--overrides-css examples/code-walkthrough/overrides.css \
 		$(PRESENT_FLAGS)
 
 keynote: shell
 	$(PRESENT) examples/keynote/deck.md \
-		--template examples/keynote/template.html \
+		--layout examples/keynote/layout.html \
 		--base-css examples/keynote/base.css \
 		--overrides-css examples/keynote/overrides.css \
 		$(PRESENT_FLAGS)

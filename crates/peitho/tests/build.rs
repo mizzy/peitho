@@ -11,7 +11,7 @@ use tempfile::{tempdir, TempDir};
 fn build_writes_index_html_and_css() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    let template = dir.path().join("title-body-code.html");
+    let layout = dir.path().join("title-body-code.html");
     let base = dir.path().join("base.css");
     let overrides = dir.path().join("overrides.css");
     let out = dir.path().join("dist");
@@ -22,7 +22,7 @@ fn build_writes_index_html_and_css() {
     )
     .unwrap();
     fs::write(
-        &template,
+        &layout,
         r#"<section class="slide"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
     )
     .unwrap();
@@ -38,8 +38,8 @@ fn build_writes_index_html_and_css() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -65,7 +65,7 @@ fn build_writes_index_html_and_css() {
 fn build_fails_with_line_and_help_for_contract_violation() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    let template = dir.path().join("title-body-code.html");
+    let layout = dir.path().join("title-body-code.html");
     let base = dir.path().join("base.css");
     let overrides = dir.path().join("overrides.css");
     let out = dir.path().join("dist");
@@ -76,7 +76,7 @@ fn build_fails_with_line_and_help_for_contract_violation() {
     )
     .unwrap();
     fs::write(
-        &template,
+        &layout,
         r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
     )
     .unwrap();
@@ -88,8 +88,8 @@ fn build_fails_with_line_and_help_for_contract_violation() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -107,10 +107,10 @@ fn build_fails_with_line_and_help_for_contract_violation() {
 }
 
 #[test]
-fn contract_error_uses_template_file_stem_as_layout_name() {
+fn contract_error_uses_layout_file_stem_as_layout_name() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    let template = dir.path().join("custom-layout.html");
+    let layout = dir.path().join("custom-layout.html");
     let base = dir.path().join("base.css");
     let overrides = dir.path().join("overrides.css");
     let out = dir.path().join("dist");
@@ -121,7 +121,7 @@ fn contract_error_uses_template_file_stem_as_layout_name() {
     )
     .unwrap();
     fs::write(
-        &template,
+        &layout,
         r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
     )
     .unwrap();
@@ -133,8 +133,8 @@ fn contract_error_uses_template_file_stem_as_layout_name() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -155,7 +155,7 @@ fn build_writes_slide_fragments_in_slides_directory() {
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
     write_multi_slide_fixture(&deck);
-    let template = write_template(dir.path());
+    let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
     let overrides = write_overrides_css(
         dir.path(),
@@ -167,8 +167,8 @@ fn build_writes_slide_fragments_in_slides_directory() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -246,7 +246,7 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     fs::write(&deck, "# Intro\n\n---\n# Intro").unwrap();
-    let template = write_template(dir.path());
+    let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
     let overrides = write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
@@ -256,8 +256,8 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -284,8 +284,8 @@ fn repository_example_builds_three_slide_distribution() {
         .args([
             "build",
             "examples/deck.md",
-            "--template",
-            "templates/title-body-code.html",
+            "--layout",
+            "layouts/title-body-code.html",
             "--base-css",
             "themes/base.css",
             "--overrides-css",
@@ -322,7 +322,7 @@ fn build_keeps_slide_html_only_in_fragment_files() {
 fn build_clears_stale_slide_fragments_before_writing_new_ones() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    let template = write_template(dir.path());
+    let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
     let overrides = write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
@@ -333,8 +333,8 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -352,8 +352,8 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",
@@ -417,7 +417,7 @@ Fragments and manifest.
     .unwrap();
 }
 
-fn write_template(dir: &Path) -> PathBuf {
+fn write_layout(dir: &Path) -> PathBuf {
     let path = dir.join("title-body-code.html");
     fs::write(
         &path,
@@ -453,7 +453,7 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     write_multi_slide_fixture(&deck);
-    let template = write_template(dir.path());
+    let layout = write_layout(dir.path());
     let base = write_base_css(dir.path());
     let overrides = write_overrides_css(dir.path(), override_css);
     let out = dir.path().join("dist");
@@ -463,8 +463,8 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--template",
-            template.to_str().unwrap(),
+            "--layout",
+            layout.to_str().unwrap(),
             "--base-css",
             base.to_str().unwrap(),
             "--overrides-css",

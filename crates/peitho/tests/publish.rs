@@ -283,8 +283,8 @@ fn repository_example_can_be_published_to_external_command() {
         .args([
             "build",
             "examples/deck.md",
-            "--template",
-            "templates/title-body-code.html",
+            "--layout",
+            "layouts/title-body-code.html",
             "--base-css",
             "themes/base.css",
             "--overrides-css",

@@ -42,7 +42,7 @@ impl Deck<Checked> {
 ```rust
 pub fn render_deck(
     deck: Deck<Checked>,
-    template: &Template,
+    layout: &Layout,
 ) -> Result<Deck<Rendered>> {
     // an unchecked deck cannot reach here
 }
@@ -57,7 +57,7 @@ pub fn render_deck(
 
 ```rust
 let parsed = parse_markdown(input)?;
-render_deck(parsed, &template);
+render_deck(parsed, &layout);
 
 // error[E0308]: mismatched types
 //   expected `Deck<Checked>`
