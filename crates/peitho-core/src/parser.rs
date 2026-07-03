@@ -242,11 +242,15 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                     else {
                         unreachable!();
                     };
-                    fragments.push(SourceFragment::code(
-                        line_for_offset(source, start),
-                        language,
-                        text,
-                    ));
+                    let code_line = line_for_offset(source, start);
+                    if let Some(language) = &language {
+                        crate::highlight::validate_language(language, code_line).map_err(
+                            |err| {
+                                attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                            },
+                        )?;
+                    }
+                    fragments.push(SourceFragment::code(code_line, language, text));
                     seen_content = true;
                 }
             }
@@ -652,6 +656,22 @@ After list
         assert!(err
             .to_string()
             .contains("page settings comment has no settings"));
+    }
+
+    #[test]
+    fn rejects_unknown_code_language_tag_with_line() {
+        let err = parse_markdown("# Title\n\n```notalang\nx\n```").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unknown code language 'notalang'"));
+    }
+
+    #[test]
+    fn untagged_code_block_needs_no_language() {
+        let deck = parse_markdown("# Title\n\n```\nplain\n```").unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].fragments[1].language(), None);
     }
 
     #[test]

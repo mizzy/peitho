@@ -67,7 +67,8 @@ fn render_slide(
                         ))
                     })?;
                     let fragments = slot_values.get(&slot).cloned().unwrap_or_default();
-                    el.replace(&render_slot(&slot, &fragments), ContentType::Html);
+                    let html = render_slot(&slot, &fragments).map_err(box_build_error)?;
+                    el.replace(&html, ContentType::Html);
                     Ok(())
                 }),
             ],
@@ -89,13 +90,13 @@ fn render_slide(
     })
 }
 
-fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
+fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> Result<String> {
     if fragments.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let class_name = slot.class_name();
-    match fragments.first().map(SourceFragment::kind) {
+    Ok(match fragments.first().map(SourceFragment::kind) {
         Some(FragmentKind::Heading { .. }) => {
             let body = fragments
                 .iter()
@@ -105,15 +106,12 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
             format!(r#"<span class="{class_name}">{body}</span>"#)
         }
         Some(FragmentKind::Code) => {
-            let code = fragments
+            let body = fragments
                 .iter()
-                .map(SourceFragment::code_text)
-                .collect::<Vec<_>>()
+                .map(render_code_fragment)
+                .collect::<Result<Vec<_>>>()?
                 .join("\n");
-            format!(
-                r#"<pre class="{class_name}"><code>{}</code></pre>"#,
-                encode_text(&code)
-            )
+            format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
         }
         _ => {
             let markdown = fragments
@@ -125,6 +123,19 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> String {
             html::push_html(&mut body, Parser::new_ext(&markdown, Options::empty()));
             format!(r#"<div class="{class_name}">{body}</div>"#)
         }
+    })
+}
+
+/// A tagged code block is highlighted at build time into `hl-*` classed
+/// spans (colors live in theme CSS); an untagged block stays escaped plain
+/// text.
+fn render_code_fragment(fragment: &SourceFragment) -> Result<String> {
+    match fragment.language() {
+        Some(language) => {
+            crate::highlight::highlight_html(fragment.code_text(), language, fragment.line())
+                .map(|html| html.trim_end().to_owned())
+        }
+        None => Ok(encode_text(fragment.code_text()).into_owned()),
     }
 }
 
@@ -427,7 +438,9 @@ mod tests {
         assert!(html.contains(r#"class="slot-code""#));
         assert!(html.contains("<strong>Architecture</strong>"));
         assert!(html.contains("<code>Phase</code>"));
-        assert!(html.contains("fn main() {}"));
+        // The tagged rust block is highlighted into hl-* classed spans.
+        assert!(html.contains("hl-"));
+        assert!(html.contains("main"));
     }
 
     #[test]

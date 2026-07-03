@@ -79,3 +79,28 @@
 .slot-body code {
   color: #d7e0ea;
 }
+
+.slot-code .hl-comment {
+  color: #565f89;
+}
+
+.slot-code .hl-string {
+  color: #9ece6a;
+}
+
+.slot-code .hl-keyword,
+.slot-code .hl-storage {
+  color: #bb9af7;
+}
+
+.slot-code .hl-constant {
+  color: #ff9e64;
+}
+
+.slot-code .hl-function {
+  color: #7aa2f7;
+}
+
+.slot-code .hl-type {
+  color: #2ac3de;
+}
