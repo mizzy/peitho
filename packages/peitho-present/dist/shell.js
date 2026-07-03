@@ -697,6 +697,72 @@ async function mountPresenterView(options) {
     }
   };
 }
+
+// src/timeTracker.ts
+var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
+function isValidSlideChangeDetail(detail) {
+  if (typeof detail !== "object" || detail === null) return false;
+  const candidate = detail;
+  const { index, previousIndex, total } = candidate;
+  return typeof index === "number" && Number.isFinite(index) && index >= 0 && typeof total === "number" && Number.isFinite(total) && total > 0 && (previousIndex === null || typeof previousIndex === "number" && Number.isFinite(previousIndex) && previousIndex >= 0);
+}
+function installTimeTracker(options) {
+  if (!Number.isFinite(options.plannedDurationMs) || options.plannedDurationMs <= 0) {
+    throw new Error("plannedDurationMs must be a positive finite number");
+  }
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const log = options.console ?? console;
+  const bus = options.bus ?? win;
+  const track = doc.createElement("div");
+  track.className = "peitho-time-tracker";
+  track.dataset.peithoTimeTracker = options.variant ?? "present";
+  track.innerHTML = [
+    '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
+    '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>'
+  ].join("");
+  options.root.appendChild(track);
+  const rabbit = track.querySelector('[data-peitho-marker="rabbit"]');
+  const turtle = track.querySelector('[data-peitho-marker="turtle"]');
+  let autoStarted = false;
+  const setMarker = (element, ratio) => {
+    element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
+  };
+  const updateSlides = (index, total) => {
+    const ratio = total <= 1 ? 0 : index / (total - 1);
+    setMarker(rabbit, clamp01(ratio));
+  };
+  const tick = () => {
+    const ratio = options.shell.elapsedMs() / options.plannedDurationMs;
+    setMarker(turtle, clamp01(ratio));
+    track.toggleAttribute("data-peitho-overrun", ratio > 1);
+  };
+  const onSlideChange = (event) => {
+    const detail = event.detail;
+    if (!isValidSlideChangeDetail(detail)) {
+      log.error("Invalid peitho:slidechange event");
+      return;
+    }
+    updateSlides(detail.index, detail.total);
+    if (!autoStarted && detail.previousIndex !== null && detail.index > detail.previousIndex) {
+      autoStarted = true;
+      bus.dispatchEvent(
+        new CustomEvent("peitho:timercontrol", {
+          detail: { action: "start" }
+        })
+      );
+    }
+  };
+  updateSlides(options.shell.currentIndex, options.shell.manifest?.slideCount ?? 0);
+  tick();
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  const interval = win.setInterval(tick, 250);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    track.remove();
+  };
+}
 export {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
@@ -710,6 +776,7 @@ export {
   installKeyboardNavigation,
   installPresentationControls,
   installSyncBridge,
+  installTimeTracker,
   mountPresentShell,
   mountPresenterView,
   openPresenterPopup,

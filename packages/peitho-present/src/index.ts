@@ -26,6 +26,7 @@ export { installCloseOnEscape, installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";
+export { installTimeTracker } from "./timeTracker";
 export type { PresenterOptions, PresenterView } from "./presenter";
 export type {
   NavigateDetail,
@@ -43,3 +44,4 @@ export type {
   SyncChannelFactory,
   SyncMessage
 } from "./sync";
+export type { TimeTrackerOptions, TimeTrackerShell } from "./timeTracker";
