@@ -37,11 +37,21 @@ time: 15m
 
 ### D2: frontmatterのパースはpulldown-cmarkのmetadata blockで字句解析する
 
-スライド区切りも`---`（thematic break）なので、frontmatterの`---`との弁別が核心。自前の文字列前処理ではなく、`parser_options()`に`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`を追加し、pulldown-cmark 0.10（既存依存）に文書先頭のYAMLブロックを`Tag::MetadataBlock`としてトークナイズさせる。
+スライド区切りも`---`（thematic break）なので、frontmatterの`---`との弁別が核心。自前の文字列前処理ではなく、`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`を使い、pulldown-cmark（当初は0.10を想定、下記の実測により**0.13**へ更新）に文書先頭のYAMLブロックを`Tag::MetadataBlock`としてトークナイズさせる。
 
-- CommonMark的にfrontmatterは**文書先頭のみ**。2枚目以降の`---`は従来どおりスライド区切り。`time: 15m`の直後の`---`がsetext見出しに化ける事故も字句レベルで消える
-- `split_slide_ranges`が`MetadataBlock`イベント（Start/Text/End）を捕捉して生YAMLと行番号を取り出し、スライド範囲はブロック終端の後から始める
-- `parse_slide`側は`MetadataBlock`イベントに遭遇したら明示エラー（先頭以外のfrontmatter。`_ => {}`に飲ませない）
+**実測による修正（2026-07-03〜04、Task 2実装時）**: pulldown-cmark 0.10はこのオプションを有効にすると（1）**文書途中の密な`---`ペアもMetadataBlock化し**（`---`/`# Cfg`/`port: 8080`/`---`のような正当なスライドまで飲まれる）、（2）**字下げ`---`の密ペアで無限ループする**（`peitho build`が永久ハング。文書のどこにあっても発火）。どちらも実測で確認。よって**pulldown-cmarkを0.13へアップグレード**する（0.11以降でハングは修正済み、かつmetadata blockは文書先頭のみに限定された=途中の密ペアはRule/setextのまま。0.11/0.12/0.13で実測確認）。その上で**2文法の使い分け**にする:
+
+- **先頭frontmatterの検出**はmetadata有効文法で行い、**最初のイベントがYAML metadata blockで、かつその前に空白文字しかない**場合だけ採用する（空白プレフィックス規則。空行の後のfrontmatterはユーザーの意図が明白で、空白は内容を持たないため何もドロップしない）。生YAMLは**原文のまま**（trimしない）保持し、後段のYAMLエラー位置を「開始`---`の行番号+YAML内行番号」で源文に正確に写像する。スライド範囲はブロック終端の後から始める
+- **スライド分割**は従来文法（metadata無効）で行う。2枚目以降の`---`はこれまでどおりスライド区切り/setextであり、既存デッキの意味を一切変えない
+- 文書途中に`---`+`key: value`+`---`を書いた場合は従来どおりのCommonMark解釈（rule+setext見出し）になる。「途中frontmatter」を内容ヒューリスティックで推測してエラーにすることは**しない**（正当なデッキを誤検知でリグレッションさせるため。曖昧さは推測で解決しない原則どおり）。コメント等の非空白ブロックが先行する場合も同様にCommonMark解釈のまま（結果は可視のsetext見出しであり、サイレントドロップではない）
+- **意図的な挙動変更**: `---`で始まるファイル（空白プレフィックス含む）はfrontmatter領域になる。先頭の密な`---`ペアでスライドを区切っていた既存デッキ（例: `---`/`# Title`/`---`）は、中身がYAMLマッピングでないため行番号+help付きビルドエラーになる（黙って1枚目が消えるのではなく明示的に落ちる。捕捉と検証は必ず一体で実装し、「捕捉だけして未検証」の中間状態をmainに置かない）
+- `parse_slide`側は（metadata有効文法のため）slice先頭でMetadataBlockに遭遇し得る。その場合は明示エラー（`_ => {}`に飲ませない）。これは防御的な網であり、通常の分割経路では到達しない
+- frontmatter検出中に想定外のイベントが来た場合も明示エラー（開いたブロックを黙って無視しない）
+
+**サイレントミスを塞ぐ追加規則（実測起点、2026-07-04）**:
+- **行形状ホワイトリスト**: 捕捉したfrontmatter本文は、末尾のスタイル的空行を除き、**全ての行が`key:`で始まるフラットな設定行**でなければ行番号+helpエラー。閉じ`---`忘れはmetadata blockが次の`---`までを飲み込むが（実測）、飲まれたmarkdownは行形状エラー（見出し・段落・空行・リスト）かunknown keyエラー（`note: ...`型）の必ずどちらかに落ち、黙って通る経路が構造的に存在しない。空行のみを禁止するブラックリストでは`# 見出し`（YAMLコメント扱い）をすり抜けるため不足だった
+- **`---`開始ガード**: 最初の非空白行が`---`なのにfrontmatterが認識されなかった場合（opener直後の空行`---`/空行/`time: 15m`/`---`、空のペア`---`/`---`など）は行番号+helpエラー。「`---`で始まるファイルはfrontmatter領域」の位置規則であり内容の推測ではない
+- **BOM除去**: 先頭のU+FEFFはパース前に1つ除去（BOMがあるとmetadata blockが認識されず設定が黙って無視されるため。実測）
 - YAML本体は新規`DeckFrontmatter`（serde、`deny_unknown_fields`）にデシリアライズ。YAML crateは保守が継続しているserde互換のもの（serde_norway）をworkspace依存に追加
 - `time`値は専用の型（例: `PlannedTime`）にカスタムDeserializeで解釈し、文字列/整数の両形式と不正値エラーを型の構築点で一元化する（消費側に検証を分散させない）
 - パース結果は`Deck<Parsed>`にデッキ設定として載り、以降の相（Mapped/Checked/Rendered）へ携行される
