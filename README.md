@@ -45,6 +45,8 @@ peitho present deck.md --presenter-windowed
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
 
+テンプレートとテーマはバイナリに内蔵されたデフォルト（`templates/title-body-code.html`・`themes/base.css`と同内容）が使われるため、デッキファイルだけあればどのディレクトリでも動く。差し替えるときだけ`--template`/`--base-css`/`--overrides-css`を渡す。
+
 `peitho present` はTS製の発表シェルを使うため、初回のみバンドルのビルドが必要:
 
 ```sh
