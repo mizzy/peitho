@@ -21,7 +21,7 @@ crates/peitho-core/   契約・パイプライン(parser/template/mapping/check/
 crates/peitho/        CLI(build/present/publish)、server.rs(配信+/syncロングポール)、browser.rs、displays.rs
 packages/peitho-present/  TS発表シェル(canvas/shell/controls/keyboard/sync/presenter)
 bindings/             ts-rs生成TS型（コミット対象）
-templates/ themes/ examples/  共有レイアウト・baseテーマ・サンプル
+templates/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのテンプレート/base.cssはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる）
 docs/plans/           各マイルストーンの実装計画（履歴）
 ```
 
