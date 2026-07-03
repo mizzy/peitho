@@ -25,6 +25,66 @@ export function chooseOtherScreen(details: ScreenDetails): ScreenDetailed | null
 }
 
 export type PresenterPopup = Pick<Window, "moveTo" | "resizeTo">;
+export type RequestFullscreen = (options?: FullscreenOptions) => Promise<void> | void;
+
+export type PlaceWindowsOptions = {
+  details: ScreenDetails;
+  popup: PresenterPopup | null;
+  requestFullscreen: RequestFullscreen;
+};
+
+export type PlacementOverlay = {
+  remove: () => void;
+};
+
+export type ShowPlacementOverlay = (retry: () => Promise<void>) => PlacementOverlay;
+
+export async function placeWindows(options: PlaceWindowsOptions): Promise<boolean> {
+  const otherScreen = chooseOtherScreen(options.details);
+  if (!otherScreen) return false;
+
+  await options.requestFullscreen({ screen: otherScreen });
+
+  if (options.popup) {
+    options.popup.moveTo(
+      options.details.currentScreen.availLeft,
+      options.details.currentScreen.availTop
+    );
+    options.popup.resizeTo(
+      Math.min(DEFAULT_POPUP_WIDTH, options.details.currentScreen.availWidth),
+      Math.min(DEFAULT_POPUP_HEIGHT, options.details.currentScreen.availHeight)
+    );
+  }
+
+  return true;
+}
+
+export function showPlacementOverlay(
+  doc: Document,
+  retry: () => Promise<void>
+): PlacementOverlay {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.dataset.peithoPlaceOverlay = "true";
+  button.textContent = "Click to place windows / クリックで画面を配置";
+  button.style.position = "fixed";
+  button.style.inset = "0";
+  button.style.zIndex = "2147483647";
+  button.style.display = "grid";
+  button.style.placeItems = "center";
+  button.style.border = "0";
+  button.style.background = "rgba(0, 0, 0, 0.82)";
+  button.style.color = "#fff";
+  button.style.font = "600 28px system-ui, sans-serif";
+  button.addEventListener("click", () => {
+    void retry();
+  });
+  doc.body.appendChild(button);
+
+  return {
+    remove: () => button.remove()
+  };
+}
 
 export type OpenPresenterWithDisplayOptions = {
   window?: Window;
@@ -32,8 +92,13 @@ export type OpenPresenterWithDisplayOptions = {
   url?: string;
   getScreenDetails?: (() => Promise<ScreenDetails>) | undefined;
   openWindow?: (url: string, target: string, features: string) => PresenterPopup | null;
-  requestFullscreen?: (options?: FullscreenOptions) => Promise<void> | void;
+  requestFullscreen?: RequestFullscreen;
+  showPlacementOverlay?: ShowPlacementOverlay;
 };
+
+function isNotAllowedError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "NotAllowedError";
+}
 
 export async function openPresenterWithDisplay(
   options: OpenPresenterWithDisplayOptions = {}
@@ -49,24 +114,33 @@ export async function openPresenterWithDisplay(
     ((fullscreenOptions?: FullscreenOptions) =>
       doc.documentElement.requestFullscreen?.(fullscreenOptions));
   const getScreenDetails = options.getScreenDetails ?? win.getScreenDetails?.bind(win);
+  const showOverlay =
+    options.showPlacementOverlay ??
+    ((retry: () => Promise<void>) => showPlacementOverlay(doc, retry));
 
   if (!getScreenDetails) return popup;
 
+  let details: ScreenDetails;
   try {
-    const details = await getScreenDetails();
-    const otherScreen = chooseOtherScreen(details);
-    if (otherScreen) {
-      await requestFullscreen({ screen: otherScreen });
-      if (popup) {
-        popup.moveTo(details.currentScreen.availLeft, details.currentScreen.availTop);
-        popup.resizeTo(
-          Math.min(DEFAULT_POPUP_WIDTH, details.currentScreen.availWidth),
-          Math.min(DEFAULT_POPUP_HEIGHT, details.currentScreen.availHeight)
-        );
-      }
-    }
+    details = await getScreenDetails();
   } catch {
     return popup;
+  }
+
+  try {
+    await placeWindows({ details, popup, requestFullscreen });
+  } catch (error) {
+    if (!popup || !isNotAllowedError(error)) return popup;
+    let overlay: PlacementOverlay | null = null;
+    overlay = showOverlay(async () => {
+      try {
+        await placeWindows({ details, popup, requestFullscreen });
+        overlay?.remove();
+        overlay = null;
+      } catch {
+        return;
+      }
+    });
   }
 
   return popup;

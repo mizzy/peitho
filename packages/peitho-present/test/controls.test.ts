@@ -109,6 +109,50 @@ it("opens presenter popup with default display management", async () => {
   );
 });
 
+it("passes the placement overlay hook to the default presenter display helper", async () => {
+  const root = document.createElement("main");
+  const current: ScreenDetailed = {
+    availLeft: 0,
+    availTop: 0,
+    availWidth: 1440,
+    availHeight: 900
+  };
+  const other: ScreenDetailed = {
+    availLeft: 1440,
+    availTop: 0,
+    availWidth: 1920,
+    availHeight: 1080
+  };
+  const popup = {
+    moveTo: vi.fn(),
+    resizeTo: vi.fn()
+  };
+  const showPlacementOverlay = vi.fn((retry: () => Promise<void>) => {
+    void retry;
+    return { remove: vi.fn() };
+  });
+  const cleanup = installPresentationControls({
+    root,
+    window,
+    document,
+    bus: window,
+    openPresenterWindow: vi.fn(() => popup),
+    getScreenDetails: async () => ({ currentScreen: current, screens: [current, other] }),
+    requestFullscreen: vi.fn(async () => {
+      throw new DOMException("activation expired", "NotAllowedError");
+    }),
+    showPlacementOverlay
+  });
+  cleanups.push(cleanup);
+
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="presenter"]')?.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(showPlacementOverlay).toHaveBeenCalledTimes(1);
+});
+
 it("keeps the explicit openPresenter injection as the highest priority", () => {
   const root = document.createElement("main");
   const openPresenter = vi.fn();
