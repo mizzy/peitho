@@ -38,6 +38,9 @@ peitho build deck.md --watch
 # 発表（揮発キャッシュ生成 + ローカルサーバ + ブラウザ起動。2画面なら自動配置）
 peitho present deck.md
 
+# デバッグ用: 発表者画面をフルスクリーンにせず1200x800の窓で開く
+peitho present deck.md --presenter-windowed
+
 # 公開（検査してから既存のデプロイコマンドに委譲。デプロイは再発明しない）
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
