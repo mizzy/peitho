@@ -148,7 +148,7 @@ fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
     if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
         let minutes = trimmed
             .parse::<u64>()
-            .map_err(|_| "time is too large".to_owned())?;
+            .map_err(|_| PlannedTime::TOO_LARGE_MESSAGE.to_owned())?;
         return minutes_to_millis(minutes);
     }
 
@@ -164,7 +164,7 @@ fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
         }
         let value = rest[..digit_bytes]
             .parse::<u64>()
-            .map_err(|_| "time is too large".to_owned())?;
+            .map_err(|_| PlannedTime::TOO_LARGE_MESSAGE.to_owned())?;
         rest = &rest[digit_bytes..];
         let unit = rest
             .bytes()
@@ -176,10 +176,10 @@ fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
             b's' => Some(value),
             _ => return Err("time must use h, m, or s units".to_owned()),
         }
-        .ok_or_else(|| "time is too large".to_owned())?;
+        .ok_or_else(|| PlannedTime::TOO_LARGE_MESSAGE.to_owned())?;
         total_seconds = total_seconds
             .checked_add(seconds)
-            .ok_or_else(|| "time is too large".to_owned())?;
+            .ok_or_else(|| PlannedTime::TOO_LARGE_MESSAGE.to_owned())?;
         rest = &rest[1..];
     }
 
@@ -189,13 +189,13 @@ fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
 fn minutes_to_millis(minutes: u64) -> std::result::Result<u64, String> {
     minutes
         .checked_mul(60_000)
-        .ok_or_else(|| "time is too large".to_owned())
+        .ok_or_else(|| PlannedTime::TOO_LARGE_MESSAGE.to_owned())
 }
 
 fn seconds_to_millis(seconds: u64) -> std::result::Result<u64, String> {
     seconds
         .checked_mul(1000)
-        .ok_or_else(|| "time is too large".to_owned())
+        .ok_or_else(|| PlannedTime::TOO_LARGE_MESSAGE.to_owned())
 }
 
 impl<'de> Deserialize<'de> for PlannedTime {
@@ -1235,13 +1235,27 @@ After list
         ] {
             let err = serde_norway::from_str::<DeckFrontmatter>(yaml).unwrap_err();
 
-            assert!(err.to_string().contains("time is too large"));
+            assert!(err.to_string().contains(PlannedTime::TOO_LARGE_MESSAGE));
         }
 
         let err = serde_norway::from_str::<DeckFrontmatter>("time: 0\n").unwrap_err();
         assert!(err
             .to_string()
             .contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE));
+    }
+
+    #[test]
+    fn rejects_planned_time_above_javascript_safe_integer_with_line_and_help() {
+        let err = parse_markdown("---\ntime: 9007199254740993s\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert!(err.to_string().contains(PlannedTime::TOO_LARGE_MESSAGE));
+        assert_eq!(
+            err.help,
+            "set time to 15m, 90s, 1h, 1h30m, or an integer minute count"
+        );
     }
 
     #[test]

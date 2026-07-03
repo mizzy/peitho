@@ -10,10 +10,14 @@ pub struct PlannedTime(u64);
 
 impl PlannedTime {
     pub(crate) const GREATER_THAN_ZERO_MESSAGE: &'static str = "time must be greater than zero";
+    pub(crate) const MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS: u64 = 9_007_199_254_740_991;
+    pub(crate) const TOO_LARGE_MESSAGE: &'static str = "time is too large";
 
     pub(crate) fn from_millis(millis: u64) -> std::result::Result<Self, String> {
         if millis == 0 {
             Err(Self::GREATER_THAN_ZERO_MESSAGE.to_owned())
+        } else if millis > Self::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS {
+            Err(Self::TOO_LARGE_MESSAGE.to_owned())
         } else {
             Ok(Self(millis))
         }
@@ -323,6 +327,25 @@ pub fn require_checked_for_render(_: &Deck<Checked>) {}
 mod tests {
     use super::*;
     use crate::domain::{SlideKey, SourceFragment};
+
+    #[test]
+    fn planned_time_accepts_javascript_safe_integer_boundary() {
+        let planned = PlannedTime::from_millis(PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS)
+            .expect("boundary is accepted");
+
+        assert_eq!(
+            planned.as_millis(),
+            PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS
+        );
+    }
+
+    #[test]
+    fn planned_time_rejects_values_above_javascript_safe_integer_boundary() {
+        let err = PlannedTime::from_millis(PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS + 1)
+            .unwrap_err();
+
+        assert_eq!(err, PlannedTime::TOO_LARGE_MESSAGE);
+    }
 
     #[test]
     fn parsed_deck_owns_source_fragments() {
