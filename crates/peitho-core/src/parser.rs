@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel, MetadataBlockKind, Options, Parser, Tag, TagEnd,
+};
 use serde::Deserialize;
 
 use crate::{
@@ -16,6 +18,28 @@ use crate::{
 struct PageComment {
     key: Option<String>,
     layout: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeckFrontmatter {
+    #[serde(default, deserialize_with = "deserialize_optional_planned_time")]
+    time: Option<PlannedTime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannedTime(u64);
+
+impl PlannedTime {
+    #[allow(dead_code)] // Converted at the future Deck/manifest consumption boundary.
+    fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
+#[allow(dead_code)] // Carried on Deck in Task 5.
+struct ParsedDeckSettings {
+    time: Option<PlannedTime>,
 }
 
 struct PageSettings {
@@ -45,8 +69,23 @@ struct SlideRange {
     end: usize,
 }
 
+struct RawFrontmatter {
+    line: usize,
+    yaml: String,
+}
+
+struct SplitSlides {
+    frontmatter: Option<RawFrontmatter>,
+    ranges: Vec<SlideRange>,
+}
+
 pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
-    let ranges = split_slide_ranges(source)?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let SplitSlides {
+        frontmatter,
+        ranges,
+    } = split_slide_ranges(source)?;
+    let _settings = parse_deck_frontmatter(frontmatter.as_ref())?;
     if ranges.is_empty() {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -64,21 +103,29 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
     Ok(Deck::parsed(slides))
 }
 
-fn split_slide_ranges(source: &str) -> Result<Vec<SlideRange>> {
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    let mut list_depth = 0usize;
+fn split_slide_ranges(source: &str) -> Result<SplitSlides> {
+    let (frontmatter, content_start) = leading_frontmatter(source)?;
+    if frontmatter.is_none() {
+        reject_invalid_leading_frontmatter_start(source)?;
+    }
 
-    for (event, range) in Parser::new_ext(source, parser_options()).into_offset_iter() {
+    let mut ranges = Vec::new();
+    let mut start = content_start;
+    let mut list_depth = 0usize;
+    let content = &source[content_start..];
+
+    for (event, range) in Parser::new_ext(content, slide_split_options()).into_offset_iter() {
+        let global_start = content_start + range.start;
+        let global_end = content_start + range.end;
         match event {
             Event::Start(Tag::List(_)) => list_depth += 1,
             Event::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
             Event::Rule if list_depth == 0 => {
                 ranges.push(SlideRange {
                     start,
-                    end: range.start,
+                    end: global_start,
                 });
-                start = range.end;
+                start = global_end;
             }
             Event::Rule => {}
             _ => {}
@@ -89,10 +136,302 @@ fn split_slide_ranges(source: &str) -> Result<Vec<SlideRange>> {
         start,
         end: source.len(),
     });
-    Ok(ranges
+    let ranges = ranges
         .into_iter()
         .filter(|range| !source[range.start..range.end].trim().is_empty())
-        .collect())
+        .collect();
+    Ok(SplitSlides {
+        frontmatter,
+        ranges,
+    })
+}
+
+fn deserialize_optional_planned_time<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<PlannedTime>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    PlannedTime::deserialize(deserializer).map(Some)
+}
+
+fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("time must not be empty".to_owned());
+    }
+    if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        let minutes = trimmed
+            .parse::<u64>()
+            .map_err(|_| "time is too large".to_owned())?;
+        return minutes_to_millis(minutes);
+    }
+
+    let mut rest = trimmed;
+    let mut total_seconds = 0_u64;
+    while !rest.is_empty() {
+        let digit_bytes = rest
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_bytes == 0 {
+            return Err("time must use h, m, or s units".to_owned());
+        }
+        let value = rest[..digit_bytes]
+            .parse::<u64>()
+            .map_err(|_| "time is too large".to_owned())?;
+        rest = &rest[digit_bytes..];
+        let unit = rest
+            .bytes()
+            .next()
+            .ok_or_else(|| "time string is missing a unit".to_owned())?;
+        let seconds = match unit {
+            b'h' => value.checked_mul(3600),
+            b'm' => value.checked_mul(60),
+            b's' => Some(value),
+            _ => return Err("time must use h, m, or s units".to_owned()),
+        }
+        .ok_or_else(|| "time is too large".to_owned())?;
+        total_seconds = total_seconds
+            .checked_add(seconds)
+            .ok_or_else(|| "time is too large".to_owned())?;
+        rest = &rest[1..];
+    }
+
+    seconds_to_millis(total_seconds)
+}
+
+fn minutes_to_millis(minutes: u64) -> std::result::Result<u64, String> {
+    if minutes == 0 {
+        return Err("time must be greater than zero".to_owned());
+    }
+    minutes
+        .checked_mul(60_000)
+        .ok_or_else(|| "time is too large".to_owned())
+}
+
+fn seconds_to_millis(seconds: u64) -> std::result::Result<u64, String> {
+    seconds
+        .checked_mul(1000)
+        .filter(|millis| *millis > 0)
+        .ok_or_else(|| {
+            if seconds == 0 {
+                "time must be greater than zero".to_owned()
+            } else {
+                "time is too large".to_owned()
+            }
+        })
+}
+
+impl<'de> Deserialize<'de> for PlannedTime {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PlannedTimeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PlannedTimeVisitor {
+            type Value = PlannedTime;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a duration like 15m, 90s, 1h30m, or an integer minute count")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                minutes_to_millis(value).map(PlannedTime).map_err(E::custom)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value <= 0 {
+                    return Err(E::custom("time must be greater than zero"));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                parse_planned_time_text(value)
+                    .map(PlannedTime)
+                    .map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(PlannedTimeVisitor)
+    }
+}
+
+fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<ParsedDeckSettings> {
+    let Some(raw) = raw else {
+        return Ok(ParsedDeckSettings { time: None });
+    };
+    if raw.yaml.trim().is_empty() {
+        return Ok(ParsedDeckSettings { time: None });
+    }
+    validate_frontmatter_lines(raw)?;
+
+    let value: serde_norway::Value =
+        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+    if !matches!(value, serde_norway::Value::Mapping(_)) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(raw.line + first_nonblank_yaml_line(&raw.yaml)),
+            "invalid deck frontmatter: expected a YAML mapping of deck settings",
+            "write valid YAML frontmatter before the first slide",
+        ));
+    }
+
+    let parsed: DeckFrontmatter =
+        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+
+    Ok(ParsedDeckSettings { time: parsed.time })
+}
+
+fn first_nonblank_yaml_line(yaml: &str) -> usize {
+    yaml.lines()
+        .position(|line| !line.trim().is_empty())
+        .map(|index| index + 1)
+        .unwrap_or(1)
+}
+
+fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
+    let lines = raw.yaml.lines().collect::<Vec<_>>();
+    let content_len = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|index| index + 1)
+        .unwrap_or(0);
+
+    for (index, line) in lines[..content_len].iter().enumerate() {
+        if !starts_with_flat_yaml_key(line) {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(raw.line + index + 1),
+                "unexpected line in deck frontmatter (missing closing ---?)",
+                "keep only key: value settings (like time: 15m) between the --- markers",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn starts_with_flat_yaml_key(line: &str) -> bool {
+    let Some(colon_index) = line.find(':') else {
+        return false;
+    };
+    let key = &line[..colon_index];
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
+    let yaml_line = err
+        .location()
+        .map(|location| location.line())
+        .unwrap_or_else(|| first_nonblank_yaml_line(&raw.yaml));
+    let err = err.to_string();
+    let message = format!(
+        "invalid deck frontmatter: {}",
+        err.split(" at line ").next().unwrap_or(&err)
+    );
+    let help = frontmatter_help(&message);
+    BuildError::new(ErrorKind::Parse, Some(raw.line + yaml_line), message, help)
+}
+
+fn frontmatter_help(message: &str) -> &'static str {
+    if message.contains("unknown field") || message.contains("duplicate entry") {
+        "use only the supported deck frontmatter key: time"
+    } else if message.contains("time")
+        || message.contains("duration")
+        || message.contains("greater than zero")
+        || message.contains("unit")
+        || message.contains("integer")
+        || message.contains("u128")
+        || message.contains("too large")
+    {
+        "set time to 15m, 90s, 1h, 1h30m, or an integer minute count"
+    } else {
+        "write valid YAML frontmatter before the first slide"
+    }
+}
+
+fn leading_frontmatter(source: &str) -> Result<(Option<RawFrontmatter>, usize)> {
+    let mut events = Parser::new_ext(source, parser_options()).into_offset_iter();
+    let Some((event, range)) = events.next() else {
+        return Ok((None, 0));
+    };
+
+    let frontmatter_line = match event {
+        Event::Start(Tag::MetadataBlock(MetadataBlockKind::YamlStyle))
+            if source[..range.start].chars().all(char::is_whitespace) =>
+        {
+            line_for_offset(source, range.start)
+        }
+        _ => return Ok((None, 0)),
+    };
+
+    let mut frontmatter_yaml = String::new();
+
+    for (event, range) in events {
+        match event {
+            Event::Text(text) => {
+                frontmatter_yaml.push_str(&text);
+            }
+            Event::End(TagEnd::MetadataBlock(MetadataBlockKind::YamlStyle)) => {
+                return Ok((
+                    Some(RawFrontmatter {
+                        line: frontmatter_line,
+                        yaml: frontmatter_yaml,
+                    }),
+                    range.end,
+                ));
+            }
+            Event::Start(Tag::MetadataBlock(_)) | Event::End(TagEnd::MetadataBlock(_)) => {
+                return Err(metadata_block_position_error(source, range.start));
+            }
+            _ => return Err(unexpected_frontmatter_content_error(source, range.start)),
+        }
+    }
+
+    Err(unexpected_frontmatter_content_error(source, source.len()))
+}
+
+fn reject_invalid_leading_frontmatter_start(source: &str) -> Result<()> {
+    let Some((offset, line)) = first_nonblank_source_line(source) else {
+        return Ok(());
+    };
+    if line.trim() != "---" {
+        return Ok(());
+    }
+
+    Err(BuildError::new(
+        ErrorKind::Parse,
+        Some(line_for_offset(source, offset)),
+        "deck starts with --- but no valid YAML frontmatter was found",
+        "put --- on the first line, settings on the following lines, and close with --- without blank lines",
+    ))
+}
+
+fn first_nonblank_source_line(source: &str) -> Option<(usize, &str)> {
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        if !line_without_newline.trim().is_empty() {
+            return Some((line_start, line_without_newline));
+        }
+        line_start += line.len();
+    }
+    None
 }
 
 fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSlide> {
@@ -179,6 +518,15 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                         &fragments,
                     ));
                 }
+            }
+            Event::Start(Tag::MetadataBlock(_)) => {
+                let err = metadata_block_position_error(source, global_start);
+                return Err(attach_slide_context(
+                    err,
+                    index,
+                    explicit_key.as_ref(),
+                    &fragments,
+                ));
             }
             _ if list_depth > 0 => {}
             Event::Start(Tag::Heading { level, .. }) => {
@@ -338,6 +686,10 @@ fn attach_slide_context(
 }
 
 fn parser_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+}
+
+fn slide_split_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES
 }
 
@@ -439,10 +791,28 @@ fn unsupported_construct(line: usize, name: &str) -> BuildError {
     )
 }
 
+fn metadata_block_position_error(source: &str, offset: usize) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        Some(line_for_offset(source, offset)),
+        "YAML frontmatter is only allowed at the top of the deck",
+        "move deck settings before the first slide or replace this block with slide content",
+    )
+}
+
+fn unexpected_frontmatter_content_error(source: &str, offset: usize) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        Some(line_for_offset(source, offset)),
+        "unexpected content in deck frontmatter",
+        "write plain YAML frontmatter before the first slide",
+    )
+}
+
 fn unsupported_tag(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
-        Tag::BlockQuote
+        Tag::BlockQuote(_)
             | Tag::Table(_)
             | Tag::TableHead
             | Tag::TableRow
@@ -454,7 +824,7 @@ fn unsupported_tag(tag: &Tag<'_>) -> bool {
 
 fn unsupported_tag_name(tag: &Tag<'_>) -> &'static str {
     match tag {
-        Tag::BlockQuote => "blockquote",
+        Tag::BlockQuote(_) => "blockquote",
         Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => "table",
         Tag::Image { .. } => "image",
         Tag::FootnoteDefinition(_) => "footnote",
@@ -524,6 +894,36 @@ mod tests {
         let parsed: Probe = serde_norway::from_str("time: 15m\n").unwrap();
 
         assert_eq!(parsed.time, "15m");
+    }
+
+    #[test]
+    fn parses_planned_time_values_from_frontmatter() {
+        let cases = [
+            ("15m", 900_000),
+            ("90s", 90_000),
+            ("1h", 3_600_000),
+            ("1h30m", 5_400_000),
+            ("15", 900_000),
+        ];
+
+        for (value, expected) in cases {
+            let yaml = format!("time: {value}\n");
+            let parsed: DeckFrontmatter = serde_norway::from_str(&yaml).unwrap();
+
+            assert_eq!(parsed.time.map(PlannedTime::as_millis), Some(expected));
+        }
+    }
+
+    #[test]
+    fn parsed_deck_settings_keep_planned_time_until_consumed() {
+        let raw = RawFrontmatter {
+            line: 1,
+            yaml: "time: 15m\n".to_owned(),
+        };
+
+        let settings = parse_deck_frontmatter(Some(&raw)).unwrap();
+
+        assert_eq!(settings.time.map(PlannedTime::as_millis), Some(900_000));
     }
 
     #[test]
@@ -768,8 +1168,272 @@ After list
     }
 
     #[test]
+    fn frontmatter_is_not_a_slide_and_later_rules_still_split_slides() {
+        let markdown = "---\ntime: 15m\n---\n\n# Intro\n\n---\n# Details";
+        let split = split_slide_ranges(markdown).unwrap();
+        let frontmatter = split.frontmatter.as_ref().unwrap();
+
+        assert_eq!(frontmatter.line, 1);
+        assert_eq!(frontmatter.yaml, "time: 15m\n");
+
+        let deck = parse_markdown(markdown).unwrap();
+        assert_eq!(deck.parsed_slides().len(), 2);
+        assert_eq!(deck.parsed_slides()[0].fragments[0].line(), 5);
+        assert_eq!(deck.parsed_slides()[1].fragments[0].line(), 8);
+    }
+
+    #[test]
+    fn rejects_leading_dense_rule_pair_as_invalid_frontmatter_not_dropped_slide() {
+        let err = parse_markdown("---\n# Title\n---\n# Next").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err
+            .to_string()
+            .contains("unexpected line in deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "keep only key: value settings (like time: 15m) between the --- markers"
+        );
+    }
+
+    #[test]
+    fn blank_prefixed_frontmatter_is_accepted_without_dropping_content() {
+        let deck = parse_markdown("\n---\ntime: 15m\n---\n\n# A").unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].key.as_str(), "a");
+        assert_eq!(slides[0].fragments[0].line(), 6);
+    }
+
+    #[test]
+    fn nonblank_prefix_before_rule_pair_keeps_existing_markdown_semantics() {
+        let deck = parse_markdown("# Z\n\n---\ntitle: x\n---\n\n# A").unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].key.as_str(), "z");
+        assert_eq!(slides[1].key.as_str(), "title-x");
+        assert_eq!(slides[1].fragments[1].line(), 7);
+        assert_eq!(slides[1].fragments[1].markdown(), "# A");
+    }
+
+    #[test]
+    fn rejects_unknown_frontmatter_key_with_line_and_help() {
+        let err = parse_markdown("---\ntime: 15m\nunknown: true\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "use only the supported deck frontmatter key: time"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_frontmatter_time_with_line_and_help() {
+        for value in ["0", "-1", "abc", ""] {
+            let markdown = format!("---\ntime: {value}\n---\n# Intro");
+            let err = parse_markdown(&markdown).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(2));
+            assert!(err.to_string().contains("invalid deck frontmatter"));
+            assert_eq!(
+                err.help,
+                "set time to 15m, 90s, 1h, 1h30m, or an integer minute count"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_overflowing_planned_time_with_specific_message() {
+        for yaml in [
+            "time: 18446744073709551615\n",
+            "time: 18446744073709551615m\n",
+        ] {
+            let err = serde_norway::from_str::<DeckFrontmatter>(yaml).unwrap_err();
+
+            assert!(err.to_string().contains("time is too large"));
+        }
+
+        let err = serde_norway::from_str::<DeckFrontmatter>("time: 0\n").unwrap_err();
+        assert!(err.to_string().contains("time must be greater than zero"));
+    }
+
+    #[test]
+    fn huge_integer_time_uses_time_format_help() {
+        let err = parse_markdown("---\ntime: 999999999999999999999\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "set time to 15m, 90s, 1h, 1h30m, or an integer minute count"
+        );
+    }
+
+    #[test]
+    fn duplicate_frontmatter_time_reports_frontmatter_line() {
+        let err = parse_markdown("---\ntime: 15m\ntime: 20m\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("duplicate entry"));
+        assert_eq!(
+            err.help,
+            "use only the supported deck frontmatter key: time"
+        );
+    }
+
+    #[test]
+    fn rejects_broken_frontmatter_yaml_with_line_and_help() {
+        let err = parse_markdown("---\ntime: [\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert!(!err.to_string().contains(" at line "));
+        assert_eq!(
+            err.help,
+            "write valid YAML frontmatter before the first slide"
+        );
+    }
+
+    #[test]
+    fn rejects_metadata_block_inside_a_slide() {
+        let source = "---\ntime: 15m\n---\n# Details";
+        let err = parse_slide(
+            source,
+            SlideRange {
+                start: 0,
+                end: source.len(),
+            },
+            1,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err
+            .to_string()
+            .contains("YAML frontmatter is only allowed at the top of the deck"));
+    }
+
+    #[test]
+    fn frontmatter_keeps_raw_yaml_for_error_line_mapping() {
+        let err = parse_markdown("\n---\nunknown: true\n---\n# Intro").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "use only the supported deck frontmatter key: time"
+        );
+    }
+
+    #[test]
+    fn rejects_frontmatter_heading_line_as_missing_closing_delimiter() {
+        let err = parse_markdown("---\ntime: 15m\n# Intro\n---\n# Details").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unexpected line in deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "keep only key: value settings (like time: 15m) between the --- markers"
+        );
+    }
+
+    #[test]
+    fn allows_trailing_blank_line_before_frontmatter_close() {
+        let raw = RawFrontmatter {
+            line: 1,
+            yaml: "time: 15m\n\n".to_owned(),
+        };
+
+        let settings = parse_deck_frontmatter(Some(&raw)).unwrap();
+        let deck = parse_markdown("---\ntime: 15m\n\n---\n\n# A").unwrap();
+
+        assert_eq!(settings.time.map(PlannedTime::as_millis), Some(900_000));
+        assert_eq!(deck.parsed_slides().len(), 1);
+        assert_eq!(deck.parsed_slides()[0].key.as_str(), "a");
+    }
+
+    #[test]
+    fn rejects_frontmatter_blank_line_as_missing_closing_delimiter() {
+        let err = parse_markdown("---\ntime: 15m\n\n# A\n\n---\n\n# B").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unexpected line in deck frontmatter"));
+        assert_eq!(
+            err.help,
+            "keep only key: value settings (like time: 15m) between the --- markers"
+        );
+    }
+
+    #[test]
+    fn bom_prefixed_frontmatter_is_parsed_normally() {
+        let deck = parse_markdown("\u{feff}---\ntime: 15m\n---\n\n# A").unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 1);
+        assert_eq!(slides[0].key.as_str(), "a");
+    }
+
+    #[test]
+    fn rejects_leading_rule_when_no_valid_frontmatter_was_found() {
+        for markdown in ["---\n\ntime: 15m\n---\n\n# A", "---\n---\n\n# A"] {
+            let err = parse_markdown(markdown).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(1));
+            assert!(err
+                .to_string()
+                .contains("deck starts with --- but no valid YAML frontmatter was found"));
+            assert_eq!(
+                err.help,
+                "put --- on the first line, settings on the following lines, and close with --- without blank lines"
+            );
+        }
+    }
+
+    #[test]
+    fn indented_leading_rule_does_not_hang_and_reports_invalid_frontmatter_start() {
+        let err = parse_markdown("  ---\ntime: 15m\n---\n\n# A").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err
+            .to_string()
+            .contains("deck starts with --- but no valid YAML frontmatter was found"));
+    }
+
+    #[test]
+    fn yaml_like_slide_content_between_rules_still_splits_as_slides() {
+        let markdown = "# A\n\n---\n# Cfg\nport: 8080\n\n---\n\n# C";
+        let deck = parse_markdown(markdown).unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[0].key.as_str(), "a");
+        assert_eq!(slides[1].key.as_str(), "cfg");
+        assert_eq!(slides[1].fragments[0].line(), 4);
+        assert_eq!(slides[1].fragments[1].line(), 5);
+        assert_eq!(slides[2].key.as_str(), "c");
+    }
+
+    #[test]
     fn rejects_empty_deck_after_splitting_delimiters() {
-        let err = parse_markdown("  \n\n---\n\n---\n").unwrap_err();
+        let err = parse_markdown("  \n\n***\n\n***\n").unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, None);
