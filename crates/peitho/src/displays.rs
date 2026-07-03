@@ -114,18 +114,19 @@ fn contains_point(display: &ChromeDisplay, x: i32, y: i32) -> bool {
 }
 
 /// Saved bounds are only worth restoring when their center sits on a display
-/// other than the slides display; anywhere else the restored window would be
-/// hidden behind the fullscreen slides Space or off screen entirely.
+/// that the fullscreen slides Space does not cover; anywhere else the
+/// restored window would be hidden or off screen entirely. With no slides
+/// display (single-display windowed mode) every display is fine.
 fn saved_bounds_visible(
     saved: &SavedWindowBounds,
     displays: &[ChromeDisplay],
-    slides: &ChromeDisplay,
+    slides: Option<&ChromeDisplay>,
 ) -> bool {
     let center_x = saved.x + (saved.width / 2) as i32;
     let center_y = saved.y + (saved.height / 2) as i32;
     displays
         .iter()
-        .any(|display| display != slides && contains_point(display, center_x, center_y))
+        .any(|display| Some(display) != slides && contains_point(display, center_x, center_y))
 }
 
 pub fn plan_presentation_layout(
@@ -133,38 +134,66 @@ pub fn plan_presentation_layout(
     presenter_mode: PresenterMode,
 ) -> Option<PresentationLayout> {
     let primary = displays.iter().find(|display| display.primary)?;
-    let slides = displays.iter().find(|display| !display.primary)?;
+    let slides_display = displays.iter().find(|display| !display.primary);
 
     let presenter_width = 1200_u32.min(primary.width);
     let presenter_height = 800_u32.min(primary.height);
     let presenter_x = primary.x + ((primary.width - presenter_width) / 2) as i32;
     let presenter_y = primary.y + ((primary.height - presenter_height) / 2) as i32;
-
-    let presenter = match presenter_mode {
-        PresenterMode::Fullscreen => WindowPlacement::Fullscreen {
-            x: presenter_x,
-            y: presenter_y,
-        },
-        PresenterMode::Windowed { saved: Some(saved) }
-            if saved_bounds_visible(&saved, displays, slides) =>
-        {
-            WindowPlacement::Restored
-        }
-        PresenterMode::Windowed { .. } => WindowPlacement::Windowed {
-            x: presenter_x,
-            y: presenter_y,
-            width: presenter_width,
-            height: presenter_height,
-        },
+    let presenter_seed = WindowPlacement::Windowed {
+        x: presenter_x,
+        y: presenter_y,
+        width: presenter_width,
+        height: presenter_height,
     };
 
-    Some(PresentationLayout {
-        slides: WindowPlacement::Fullscreen {
-            x: slides.x,
-            y: slides.y,
-        },
-        presenter,
-    })
+    match (slides_display, presenter_mode) {
+        // Two displays: slides go fullscreen on the external one.
+        (Some(slides), mode) => {
+            let presenter = match mode {
+                PresenterMode::Fullscreen => WindowPlacement::Fullscreen {
+                    x: presenter_x,
+                    y: presenter_y,
+                },
+                PresenterMode::Windowed { saved: Some(saved) }
+                    if saved_bounds_visible(&saved, displays, Some(slides)) =>
+                {
+                    WindowPlacement::Restored
+                }
+                PresenterMode::Windowed { .. } => presenter_seed,
+            };
+            Some(PresentationLayout {
+                slides: WindowPlacement::Fullscreen {
+                    x: slides.x,
+                    y: slides.y,
+                },
+                presenter,
+            })
+        }
+        // Single display, presentation mode: no presenter (as before).
+        (None, PresenterMode::Fullscreen) => None,
+        // Single display, debug mode: open both as normal windows so the
+        // presenter can be exercised without a second (virtual) display.
+        // The slides window is seeded top-left; nothing goes fullscreen,
+        // so a saved presenter placement on this display is restorable.
+        (None, PresenterMode::Windowed { saved }) => {
+            let presenter = match saved {
+                Some(saved) if saved_bounds_visible(&saved, displays, None) => {
+                    WindowPlacement::Restored
+                }
+                _ => presenter_seed,
+            };
+            Some(PresentationLayout {
+                slides: WindowPlacement::Windowed {
+                    x: primary.x + 24,
+                    y: primary.y + 48,
+                    width: 960_u32.min(primary.width),
+                    height: 600_u32.min(primary.height),
+                },
+                presenter,
+            })
+        }
+    }
 }
 
 pub fn layout_from_jxa_output(
@@ -385,6 +414,87 @@ mod tests {
         assert_eq!(
             plan_presentation_layout(&displays, PresenterMode::Fullscreen),
             None
+        );
+    }
+
+    fn single_display() -> Vec<ChromeDisplay> {
+        vec![ChromeDisplay {
+            x: 0,
+            y: 0,
+            width: 1512,
+            height: 982,
+            primary: true,
+        }]
+    }
+
+    #[test]
+    fn single_display_windowed_opens_both_as_windows() {
+        let layout =
+            plan_presentation_layout(&single_display(), PresenterMode::Windowed { saved: None })
+                .unwrap();
+
+        assert_eq!(
+            layout.slides,
+            WindowPlacement::Windowed {
+                x: 24,
+                y: 48,
+                width: 960,
+                height: 600,
+            }
+        );
+        assert_eq!(
+            layout.presenter,
+            WindowPlacement::Windowed {
+                x: 156,
+                y: 91,
+                width: 1200,
+                height: 800,
+            }
+        );
+    }
+
+    #[test]
+    fn single_display_windowed_restores_saved_presenter_bounds() {
+        let layout = plan_presentation_layout(
+            &single_display(),
+            PresenterMode::Windowed {
+                saved: Some(SavedWindowBounds {
+                    x: 300,
+                    y: 60,
+                    width: 1180,
+                    height: 800,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(layout.presenter, WindowPlacement::Restored);
+        assert!(matches!(layout.slides, WindowPlacement::Windowed { .. }));
+    }
+
+    #[test]
+    fn single_display_windowed_reseeds_offscreen_saved_bounds() {
+        let layout = plan_presentation_layout(
+            &single_display(),
+            PresenterMode::Windowed {
+                saved: Some(SavedWindowBounds {
+                    x: 9000,
+                    y: 9000,
+                    width: 1200,
+                    height: 800,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.presenter,
+            WindowPlacement::Windowed {
+                x: 156,
+                y: 91,
+                width: 1200,
+                height: 800,
+            }
         );
     }
 
