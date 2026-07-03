@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::{
     domain::{FragmentKind, SlideKey, SourceFragment},
     error::{BuildError, ErrorKind, Result},
-    phase::{Deck, KeySource, LayoutRequest, Parsed, ParsedSlide},
+    phase::{Deck, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime},
 };
 
 /// Page settings comment, deck-style: `<!-- {"key":"...","layout":"..."} -->`.
@@ -24,21 +24,6 @@ struct PageComment {
 #[serde(deny_unknown_fields)]
 struct DeckFrontmatter {
     #[serde(default, deserialize_with = "deserialize_optional_planned_time")]
-    time: Option<PlannedTime>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PlannedTime(u64);
-
-impl PlannedTime {
-    #[allow(dead_code)] // Converted at the future Deck/manifest consumption boundary.
-    fn as_millis(self) -> u64 {
-        self.0
-    }
-}
-
-#[allow(dead_code)] // Carried on Deck in Task 5.
-struct ParsedDeckSettings {
     time: Option<PlannedTime>,
 }
 
@@ -85,7 +70,7 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
         frontmatter,
         ranges,
     } = split_slide_ranges(source)?;
-    let _settings = parse_deck_frontmatter(frontmatter.as_ref())?;
+    let settings = parse_deck_frontmatter(frontmatter.as_ref())?;
     if ranges.is_empty() {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -100,7 +85,7 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
         slides.push(parse_slide(source, range, index)?);
     }
     validate_unique_keys(&slides)?;
-    Ok(Deck::parsed(slides))
+    Ok(Deck::parsed(settings, slides))
 }
 
 fn split_slide_ranges(source: &str) -> Result<SplitSlides> {
@@ -202,9 +187,6 @@ fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
 }
 
 fn minutes_to_millis(minutes: u64) -> std::result::Result<u64, String> {
-    if minutes == 0 {
-        return Err("time must be greater than zero".to_owned());
-    }
     minutes
         .checked_mul(60_000)
         .ok_or_else(|| "time is too large".to_owned())
@@ -213,14 +195,7 @@ fn minutes_to_millis(minutes: u64) -> std::result::Result<u64, String> {
 fn seconds_to_millis(seconds: u64) -> std::result::Result<u64, String> {
     seconds
         .checked_mul(1000)
-        .filter(|millis| *millis > 0)
-        .ok_or_else(|| {
-            if seconds == 0 {
-                "time must be greater than zero".to_owned()
-            } else {
-                "time is too large".to_owned()
-            }
-        })
+        .ok_or_else(|| "time is too large".to_owned())
 }
 
 impl<'de> Deserialize<'de> for PlannedTime {
@@ -241,15 +216,17 @@ impl<'de> Deserialize<'de> for PlannedTime {
             where
                 E: serde::de::Error,
             {
-                minutes_to_millis(value).map(PlannedTime).map_err(E::custom)
+                minutes_to_millis(value)
+                    .and_then(PlannedTime::from_millis)
+                    .map_err(E::custom)
             }
 
             fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                if value <= 0 {
-                    return Err(E::custom("time must be greater than zero"));
+                if value < 0 {
+                    return Err(E::custom("time must not be negative"));
                 }
                 self.visit_u64(value as u64)
             }
@@ -259,7 +236,7 @@ impl<'de> Deserialize<'de> for PlannedTime {
                 E: serde::de::Error,
             {
                 parse_planned_time_text(value)
-                    .map(PlannedTime)
+                    .and_then(PlannedTime::from_millis)
                     .map_err(E::custom)
             }
         }
@@ -268,12 +245,12 @@ impl<'de> Deserialize<'de> for PlannedTime {
     }
 }
 
-fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<ParsedDeckSettings> {
+fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> {
     let Some(raw) = raw else {
-        return Ok(ParsedDeckSettings { time: None });
+        return Ok(DeckSettings::default());
     };
     if raw.yaml.trim().is_empty() {
-        return Ok(ParsedDeckSettings { time: None });
+        return Ok(DeckSettings::default());
     }
     validate_frontmatter_lines(raw)?;
 
@@ -291,7 +268,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<ParsedDeckSett
     let parsed: DeckFrontmatter =
         serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
 
-    Ok(ParsedDeckSettings { time: parsed.time })
+    Ok(DeckSettings::new(parsed.time))
 }
 
 fn first_nonblank_yaml_line(yaml: &str) -> usize {
@@ -353,7 +330,7 @@ fn frontmatter_help(message: &str) -> &'static str {
         "use only the supported deck frontmatter key: time"
     } else if message.contains("time")
         || message.contains("duration")
-        || message.contains("greater than zero")
+        || message.contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE)
         || message.contains("unit")
         || message.contains("integer")
         || message.contains("u128")
@@ -923,7 +900,10 @@ mod tests {
 
         let settings = parse_deck_frontmatter(Some(&raw)).unwrap();
 
-        assert_eq!(settings.time.map(PlannedTime::as_millis), Some(900_000));
+        assert_eq!(
+            settings.planned_time().map(PlannedTime::as_millis),
+            Some(900_000)
+        );
     }
 
     #[test]
@@ -1234,7 +1214,7 @@ After list
 
     #[test]
     fn rejects_invalid_frontmatter_time_with_line_and_help() {
-        for value in ["0", "-1", "abc", ""] {
+        for value in ["0", "0s", "-1", "abc", ""] {
             let markdown = format!("---\ntime: {value}\n---\n# Intro");
             let err = parse_markdown(&markdown).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Parse);
@@ -1259,7 +1239,9 @@ After list
         }
 
         let err = serde_norway::from_str::<DeckFrontmatter>("time: 0\n").unwrap_err();
-        assert!(err.to_string().contains("time must be greater than zero"));
+        assert!(err
+            .to_string()
+            .contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE));
     }
 
     #[test]
@@ -1360,7 +1342,10 @@ After list
         let settings = parse_deck_frontmatter(Some(&raw)).unwrap();
         let deck = parse_markdown("---\ntime: 15m\n\n---\n\n# A").unwrap();
 
-        assert_eq!(settings.time.map(PlannedTime::as_millis), Some(900_000));
+        assert_eq!(
+            settings.planned_time().map(PlannedTime::as_millis),
+            Some(900_000)
+        );
         assert_eq!(deck.parsed_slides().len(), 1);
         assert_eq!(deck.parsed_slides()[0].key.as_str(), "a");
     }

@@ -19,15 +19,16 @@ use crate::{
 ///    exactly one structural match is required — none or several are build
 ///    errors that name the candidates and how to disambiguate
 pub fn dispatch_by_convention(deck: Deck<Parsed>, layouts: &Layouts) -> Result<Deck<Mapped>> {
+    let (settings, parsed_slides) = deck.into_parsed_parts();
     let mut slides = Vec::new();
-    for slide in deck.into_parsed_slides() {
+    for slide in parsed_slides {
         let slide_number = slide.index + 1;
         let slide_key = slide.key.as_str().to_owned();
         let mapped = dispatch_slide(slide, layouts)
             .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         slides.push(mapped);
     }
-    Ok(Deck::mapped(slides))
+    Ok(Deck::mapped(settings, slides))
 }
 
 /// Single-layout convenience.
