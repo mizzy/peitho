@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::SlideKey,
     error::{BuildError, ErrorKind, Result},
-    phase::{Checked, CheckedSlide, Deck},
+    phase::{Checked, CheckedSlide, Deck, PlannedTime},
 };
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -19,6 +19,9 @@ pub struct Manifest {
     title: String,
     #[serde(rename = "slideCount")]
     slide_count: usize,
+    #[serde(rename = "plannedDurationMs")]
+    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "number | null"))]
+    planned_duration_ms: Option<u64>,
     slides: Vec<ManifestSlide>,
 }
 
@@ -65,19 +68,28 @@ impl ManifestSlide {
 }
 
 impl Manifest {
-    pub fn new(title: impl Into<String>, slides: Vec<ManifestSlide>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        planned_duration_ms: Option<u64>,
+        slides: Vec<ManifestSlide>,
+    ) -> Self {
         let slide_count = slides.len();
         Self {
             version: 1,
             peitho_version: env!("CARGO_PKG_VERSION").to_owned(),
             title: title.into(),
             slide_count,
+            planned_duration_ms,
             slides,
         }
     }
 
     pub fn slide_count(&self) -> usize {
         self.slide_count
+    }
+
+    pub fn planned_duration_ms(&self) -> Option<u64> {
+        self.planned_duration_ms
     }
 
     pub fn slides(&self) -> &[ManifestSlide] {
@@ -119,7 +131,11 @@ pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
         })
         .collect();
 
-    Manifest::new(title, slides)
+    Manifest::new(
+        title,
+        deck.settings().planned_time().map(PlannedTime::as_millis),
+        slides,
+    )
 }
 
 pub fn fragment_src(index: usize, key: &SlideKey) -> String {
@@ -141,6 +157,7 @@ mod tests {
     fn serializes_manifest_schema_exactly() {
         let manifest = Manifest::new(
             "Peitho Architecture",
+            None,
             vec![
                 ManifestSlide::new(
                     0,
@@ -169,6 +186,7 @@ mod tests {
                 "\",\n",
                 "  \"title\": \"Peitho Architecture\",\n",
                 "  \"slideCount\": 2,\n",
+                "  \"plannedDurationMs\": null,\n",
                 "  \"slides\": [\n",
                 "    {\n",
                 "      \"index\": 0,\n",
@@ -206,7 +224,96 @@ mod tests {
     }
 
     #[test]
+    fn manifest_serializes_planned_duration_ms() {
+        let manifest = Manifest::new(
+            "Deck",
+            Some(900_000),
+            vec![ManifestSlide::new(
+                0,
+                SlideKey::new("intro").unwrap(),
+                "slides/000-intro.html",
+                false,
+            )],
+        );
+
+        let json = manifest_json(&manifest).unwrap();
+
+        assert!(json.contains(r#""plannedDurationMs": 900000"#));
+    }
+
+    #[test]
+    fn build_manifest_reads_planned_duration_from_checked_deck() {
+        let checked = checked_deck("---\ntime: 15m\n---\n# Intro", title_body_layout());
+        let manifest = build_manifest(&checked);
+
+        assert_eq!(manifest.planned_duration_ms(), Some(900_000));
+    }
+
+    #[test]
+    fn build_manifest_serializes_null_planned_duration_without_frontmatter() {
+        let checked = checked_deck("# Intro", title_body_layout());
+        let manifest = build_manifest(&checked);
+        let json = manifest_json(&manifest).unwrap();
+
+        assert_eq!(manifest.planned_duration_ms(), None);
+        assert!(json.contains(r#""plannedDurationMs": null"#));
+    }
+
+    #[test]
     fn deserializes_manifest_schema_for_publish_validation() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"arch-1\",\n",
+            "      \"src\": \"slides/000-arch-1.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.slide_count(), 1);
+        assert_eq!(manifest.planned_duration_ms(), None);
+        assert_eq!(manifest.slides()[0].src(), "slides/000-arch-1.html");
+        assert_eq!(manifest.slides()[0].key().as_str(), "arch-1");
+    }
+
+    #[test]
+    fn deserializes_numeric_planned_duration_for_publish_validation() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": 900000,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"arch-1\",\n",
+            "      \"src\": \"slides/000-arch-1.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.planned_duration_ms(), Some(900_000));
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_planned_duration_as_none_for_additive_compatibility() {
         let json = concat!(
             "{\n",
             "  \"version\": 1,\n",
@@ -226,9 +333,7 @@ mod tests {
 
         let manifest: Manifest = serde_json::from_str(json).unwrap();
 
-        assert_eq!(manifest.slide_count(), 1);
-        assert_eq!(manifest.slides()[0].src(), "slides/000-arch-1.html");
-        assert_eq!(manifest.slides()[0].key().as_str(), "arch-1");
+        assert_eq!(manifest.planned_duration_ms(), None);
     }
 
     #[test]
@@ -293,6 +398,7 @@ mod ts_tests {
 
         assert!(manifest.contains("peithoVersion: string"));
         assert!(manifest.contains("slideCount: number"));
+        assert!(manifest.contains("plannedDurationMs: number | null"));
         assert!(manifest.contains("slides: Array<ManifestSlide>"));
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));

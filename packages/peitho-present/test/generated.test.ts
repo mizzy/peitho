@@ -32,6 +32,7 @@ describe("generated manifest contract", () => {
       peithoVersion: "0.1.0",
       title: "Demo",
       slideCount: 1,
+      plannedDurationMs: null,
       slides: [
         {
           index: 0,

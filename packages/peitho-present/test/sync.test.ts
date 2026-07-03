@@ -21,6 +21,7 @@ const manifest = {
   peithoVersion: "0.1.0",
   title: "Demo",
   slideCount: 2,
+  plannedDurationMs: null,
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
     { index: 1, key: "arch-1", src: "slides/001-arch-1.html", hasNotes: false }
