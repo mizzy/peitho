@@ -21,4 +21,4 @@ pub use phase::{require_checked_for_render, Deck, Mapped, Rendered};
 pub use render::{
     render_deck, render_distribution_index, render_present_index, render_presenter_index,
 };
-pub use theme::build_theme_css;
+pub use theme::{build_theme_css, CssFile};

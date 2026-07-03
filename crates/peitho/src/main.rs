@@ -24,26 +24,46 @@ struct BuildArtifacts {
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
-    layouts: Vec<PathBuf>,
-    base_css: Option<PathBuf>,
-    overrides_css: Option<PathBuf>,
+    layouts: Option<PathBuf>,
+    css: Option<PathBuf>,
     out: PathBuf,
 }
 
 impl BuildOptions {
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        std::iter::once(&self.input)
-            .chain(self.layouts.iter())
-            .chain(self.base_css.iter())
-            .chain(self.overrides_css.iter())
-            .cloned()
-            .collect()
+    /// The deck file plus the --layouts/--css paths. Each asset path may be
+    /// a single file or a directory whose *.html / *.css files are watched.
+    fn watch_roots(&self) -> Vec<(PathBuf, &'static str)> {
+        let mut roots = vec![(self.input.clone(), "md")];
+        if let Some(path) = &self.layouts {
+            roots.push((path.clone(), "html"));
+        }
+        if let Some(path) = &self.css {
+            roots.push((path.clone(), "css"));
+        }
+        roots
+    }
+
+    fn is_relevant_change(&self, changed: &Path) -> bool {
+        self.watch_roots().iter().any(|(root, ext)| {
+            if same_watch_path(root, changed) {
+                return true;
+            }
+            root.is_dir()
+                && changed.extension().and_then(|e| e.to_str()) == Some(ext)
+                && changed
+                    .parent()
+                    .is_some_and(|parent| same_watch_path(root, parent))
+        })
     }
 
     fn watch_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
-        for path in self.watch_paths() {
-            let dir = parent_dir_for_watch(&path);
+        for (root, _ext) in self.watch_roots() {
+            let dir = if root.is_dir() {
+                root
+            } else {
+                parent_dir_for_watch(&root)
+            };
             if !dirs.iter().any(|existing| same_watch_path(existing, &dir)) {
                 dirs.push(dir);
             }
@@ -54,9 +74,8 @@ impl BuildOptions {
 
 struct PresentOptions {
     input: PathBuf,
-    layouts: Vec<PathBuf>,
-    base_css: Option<PathBuf>,
-    overrides_css: Option<PathBuf>,
+    layouts: Option<PathBuf>,
+    css: Option<PathBuf>,
     shell: Option<PathBuf>,
     port: u16,
     no_open: bool,
@@ -78,14 +97,15 @@ enum Command {
     Build {
         input: PathBuf,
         #[arg(
-            long = "layout",
-            help = "layout HTML path, repeatable (default: built-in title-body-code)"
+            long,
+            help = "layout HTML file or directory of *.html (default: built-in title-body-code)"
         )]
-        layouts: Vec<PathBuf>,
-        #[arg(long, help = "base CSS path (default: built-in base theme)")]
-        base_css: Option<PathBuf>,
-        #[arg(long, help = "overrides CSS path (default: no overrides)")]
-        overrides_css: Option<PathBuf>,
+        layouts: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "CSS file or directory of *.css, concatenated in filename order (default: built-in base theme)"
+        )]
+        css: Option<PathBuf>,
         #[arg(long, default_value = "dist")]
         out: PathBuf,
         #[arg(long)]
@@ -94,14 +114,15 @@ enum Command {
     Present {
         input: PathBuf,
         #[arg(
-            long = "layout",
-            help = "layout HTML path, repeatable (default: built-in title-body-code)"
+            long,
+            help = "layout HTML file or directory of *.html (default: built-in title-body-code)"
         )]
-        layouts: Vec<PathBuf>,
-        #[arg(long, help = "base CSS path (default: built-in base theme)")]
-        base_css: Option<PathBuf>,
-        #[arg(long, help = "overrides CSS path (default: no overrides)")]
-        overrides_css: Option<PathBuf>,
+        layouts: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "CSS file or directory of *.css, concatenated in filename order (default: built-in base theme)"
+        )]
+        css: Option<PathBuf>,
         #[arg(long, help = "shell bundle path (default: built-in present shell)")]
         shell: Option<PathBuf>,
         #[arg(long, default_value_t = 0)]
@@ -144,16 +165,14 @@ fn main() -> miette::Result<()> {
         Command::Build {
             input,
             layouts,
-            base_css,
-            overrides_css,
+            css,
             out,
             watch,
         } => {
             let options = BuildOptions {
                 input,
                 layouts,
-                base_css,
-                overrides_css,
+                css,
                 out,
             };
             if watch {
@@ -165,8 +184,7 @@ fn main() -> miette::Result<()> {
         Command::Present {
             input,
             layouts,
-            base_css,
-            overrides_css,
+            css,
             shell,
             port,
             no_open,
@@ -176,8 +194,7 @@ fn main() -> miette::Result<()> {
         } => present(PresentOptions {
             input,
             layouts,
-            base_css,
-            overrides_css,
+            css,
             shell,
             port,
             no_open,
@@ -198,9 +215,8 @@ fn main() -> miette::Result<()> {
 fn build(options: &BuildOptions) -> miette::Result<()> {
     let artifacts = build_artifacts(
         &options.input,
-        &options.layouts,
-        options.base_css.as_deref(),
-        options.overrides_css.as_deref(),
+        options.layouts.as_deref(),
+        options.css.as_deref(),
     )?;
     emit_distribution(&options.out, &artifacts)?;
     println!(
@@ -218,9 +234,8 @@ fn rebuild_once_for_watch(
 ) -> miette::Result<()> {
     match build_artifacts(
         &options.input,
-        &options.layouts,
-        options.base_css.as_deref(),
-        options.overrides_css.as_deref(),
+        options.layouts.as_deref(),
+        options.css.as_deref(),
     ) {
         Ok(artifacts) => match emit_distribution(&options.out, &artifacts) {
             Ok(()) => {
@@ -253,10 +268,9 @@ fn handle_watch_paths(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> miette::Result<()> {
-    let watched = options.watch_paths();
     let relevant = changed_paths
         .iter()
-        .any(|changed| watched.iter().any(|path| same_watch_path(path, changed)));
+        .any(|changed| options.is_relevant_change(changed));
 
     if relevant {
         rebuild_once_for_watch(options, stdout, stderr)?;
@@ -331,38 +345,80 @@ fn same_watch_path(left: &Path, right: &Path) -> bool {
         }
 }
 
-fn load_layouts(layout_paths: &[PathBuf]) -> miette::Result<peitho_core::Layouts> {
-    if layout_paths.is_empty() {
+/// Resolve a --layouts/--css argument to concrete files: a file stands for
+/// itself, a directory contributes its `*.{ext}` files in filename order
+/// (deterministic — this is also the dispatch probe order and the CSS
+/// cascade order).
+fn collect_asset_files(path: &Path, ext: &str) -> miette::Result<Vec<PathBuf>> {
+    let metadata = fs::metadata(path).map_err(|err| {
+        miette::miette!(
+            "cannot read {}\nhelp: pass a .{ext} file or a directory containing them\ncaused by: {err}",
+            path.display()
+        )
+    })?;
+    if metadata.is_file() {
+        return Ok(vec![path.to_owned()]);
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(path)
+        .into_diagnostic()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some(ext))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(miette::miette!(
+            "no *.{ext} files in {}\nhelp: add at least one .{ext} file to the directory",
+            path.display()
+        ));
+    }
+    Ok(files)
+}
+
+fn load_layouts(layouts_path: Option<&Path>) -> miette::Result<peitho_core::Layouts> {
+    let Some(path) = layouts_path else {
         let layout = core(peitho_core::parse_layout(
             BUILTIN_LAYOUT_NAME,
             BUILTIN_LAYOUT_HTML,
         ))?;
         return core(peitho_core::Layouts::new(vec![layout]));
-    }
+    };
     let mut layouts = Vec::new();
-    for path in layout_paths {
-        let html = fs::read_to_string(path).into_diagnostic()?;
-        layouts.push(core(peitho_core::parse_layout(layout_name(path), &html))?);
+    for file in collect_asset_files(path, "html")? {
+        let html = fs::read_to_string(&file).into_diagnostic()?;
+        layouts.push(core(peitho_core::parse_layout(layout_name(&file), &html))?);
     }
     core(peitho_core::Layouts::new(layouts))
 }
 
+fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>> {
+    let Some(path) = css_path else {
+        return Ok(vec![peitho_core::CssFile {
+            name: "base.css (built-in)".to_owned(),
+            content: BUILTIN_BASE_CSS.to_owned(),
+        }]);
+    };
+    let mut files = Vec::new();
+    for file in collect_asset_files(path, "css")? {
+        files.push(peitho_core::CssFile {
+            name: file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.display().to_string()),
+            content: fs::read_to_string(&file).into_diagnostic()?,
+        });
+    }
+    Ok(files)
+}
+
 fn build_artifacts(
     input: &Path,
-    layout_paths: &[PathBuf],
-    base_path: Option<&Path>,
-    overrides_path: Option<&Path>,
+    layouts_path: Option<&Path>,
+    css_path: Option<&Path>,
 ) -> miette::Result<BuildArtifacts> {
     let markdown = fs::read_to_string(input).into_diagnostic()?;
-    let layouts = load_layouts(layout_paths)?;
-    let base_css = match base_path {
-        Some(path) => fs::read_to_string(path).into_diagnostic()?,
-        None => BUILTIN_BASE_CSS.to_owned(),
-    };
-    let overrides_css = match overrides_path {
-        Some(path) => fs::read_to_string(path).into_diagnostic()?,
-        None => String::new(),
-    };
+    let layouts = load_layouts(layouts_path)?;
+    let css_files = load_css(css_path)?;
     let parsed = core(peitho_core::parse_markdown(&markdown))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
@@ -370,9 +426,9 @@ fn build_artifacts(
     let manifest = peitho_core::build_manifest(&checked);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
     let css = core(peitho_core::build_theme_css(
-        &base_css,
-        &overrides_css,
+        &css_files,
         &checked.slide_slot_classes(),
+        &layouts.slot_classes(),
     ))?;
     let rendered = core(peitho_core::render_deck(checked))?;
 
@@ -565,9 +621,8 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 
     let artifacts = build_artifacts(
         &options.input,
-        &options.layouts,
-        options.base_css.as_deref(),
-        options.overrides_css.as_deref(),
+        options.layouts.as_deref(),
+        options.css.as_deref(),
     )?;
     emit_present_cache(&cache, &artifacts, options.shell.as_deref())?;
     if options.no_serve {
@@ -694,37 +749,42 @@ mod tests {
     }
 
     #[test]
-    fn build_options_lists_watched_input_paths() {
+    fn watch_covers_asset_dir_contents_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
         let options = BuildOptions {
-            input: PathBuf::from("deck.md"),
-            layouts: vec![PathBuf::from("layout.html")],
-            base_css: Some(PathBuf::from("base.css")),
-            overrides_css: Some(PathBuf::from("overrides.css")),
-            out: PathBuf::from("dist"),
+            input: dir.path().join("deck.md"),
+            layouts: Some(layouts.clone()),
+            css: Some(css.clone()),
+            out: dir.path().join("dist"),
         };
 
-        assert_eq!(
-            options.watch_paths(),
-            [
-                PathBuf::from("deck.md"),
-                PathBuf::from("layout.html"),
-                PathBuf::from("base.css"),
-                PathBuf::from("overrides.css"),
-            ]
-        );
+        assert!(options.is_relevant_change(&dir.path().join("deck.md")));
+        assert!(options.is_relevant_change(&layouts.join("cover.html")));
+        assert!(options.is_relevant_change(&css.join("base.css")));
+        assert!(!options.is_relevant_change(&layouts.join("notes.txt")));
+        assert!(!options.is_relevant_change(&dir.path().join("other.md")));
+
+        let dirs = options.watch_dirs();
+        assert!(dirs.iter().any(|d| d == &layouts));
+        assert!(dirs.iter().any(|d| d == &css));
+        assert!(dirs.iter().any(|d| d == dir.path()));
     }
 
     #[test]
     fn build_options_with_builtin_assets_watch_only_the_deck() {
         let options = BuildOptions {
             input: PathBuf::from("deck.md"),
-            layouts: Vec::new(),
-            base_css: None,
-            overrides_css: None,
+            layouts: None,
+            css: None,
             out: PathBuf::from("dist"),
         };
 
-        assert_eq!(options.watch_paths(), [PathBuf::from("deck.md")]);
+        assert!(options.is_relevant_change(Path::new("deck.md")));
+        assert!(!options.is_relevant_change(Path::new("layout.html")));
     }
 
     #[test]
@@ -733,10 +793,35 @@ mod tests {
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n\nBody\n\n```rust\nfn main() {}\n```\n").unwrap();
 
-        let artifacts = build_artifacts(&deck, &[], None, None).unwrap();
+        let artifacts = build_artifacts(&deck, None, None).unwrap();
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts.css.contains("width: 1280px;"));
+    }
+
+    #[test]
+    fn collect_asset_files_sorts_directory_entries_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("b.css"), "").unwrap();
+        fs::write(dir.path().join("a.css"), "").unwrap();
+        fs::write(dir.path().join("ignore.txt"), "").unwrap();
+
+        let files = collect_asset_files(dir.path(), "css").unwrap();
+
+        assert_eq!(
+            files,
+            vec![dir.path().join("a.css"), dir.path().join("b.css")]
+        );
+    }
+
+    #[test]
+    fn collect_asset_files_rejects_directory_without_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("ignore.txt"), "").unwrap();
+
+        let err = collect_asset_files(dir.path(), "html").unwrap_err();
+
+        assert!(err.to_string().contains("no *.html files"));
     }
 
     #[test]
@@ -744,9 +829,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let options = BuildOptions {
             input: dir.path().join("deck.md"),
-            layouts: vec![dir.path().join("title-body-code.html")],
-            base_css: Some(dir.path().join("base.css")),
-            overrides_css: Some(dir.path().join("overrides.css")),
+            layouts: Some(dir.path().join("title-body-code.html")),
+            css: Some(dir.path().join("base.css")),
             out: dir.path().join("dist"),
         };
 
@@ -932,15 +1016,9 @@ mod tests {
         let cli = Cli::parse_from(["peitho", "build", "deck.md"]);
 
         match cli.command {
-            Command::Build {
-                layouts,
-                base_css,
-                overrides_css,
-                ..
-            } => {
-                assert!(layouts.is_empty());
-                assert_eq!(base_css, None);
-                assert_eq!(overrides_css, None);
+            Command::Build { layouts, css, .. } => {
+                assert_eq!(layouts, None);
+                assert_eq!(css, None);
             }
             Command::Present { .. } | Command::Publish { .. } => {
                 panic!("expected build command");
@@ -957,27 +1035,26 @@ mod tests {
         fn new(markdown: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let deck = dir.path().join("deck.md");
-            let layout = dir.path().join("title-body-code.html");
-            let base = dir.path().join("base.css");
-            let overrides = dir.path().join("overrides.css");
+            let layouts = dir.path().join("layouts");
+            let css = dir.path().join("css");
             let out = dir.path().join("dist");
 
             fs::write(&deck, markdown).unwrap();
+            fs::create_dir_all(&layouts).unwrap();
+            fs::create_dir_all(&css).unwrap();
             fs::write(
-                &layout,
+                layouts.join("title-body-code.html"),
                 r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
             )
             .unwrap();
-            fs::write(&base, ".slot-title { font-weight: 700; }\n").unwrap();
-            fs::write(&overrides, "").unwrap();
+            fs::write(css.join("base.css"), ".slot-title { font-weight: 700; }\n").unwrap();
 
             Self {
                 _dir: dir,
                 options: BuildOptions {
                     input: deck,
-                    layouts: vec![layout],
-                    base_css: Some(base),
-                    overrides_css: Some(overrides),
+                    layouts: Some(layouts),
+                    css: Some(css),
                     out,
                 },
             }

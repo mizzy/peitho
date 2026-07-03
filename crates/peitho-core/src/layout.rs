@@ -93,6 +93,15 @@ impl Layouts {
     pub fn names(&self) -> Vec<&str> {
         self.layouts.iter().map(Layout::name).collect()
     }
+
+    /// Slot class names across all provided layouts; bare `.slot-*`
+    /// selectors in theme CSS are validated against this union.
+    pub fn slot_classes(&self) -> std::collections::BTreeSet<String> {
+        self.layouts
+            .iter()
+            .flat_map(|layout| layout.slots().keys().map(SlotName::class_name))
+            .collect()
+    }
 }
 
 pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {

@@ -409,12 +409,10 @@ fn repository_example_present_no_serve_smoke() {
         .args([
             "present",
             "examples/deck.md",
-            "--layout",
+            "--layouts",
             "layouts/title-body-code.html",
-            "--base-css",
+            "--css",
             "themes/base.css",
-            "--overrides-css",
-            "themes/overrides.css",
             "--no-serve",
             "--no-open",
         ])
@@ -460,16 +458,15 @@ fn repository_example_present_no_serve_smoke() {
 struct Fixture {
     deck: std::path::PathBuf,
     layout: std::path::PathBuf,
-    base: std::path::PathBuf,
-    overrides: std::path::PathBuf,
+    css_dir: std::path::PathBuf,
 }
 
 impl Fixture {
     fn write(root: &std::path::Path) -> Self {
         let deck = root.join("deck.md");
         let layout = root.join("layout.html");
-        let base = root.join("base.css");
-        let overrides = root.join("overrides.css");
+        let css_dir = root.join("css");
+        fs::create_dir_all(&css_dir).unwrap();
         fs::write(
             &deck,
             "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody",
@@ -480,17 +477,16 @@ impl Fixture {
             r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
         )
         .unwrap();
-        fs::write(&base, ".slot-title { color: red; }").unwrap();
+        fs::write(css_dir.join("base.css"), ".slot-title { color: red; }").unwrap();
         fs::write(
-            &overrides,
+            css_dir.join("overrides.css"),
             r#"[data-slide-key="arch-1"] .slot-title { color: blue; }"#,
         )
         .unwrap();
         Self {
             deck,
             layout,
-            base,
-            overrides,
+            css_dir,
         }
     }
 
@@ -505,12 +501,10 @@ impl Fixture {
         vec![
             OsString::from("present"),
             self.deck.as_os_str().to_owned(),
-            OsString::from("--layout"),
+            OsString::from("--layouts"),
             self.layout.as_os_str().to_owned(),
-            OsString::from("--base-css"),
-            self.base.as_os_str().to_owned(),
-            OsString::from("--overrides-css"),
-            self.overrides.as_os_str().to_owned(),
+            OsString::from("--css"),
+            self.css_dir.as_os_str().to_owned(),
         ]
     }
 }
