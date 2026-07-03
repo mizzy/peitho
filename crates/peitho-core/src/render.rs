@@ -387,7 +387,7 @@ pub fn render_presenter_index() -> String {
     html, body { margin: 0; width: 100%; min-height: 100%; background: #111; color: #f5f5f5; }
     body { font: 14px system-ui, sans-serif; }
     #peitho-presenter-root { min-height: 100vh; }
-    .peitho-presenter { display: grid; grid-layout-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
+    .peitho-presenter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
     .peitho-presenter-pane { position: relative; overflow: hidden; background: #000; min-height: 180px; }
     [data-peitho-presenter="current"] { min-height: calc(100vh - 32px); }
     [data-peitho-presenter="preview"] { aspect-ratio: 16 / 9; }
@@ -672,6 +672,8 @@ mod tests {
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
         assert!(html.contains(r#"data-peitho-action="close""#));
         assert!(html.contains(".peitho-presenter-pane"));
+        assert!(html.contains("grid-template-columns"));
+        assert!(!html.contains("grid-layout-columns"));
         assert!(html.contains("overflow: hidden"));
         assert!(html.contains("Failed to load"));
         assert!(!html.contains("fetchOk(slide.src)"));
