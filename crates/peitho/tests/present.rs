@@ -409,8 +409,8 @@ fn repository_example_present_no_serve_smoke() {
         .args([
             "present",
             "examples/deck.md",
-            "--template",
-            "templates/title-body-code.html",
+            "--layout",
+            "layouts/title-body-code.html",
             "--base-css",
             "themes/base.css",
             "--overrides-css",
@@ -459,7 +459,7 @@ fn repository_example_present_no_serve_smoke() {
 
 struct Fixture {
     deck: std::path::PathBuf,
-    template: std::path::PathBuf,
+    layout: std::path::PathBuf,
     base: std::path::PathBuf,
     overrides: std::path::PathBuf,
 }
@@ -467,7 +467,7 @@ struct Fixture {
 impl Fixture {
     fn write(root: &std::path::Path) -> Self {
         let deck = root.join("deck.md");
-        let template = root.join("template.html");
+        let layout = root.join("layout.html");
         let base = root.join("base.css");
         let overrides = root.join("overrides.css");
         fs::write(
@@ -476,7 +476,7 @@ impl Fixture {
         )
         .unwrap();
         fs::write(
-            &template,
+            &layout,
             r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
         )
         .unwrap();
@@ -488,7 +488,7 @@ impl Fixture {
         .unwrap();
         Self {
             deck,
-            template,
+            layout,
             base,
             overrides,
         }
@@ -505,8 +505,8 @@ impl Fixture {
         vec![
             OsString::from("present"),
             self.deck.as_os_str().to_owned(),
-            OsString::from("--template"),
-            self.template.as_os_str().to_owned(),
+            OsString::from("--layout"),
+            self.layout.as_os_str().to_owned(),
             OsString::from("--base-css"),
             self.base.as_os_str().to_owned(),
             OsString::from("--overrides-css"),

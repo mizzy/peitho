@@ -3,19 +3,19 @@ use std::collections::BTreeSet;
 use crate::{
     domain::{SlideKey, SlotName},
     error::{BuildError, ErrorKind, Result},
-    template::Template,
+    layout::Layout,
 };
 
 pub fn build_theme_css<'a>(
     base_css: &str,
     overrides_css: &str,
     slide_keys: impl Iterator<Item = &'a SlideKey>,
-    template: &Template,
+    layout: &Layout,
 ) -> Result<String> {
     let known_keys = slide_keys
         .map(|key| key.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    validate_override_selectors(overrides_css, &known_keys, template)?;
+    validate_override_selectors(overrides_css, &known_keys, layout)?;
     Ok(format!(
         "{}\n\n{}",
         base_css.trim_end(),
@@ -53,10 +53,10 @@ fn strip_css_comments(css: &str) -> String {
 fn validate_override_selectors(
     css: &str,
     known_keys: &BTreeSet<String>,
-    template: &Template,
+    layout: &Layout,
 ) -> Result<()> {
     let css = &strip_css_comments(css);
-    let known_slots = template
+    let known_slots = layout
         .slots()
         .keys()
         .map(SlotName::class_name)
@@ -207,12 +207,12 @@ mod tests {
     use crate::{
         domain::{SlideKey, SlotName},
         error::ErrorKind,
-        template::parse_template,
+        layout::parse_layout,
     };
 
     #[test]
     fn appends_valid_override_after_base_css() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title-body-code",
             r#"<section>
                <slot name="title" accepts="inline" arity="1"></slot>
@@ -225,7 +225,7 @@ mod tests {
             ".slot-code { color: black; }",
             r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap();
 
@@ -233,14 +233,12 @@ mod tests {
         assert!(
             css.ends_with(r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#)
         );
-        assert!(template
-            .slots()
-            .contains_key(&SlotName::new("code").unwrap()));
+        assert!(layout.slots().contains_key(&SlotName::new("code").unwrap()));
     }
 
     #[test]
     fn ignores_selectors_inside_css_comments() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -251,7 +249,7 @@ mod tests {
             "",
             "/* example: [data-slide-key=\"...\"] .slot-nope { } */\n/* spans\n[data-slide-key=\"also-ignored\"] .slot-ghost { }\nlines */\n[data-slide-key=\"arch-1\"] .slot-title { color: red; }",
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap();
 
@@ -260,7 +258,7 @@ mod tests {
 
     #[test]
     fn reports_correct_line_number_after_multiline_comment() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -271,7 +269,7 @@ mod tests {
             "",
             "/* comment\nstill comment */\n[data-slide-key=\"missing\"] .slot-title { color: red; }",
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 
@@ -280,7 +278,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_slide_key_in_override_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -291,7 +289,7 @@ mod tests {
             "",
             r#"[data-slide-key="missing"] .slot-title { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 
@@ -303,7 +301,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_single_quoted_slide_key_in_override_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -314,7 +312,7 @@ mod tests {
             "",
             r#"[data-slide-key='missing'] .slot-title { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 
@@ -326,7 +324,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_unquoted_slide_key_in_override_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -337,7 +335,7 @@ mod tests {
             "",
             r#"[data-slide-key=missing] .slot-title { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 
@@ -349,7 +347,7 @@ mod tests {
 
     #[test]
     fn accepts_known_single_quoted_slide_key_in_override_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -360,7 +358,7 @@ mod tests {
             ".slot-title { color: black; }",
             r#"[data-slide-key='arch-1'] .slot-title { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap();
 
@@ -369,7 +367,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_slide_key_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -380,7 +378,7 @@ mod tests {
             "",
             r#"[data-slide-key='arch-1' .slot-title { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 
@@ -391,7 +389,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_slot_class_in_override_selector() {
-        let template = parse_template(
+        let layout = parse_layout(
             "title",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
@@ -402,7 +400,7 @@ mod tests {
             "",
             r#"[data-slide-key="arch-1"] .slot-code { color: red; }"#,
             keys.iter(),
-            &template,
+            &layout,
         )
         .unwrap_err();
 

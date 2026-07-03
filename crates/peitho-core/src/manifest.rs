@@ -132,9 +132,9 @@ mod tests {
     use crate::{
         check::check_deck,
         domain::SlideKey,
+        layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::parse_markdown,
-        template::{parse_template, Template},
     };
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
     fn builds_manifest_from_checked_deck() {
         let checked = checked_deck(
             "<!-- {\"key\":\"arch-1\"} -->\n# Peitho Architecture\n\n---\n# Details",
-            title_body_template(),
+            title_body_layout(),
         );
 
         let manifest = build_manifest(&checked);
@@ -257,19 +257,16 @@ mod tests {
             .contains("slide key must use lowercase ascii"));
     }
 
-    fn checked_deck(
-        markdown: &str,
-        template: Template,
-    ) -> crate::phase::Deck<crate::phase::Checked> {
+    fn checked_deck(markdown: &str, layout: Layout) -> crate::phase::Deck<crate::phase::Checked> {
         check_deck(
-            map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap(),
-            &template,
+            map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap(),
+            &layout,
         )
         .unwrap()
     }
 
-    fn title_body_template() -> Template {
-        parse_template(
+    fn title_body_layout() -> Layout {
+        parse_layout(
             "title-body",
             r#"<section>
                <slot name="title" accepts="inline" arity="1"></slot>

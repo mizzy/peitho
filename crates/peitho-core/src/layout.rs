@@ -8,13 +8,13 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Template {
+pub struct Layout {
     name: String,
     html: String,
     slots: BTreeMap<SlotName, SlotContract>,
 }
 
-impl Template {
+impl Layout {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -38,7 +38,7 @@ impl Template {
     }
 }
 
-pub fn parse_template(name: impl Into<String>, html: &str) -> Result<Template> {
+pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
     let slots = Rc::new(RefCell::new(BTreeMap::new()));
     let sink = slots.clone();
     let section_count = Rc::new(RefCell::new(0usize));
@@ -56,7 +56,7 @@ pub fn parse_template(name: impl Into<String>, html: &str) -> Result<Template> {
                     let mut slots = sink.borrow_mut();
                     if slots.contains_key(&key) {
                         return Err(box_build_error(BuildError::new(
-                            ErrorKind::Template,
+                            ErrorKind::Layout,
                             None,
                             format!("duplicate slot '{}'", key.as_str()),
                             "rename one slot so every slot contract has a unique name",
@@ -72,20 +72,20 @@ pub fn parse_template(name: impl Into<String>, html: &str) -> Result<Template> {
     );
     rewriter
         .write(html.as_bytes())
-        .map_err(template_parse_error)?;
-    rewriter.end().map_err(template_parse_error)?;
+        .map_err(layout_parse_error)?;
+    rewriter.end().map_err(layout_parse_error)?;
 
     let section_count = Rc::try_unwrap(section_count).unwrap().into_inner();
     if section_count != 1 {
         return Err(BuildError::new(
-            ErrorKind::Template,
+            ErrorKind::Layout,
             None,
-            format!("template must contain exactly one <section>, found {section_count}"),
-            "wrap each slide template in one slide host <section> element",
+            format!("layout must contain exactly one <section>, found {section_count}"),
+            "wrap each slide layout in one slide host <section> element",
         ));
     }
 
-    Ok(Template {
+    Ok(Layout {
         name: name.into(),
         html: html.to_owned(),
         slots: Rc::try_unwrap(slots).unwrap().into_inner(),
@@ -99,11 +99,11 @@ impl SlotContract {
         let raw_arity = required_attr(el, "arity")?;
         Ok(Self {
             name: SlotName::new(raw_name).map_err(|message| {
-                BuildError::new(ErrorKind::Template, None, message, "rename the slot")
+                BuildError::new(ErrorKind::Layout, None, message, "rename the slot")
             })?,
             accepts: raw_accepts.parse::<Accepts>().map_err(|message| {
                 BuildError::new(
-                    ErrorKind::Template,
+                    ErrorKind::Layout,
                     None,
                     message,
                     "use one of inline, blocks, text, code, image, list",
@@ -111,7 +111,7 @@ impl SlotContract {
             })?,
             arity: raw_arity.parse::<Arity>().map_err(|message| {
                 BuildError::new(
-                    ErrorKind::Template,
+                    ErrorKind::Layout,
                     None,
                     message,
                     "use one of 1, 0..1, 1..*, 0..*",
@@ -124,7 +124,7 @@ impl SlotContract {
 fn required_attr(el: &lol_html::html_content::Element<'_, '_>, name: &str) -> Result<String> {
     el.get_attribute(name).ok_or_else(|| {
         BuildError::new(
-            ErrorKind::Template,
+            ErrorKind::Layout,
             None,
             format!("slot is missing '{name}'"),
             r#"write <slot name="title" accepts="inline" arity="1"></slot>"#,
@@ -136,22 +136,22 @@ fn box_build_error(err: BuildError) -> Box<dyn Error + Send + Sync> {
     Box::new(err)
 }
 
-fn template_parse_error(err: RewritingError) -> BuildError {
+fn layout_parse_error(err: RewritingError) -> BuildError {
     match err {
         RewritingError::ContentHandlerError(inner) => match inner.downcast::<BuildError>() {
             Ok(build_error) => *build_error,
             Err(inner) => BuildError::new(
-                ErrorKind::Template,
+                ErrorKind::Layout,
                 None,
-                format!("template content handler failed: {inner}"),
-                "keep the template HTML well-formed and slot attributes complete",
+                format!("layout content handler failed: {inner}"),
+                "keep the layout HTML well-formed and slot attributes complete",
             ),
         },
         other => BuildError::new(
-            ErrorKind::Template,
+            ErrorKind::Layout,
             None,
-            format!("failed to parse template: {other}"),
-            "keep the template HTML well-formed and slot attributes complete",
+            format!("failed to parse layout: {other}"),
+            "keep the layout HTML well-formed and slot attributes complete",
         ),
     }
 }
@@ -169,22 +169,22 @@ mod tests {
   <figure><slot name="code" accepts="code" arity="0..1"></slot></figure>
 </section>"#;
 
-        let template = parse_template("title-body-code", html).unwrap();
+        let layout = parse_layout("title-body-code", html).unwrap();
 
-        assert_eq!(template.slot("title").unwrap().accepts, Accepts::Inline);
-        assert_eq!(template.slot("body").unwrap().arity, Arity::ZeroOrMore);
-        assert_eq!(template.slot("code").unwrap().accepts, Accepts::Code);
+        assert_eq!(layout.slot("title").unwrap().accepts, Accepts::Inline);
+        assert_eq!(layout.slot("body").unwrap().arity, Arity::ZeroOrMore);
+        assert_eq!(layout.slot("code").unwrap().accepts, Accepts::Code);
     }
 
     #[test]
     fn rejects_unknown_accepts_value_with_help() {
-        let err = parse_template(
+        let err = parse_layout(
             "bad",
             r#"<section><slot name="title" accepts="heading" arity="1"></slot></section>"#,
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, ErrorKind::Template);
+        assert_eq!(err.kind, ErrorKind::Layout);
         assert!(err.to_string().contains("unknown accepts value 'heading'"));
         assert_eq!(
             err.help,
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_slot_name() {
-        let err = parse_template(
+        let err = parse_layout(
             "bad",
             r#"<section>
                <slot name="title" accepts="inline" arity="1"></slot>
@@ -207,38 +207,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_template_without_section() {
-        let err = parse_template(
+    fn rejects_layout_without_section() {
+        let err = parse_layout(
             "bad",
             r#"<div><slot name="title" accepts="inline" arity="1"></slot></div>"#,
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, ErrorKind::Template);
+        assert_eq!(err.kind, ErrorKind::Layout);
         assert!(err
             .to_string()
-            .contains("template must contain exactly one <section>, found 0"));
+            .contains("layout must contain exactly one <section>, found 0"));
         assert_eq!(
             err.help,
-            "wrap each slide template in one slide host <section> element"
+            "wrap each slide layout in one slide host <section> element"
         );
     }
 
     #[test]
-    fn rejects_template_with_multiple_sections() {
-        let err = parse_template(
+    fn rejects_layout_with_multiple_sections() {
+        let err = parse_layout(
             "bad",
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section><section></section>"#,
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, ErrorKind::Template);
+        assert_eq!(err.kind, ErrorKind::Layout);
         assert!(err
             .to_string()
-            .contains("template must contain exactly one <section>, found 2"));
+            .contains("layout must contain exactly one <section>, found 2"));
         assert_eq!(
             err.help,
-            "wrap each slide template in one slide host <section> element"
+            "wrap each slide layout in one slide host <section> element"
         );
     }
 }

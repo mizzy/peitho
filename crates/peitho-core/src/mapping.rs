@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use crate::{
     domain::{FragmentKind, SlotName, SourceFragment},
     error::Result,
+    layout::Layout,
     phase::{Deck, Mapped, MappedSlide, MappedSlot, Parsed, UnassignedFragment},
-    template::Template,
 };
 
-pub fn map_by_convention(deck: Deck<Parsed>, template: &Template) -> Result<Deck<Mapped>> {
+pub fn map_by_convention(deck: Deck<Parsed>, layout: &Layout) -> Result<Deck<Mapped>> {
     let mut slides = Vec::new();
     for slide in deck.into_parsed_slides() {
         let title_line = shallowest_heading_line(&slide.fragments);
@@ -25,7 +25,7 @@ pub fn map_by_convention(deck: Deck<Parsed>, template: &Template) -> Result<Deck
                 | FragmentKind::Text => "body",
             };
             let slot = SlotName::new(target).expect("conventional slot names are valid");
-            if let Some(contract) = template.slot_by_name(&slot).cloned() {
+            if let Some(contract) = layout.slot_by_name(&slot).cloned() {
                 slots
                     .entry(slot.clone())
                     .or_insert_with(|| MappedSlot::new(contract))
@@ -59,13 +59,13 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{domain::SlotName, parser::parse_markdown, template::parse_template};
+    use crate::{domain::SlotName, layout::parse_layout, parser::parse_markdown};
 
     #[test]
     fn maps_title_body_and_code_slots_by_convention() {
         let markdown =
             "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody\n\n```rust\nfn main() {}\n```";
-        let template = parse_template(
+        let layout = parse_layout(
             "title-body-code",
             r#"<section>
                <slot name="title" accepts="inline" arity="1"></slot>
@@ -75,7 +75,7 @@ mod tests {
         )
         .unwrap();
 
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
         let slide = &mapped.mapped_slides()[0];
 
         assert_eq!(
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn maps_each_slide_independently() {
         let markdown = "# Intro\n\nBody\n\n---\n# Architecture\n\n```rust\nfn main() {}\n```";
-        let template = parse_template(
+        let layout = parse_layout(
             "title-body-code",
             r#"<section>
                <slot name="title" accepts="inline" arity="1"></slot>
@@ -112,7 +112,7 @@ mod tests {
         )
         .unwrap();
 
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &template).unwrap();
+        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
 
         assert_eq!(mapped.mapped_slides().len(), 2);
         assert_eq!(

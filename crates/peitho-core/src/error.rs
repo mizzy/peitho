@@ -3,7 +3,7 @@ use std::{error::Error, fmt};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     Parse,
-    Template,
+    Layout,
     Accepts,
     Arity,
     ResidualContent,

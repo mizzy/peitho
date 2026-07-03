@@ -24,7 +24,7 @@ struct BuildArtifacts {
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
-    template: Option<PathBuf>,
+    layout: Option<PathBuf>,
     base_css: Option<PathBuf>,
     overrides_css: Option<PathBuf>,
     out: PathBuf,
@@ -33,7 +33,7 @@ struct BuildOptions {
 impl BuildOptions {
     fn watch_paths(&self) -> Vec<PathBuf> {
         std::iter::once(&self.input)
-            .chain(self.template.iter())
+            .chain(self.layout.iter())
             .chain(self.base_css.iter())
             .chain(self.overrides_css.iter())
             .cloned()
@@ -54,7 +54,7 @@ impl BuildOptions {
 
 struct PresentOptions {
     input: PathBuf,
-    template: Option<PathBuf>,
+    layout: Option<PathBuf>,
     base_css: Option<PathBuf>,
     overrides_css: Option<PathBuf>,
     shell: Option<PathBuf>,
@@ -77,8 +77,8 @@ struct Cli {
 enum Command {
     Build {
         input: PathBuf,
-        #[arg(long, help = "template HTML path (default: built-in title-body-code)")]
-        template: Option<PathBuf>,
+        #[arg(long, help = "layout HTML path (default: built-in title-body-code)")]
+        layout: Option<PathBuf>,
         #[arg(long, help = "base CSS path (default: built-in base theme)")]
         base_css: Option<PathBuf>,
         #[arg(long, help = "overrides CSS path (default: no overrides)")]
@@ -90,8 +90,8 @@ enum Command {
     },
     Present {
         input: PathBuf,
-        #[arg(long, help = "template HTML path (default: built-in title-body-code)")]
-        template: Option<PathBuf>,
+        #[arg(long, help = "layout HTML path (default: built-in title-body-code)")]
+        layout: Option<PathBuf>,
         #[arg(long, help = "base CSS path (default: built-in base theme)")]
         base_css: Option<PathBuf>,
         #[arg(long, help = "overrides CSS path (default: no overrides)")]
@@ -117,12 +117,12 @@ enum Command {
     },
 }
 
-/// Built-in defaults compiled from the repository's own template and theme,
+/// Built-in defaults compiled from the repository's own layout and theme,
 /// so `peitho build deck.md` works outside the repository. `include_str!`
 /// keeps the checked-in files as the single source: the binary embeds them
 /// at compile time and cannot drift.
-const BUILTIN_TEMPLATE_NAME: &str = "title-body-code";
-const BUILTIN_TEMPLATE_HTML: &str = include_str!("../../../templates/title-body-code.html");
+const BUILTIN_LAYOUT_NAME: &str = "title-body-code";
+const BUILTIN_LAYOUT_HTML: &str = include_str!("../../../layouts/title-body-code.html");
 const BUILTIN_BASE_CSS: &str = include_str!("../../../themes/base.css");
 /// The committed esbuild bundle; CI rebuilds it and fails on drift, the same
 /// discipline as the generated TS types in bindings/.
@@ -137,7 +137,7 @@ fn main() -> miette::Result<()> {
     match cli.command {
         Command::Build {
             input,
-            template,
+            layout,
             base_css,
             overrides_css,
             out,
@@ -145,7 +145,7 @@ fn main() -> miette::Result<()> {
         } => {
             let options = BuildOptions {
                 input,
-                template,
+                layout,
                 base_css,
                 overrides_css,
                 out,
@@ -158,7 +158,7 @@ fn main() -> miette::Result<()> {
         }
         Command::Present {
             input,
-            template,
+            layout,
             base_css,
             overrides_css,
             shell,
@@ -169,7 +169,7 @@ fn main() -> miette::Result<()> {
             presenter_windowed,
         } => present(PresentOptions {
             input,
-            template,
+            layout,
             base_css,
             overrides_css,
             shell,
@@ -192,7 +192,7 @@ fn main() -> miette::Result<()> {
 fn build(options: &BuildOptions) -> miette::Result<()> {
     let artifacts = build_artifacts(
         &options.input,
-        options.template.as_deref(),
+        options.layout.as_deref(),
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     )?;
@@ -212,7 +212,7 @@ fn rebuild_once_for_watch(
 ) -> miette::Result<()> {
     match build_artifacts(
         &options.input,
-        options.template.as_deref(),
+        options.layout.as_deref(),
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     ) {
@@ -284,7 +284,7 @@ fn watch_build(options: BuildOptions) -> miette::Result<()> {
             })?;
     }
 
-    println!("watching parent directories for markdown, template, base css, and overrides css");
+    println!("watching parent directories for markdown, layout, base css, and overrides css");
     rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())?;
 
     for result in rx {
@@ -327,19 +327,19 @@ fn same_watch_path(left: &Path, right: &Path) -> bool {
 
 fn build_artifacts(
     input: &Path,
-    template_path: Option<&Path>,
+    layout_path: Option<&Path>,
     base_path: Option<&Path>,
     overrides_path: Option<&Path>,
 ) -> miette::Result<BuildArtifacts> {
     let markdown = fs::read_to_string(input).into_diagnostic()?;
-    let (template_name, template_html) = match template_path {
+    let (layout_name, layout_html) = match layout_path {
         Some(path) => (
-            template_name(path),
+            layout_name(path),
             fs::read_to_string(path).into_diagnostic()?,
         ),
         None => (
-            BUILTIN_TEMPLATE_NAME.to_owned(),
-            BUILTIN_TEMPLATE_HTML.to_owned(),
+            BUILTIN_LAYOUT_NAME.to_owned(),
+            BUILTIN_LAYOUT_HTML.to_owned(),
         ),
     };
     let base_css = match base_path {
@@ -350,10 +350,10 @@ fn build_artifacts(
         Some(path) => fs::read_to_string(path).into_diagnostic()?,
         None => String::new(),
     };
-    let template = core(peitho_core::parse_template(template_name, &template_html))?;
+    let layout = core(peitho_core::parse_layout(layout_name, &layout_html))?;
     let parsed = core(peitho_core::parse_markdown(&markdown))?;
-    let mapped = core(peitho_core::map_by_convention(parsed, &template))?;
-    let checked = core(peitho_core::check_deck(mapped, &template))?;
+    let mapped = core(peitho_core::map_by_convention(parsed, &layout))?;
+    let checked = core(peitho_core::check_deck(mapped, &layout))?;
     let slide_count = checked.slide_count();
     let manifest = peitho_core::build_manifest(&checked);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
@@ -361,9 +361,9 @@ fn build_artifacts(
         &base_css,
         &overrides_css,
         checked.slide_keys(),
-        &template,
+        &layout,
     ))?;
-    let rendered = core(peitho_core::render_deck(checked, &template))?;
+    let rendered = core(peitho_core::render_deck(checked, &layout))?;
 
     Ok(BuildArtifacts {
         slide_count,
@@ -554,7 +554,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 
     let artifacts = build_artifacts(
         &options.input,
-        options.template.as_deref(),
+        options.layout.as_deref(),
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     )?;
@@ -661,7 +661,7 @@ fn core<T>(result: peitho_core::Result<T>) -> miette::Result<T> {
     result.map_err(|err| miette::miette!("{err}"))
 }
 
-fn template_name(path: &Path) -> String {
+fn layout_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_owned)
@@ -686,7 +686,7 @@ mod tests {
     fn build_options_lists_watched_input_paths() {
         let options = BuildOptions {
             input: PathBuf::from("deck.md"),
-            template: Some(PathBuf::from("template.html")),
+            layout: Some(PathBuf::from("layout.html")),
             base_css: Some(PathBuf::from("base.css")),
             overrides_css: Some(PathBuf::from("overrides.css")),
             out: PathBuf::from("dist"),
@@ -696,7 +696,7 @@ mod tests {
             options.watch_paths(),
             [
                 PathBuf::from("deck.md"),
-                PathBuf::from("template.html"),
+                PathBuf::from("layout.html"),
                 PathBuf::from("base.css"),
                 PathBuf::from("overrides.css"),
             ]
@@ -707,7 +707,7 @@ mod tests {
     fn build_options_with_builtin_assets_watch_only_the_deck() {
         let options = BuildOptions {
             input: PathBuf::from("deck.md"),
-            template: None,
+            layout: None,
             base_css: None,
             overrides_css: None,
             out: PathBuf::from("dist"),
@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn build_artifacts_uses_builtin_template_and_theme_without_flags() {
+    fn build_artifacts_uses_builtin_layout_and_theme_without_flags() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n\nBody\n\n```rust\nfn main() {}\n```\n").unwrap();
@@ -733,7 +733,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let options = BuildOptions {
             input: dir.path().join("deck.md"),
-            template: Some(dir.path().join("title-body-code.html")),
+            layout: Some(dir.path().join("title-body-code.html")),
             base_css: Some(dir.path().join("base.css")),
             overrides_css: Some(dir.path().join("overrides.css")),
             out: dir.path().join("dist"),
@@ -922,12 +922,12 @@ mod tests {
 
         match cli.command {
             Command::Build {
-                template,
+                layout,
                 base_css,
                 overrides_css,
                 ..
             } => {
-                assert_eq!(template, None);
+                assert_eq!(layout, None);
                 assert_eq!(base_css, None);
                 assert_eq!(overrides_css, None);
             }
@@ -946,14 +946,14 @@ mod tests {
         fn new(markdown: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let deck = dir.path().join("deck.md");
-            let template = dir.path().join("title-body-code.html");
+            let layout = dir.path().join("title-body-code.html");
             let base = dir.path().join("base.css");
             let overrides = dir.path().join("overrides.css");
             let out = dir.path().join("dist");
 
             fs::write(&deck, markdown).unwrap();
             fs::write(
-                &template,
+                &layout,
                 r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
             )
             .unwrap();
@@ -964,7 +964,7 @@ mod tests {
                 _dir: dir,
                 options: BuildOptions {
                     input: deck,
-                    template: Some(template),
+                    layout: Some(layout),
                     base_css: Some(base),
                     overrides_css: Some(overrides),
                     out,
