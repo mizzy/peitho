@@ -1,6 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::domain::{RenderedSlide, SlideKey, SlotContract, SlotName, SourceFragment};
+use crate::{
+    domain::{RenderedSlide, SlideKey, SlotContract, SlotName, SourceFragment},
+    layout::Layout,
+};
 
 #[derive(Debug, Clone)]
 pub struct Deck<P> {
@@ -18,11 +21,21 @@ pub enum KeySource {
     Derived { line: Option<usize> },
 }
 
+/// An explicit `{"layout":"name"}` request from the slide's page settings
+/// comment. The name is resolved against the provided layouts at dispatch;
+/// the line makes an unknown name a位置付きビルドエラー.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutRequest {
+    pub name: String,
+    pub line: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedSlide {
     pub index: usize,
     pub key: SlideKey,
     pub key_source: KeySource,
+    pub layout_request: Option<LayoutRequest>,
     pub fragments: Vec<SourceFragment>,
 }
 
@@ -31,10 +44,14 @@ pub struct Mapped {
     slides: Vec<MappedSlide>,
 }
 
+/// A mapped slide carries the layout it was dispatched to, so the later
+/// phases never look a layout up again (and thus have no failure path for
+/// a missing layout).
 #[derive(Debug, Clone)]
 pub struct MappedSlide {
     pub(crate) index: usize,
     pub(crate) key: SlideKey,
+    pub(crate) layout: Layout,
     pub(crate) slots: BTreeMap<SlotName, MappedSlot>,
     pub(crate) unassigned: Vec<UnassignedFragment>,
 }
@@ -98,6 +115,7 @@ pub struct Checked {
 pub struct CheckedSlide {
     index: usize,
     key: SlideKey,
+    layout: Layout,
     slots: BTreeMap<SlotName, Vec<SourceFragment>>,
 }
 
@@ -143,9 +161,19 @@ impl CheckedSlide {
     pub(crate) fn new(
         index: usize,
         key: SlideKey,
+        layout: Layout,
         slots: BTreeMap<SlotName, Vec<SourceFragment>>,
     ) -> Self {
-        Self { index, key, slots }
+        Self {
+            index,
+            key,
+            layout,
+            slots,
+        }
+    }
+
+    pub(crate) fn layout(&self) -> &Layout {
+        &self.layout
     }
 
     pub(crate) fn index(&self) -> usize {
@@ -182,6 +210,26 @@ impl Deck<Checked> {
 
     pub fn slide_keys(&self) -> impl Iterator<Item = &SlideKey> {
         self.phase.slides.iter().map(|slide| &slide.key)
+    }
+
+    /// Slide key → slot class names of that slide's layout, plus the union
+    /// used to validate override selectors that name no slide key.
+    pub fn slide_slot_classes(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.phase
+            .slides
+            .iter()
+            .map(|slide| {
+                (
+                    slide.key.as_str().to_owned(),
+                    slide
+                        .layout
+                        .slots()
+                        .keys()
+                        .map(SlotName::class_name)
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn checked_slides(&self) -> &[CheckedSlide] {
@@ -233,6 +281,7 @@ mod tests {
             key: SlideKey::new("arch-1").unwrap(),
             index: 0,
             key_source: KeySource::Explicit { line: 1 },
+            layout_request: None,
             fragments: vec![SourceFragment::paragraph(3, "body")],
         }]);
 

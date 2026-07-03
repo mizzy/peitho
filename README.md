@@ -71,20 +71,31 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
 ```
 
+## 複数レイアウト
+
+`--layout`は繰り返し指定できる。スライドごとのレイアウトは次の順で決まる（[k1LoW/deck](https://github.com/k1LoW/deck)のページ設定を参考にしたハイブリッド方式）:
+
+1. **明示指定** — ページ設定コメント`<!-- {"layout":"cover"} -->`があればそのレイアウト（未知の名前は候補一覧つきビルドエラー）
+2. **1枚なら無条件** — レイアウトが1枚だけなら常にそれ（契約違反は従来どおりの行番号付きエラー）
+3. **型駆動ディスパッチ** — 複数枚なら、スライドの内容の形（タイトルだけ・本文あり・コードあり等）にスロット契約が一致するレイアウトへ自動で振り分ける。ちょうど1枚に一致することが条件で、**複数一致（曖昧）も0枚一致も黙って解決せずビルドエラー**にし、明示指定を促す
+
+レイアウト名はファイル名のstem（`cover.html`→`cover`）。
+
 ## サンプル
 
-`examples/`に、内容・レイアウト構造・テーマが全て異なるサンプルを置いている。各ディレクトリは`deck.md`+`layout.html`+`base.css`+`overrides.css`で自己完結する。
+`examples/`に、内容・レイアウト構造・テーマが全て異なるサンプルを置いている。各ディレクトリは`deck.md`+レイアウトHTML+`base.css`+`overrides.css`で自己完結する。
 
 | サンプル | 内容 | デザイン | 契約の見どころ |
 |---|---|---|---|
 | `examples/deck.md` | 最小デモ | デフォルトテーマ | デフォルトフラグでそのまま動く |
 | `examples/lightning-talk/` | 日本語LT | ダーク+大型タイポのポスター風 | codeスロットが無い=コードを書くとビルドエラー |
 | `examples/code-walkthrough/` | Rustのtypestate解説 | ターミナル風2カラム | `code`が`arity="1"`=毎スライドコード必須。キー付きoverrideの実用例 |
-| `examples/keynote/` | 日本語キーノート | クリーム地+セリフ体+中央寄せ | title+bodyだけの最小契約 |
+| `examples/keynote/` | 日本語キーノート | クリーム地+セリフ体+中央寄せ | 2レイアウト構成。タイトルだけのスライドは`cover`へ、本文ありは`statement`へ型駆動ディスパッチ |
 
 ```sh
 peitho present examples/keynote/deck.md \
-  --layout examples/keynote/layout.html \
+  --layout examples/keynote/cover.html \
+  --layout examples/keynote/statement.html \
   --base-css examples/keynote/base.css \
   --overrides-css examples/keynote/overrides.css
 ```

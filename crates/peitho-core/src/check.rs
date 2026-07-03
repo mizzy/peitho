@@ -7,26 +7,33 @@ use crate::{
     phase::{Checked, CheckedSlide, Deck, Mapped, MappedSlide, MappedSlot, UnassignedFragment},
 };
 
-pub fn check_deck(deck: Deck<Mapped>, layout: &Layout) -> Result<Deck<Checked>> {
+pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
     let mut slides = Vec::new();
     for slide in deck.into_mapped_slides() {
         let slide_number = slide.index + 1;
         let slide_key = slide.key.as_str().to_owned();
-        check_slide(&slide, layout)
-            .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
+        check_slide(&slide).map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         let checked_slots = slide
             .slots
             .into_iter()
             .map(|(slot, mapped_slot)| (slot, mapped_slot.fragments().to_vec()))
             .collect();
-        slides.push(CheckedSlide::new(slide.index, slide.key, checked_slots));
+        slides.push(CheckedSlide::new(
+            slide.index,
+            slide.key,
+            slide.layout,
+            checked_slots,
+        ));
     }
     Ok(Deck::checked(slides))
 }
 
-fn check_slide(slide: &MappedSlide, layout: &Layout) -> Result<()> {
+/// Validate one mapped slide against the layout it carries. Also used by
+/// dispatch to probe whether a slide structurally fits a candidate layout,
+/// so there is exactly one source of contract truth.
+pub(crate) fn check_slide(slide: &MappedSlide) -> Result<()> {
     check_accepts(&slide.slots)?;
-    check_arity(&slide.slots, layout)?;
+    check_arity(&slide.slots, &slide.layout)?;
     check_no_unassigned(&slide.unassigned)
 }
 
@@ -149,7 +156,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Accepts);
         assert_eq!(err.line, Some(3));
@@ -174,7 +181,7 @@ mod tests {
         .unwrap();
         let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Arity);
         assert_eq!(err.line, Some(3));
@@ -194,7 +201,7 @@ mod tests {
         .unwrap();
         let mapped = map_by_convention(parse_markdown("Body only").unwrap(), &layout).unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Arity);
         assert!(err.to_string().contains("slot 'title' got 0 item(s)"));
@@ -214,7 +221,7 @@ mod tests {
         let markdown = "# Title\n\n```rust\nfn lost() {}\n```";
         let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
@@ -235,7 +242,7 @@ mod tests {
         let markdown = "# Title\n\n## Detail";
         let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
@@ -258,7 +265,7 @@ mod tests {
         .unwrap();
         let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
 
-        let err = check_deck(mapped, &layout).unwrap_err();
+        let err = check_deck(mapped).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Arity);
         assert!(err.to_string().contains("slide 2 ('code-slide'), line 7"));

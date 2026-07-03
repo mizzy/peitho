@@ -13,10 +13,10 @@ use crate::{
     phase::{Checked, Deck, Rendered},
 };
 
-pub fn render_deck(deck: Deck<Checked>, layout: &Layout) -> Result<Deck<Rendered>> {
+pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
     let mut slides = Vec::new();
     for slide in deck.into_checked_slides() {
-        let html = render_slide(slide.key(), slide.slots(), layout)?;
+        let html = render_slide(slide.key(), slide.slots(), slide.layout())?;
         slides.push(RenderedSlide::new(slide.index(), slide.key().clone(), html));
     }
     Ok(Deck::rendered(slides, String::new()))
@@ -414,13 +414,11 @@ mod tests {
 </section>"#,
         )
         .unwrap();
-        let checked = check_deck(
-            map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap(),
-            &layout,
-        )
-        .unwrap();
+        let checked =
+            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
+                .unwrap();
 
-        let rendered = render_deck(checked, &layout).unwrap();
+        let rendered = render_deck(checked).unwrap();
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(r#"data-slide-key="arch-1""#));
@@ -444,13 +442,11 @@ mod tests {
 </section>"#,
         )
         .unwrap();
-        let checked = check_deck(
-            map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap(),
-            &layout,
-        )
-        .unwrap();
+        let checked =
+            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
+                .unwrap();
 
-        let rendered = render_deck(checked, &layout).unwrap();
+        let rendered = render_deck(checked).unwrap();
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(r#"<figure class="code"></figure>"#));
@@ -465,13 +461,11 @@ mod tests {
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
-        let checked = check_deck(
-            map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap(),
-            &layout,
-        )
-        .unwrap();
+        let checked =
+            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
+                .unwrap();
 
-        let rendered = render_deck(checked, &layout).unwrap();
+        let rendered = render_deck(checked).unwrap();
         let html = rendered.slides()[0].html();
 
         assert!(html.contains("<strong>Architecture</strong>"));
@@ -494,24 +488,18 @@ mod tests {
                 &layout,
             )
             .unwrap(),
-            &layout,
         )
         .unwrap();
-        let setext_html = render_deck(setext, &layout).unwrap().slides()[0]
-            .html()
-            .to_owned();
+        let setext_html = render_deck(setext).unwrap().slides()[0].html().to_owned();
         assert!(setext_html.contains("<strong>Architecture</strong>"));
         assert!(setext_html.contains("<code>Phase</code>"));
         assert!(!setext_html.contains(r#"<span class="slot-title"><h1>"#));
 
         let atx = check_deck(
             map_by_convention(parse_markdown("# Architecture #").unwrap(), &layout).unwrap(),
-            &layout,
         )
         .unwrap();
-        let atx_html = render_deck(atx, &layout).unwrap().slides()[0]
-            .html()
-            .to_owned();
+        let atx_html = render_deck(atx).unwrap().slides()[0].html().to_owned();
         assert!(atx_html.contains(r#"<span class="slot-title">Architecture</span>"#));
         assert!(!atx_html.contains("Architecture #"));
     }
@@ -633,11 +621,9 @@ mod tests {
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
-        let checked = check_deck(
-            map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap(),
-            &layout,
-        )
-        .unwrap();
-        render_deck(checked, &layout).unwrap()
+        let checked =
+            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
+                .unwrap();
+        render_deck(checked).unwrap()
     }
 }

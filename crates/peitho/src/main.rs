@@ -24,7 +24,7 @@ struct BuildArtifacts {
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
-    layout: Option<PathBuf>,
+    layouts: Vec<PathBuf>,
     base_css: Option<PathBuf>,
     overrides_css: Option<PathBuf>,
     out: PathBuf,
@@ -33,7 +33,7 @@ struct BuildOptions {
 impl BuildOptions {
     fn watch_paths(&self) -> Vec<PathBuf> {
         std::iter::once(&self.input)
-            .chain(self.layout.iter())
+            .chain(self.layouts.iter())
             .chain(self.base_css.iter())
             .chain(self.overrides_css.iter())
             .cloned()
@@ -54,7 +54,7 @@ impl BuildOptions {
 
 struct PresentOptions {
     input: PathBuf,
-    layout: Option<PathBuf>,
+    layouts: Vec<PathBuf>,
     base_css: Option<PathBuf>,
     overrides_css: Option<PathBuf>,
     shell: Option<PathBuf>,
@@ -77,8 +77,11 @@ struct Cli {
 enum Command {
     Build {
         input: PathBuf,
-        #[arg(long, help = "layout HTML path (default: built-in title-body-code)")]
-        layout: Option<PathBuf>,
+        #[arg(
+            long = "layout",
+            help = "layout HTML path, repeatable (default: built-in title-body-code)"
+        )]
+        layouts: Vec<PathBuf>,
         #[arg(long, help = "base CSS path (default: built-in base theme)")]
         base_css: Option<PathBuf>,
         #[arg(long, help = "overrides CSS path (default: no overrides)")]
@@ -90,8 +93,11 @@ enum Command {
     },
     Present {
         input: PathBuf,
-        #[arg(long, help = "layout HTML path (default: built-in title-body-code)")]
-        layout: Option<PathBuf>,
+        #[arg(
+            long = "layout",
+            help = "layout HTML path, repeatable (default: built-in title-body-code)"
+        )]
+        layouts: Vec<PathBuf>,
         #[arg(long, help = "base CSS path (default: built-in base theme)")]
         base_css: Option<PathBuf>,
         #[arg(long, help = "overrides CSS path (default: no overrides)")]
@@ -137,7 +143,7 @@ fn main() -> miette::Result<()> {
     match cli.command {
         Command::Build {
             input,
-            layout,
+            layouts,
             base_css,
             overrides_css,
             out,
@@ -145,7 +151,7 @@ fn main() -> miette::Result<()> {
         } => {
             let options = BuildOptions {
                 input,
-                layout,
+                layouts,
                 base_css,
                 overrides_css,
                 out,
@@ -158,7 +164,7 @@ fn main() -> miette::Result<()> {
         }
         Command::Present {
             input,
-            layout,
+            layouts,
             base_css,
             overrides_css,
             shell,
@@ -169,7 +175,7 @@ fn main() -> miette::Result<()> {
             presenter_windowed,
         } => present(PresentOptions {
             input,
-            layout,
+            layouts,
             base_css,
             overrides_css,
             shell,
@@ -192,7 +198,7 @@ fn main() -> miette::Result<()> {
 fn build(options: &BuildOptions) -> miette::Result<()> {
     let artifacts = build_artifacts(
         &options.input,
-        options.layout.as_deref(),
+        &options.layouts,
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     )?;
@@ -212,7 +218,7 @@ fn rebuild_once_for_watch(
 ) -> miette::Result<()> {
     match build_artifacts(
         &options.input,
-        options.layout.as_deref(),
+        &options.layouts,
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     ) {
@@ -325,23 +331,30 @@ fn same_watch_path(left: &Path, right: &Path) -> bool {
         }
 }
 
+fn load_layouts(layout_paths: &[PathBuf]) -> miette::Result<peitho_core::Layouts> {
+    if layout_paths.is_empty() {
+        let layout = core(peitho_core::parse_layout(
+            BUILTIN_LAYOUT_NAME,
+            BUILTIN_LAYOUT_HTML,
+        ))?;
+        return core(peitho_core::Layouts::new(vec![layout]));
+    }
+    let mut layouts = Vec::new();
+    for path in layout_paths {
+        let html = fs::read_to_string(path).into_diagnostic()?;
+        layouts.push(core(peitho_core::parse_layout(layout_name(path), &html))?);
+    }
+    core(peitho_core::Layouts::new(layouts))
+}
+
 fn build_artifacts(
     input: &Path,
-    layout_path: Option<&Path>,
+    layout_paths: &[PathBuf],
     base_path: Option<&Path>,
     overrides_path: Option<&Path>,
 ) -> miette::Result<BuildArtifacts> {
     let markdown = fs::read_to_string(input).into_diagnostic()?;
-    let (layout_name, layout_html) = match layout_path {
-        Some(path) => (
-            layout_name(path),
-            fs::read_to_string(path).into_diagnostic()?,
-        ),
-        None => (
-            BUILTIN_LAYOUT_NAME.to_owned(),
-            BUILTIN_LAYOUT_HTML.to_owned(),
-        ),
-    };
+    let layouts = load_layouts(layout_paths)?;
     let base_css = match base_path {
         Some(path) => fs::read_to_string(path).into_diagnostic()?,
         None => BUILTIN_BASE_CSS.to_owned(),
@@ -350,20 +363,18 @@ fn build_artifacts(
         Some(path) => fs::read_to_string(path).into_diagnostic()?,
         None => String::new(),
     };
-    let layout = core(peitho_core::parse_layout(layout_name, &layout_html))?;
     let parsed = core(peitho_core::parse_markdown(&markdown))?;
-    let mapped = core(peitho_core::map_by_convention(parsed, &layout))?;
-    let checked = core(peitho_core::check_deck(mapped, &layout))?;
+    let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
+    let checked = core(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
     let manifest = peitho_core::build_manifest(&checked);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
     let css = core(peitho_core::build_theme_css(
         &base_css,
         &overrides_css,
-        checked.slide_keys(),
-        &layout,
+        &checked.slide_slot_classes(),
     ))?;
-    let rendered = core(peitho_core::render_deck(checked, &layout))?;
+    let rendered = core(peitho_core::render_deck(checked))?;
 
     Ok(BuildArtifacts {
         slide_count,
@@ -554,7 +565,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 
     let artifacts = build_artifacts(
         &options.input,
-        options.layout.as_deref(),
+        &options.layouts,
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     )?;
@@ -686,7 +697,7 @@ mod tests {
     fn build_options_lists_watched_input_paths() {
         let options = BuildOptions {
             input: PathBuf::from("deck.md"),
-            layout: Some(PathBuf::from("layout.html")),
+            layouts: vec![PathBuf::from("layout.html")],
             base_css: Some(PathBuf::from("base.css")),
             overrides_css: Some(PathBuf::from("overrides.css")),
             out: PathBuf::from("dist"),
@@ -707,7 +718,7 @@ mod tests {
     fn build_options_with_builtin_assets_watch_only_the_deck() {
         let options = BuildOptions {
             input: PathBuf::from("deck.md"),
-            layout: None,
+            layouts: Vec::new(),
             base_css: None,
             overrides_css: None,
             out: PathBuf::from("dist"),
@@ -722,7 +733,7 @@ mod tests {
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n\nBody\n\n```rust\nfn main() {}\n```\n").unwrap();
 
-        let artifacts = build_artifacts(&deck, None, None, None).unwrap();
+        let artifacts = build_artifacts(&deck, &[], None, None).unwrap();
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts.css.contains("width: 1280px;"));
@@ -733,7 +744,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let options = BuildOptions {
             input: dir.path().join("deck.md"),
-            layout: Some(dir.path().join("title-body-code.html")),
+            layouts: vec![dir.path().join("title-body-code.html")],
             base_css: Some(dir.path().join("base.css")),
             overrides_css: Some(dir.path().join("overrides.css")),
             out: dir.path().join("dist"),
@@ -922,12 +933,12 @@ mod tests {
 
         match cli.command {
             Command::Build {
-                layout,
+                layouts,
                 base_css,
                 overrides_css,
                 ..
             } => {
-                assert_eq!(layout, None);
+                assert!(layouts.is_empty());
                 assert_eq!(base_css, None);
                 assert_eq!(overrides_css, None);
             }
@@ -964,7 +975,7 @@ mod tests {
                 _dir: dir,
                 options: BuildOptions {
                     input: deck,
-                    layout: Some(layout),
+                    layouts: vec![layout],
                     base_css: Some(base),
                     overrides_css: Some(overrides),
                     out,

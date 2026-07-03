@@ -1,21 +1,17 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{
-    domain::{SlideKey, SlotName},
-    error::{BuildError, ErrorKind, Result},
-    layout::Layout,
-};
+use crate::error::{BuildError, ErrorKind, Result};
 
-pub fn build_theme_css<'a>(
+/// `slide_slots` maps each slide key to the slot class names of the layout
+/// that slide was dispatched to (see `Deck::<Checked>::slide_slot_classes`).
+/// A selector that names a slide key is validated against that slide's own
+/// layout; a selector without a key is validated against the union.
+pub fn build_theme_css(
     base_css: &str,
     overrides_css: &str,
-    slide_keys: impl Iterator<Item = &'a SlideKey>,
-    layout: &Layout,
+    slide_slots: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<String> {
-    let known_keys = slide_keys
-        .map(|key| key.as_str().to_owned())
-        .collect::<BTreeSet<_>>();
-    validate_override_selectors(overrides_css, &known_keys, layout)?;
+    validate_override_selectors(overrides_css, slide_slots)?;
     Ok(format!(
         "{}\n\n{}",
         base_css.trim_end(),
@@ -52,41 +48,55 @@ fn strip_css_comments(css: &str) -> String {
 
 fn validate_override_selectors(
     css: &str,
-    known_keys: &BTreeSet<String>,
-    layout: &Layout,
+    slide_slots: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<()> {
     let css = &strip_css_comments(css);
-    let known_slots = layout
-        .slots()
-        .keys()
-        .map(SlotName::class_name)
+    let all_slots = slide_slots
+        .values()
+        .flatten()
+        .cloned()
         .collect::<BTreeSet<_>>();
 
     for (line_index, line) in css.lines().enumerate() {
         let line_no = line_index + 1;
         let selector = line.split('{').next().unwrap_or(line);
-        for key in extract_slide_key_values(selector, line_no)? {
-            if !known_keys.contains(&key) {
+        let keys = extract_slide_key_values(selector, line_no)?;
+        for key in &keys {
+            if !slide_slots.contains_key(key) {
                 return Err(BuildError::new(
                     ErrorKind::Theme,
                     Some(line_no),
                     format!("unknown slide key '{key}' in override selector"),
                     format!(
                         "use one of: {}",
-                        known_keys.iter().cloned().collect::<Vec<_>>().join(", ")
+                        slide_slots.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
             }
         }
+        let scope = if keys.is_empty() {
+            all_slots.clone()
+        } else {
+            keys.iter()
+                .filter_map(|key| slide_slots.get(key))
+                .flatten()
+                .cloned()
+                .collect()
+        };
         for class in extract_slot_classes(selector) {
-            if !known_slots.contains(&class) {
+            if !scope.contains(&class) {
+                let context = if keys.is_empty() {
+                    "in override selector".to_owned()
+                } else {
+                    format!("for slide '{}'", keys.join("', '"))
+                };
                 return Err(BuildError::new(
                     ErrorKind::Theme,
                     Some(line_no),
-                    format!("unknown slot class '.{class}' in override selector"),
+                    format!("unknown slot class '.{class}' {context}"),
                     format!(
                         "use one of: {}",
-                        known_slots
+                        scope
                             .iter()
                             .map(|slot| format!(".{slot}"))
                             .collect::<Vec<_>>()
@@ -204,28 +214,26 @@ fn malformed_selector(line_no: usize) -> BuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        domain::{SlideKey, SlotName},
-        error::ErrorKind,
-        layout::parse_layout,
-    };
+    use crate::error::ErrorKind;
+
+    fn slots(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+        entries
+            .iter()
+            .map(|(key, classes)| {
+                (
+                    (*key).to_owned(),
+                    classes.iter().map(|class| (*class).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn appends_valid_override_after_base_css() {
-        let layout = parse_layout(
-            "title-body-code",
-            r#"<section>
-               <slot name="title" accepts="inline" arity="1"></slot>
-               <slot name="code" accepts="code" arity="0..1"></slot>
-               </section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
         let css = build_theme_css(
             ".slot-code { color: black; }",
             r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title", "slot-code"])]),
         )
         .unwrap();
 
@@ -233,23 +241,14 @@ mod tests {
         assert!(
             css.ends_with(r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#)
         );
-        assert!(layout.slots().contains_key(&SlotName::new("code").unwrap()));
     }
 
     #[test]
     fn ignores_selectors_inside_css_comments() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let css = build_theme_css(
             "",
             "/* example: [data-slide-key=\"...\"] .slot-nope { } */\n/* spans\n[data-slide-key=\"also-ignored\"] .slot-ghost { }\nlines */\n[data-slide-key=\"arch-1\"] .slot-title { color: red; }",
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap();
 
@@ -258,18 +257,10 @@ mod tests {
 
     #[test]
     fn reports_correct_line_number_after_multiline_comment() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             "/* comment\nstill comment */\n[data-slide-key=\"missing\"] .slot-title { color: red; }",
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -278,18 +269,10 @@ mod tests {
 
     #[test]
     fn rejects_unknown_slide_key_in_override_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             r#"[data-slide-key="missing"] .slot-title { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -301,18 +284,10 @@ mod tests {
 
     #[test]
     fn rejects_unknown_single_quoted_slide_key_in_override_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             r#"[data-slide-key='missing'] .slot-title { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -324,18 +299,10 @@ mod tests {
 
     #[test]
     fn rejects_unknown_unquoted_slide_key_in_override_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             r#"[data-slide-key=missing] .slot-title { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -347,18 +314,10 @@ mod tests {
 
     #[test]
     fn accepts_known_single_quoted_slide_key_in_override_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let css = build_theme_css(
             ".slot-title { color: black; }",
             r#"[data-slide-key='arch-1'] .slot-title { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap();
 
@@ -367,18 +326,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_slide_key_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             r#"[data-slide-key='arch-1' .slot-title { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -389,18 +340,10 @@ mod tests {
 
     #[test]
     fn rejects_unknown_slot_class_in_override_selector() {
-        let layout = parse_layout(
-            "title",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let keys = [SlideKey::new("arch-1").unwrap()];
-
         let err = build_theme_css(
             "",
             r#"[data-slide-key="arch-1"] .slot-code { color: red; }"#,
-            keys.iter(),
-            &layout,
+            &slots(&[("arch-1", &["slot-title"])]),
         )
         .unwrap_err();
 
@@ -408,5 +351,27 @@ mod tests {
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown slot class '.slot-code'"));
         assert_eq!(err.help, "use one of: .slot-title");
+    }
+
+    #[test]
+    fn keyed_selector_validates_against_that_slides_layout_only() {
+        let deck_slots = slots(&[
+            ("walkthrough", &["slot-title", "slot-code"]),
+            ("cover", &["slot-title"]),
+        ]);
+
+        let err = build_theme_css(
+            "",
+            r#"[data-slide-key="cover"] .slot-code { color: red; }"#,
+            &deck_slots,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unknown slot class '.slot-code' for slide 'cover'"));
+
+        let css = build_theme_css("", ".slot-code { color: red; }", &deck_slots).unwrap();
+        assert!(css.contains(".slot-code { color: red; }"));
     }
 }
