@@ -7,6 +7,7 @@ import {
   fallbackFeatures,
   installCanvasClickNavigation,
   installCanvasScaler,
+  installCloseOnEscape,
   installFullscreenShortcut,
   installPresentationControls,
   mountPresenterView,
@@ -68,6 +69,7 @@ describe("generated manifest contract", () => {
     expect(typeof installCanvasScaler).toBe("function");
     expect(typeof installPresentationControls).toBe("function");
     expect(typeof installCanvasClickNavigation).toBe("function");
+    expect(typeof installCloseOnEscape).toBe("function");
     expect(typeof installFullscreenShortcut).toBe("function");
     expect(typeof mountPresentShell).toBe("function");
     expect(typeof mountPresenterView).toBe("function");

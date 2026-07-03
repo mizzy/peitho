@@ -1,5 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { installSyncBridge, mountPresentShell, serverSyncChannelFactory } from "../src/index";
+import {
+  installCloseOnEscape,
+  installSyncBridge,
+  mountPresentShell,
+  serverSyncChannelFactory
+} from "../src/index";
 import type { PresentShell } from "../src/index";
 import type { SyncChannel } from "../src/sync";
 
@@ -50,6 +55,7 @@ function mockChannel() {
 it("server sync channel posts local messages to /sync", async () => {
   const fetcher = vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 0, message: null }));
     return new Promise<Response>(() => undefined);
   }) as typeof fetch;
   const factory = serverSyncChannelFactory({
@@ -63,7 +69,8 @@ it("server sync channel posts local messages to /sync", async () => {
   expect(fetcher).toHaveBeenCalledWith("/sync", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index: 2 })
+    body: JSON.stringify({ index: 2 }),
+    keepalive: true
   });
   channel.close();
 });
@@ -71,8 +78,9 @@ it("server sync channel posts local messages to /sync", async () => {
 it("server sync channel polls and forwards long-poll messages", async () => {
   const fetcher = vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
-    if (url === "/sync?seq=0") {
-      return Promise.resolve(okJson({ seq: 1, message: { index: 1 } }));
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return Promise.resolve(okJson({ seq: 6, message: { index: 1 } }));
     }
     return new Promise<Response>(() => undefined);
   }) as typeof fetch;
@@ -85,14 +93,35 @@ it("server sync channel polls and forwards long-poll messages", async () => {
 
   await vi.waitFor(() => expect(received).toEqual([{ index: 1 }]));
 
-  expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.objectContaining({ signal: expect.any(AbortSignal) }));
-  expect(fetcher).toHaveBeenCalledWith("/sync?seq=1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(fetcher).toHaveBeenCalledWith("/sync");
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=5", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=6", expect.objectContaining({ signal: expect.any(AbortSignal) }));
   channel.close();
 });
 
-it("server sync channel aborts the active poll on close", () => {
+it("server sync channel does not replay backlog close messages after handshake", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 9, message: null }));
+    if (url === "/sync?seq=9") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected poll url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(fetcher).toHaveBeenCalledWith("/sync?seq=9", expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  );
+
+  expect(received).toEqual([]);
+  expect(fetcher).not.toHaveBeenCalledWith("/sync?seq=0", expect.anything());
+  channel.close();
+});
+
+it("server sync channel aborts the active poll on close", async () => {
   const captured: { signal?: AbortSignal } = {};
-  const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 0, message: null }));
     captured.signal = init?.signal as AbortSignal;
     return new Promise<Response>(() => undefined);
   }) as typeof fetch;
@@ -100,8 +129,9 @@ it("server sync channel aborts the active poll on close", () => {
     fetcher
   })("peitho-sync");
 
-  channel.close();
+  await vi.waitFor(() => expect(captured.signal).toBeInstanceOf(AbortSignal));
 
+  channel.close();
   if (!captured.signal) throw new Error("poll signal was not captured");
   expect(captured.signal.aborted).toBe(true);
 });
@@ -124,6 +154,40 @@ it("posts local slidechange index to peitho-sync", async () => {
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
 
   expect(channel.sent).toEqual([{ index: 1 }]);
+});
+
+it("dispatches closerequest from Escape", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:closerequest", (event) => requests.push((event as CustomEvent).detail));
+  const cleanup = installCloseOnEscape(window, bus);
+  cleanups.push(cleanup);
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+  expect(requests).toEqual([null]);
+});
+
+it("posts close sync messages from closerequest", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+
+  expect(channel.sent).toEqual([{ close: true }]);
+});
+
+it("closes the window when a remote close sync message arrives", () => {
+  const channel = mockChannel();
+  const closeWindow = vi.fn();
+  const cleanup = installSyncBridge(window, () => channel, window, closeWindow);
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { close: true } });
+
+  expect(closeWindow).toHaveBeenCalledTimes(1);
 });
 
 it("turns remote index messages into navigate requests", () => {
