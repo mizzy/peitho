@@ -333,6 +333,16 @@ fn request_graceful_quit(pid: &str) {
     }
 }
 
+/// Quit any Chrome instances still holding the peitho profiles. Called when
+/// the presentation ends so no windowless Chrome lingers in the Dock between
+/// sessions; the launch path stays as a fallback for sessions that never
+/// ended cleanly.
+pub fn quit_profile_instances() {
+    if let Some(profiles) = chrome_profiles_from_home(std::env::var_os("HOME")) {
+        terminate_stale_profile_instances(&profiles);
+    }
+}
+
 /// Chrome on macOS keeps running after its last window closes, so a previous
 /// `present` session leaves processes holding the peitho profiles. Launching
 /// into such a process hands off the URL and drops every flag except `--app`

@@ -564,7 +564,11 @@ fn present(options: PresentOptions) -> miette::Result<()> {
             displays::detect_presentation_layout(presenter_mode),
         );
     }
-    server.serve_forever()
+    let result = server.serve_forever();
+    if !options.no_open {
+        browser::quit_profile_instances();
+    }
+    result
 }
 
 fn emit_present_cache(
