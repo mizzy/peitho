@@ -69,13 +69,6 @@ fn push_window_position(args: &mut Vec<OsString>, placement: WindowPlacement) {
     )));
 }
 
-fn push_window_size(args: &mut Vec<OsString>, placement: WindowPlacement) {
-    args.push(OsString::from(format!(
-        "--window-size={},{}",
-        placement.width, placement.height
-    )));
-}
-
 fn chrome_slides_args(
     profile_dir: &Path,
     url: &str,
@@ -96,7 +89,7 @@ fn chrome_presenter_args(
 ) -> Vec<OsString> {
     let mut args = chrome_base_args(profile_dir, url);
     push_window_position(&mut args, placement);
-    push_window_size(&mut args, placement);
+    args.push(OsString::from("--start-fullscreen"));
     args
 }
 
@@ -386,7 +379,7 @@ mod tests {
                 OsString::from("--no-default-browser-check"),
                 OsString::from("--app=http://127.0.0.1:8000/presenter.html"),
                 OsString::from("--window-position=156,91"),
-                OsString::from("--window-size=1200,800"),
+                OsString::from("--start-fullscreen"),
             ]
         );
     }
@@ -486,8 +479,8 @@ mod tests {
             rendered[1].contains("--user-data-dir=/Users/alice/.peitho/chrome-profile-presenter")
         );
         assert!(rendered[1].contains("--window-position=156,91"));
-        assert!(rendered[1].contains("--window-size=1200,800"));
-        assert!(!rendered[1].contains("--start-fullscreen"));
+        assert!(rendered[1].contains("--start-fullscreen"));
+        assert!(!rendered[1].contains("--window-size=1200,800"));
     }
 
     #[test]
