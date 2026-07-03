@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::{
-    domain::SlideKey,
-    error::{BuildError, ErrorKind, Result},
-};
+use crate::{domain::SlideKey, error::Result, json::pretty_json};
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(
@@ -36,16 +33,7 @@ impl Notes {
 }
 
 pub fn notes_json(notes: &Notes) -> Result<String> {
-    let mut json = serde_json::to_string_pretty(notes).map_err(|err| {
-        BuildError::new(
-            ErrorKind::Manifest,
-            None,
-            format!("failed to serialize notes: {err}"),
-            "keep notes fields serializable",
-        )
-    })?;
-    json.push('\n');
-    Ok(json)
+    pretty_json(notes, "notes", "keep notes fields serializable")
 }
 
 #[cfg(test)]
