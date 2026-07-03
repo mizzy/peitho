@@ -8,6 +8,7 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 assert_cmd = "2"
 clap = { version = "4", features = ["derive"] }
 html-escape = "0.2"

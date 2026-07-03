@@ -54,3 +54,28 @@
   font-size: 22px;
   line-height: 1.35;
 }
+
+.slot-code .hl-comment {
+  color: #8a8578;
+}
+
+.slot-code .hl-string {
+  color: #2f7d4f;
+}
+
+.slot-code .hl-keyword,
+.slot-code .hl-storage {
+  color: #7141d8;
+}
+
+.slot-code .hl-constant {
+  color: #b45309;
+}
+
+.slot-code .hl-function {
+  color: #1d4ed8;
+}
+
+.slot-code .hl-type {
+  color: #0f766e;
+}

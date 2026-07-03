@@ -1,6 +1,7 @@
 pub mod check;
 pub mod domain;
 pub mod error;
+pub mod highlight;
 pub mod layout;
 pub mod manifest;
 pub mod mapping;
