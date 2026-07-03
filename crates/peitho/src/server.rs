@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
@@ -97,7 +97,7 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
 
 pub struct PresentServer {
     root: PathBuf,
-    server: Server,
+    server: Arc<Server>,
     sync: SyncHub,
 }
 
@@ -107,7 +107,7 @@ impl PresentServer {
             .map_err(|err| miette::miette!("failed to bind present server: {err}"))?;
         Ok(Self {
             root,
-            server,
+            server: Arc::new(server),
             sync: SyncHub::default(),
         })
     }
@@ -125,18 +125,19 @@ impl PresentServer {
 
     pub fn serve_forever(self) -> miette::Result<()> {
         for request in self.server.incoming_requests() {
-            self.respond(request);
+            self.respond(request, Some(ShutdownHandle::new(self.server.clone())));
         }
+        let _ = writeln!(std::io::stdout(), "presentation ended");
         Ok(())
     }
 
     pub fn handle_one(&self) {
         if let Some(request) = self.server.incoming_requests().next() {
-            self.respond(request);
+            self.respond(request, None);
         }
     }
 
-    fn respond(&self, request: tiny_http::Request) {
+    fn respond(&self, request: tiny_http::Request, shutdown: Option<ShutdownHandle>) {
         let path = request.url().split('?').next().unwrap_or(request.url());
         match (request.method(), path) {
             (&Method::Get, "/sync") => {
@@ -144,7 +145,7 @@ impl PresentServer {
                 return;
             }
             (&Method::Post, "/sync") => {
-                self.respond_sync_post(request);
+                self.respond_sync_post(request, shutdown);
                 return;
             }
             _ => {}
@@ -184,7 +185,7 @@ impl PresentServer {
         );
     }
 
-    fn respond_sync_post(&self, mut request: tiny_http::Request) {
+    fn respond_sync_post(&self, mut request: tiny_http::Request, shutdown: Option<ShutdownHandle>) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() {
             send_response(
@@ -210,6 +211,11 @@ impl PresentServer {
         let json = serde_json::to_string(&message).expect("SyncMessage serializes");
         self.sync.broadcast(&json);
         send_response(request, Response::empty(StatusCode(204)));
+        if matches!(message, SyncMessage::Close(_)) {
+            if let Some(shutdown) = shutdown {
+                shutdown.start();
+            }
+        }
     }
 
     fn respond_static(&self, request: tiny_http::Request) {
@@ -235,6 +241,23 @@ impl PresentServer {
                 );
             }
         }
+    }
+}
+
+struct ShutdownHandle {
+    server: Arc<Server>,
+}
+
+impl ShutdownHandle {
+    fn new(server: Arc<Server>) -> Self {
+        Self { server }
+    }
+
+    fn start(self) {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            self.server.unblock();
+        });
     }
 }
 
