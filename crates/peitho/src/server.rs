@@ -69,6 +69,11 @@ pub(crate) fn resolve_request_path(root: &Path, url: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return Some(root.join("present.html"));
     }
+    // Extensionless alias keeping the Chrome app name dot-free so app window
+    // placement is saved and restored (see browser::presenter_url).
+    if trimmed == "presenter" {
+        return Some(root.join("presenter.html"));
+    }
 
     let mut out = root.to_path_buf();
     for component in Path::new(trimmed).components() {
@@ -340,6 +345,18 @@ mod tests {
         assert_eq!(
             resolve_request_path(Path::new("/cache"), "/").unwrap(),
             Path::new("/cache").join("present.html")
+        );
+    }
+
+    #[test]
+    fn resolves_extensionless_presenter_route() {
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/presenter").unwrap(),
+            Path::new("/cache").join("presenter.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/presenter?seq=1").unwrap(),
+            Path::new("/cache").join("presenter.html")
         );
     }
 

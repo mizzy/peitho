@@ -546,13 +546,22 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     println!("serving presentation at {url}");
     std::io::stdout().flush().into_diagnostic()?;
     if !options.no_open {
+        let presenter_mode = if options.presenter_windowed {
+            displays::PresenterMode::Windowed {
+                saved: browser::chrome_profiles_from_home(std::env::var_os("HOME"))
+                    .as_ref()
+                    .and_then(browser::saved_presenter_bounds),
+            }
+        } else {
+            displays::PresenterMode::Fullscreen
+        };
         browser::open_browser_with_request(
             browser::BrowserOpenRequest {
                 slides_url: &url,
                 presenter_url: &presenter_url,
                 no_presenter: options.no_presenter,
             },
-            displays::detect_presentation_layout(options.presenter_windowed),
+            displays::detect_presentation_layout(presenter_mode),
         );
     }
     server.serve_forever()

@@ -41,7 +41,10 @@ UX変更は必ず実ブラウザ/実ディスプレイでE2E確認する（jsdom
 
 - **tiny_httpでSSEは不成立**: data_length Noneだと閾値以下のbodyをEOFまでバッファ、chunkエンコーダも小チャンクをflushしない。だから/syncはロングポーリング（`GET /sync?seq=N`、クエリ無しGETは現在seq即答=参加ハンドシェイク、`POST /sync`で`{index}|{close:true}`）
 - **Chrome既起動インスタンスへのフラグhandoffは`--app`しか効かない**: `--start-fullscreen`/`--window-position`/`--window-size`は無視される。確実に効かせるには別`--user-data-dir`で新規プロセス起動（だからslides/presenterは`~/.peitho/chrome-profile-{slides,presenter}`の2インスタンス）
-- **macOSのChromeは全ウィンドウを閉じてもプロセスが残る**: 前回presentのインスタンスがpeithoプロファイルを掴んだままだと次回起動がhandoffになり配置フラグが全滅する。だからpresent起動時に残存プロセスを`pkill -f -- "--user-data-dir=<profile>"`でkillしてから開く（pkillはパターンが`--`始まりだと`--`セパレータ必須）
+- **macOSのChromeは全ウィンドウを閉じてもプロセスが残る**: 前回presentのインスタンスがpeithoプロファイルを掴んだままだと次回起動がhandoffになり配置フラグが全滅する。だからpresent起動時に残存プロセスを終了してから開く
+- **Chromeの残存プロセスはSIGTERM killではなく正規終了させる**: SIGTERMはChrome的にクラッシュ（`exit_type: Crashed`）で、次回起動でクラッシュ復元が走り古いセッションの窓・boundsが復活する。`NSRunningApplication.terminate`（JXAではブリッジの都合で**括弧なし**アクセスで発火・実測）で終了させるとNormal。なお`exit_type`は起動中は常にCrashed表示（起動時に先書き→正常終了でNormalに戻す仕様）なので稼働中の読み取りは無意味。対象pidは`ps`からChromeメインプロセス（`--type=`なし）だけに絞る（`pgrep -f`はパターンを含むシェル自身まで拾う）
+- **Chromeの`--app`ウィンドウ位置復元はapp名にドットがあると壊れる**: 位置は`browser.app_window_placement`にURL由来のapp名（host+path）で保存されるが、名前中のドット（`127.0.0.1`や`.html`）が書き込み時にprefパスとして展開され、読み出しと不一致になり復元されない（Chromiumの実挙動、実測）。だからpresenterは`http://localhost:<port>/presenter`（拡張子なしルート）で開く。app名にポートは含まれないのでポートが毎回変わっても復元は効く
+- **配置フラグ無しの`--app`初回起動はウィンドウがどのディスプレイに出るか不定**: slides側ディスプレイに出るとフルスクリーンSpaceの裏に完全に隠れる（CGWindowListのOnScreenOnlyにも出ない）。だからwindowedモードは、保存placementが無い/不可視位置のときだけ`--window-position`+`--window-size`でプライマリ中央にシードし、可視な保存placementがあるときだけフラグ無しでChrome復元に任せる（判定はpeithoがプロファイルのPreferencesを読む）。Chromeは部分的に画面外の保存boundsを起動時にクランプする
 - **別プロファイル間はBroadcastChannelが届かない**: だから同期はサーバ経由（§15からの意図的拡張。層分け=DOMイベント⇔トランスポート橋渡しは不変）
 - **CLI起動のappウィンドウは`window.close()`で閉じられる**（履歴1エントリのため）。Escは`peitho:closerequest`→`{close:true}`全窓配信→各自close→サーバも猶予後にunblockして終了
 - **requestFullscreen/window.openはtransient user activation必須**: permission promptのawaitを挟むと失効する。ブラウザ内でのウィンドウ配置はこれで2敗した末にCLI主導へ転換した経緯（M8/M9/M10）
