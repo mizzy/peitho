@@ -642,6 +642,7 @@ dependencies = [
  "notify-debouncer-mini",
  "peitho-core",
  "predicates",
+ "serde",
  "serde_json",
  "tempfile",
  "tiny_http",

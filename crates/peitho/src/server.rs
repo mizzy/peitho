@@ -1,10 +1,59 @@
 use std::{
     fs,
+    io::Read,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
+    sync::{Arc, Condvar, Mutex},
+    thread,
+    time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+#[derive(Clone, Default)]
+pub(crate) struct SyncHub {
+    state: Arc<(Mutex<SyncState>, Condvar)>,
+}
+
+#[derive(Default)]
+struct SyncState {
+    seq: u64,
+    latest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncPoll {
+    seq: u64,
+    message: String,
+}
+
+impl SyncHub {
+    pub(crate) fn broadcast(&self, message: &str) -> u64 {
+        let (lock, cvar) = &*self.state;
+        let mut state = lock.lock().expect("sync hub mutex");
+        state.seq += 1;
+        state.latest = Some(message.to_owned());
+        let seq = state.seq;
+        cvar.notify_all();
+        seq
+    }
+
+    fn wait_after(&self, seq: u64, timeout: Duration) -> Option<SyncPoll> {
+        let (lock, cvar) = &*self.state;
+        let state = lock.lock().expect("sync hub mutex");
+        let (state, _) = cvar
+            .wait_timeout_while(state, timeout, |state| state.seq <= seq)
+            .expect("sync hub mutex");
+        if state.seq <= seq {
+            return None;
+        }
+        Some(SyncPoll {
+            seq: state.seq,
+            message: state.latest.clone().expect("latest sync message"),
+        })
+    }
+}
 
 pub(crate) fn resolve_request_path(root: &Path, url: &str) -> Option<PathBuf> {
     let path = url.split('?').next().unwrap_or(url);
@@ -44,13 +93,18 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
 pub struct PresentServer {
     root: PathBuf,
     server: Server,
+    sync: SyncHub,
 }
 
 impl PresentServer {
     pub fn bind(root: PathBuf, port: u16) -> miette::Result<Self> {
         let server = Server::http(("127.0.0.1", port))
             .map_err(|err| miette::miette!("failed to bind present server: {err}"))?;
-        Ok(Self { root, server })
+        Ok(Self {
+            root,
+            server,
+            sync: SyncHub::default(),
+        })
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -71,18 +125,81 @@ impl PresentServer {
         Ok(())
     }
 
-    pub fn handle_one(self) -> miette::Result<()> {
+    pub fn handle_one(&self) {
         if let Some(request) = self.server.incoming_requests().next() {
             self.respond(request);
         }
-        Ok(())
     }
 
     fn respond(&self, request: tiny_http::Request) {
+        let path = request.url().split('?').next().unwrap_or(request.url());
+        match (request.method(), path) {
+            (&Method::Get, "/sync") => {
+                self.respond_sync_poll(request);
+                return;
+            }
+            (&Method::Post, "/sync") => {
+                self.respond_sync_post(request);
+                return;
+            }
+            _ => {}
+        }
+
         if request.method() != &Method::Get {
             send_response(request, Response::empty(StatusCode(405)));
             return;
         }
+        self.respond_static(request);
+    }
+
+    fn respond_sync_poll(&self, request: tiny_http::Request) {
+        let Some(seq) = sync_seq(request.url()) else {
+            send_response(
+                request,
+                Response::from_string("invalid sync seq\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+        let sync = self.sync.clone();
+        thread::spawn(
+            move || match sync.wait_after(seq, Duration::from_secs(30)) {
+                Some(event) => {
+                    let Ok(header) =
+                        Header::from_bytes("Content-Type", "application/json; charset=utf-8")
+                    else {
+                        eprintln!("warning: failed to build Content-Type header");
+                        return;
+                    };
+                    let body = format!(r#"{{"seq":{},"message":{}}}"#, event.seq, event.message);
+                    send_response(request, Response::from_string(body).with_header(header));
+                }
+                None => send_response(request, Response::empty(StatusCode(204))),
+            },
+        );
+    }
+
+    fn respond_sync_post(&self, mut request: tiny_http::Request) {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() {
+            send_response(
+                request,
+                Response::from_string("invalid sync body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        }
+        let Ok(message) = serde_json::from_str::<SyncMessage>(&body) else {
+            send_response(
+                request,
+                Response::from_string("invalid sync body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+        let json = serde_json::to_string(&message).expect("SyncMessage serializes");
+        self.sync.broadcast(&json);
+        send_response(request, Response::empty(StatusCode(204)));
+    }
+
+    fn respond_static(&self, request: tiny_http::Request) {
         let Some(path) = resolve_request_path(&self.root, request.url()) else {
             send_response(
                 request,
@@ -108,9 +225,33 @@ impl PresentServer {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncMessage {
+    index: usize,
+}
+
+fn sync_seq(url: &str) -> Option<u64> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Some(0);
+    };
+    if query.is_empty() {
+        return Some(0);
+    }
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "seq" {
+            return value.parse().ok();
+        }
+    }
+    Some(0)
+}
+
 fn send_response<R>(request: tiny_http::Request, response: Response<R>)
 where
-    R: std::io::Read + Send + 'static,
+    R: Read + Send + 'static,
 {
     if let Err(err) = request.respond(response) {
         eprintln!("warning: failed to send present server response: {err}");
@@ -121,6 +262,7 @@ where
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::time::Duration;
 
     #[test]
     fn resolves_root_to_present_html() {
@@ -159,5 +301,30 @@ mod tests {
             content_type(Path::new("slide.bin")),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn sync_hub_returns_latest_message_after_requested_sequence() {
+        let hub = SyncHub::default();
+
+        let seq = hub.broadcast(r#"{"index":2}"#);
+
+        assert_eq!(seq, 1);
+        assert_eq!(
+            hub.wait_after(0, Duration::from_secs(1)).unwrap(),
+            SyncPoll {
+                seq: 1,
+                message: r#"{"index":2}"#.to_owned()
+            }
+        );
+        assert!(hub.wait_after(1, Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn parses_sync_seq_query() {
+        assert_eq!(sync_seq("/sync"), Some(0));
+        assert_eq!(sync_seq("/sync?seq=42"), Some(42));
+        assert_eq!(sync_seq("/sync?other=x&seq=7"), Some(7));
+        assert_eq!(sync_seq("/sync?seq=nope"), None);
     }
 }

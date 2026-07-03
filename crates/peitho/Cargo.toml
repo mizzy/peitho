@@ -14,6 +14,7 @@ miette.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 peitho-core = { path = "../peitho-core" }
+serde.workspace = true
 serde_json.workspace = true
 tiny_http.workspace = true
 

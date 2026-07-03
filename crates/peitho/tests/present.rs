@@ -14,13 +14,23 @@ use predicates::prelude::*;
 use tempfile::tempdir;
 
 #[test]
+fn present_help_lists_no_presenter_flag() {
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["present", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-presenter"));
+}
+
+#[test]
 fn present_no_serve_writes_clean_present_cache() {
     let dir = tempdir().unwrap();
     let fixture = Fixture::write(dir.path());
     let shell = dir.path().join("shell.js");
     fs::write(
         &shell,
-        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\n",
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
     )
     .unwrap();
     let stale = dir.path().join(".peitho/present-cache/stale.txt");
@@ -49,7 +59,7 @@ fn present_no_serve_writes_clean_present_cache() {
         .contains(r#""notes": {}"#));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
-        .contains("installSyncBridge(window)"));
+        .contains("installSyncBridge(window, serverSyncChannelFactory())"));
 }
 
 #[test]
@@ -59,7 +69,7 @@ fn present_no_serve_writes_presenter_html() {
     let shell = dir.path().join("shell.js");
     fs::write(
         &shell,
-        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function mountPresenterView() {}\n",
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\nexport function mountPresenterView() {}\n",
     )
     .unwrap();
 
@@ -114,7 +124,7 @@ fn present_server_serves_manifest_over_http() {
 
     let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
     let addr = server.addr();
-    let handle = thread::spawn(move || server.handle_one().unwrap());
+    let handle = thread::spawn(move || server.handle_one());
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
         .write_all(b"GET /manifest.json HTTP/1.0\r\n\r\n")
@@ -129,13 +139,72 @@ fn present_server_serves_manifest_over_http() {
 }
 
 #[test]
+fn present_server_relays_sync_post_to_long_poll_subscriber() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let mut poll = TcpStream::connect(addr).unwrap();
+    poll.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    poll.write_all(b"GET /sync?seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+
+    let mut post = TcpStream::connect(addr).unwrap();
+    post.write_all(
+        b"POST /sync HTTP/1.0\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n{\"index\":1}",
+    )
+    .unwrap();
+    let mut post_response = String::new();
+    post.read_to_string(&mut post_response).unwrap();
+    assert!(post_response.contains("204 No Content"));
+
+    let event = read_until_contains(&mut poll, r#""message":{"index":1}"#);
+    assert!(event.contains("200 OK"));
+    assert!(event.contains("application/json"));
+    assert!(event.contains(r#""seq":1"#));
+    assert!(event.contains(r#""message":{"index":1}"#));
+
+    drop(poll);
+    drop(post);
+    drop(handle);
+}
+
+#[test]
+fn present_server_rejects_invalid_sync_post_body() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let mut post = TcpStream::connect(addr).unwrap();
+    post.write_all(
+        b"POST /sync HTTP/1.0\r\nHost: localhost\r\nContent-Length: 11\r\n\r\n{\"key\":\"x\"}",
+    )
+    .unwrap();
+    let mut response = String::new();
+    post.read_to_string(&mut response).unwrap();
+
+    assert!(response.contains("400 Bad Request"));
+    handle.join().unwrap();
+}
+
+#[test]
 fn present_no_open_server_prints_assigned_url() {
     let dir = tempdir().unwrap();
     let fixture = Fixture::write(dir.path());
     let shell = dir.path().join("shell.js");
     fs::write(
         &shell,
-        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\n",
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
     )
     .unwrap();
 
@@ -209,13 +278,19 @@ fn repository_example_present_no_serve_smoke() {
     assert!(present_html.contains("installPresentationControls"));
     assert!(present_html.contains("installCanvasClickNavigation"));
     assert!(present_html.contains("installFullscreenShortcut"));
+    assert!(present_html.contains("serverSyncChannelFactory"));
+    assert!(present_html.contains("data-peitho-action=\"close\""));
     assert!(!present_html.contains("peitho-presenter-link"));
     assert!(presenter_html.contains(".peitho-presenter-pane"));
+    assert!(presenter_html.contains("serverSyncChannelFactory"));
     assert!(shell_js.contains("CANVAS_WIDTH"));
     assert!(shell_js.contains("installPresentationControls"));
-    assert!(shell_js.contains("openPresenterWithDisplay"));
-    assert!(shell_js.contains("getScreenDetails"));
-    assert!(shell_js.contains("requestFullscreen"));
+    assert!(shell_js.contains("openPresenterPopup"));
+    assert!(shell_js.contains("serverSyncChannelFactory"));
+    assert!(shell_js.contains(r#"data-peitho-action="close""#));
+    assert!(!shell_js.contains("getScreenDetails"));
+    assert!(!shell_js.contains("requestFullscreen({screen"));
+    assert!(!shell_js.contains("data-peitho-place-overlay"));
     assert!(shell_js.contains("mountPresenterView"));
 }
 
@@ -278,4 +353,15 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .unwrap()
         .to_path_buf()
+}
+
+fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
+    let mut out = String::new();
+    let mut buf = [0_u8; 128];
+    while !out.contains(needle) {
+        let len = stream.read(&mut buf).unwrap();
+        assert!(len > 0, "stream closed before reading {needle:?}: {out:?}");
+        out.push_str(&String::from_utf8_lossy(&buf[..len]));
+    }
+    out
 }
