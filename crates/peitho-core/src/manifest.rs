@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::SlideKey,
-    error::{BuildError, ErrorKind, Result},
+    error::Result,
+    json::pretty_json,
     phase::{Checked, CheckedSlide, Deck, PlannedTime},
 };
 
@@ -98,16 +99,7 @@ impl Manifest {
 }
 
 pub fn manifest_json(manifest: &Manifest) -> Result<String> {
-    let mut json = serde_json::to_string_pretty(manifest).map_err(|err| {
-        BuildError::new(
-            ErrorKind::Manifest,
-            None,
-            format!("failed to serialize manifest: {err}"),
-            "keep manifest fields serializable",
-        )
-    })?;
-    json.push('\n');
-    Ok(json)
+    pretty_json(manifest, "manifest", "keep manifest fields serializable")
 }
 
 pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {

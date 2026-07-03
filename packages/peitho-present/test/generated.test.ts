@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
+import type { PresentConfig } from "../../../bindings/PresentConfig";
 import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
@@ -46,6 +47,13 @@ describe("generated manifest contract", () => {
 
     expect(manifest.slides[0].key).toBe("intro");
     expect(options.root.tagName).toBe("MAIN");
+  });
+
+  it("uses the Rust-generated PresentConfig type shape", () => {
+    const config: PresentConfig = { version: 1, presenterOpen: true };
+
+    expect(config.version).toBe(1);
+    expect(config.presenterOpen).toBe(true);
   });
 
   it("exports presenter and presentation event types", () => {
