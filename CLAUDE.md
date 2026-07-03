@@ -21,7 +21,7 @@ crates/peitho-core/   契約・パイプライン(parser/template/mapping/check/
 crates/peitho/        CLI(build/present/publish)、server.rs(配信+/syncロングポール)、browser.rs、displays.rs
 packages/peitho-present/  TS発表シェル(canvas/shell/controls/keyboard/sync/presenter)
 bindings/             ts-rs生成TS型（コミット対象）
-templates/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのテンプレート/base.cssはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる）
+templates/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのテンプレート/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）
 docs/plans/           各マイルストーンの実装計画（履歴）
 ```
 
@@ -33,6 +33,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 git diff --exit-code bindings/  # 契約drift
 cd packages/peitho-present && npm run build && npm test && npm run typecheck
+git diff --exit-code packages/peitho-present/dist/shell.js  # 内蔵シェルdrift（npm run build後に）
 ```
 
 UX変更は必ず実ブラウザ/実ディスプレイでE2E確認する（jsdomはレイアウト・フラッシュ・ウィンドウ挙動を検出できない。過去に真っ黒画面・SSE不達・無限再ビルドをE2Eでのみ検出）。presentの確認は `--port`固定+`curl POST /sync`+`screencapture -x -D <n>` が便利。

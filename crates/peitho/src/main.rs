@@ -57,7 +57,7 @@ struct PresentOptions {
     template: Option<PathBuf>,
     base_css: Option<PathBuf>,
     overrides_css: Option<PathBuf>,
-    shell: PathBuf,
+    shell: Option<PathBuf>,
     port: u16,
     no_open: bool,
     no_serve: bool,
@@ -96,8 +96,8 @@ enum Command {
         base_css: Option<PathBuf>,
         #[arg(long, help = "overrides CSS path (default: no overrides)")]
         overrides_css: Option<PathBuf>,
-        #[arg(long, default_value = "packages/peitho-present/dist/shell.js")]
-        shell: PathBuf,
+        #[arg(long, help = "shell bundle path (default: built-in present shell)")]
+        shell: Option<PathBuf>,
         #[arg(long, default_value_t = 0)]
         port: u16,
         #[arg(long)]
@@ -124,6 +124,9 @@ enum Command {
 const BUILTIN_TEMPLATE_NAME: &str = "title-body-code";
 const BUILTIN_TEMPLATE_HTML: &str = include_str!("../../../templates/title-body-code.html");
 const BUILTIN_BASE_CSS: &str = include_str!("../../../themes/base.css");
+/// The committed esbuild bundle; CI rebuilds it and fails on drift, the same
+/// discipline as the generated TS types in bindings/.
+const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/dist/shell.js");
 
 const PRESENT_CACHE: &str = ".peitho/present-cache";
 const PRESENTATION_ONLY_DIST_FILES: &[&str] =
@@ -555,7 +558,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         options.base_css.as_deref(),
         options.overrides_css.as_deref(),
     )?;
-    emit_present_cache(&cache, &artifacts, &options.shell)?;
+    emit_present_cache(&cache, &artifacts, options.shell.as_deref())?;
     if options.no_serve {
         println!("generated present cache at {}", cache.display());
         return Ok(());
@@ -595,9 +598,11 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 fn emit_present_cache(
     cache: &Path,
     artifacts: &BuildArtifacts,
-    shell: &Path,
+    shell: Option<&Path>,
 ) -> miette::Result<()> {
-    ensure_shell_bundle(shell)?;
+    if let Some(shell) = shell {
+        ensure_shell_bundle(shell)?;
+    }
     fs::write(cache.join("peitho.css"), &artifacts.css).into_diagnostic()?;
     write_slide_fragments(cache, &artifacts.rendered)?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
@@ -616,7 +621,14 @@ fn emit_present_cache(
         peitho_core::render_presenter_index(),
     )
     .into_diagnostic()?;
-    fs::copy(shell, cache.join("shell.js")).into_diagnostic()?;
+    match shell {
+        Some(shell) => {
+            fs::copy(shell, cache.join("shell.js")).into_diagnostic()?;
+        }
+        None => {
+            fs::write(cache.join("shell.js"), BUILTIN_SHELL_JS).into_diagnostic()?;
+        }
+    }
     Ok(())
 }
 

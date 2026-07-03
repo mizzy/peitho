@@ -97,6 +97,26 @@ fn present_no_serve_writes_presenter_html() {
 }
 
 #[test]
+fn present_without_shell_flag_writes_builtin_shell() {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(fixture.present_args_builtin_shell())
+        .args(["--no-serve", "--no-open"])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(dir.path().join(".peitho/present-cache/shell.js")).unwrap();
+    let committed =
+        fs::read_to_string(workspace_root().join("packages/peitho-present/dist/shell.js")).unwrap();
+    assert_eq!(written, committed);
+    assert!(written.contains("mountPresentShell"));
+}
+
+#[test]
 fn present_fails_with_help_when_shell_bundle_is_missing() {
     let dir = tempdir().unwrap();
     let fixture = Fixture::write(dir.path());
@@ -475,6 +495,13 @@ impl Fixture {
     }
 
     fn present_args(&self, shell: &std::path::Path) -> Vec<OsString> {
+        let mut args = self.present_args_builtin_shell();
+        args.push(OsString::from("--shell"));
+        args.push(shell.as_os_str().to_owned());
+        args
+    }
+
+    fn present_args_builtin_shell(&self) -> Vec<OsString> {
         vec![
             OsString::from("present"),
             self.deck.as_os_str().to_owned(),
@@ -484,8 +511,6 @@ impl Fixture {
             self.base.as_os_str().to_owned(),
             OsString::from("--overrides-css"),
             self.overrides.as_os_str().to_owned(),
-            OsString::from("--shell"),
-            shell.as_os_str().to_owned(),
         ]
     }
 }
