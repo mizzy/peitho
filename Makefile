@@ -36,19 +36,10 @@ minimal: shell
 	$(PRESENT) examples/deck.md $(PRESENT_FLAGS)
 
 lightning-talk: shell
-	$(PRESENT) examples/lightning-talk/deck.md \
-		--layouts examples/lightning-talk/layouts \
-		--css examples/lightning-talk/css \
-		$(PRESENT_FLAGS)
+	$(PRESENT) examples/lightning-talk/deck.md $(PRESENT_FLAGS)
 
 code-walkthrough: shell
-	$(PRESENT) examples/code-walkthrough/deck.md \
-		--layouts examples/code-walkthrough/layouts \
-		--css examples/code-walkthrough/css \
-		$(PRESENT_FLAGS)
+	$(PRESENT) examples/code-walkthrough/deck.md $(PRESENT_FLAGS)
 
 keynote: shell
-	$(PRESENT) examples/keynote/deck.md \
-		--layouts examples/keynote/layouts \
-		--css examples/keynote/css \
-		$(PRESENT_FLAGS)
+	$(PRESENT) examples/keynote/deck.md $(PRESENT_FLAGS)

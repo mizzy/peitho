@@ -29,16 +29,40 @@ struct BuildOptions {
     out: PathBuf,
 }
 
+/// Convention over configuration: with no flag, a `layouts/` or `css/`
+/// directory sitting next to the deck file is used automatically (an
+/// explicit flag always wins). The lookup is deck-relative, not cwd-relative,
+/// so a deck repository behaves the same from anywhere.
+fn effective_asset_path(
+    flag: &Option<PathBuf>,
+    input: &Path,
+    conventional: &str,
+) -> Option<PathBuf> {
+    flag.clone().or_else(|| {
+        let dir = input.parent()?.join(conventional);
+        dir.is_dir().then_some(dir)
+    })
+}
+
 impl BuildOptions {
-    /// The deck file plus the --layouts/--css paths. Each asset path may be
-    /// a single file or a directory whose *.html / *.css files are watched.
+    fn effective_layouts(&self) -> Option<PathBuf> {
+        effective_asset_path(&self.layouts, &self.input, "layouts")
+    }
+
+    fn effective_css(&self) -> Option<PathBuf> {
+        effective_asset_path(&self.css, &self.input, "css")
+    }
+
+    /// The deck file plus the resolved --layouts/--css paths. Each asset
+    /// path may be a single file or a directory whose *.html / *.css files
+    /// are watched.
     fn watch_roots(&self) -> Vec<(PathBuf, &'static str)> {
         let mut roots = vec![(self.input.clone(), "md")];
-        if let Some(path) = &self.layouts {
-            roots.push((path.clone(), "html"));
+        if let Some(path) = self.effective_layouts() {
+            roots.push((path, "html"));
         }
-        if let Some(path) = &self.css {
-            roots.push((path.clone(), "css"));
+        if let Some(path) = self.effective_css() {
+            roots.push((path, "css"));
         }
         roots
     }
@@ -98,12 +122,12 @@ enum Command {
         input: PathBuf,
         #[arg(
             long,
-            help = "layout HTML file or directory of *.html (default: built-in title-body-code)"
+            help = "layout HTML file or directory of *.html (default: layouts/ next to the deck, else built-in)"
         )]
         layouts: Option<PathBuf>,
         #[arg(
             long,
-            help = "CSS file or directory of *.css, concatenated in filename order (default: built-in base theme)"
+            help = "CSS file or directory of *.css, concatenated in filename order (default: css/ next to the deck, else built-in)"
         )]
         css: Option<PathBuf>,
         #[arg(long, default_value = "dist")]
@@ -115,12 +139,12 @@ enum Command {
         input: PathBuf,
         #[arg(
             long,
-            help = "layout HTML file or directory of *.html (default: built-in title-body-code)"
+            help = "layout HTML file or directory of *.html (default: layouts/ next to the deck, else built-in)"
         )]
         layouts: Option<PathBuf>,
         #[arg(
             long,
-            help = "CSS file or directory of *.css, concatenated in filename order (default: built-in base theme)"
+            help = "CSS file or directory of *.css, concatenated in filename order (default: css/ next to the deck, else built-in)"
         )]
         css: Option<PathBuf>,
         #[arg(long, help = "shell bundle path (default: built-in present shell)")]
@@ -215,8 +239,8 @@ fn main() -> miette::Result<()> {
 fn build(options: &BuildOptions) -> miette::Result<()> {
     let artifacts = build_artifacts(
         &options.input,
-        options.layouts.as_deref(),
-        options.css.as_deref(),
+        options.effective_layouts().as_deref(),
+        options.effective_css().as_deref(),
     )?;
     emit_distribution(&options.out, &artifacts)?;
     println!(
@@ -234,8 +258,8 @@ fn rebuild_once_for_watch(
 ) -> miette::Result<()> {
     match build_artifacts(
         &options.input,
-        options.layouts.as_deref(),
-        options.css.as_deref(),
+        options.effective_layouts().as_deref(),
+        options.effective_css().as_deref(),
     ) {
         Ok(artifacts) => match emit_distribution(&options.out, &artifacts) {
             Ok(()) => {
@@ -621,8 +645,8 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 
     let artifacts = build_artifacts(
         &options.input,
-        options.layouts.as_deref(),
-        options.css.as_deref(),
+        effective_asset_path(&options.layouts, &options.input, "layouts").as_deref(),
+        effective_asset_path(&options.css, &options.input, "css").as_deref(),
     )?;
     emit_present_cache(&cache, &artifacts, options.shell.as_deref())?;
     if options.no_serve {
@@ -797,6 +821,48 @@ mod tests {
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts.css.contains("width: 1280px;"));
+    }
+
+    #[test]
+    fn conventional_dirs_next_to_the_deck_win_over_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::create_dir_all(dir.path().join("layouts")).unwrap();
+        fs::create_dir_all(dir.path().join("css")).unwrap();
+
+        assert_eq!(
+            effective_asset_path(&None, &deck, "layouts"),
+            Some(dir.path().join("layouts"))
+        );
+        assert_eq!(
+            effective_asset_path(&None, &deck, "css"),
+            Some(dir.path().join("css"))
+        );
+    }
+
+    #[test]
+    fn explicit_flag_wins_over_conventional_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::create_dir_all(dir.path().join("layouts")).unwrap();
+        let explicit = dir.path().join("other-layouts");
+
+        assert_eq!(
+            effective_asset_path(&Some(explicit.clone()), &deck, "layouts"),
+            Some(explicit)
+        );
+    }
+
+    #[test]
+    fn no_flag_and_no_conventional_dir_resolves_to_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Intro\n").unwrap();
+
+        assert_eq!(effective_asset_path(&None, &deck, "layouts"), None);
+        assert_eq!(effective_asset_path(&None, &deck, "css"), None);
     }
 
     #[test]
