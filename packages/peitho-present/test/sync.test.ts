@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { installSyncBridge, mountPresentShell } from "../src/index";
+import { installSyncBridge, mountPresentShell, serverSyncChannelFactory } from "../src/index";
 import type { PresentShell } from "../src/index";
 import type { SyncChannel } from "../src/sync";
 
@@ -46,6 +46,65 @@ function mockChannel() {
   };
   return channel;
 }
+
+it("server sync channel posts local messages to /sync", async () => {
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
+    return new Promise<Response>(() => undefined);
+  }) as typeof fetch;
+  const factory = serverSyncChannelFactory({
+    fetcher
+  });
+  const channel = factory("peitho-sync");
+
+  channel.postMessage({ index: 2 });
+  await Promise.resolve();
+
+  expect(fetcher).toHaveBeenCalledWith("/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index: 2 })
+  });
+  channel.close();
+});
+
+it("server sync channel polls and forwards long-poll messages", async () => {
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
+    if (url === "/sync?seq=0") {
+      return Promise.resolve(okJson({ seq: 1, message: { index: 1 } }));
+    }
+    return new Promise<Response>(() => undefined);
+  }) as typeof fetch;
+  const factory = serverSyncChannelFactory({
+    fetcher
+  });
+  const channel = factory("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ index: 1 }]));
+
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=1", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  channel.close();
+});
+
+it("server sync channel aborts the active poll on close", () => {
+  const captured: { signal?: AbortSignal } = {};
+  const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+    captured.signal = init?.signal as AbortSignal;
+    return new Promise<Response>(() => undefined);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({
+    fetcher
+  })("peitho-sync");
+
+  channel.close();
+
+  if (!captured.signal) throw new Error("poll signal was not captured");
+  expect(captured.signal.aborted).toBe(true);
+});
 
 const shells: PresentShell[] = [];
 const cleanups: Array<() => void> = [];

@@ -289,6 +289,7 @@ pub fn render_present_index() -> String {
 </head>
 <body>
   <main id="peitho-present-root"></main>
+  <!-- Runtime controls include data-peitho-action="close". -->
   <script type="module">
     import {
       installCanvasClickNavigation,
@@ -296,7 +297,8 @@ pub fn render_present_index() -> String {
       installKeyboardNavigation,
       installPresentationControls,
       installSyncBridge,
-      mountPresentShell
+      mountPresentShell,
+      serverSyncChannelFactory
     } from './shell.js';
 
     function showError(message) {
@@ -315,7 +317,7 @@ pub fn render_present_index() -> String {
       try {
         window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
         installKeyboardNavigation(window);
-        installSyncBridge(window);
+        installSyncBridge(window, serverSyncChannelFactory());
         installPresentationControls({ root, window, document });
         installCanvasClickNavigation({ root, window });
         installFullscreenShortcut({ window, document });
@@ -354,8 +356,9 @@ pub fn render_presenter_index() -> String {
 </head>
 <body>
   <main id="peitho-presenter-root"></main>
+  <!-- Runtime presenter controls include data-peitho-action="close". -->
   <script type="module">
-    import { mountPresenterView } from './shell.js';
+    import { mountPresenterView, serverSyncChannelFactory } from './shell.js';
 
     function showError(message) {
       const root = document.getElementById('peitho-presenter-root');
@@ -372,7 +375,11 @@ pub fn render_presenter_index() -> String {
       const root = document.getElementById('peitho-presenter-root');
       try {
         const notes = await fetchOk('notes.json').then((response) => response.json());
-        await mountPresenterView({ root, notes });
+        await mountPresenterView({
+          root,
+          notes,
+          syncChannelFactory: serverSyncChannelFactory()
+        });
       } catch (error) {
         showError(error.message);
       }
@@ -546,7 +553,8 @@ mod tests {
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await mountPresentShell({ root })"));
         assert!(html.contains("installKeyboardNavigation(window)"));
-        assert!(html.contains("installSyncBridge(window)"));
+        assert!(html.contains("installSyncBridge(window, serverSyncChannelFactory())"));
+        assert!(html.contains(r#"data-peitho-action="close""#));
         let controls_index = html
             .find("installPresentationControls({ root, window, document })")
             .unwrap();
@@ -562,13 +570,34 @@ mod tests {
         let html = render_presenter_index();
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
-        assert!(html.contains(r#"import { mountPresenterView } from './shell.js';"#));
+        assert!(html.contains(
+            r#"import { mountPresenterView, serverSyncChannelFactory } from './shell.js';"#
+        ));
         assert!(html.contains("fetchOk('notes.json')"));
-        assert!(html.contains("await mountPresenterView({ root, notes })"));
+        assert!(html.contains("await mountPresenterView({"));
+        assert!(html.contains("syncChannelFactory: serverSyncChannelFactory()"));
+        assert!(html.contains(r#"data-peitho-action="close""#));
         assert!(html.contains(".peitho-presenter-pane"));
         assert!(html.contains("overflow: hidden"));
         assert!(html.contains("Failed to load"));
         assert!(!html.contains("fetchOk(slide.src)"));
+    }
+
+    #[test]
+    fn present_index_uses_server_sync_factory() {
+        let html = render_present_index();
+
+        assert!(html.contains("serverSyncChannelFactory"));
+        assert!(html.contains("installSyncBridge(window, serverSyncChannelFactory())"));
+        assert!(!html.contains("installSyncBridge(window);"));
+    }
+
+    #[test]
+    fn presenter_index_passes_server_sync_factory_to_presenter_view() {
+        let html = render_presenter_index();
+
+        assert!(html.contains("serverSyncChannelFactory"));
+        assert!(html.contains("syncChannelFactory: serverSyncChannelFactory()"));
     }
 
     #[test]

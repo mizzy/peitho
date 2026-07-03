@@ -1,8 +1,5 @@
 import type { NavigateDetail, SlideChangeDetail } from "./shell";
-import {
-  openPresenterWithDisplay,
-  type OpenPresenterWithDisplayOptions
-} from "./presentDisplay";
+import { openPresenterPopup, type OpenPresenterPopupOptions } from "./presentDisplay";
 
 export type PresentationControlsOptions = {
   root: HTMLElement;
@@ -11,10 +8,8 @@ export type PresentationControlsOptions = {
   bus?: EventTarget;
   idleMs?: number;
   openPresenter?: () => void | Promise<void>;
-  getScreenDetails?: OpenPresenterWithDisplayOptions["getScreenDetails"];
-  openPresenterWindow?: OpenPresenterWithDisplayOptions["openWindow"];
-  requestFullscreen?: OpenPresenterWithDisplayOptions["requestFullscreen"];
-  showPlacementOverlay?: OpenPresenterWithDisplayOptions["showPlacementOverlay"];
+  openPresenterWindow?: OpenPresenterPopupOptions["openWindow"];
+  closeWindow?: () => void;
 };
 
 export type CanvasClickNavigationOptions = {
@@ -36,14 +31,11 @@ export function installPresentationControls(options: PresentationControlsOptions
   const openPresenter =
     options.openPresenter ??
     (() =>
-      openPresenterWithDisplay({
+      openPresenterPopup({
         window: win,
-        document: doc,
-        getScreenDetails: options.getScreenDetails,
-        openWindow: options.openPresenterWindow,
-        requestFullscreen: options.requestFullscreen,
-        showPlacementOverlay: options.showPlacementOverlay
+        openWindow: options.openPresenterWindow
       }));
+  const closeWindow = options.closeWindow ?? (() => win.close());
 
   const bar = doc.createElement("nav");
   bar.dataset.peithoControlBar = "true";
@@ -54,7 +46,8 @@ export function installPresentationControls(options: PresentationControlsOptions
     '<button type="button" data-peitho-action="next" aria-label="Next slide">▶</button>',
     '<output data-peitho-control="counter">– / –</output>',
     '<button type="button" data-peitho-action="fullscreen" aria-label="Toggle fullscreen">⛶</button>',
-    '<button type="button" data-peitho-action="presenter">Presenter</button>'
+    '<button type="button" data-peitho-action="presenter">Presenter</button>',
+    '<button type="button" data-peitho-action="close" aria-label="Close presentation">✕</button>'
   ].join("");
   options.root.appendChild(bar);
 
@@ -81,6 +74,7 @@ export function installPresentationControls(options: PresentationControlsOptions
     if (action === "prev" || action === "next") dispatchNavigate(action);
     if (action === "presenter") void openPresenter();
     if (action === "fullscreen") toggleFullscreen(doc);
+    if (action === "close") closeWindow();
   };
   const onSlideChange = (event: Event): void => {
     const detail = (event as CustomEvent<SlideChangeDetail>).detail;

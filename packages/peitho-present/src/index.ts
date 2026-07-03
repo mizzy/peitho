@@ -17,26 +17,15 @@ export type {
   PresentationControlsOptions
 } from "./controls";
 export {
-  buildPresenterFeatures,
-  chooseOtherScreen,
   fallbackFeatures,
-  openPresenterWithDisplay,
-  placeWindows,
-  PRESENTER_URL,
-  showPlacementOverlay
+  openPresenterPopup,
+  PRESENTER_URL
 } from "./presentDisplay";
-export type {
-  OpenPresenterWithDisplayOptions,
-  PlacementOverlay,
-  PlaceWindowsOptions,
-  PresenterPopup,
-  RequestFullscreen,
-  ShowPlacementOverlay
-} from "./presentDisplay";
+export type { OpenPresenterPopupOptions } from "./presentDisplay";
 export { installKeyboardNavigation } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
-export { installSyncBridge } from "./sync";
+export { installSyncBridge, serverSyncChannelFactory } from "./sync";
 export type { PresenterOptions, PresenterView } from "./presenter";
 export type {
   NavigateDetail,
@@ -48,4 +37,9 @@ export type {
   SlideChangeDetail,
   TimerControlDetail
 } from "./shell";
-export type { SyncChannel, SyncChannelFactory, SyncMessage } from "./sync";
+export type {
+  ServerSyncOptions,
+  SyncChannel,
+  SyncChannelFactory,
+  SyncMessage
+} from "./sync";

@@ -11,6 +11,7 @@ export type PresenterOptions = {
   document?: Document;
   now?: () => number;
   syncChannelFactory?: SyncChannelFactory;
+  closeWindow?: () => void;
 };
 
 export type PresenterView = {
@@ -41,6 +42,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const doc = options.document ?? document;
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
+  const closeWindow = options.closeWindow ?? (() => win.close());
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -58,6 +60,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           <button type="button" data-peitho-action="pause">Pause</button>
           <button type="button" data-peitho-action="resume">Resume</button>
           <button type="button" data-peitho-action="reset">Reset</button>
+          <button type="button" data-peitho-action="close">Close</button>
         </div>
       </aside>
     </section>`;
@@ -138,6 +141,9 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       tick();
     });
   }
+  options.root.querySelector('[data-peitho-action="close"]')?.addEventListener("click", () => {
+    closeWindow();
+  });
 
   const interval = win.setInterval(tick, 250);
 

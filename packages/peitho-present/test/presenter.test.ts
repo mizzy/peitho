@@ -147,13 +147,15 @@ it("scales current and next preview shells to their pane sizes", async () => {
 it("buttons emit navigate and timercontrol requests only", async () => {
   const root = document.createElement("main");
   const { channel, factory } = mockSyncChannelFactory();
+  const closeWindow = vi.fn();
   const view = await mountPresenterView({
     root,
     notes,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
-    syncChannelFactory: factory
+    syncChannelFactory: factory,
+    closeWindow
   });
   views.push(view);
   const events: unknown[] = [];
@@ -172,6 +174,7 @@ it("buttons emit navigate and timercontrol requests only", async () => {
   root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="pause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="close"]')?.click();
 
   expect(events).toEqual([
     { to: "next" },
@@ -180,4 +183,5 @@ it("buttons emit navigate and timercontrol requests only", async () => {
     { action: "reset" }
   ]);
   expect(channel.sent).toEqual([{ index: 1 }]);
+  expect(closeWindow).toHaveBeenCalledTimes(1);
 });

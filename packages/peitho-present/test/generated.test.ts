@@ -3,28 +3,24 @@ import type { Manifest } from "../../../bindings/Manifest";
 import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
-  buildPresenterFeatures,
   calculateCanvasFit,
-  chooseOtherScreen,
+  fallbackFeatures,
   installCanvasClickNavigation,
   installCanvasScaler,
   installFullscreenShortcut,
   installPresentationControls,
   mountPresenterView,
   mountPresentShell,
-  openPresenterWithDisplay,
-  placeWindows,
-  showPlacementOverlay
+  openPresenterPopup,
+  serverSyncChannelFactory
 } from "../src/index";
 import type {
-  PlacementOverlay,
-  PlaceWindowsOptions,
+  OpenPresenterPopupOptions,
   PresentationEndDetail,
   PresentationStartDetail,
   PresenterOptions,
-  RequestFullscreen,
+  ServerSyncOptions,
   ShellOptions,
-  ShowPlacementOverlay,
   TimerControlDetail
 } from "../src/index";
 
@@ -77,28 +73,19 @@ describe("generated manifest contract", () => {
     expect(typeof mountPresenterView).toBe("function");
   });
 
-  it("exports display management helpers", () => {
-    expect(typeof buildPresenterFeatures).toBe("function");
-    expect(typeof chooseOtherScreen).toBe("function");
-    expect(typeof openPresenterWithDisplay).toBe("function");
-  });
-
-  it("exports display placement retry helpers", () => {
-    const overlay: PlacementOverlay = { remove: () => undefined };
-    const fullscreen: RequestFullscreen = () => undefined;
-    const show: ShowPlacementOverlay = () => overlay;
-    const options: PlaceWindowsOptions = {
-      details: {
-        currentScreen: { availLeft: 0, availTop: 0, availWidth: 1, availHeight: 1 },
-        screens: [{ availLeft: 0, availTop: 0, availWidth: 1, availHeight: 1 }]
-      },
-      popup: null,
-      requestFullscreen: fullscreen
+  it("exports presenter popup and server sync helpers", () => {
+    const popupOptions: OpenPresenterPopupOptions = {
+      url: "presenter.html",
+      openWindow: () => null
+    };
+    const syncOptions: ServerSyncOptions = {
+      url: "/sync"
     };
 
-    expect(typeof placeWindows).toBe("function");
-    expect(typeof showPlacementOverlay).toBe("function");
-    expect(show).toBeTypeOf("function");
-    expect(options.popup).toBeNull();
+    expect(fallbackFeatures()).toContain("popup=yes");
+    expect(typeof openPresenterPopup).toBe("function");
+    expect(typeof serverSyncChannelFactory).toBe("function");
+    expect(popupOptions.url).toBe("presenter.html");
+    expect(syncOptions.url).toBe("/sync");
   });
 });

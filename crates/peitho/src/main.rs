@@ -12,7 +12,7 @@ use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
 
-use peitho::{browser, server};
+use peitho::{browser, displays, server};
 
 struct BuildArtifacts {
     slide_count: usize,
@@ -61,6 +61,7 @@ struct PresentOptions {
     port: u16,
     no_open: bool,
     no_serve: bool,
+    no_presenter: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -102,6 +103,8 @@ enum Command {
         no_open: bool,
         #[arg(long)]
         no_serve: bool,
+        #[arg(long)]
+        no_presenter: bool,
     },
     Publish {
         #[arg(long, default_value = "dist")]
@@ -148,6 +151,7 @@ fn main() -> miette::Result<()> {
             port,
             no_open,
             no_serve,
+            no_presenter,
         } => present(PresentOptions {
             input,
             template,
@@ -157,6 +161,7 @@ fn main() -> miette::Result<()> {
             port,
             no_open,
             no_serve,
+            no_presenter,
         }),
         Command::Publish { dist, command } => {
             let code = publish(&dist, &command)?;
@@ -532,10 +537,18 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 
     let server = server::PresentServer::bind(cache, options.port)?;
     let url = server.url();
+    let presenter_url = browser::presenter_url(&url);
     println!("serving presentation at {url}");
     std::io::stdout().flush().into_diagnostic()?;
     if !options.no_open {
-        browser::open_browser(&url);
+        browser::open_browser_with_request(
+            browser::BrowserOpenRequest {
+                slides_url: &url,
+                presenter_url: &presenter_url,
+                no_presenter: options.no_presenter,
+            },
+            displays::detect_presentation_layout(),
+        );
     }
     server.serve_forever()
 }
