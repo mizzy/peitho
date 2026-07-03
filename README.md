@@ -1,23 +1,23 @@
 # peitho
 
-Markdownをsource of truthとする、HTMLネイティブなプレゼンテーションツール。
+An HTML-native presentation tool that treats Markdown as the source of truth.
 
-Peitho（ペイトー）は、力ではなく言葉で人の心を動かす力を司るギリシャ神話の女神。プレゼンテーションの本質に対応する。
+Peitho is the Greek goddess who presides over the power to move people's hearts with words rather than force — a fitting match for the essence of presentation.
 
-デモ: **[peitho.gosu.ke](https://peitho.gosu.ke/)**（`examples/`をそのままビルドして配信。デプロイは`envchain peitho make deploy-demo`）
+Demo: **[peitho.gosu.ke](https://peitho.gosu.ke/)** (builds and serves `examples/` as-is. Deploy with `envchain peitho make deploy-demo`)
 
-## 特徴
+## Features
 
-- **コンテンツとデザインの分離** — コンテンツはMarkdown、デザインはレイアウトHTMLとCSS。両者を混ぜない
-- **git管理可能なレイアウト** — デザイン成果物はただのHTML/CSS。diffが取れ、レビューできる
-- **型検査されるスロット契約** — レイアウト自身がスキーマ。スロットの過不足・型不整合・参照切れ・余ったコンテンツは、黙って捨てられる代わりに行番号とヒント付きのビルドエラーになる
+- **Separation of content and design** — content is Markdown, design is layout HTML and CSS. The two are never mixed
+- **Git-manageable layouts** — design artifacts are just HTML/CSS. They diff and review cleanly
+- **Type-checked slot contracts** — the layout itself is the schema. Missing or extra slots, type mismatches, dangling references, and leftover content become build errors with line numbers and hints instead of being silently dropped
 
 ```
 error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'title-body-code' allows 0..1
   = help: use a layout with more code capacity or remove one code block
 ```
 
-- **安定キー起点のper-slide調整** — `<!-- {"key":"arch-1"} -->` で固定したキーをCSSから狙う。タイトルを直してもCSSは剥がれず、存在しないキーを狙えばビルドが止まる
+- **Per-slide tweaks anchored on stable keys** — pin a key with `<!-- {"key":"arch-1"} -->` and target it from CSS. Edit the title and the CSS still holds; target a key that doesn't exist and the build stops
 
 ```css
 [data-slide-key="arch-1"] .slot-code {
@@ -26,91 +26,91 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 }
 ```
 
-- **ビルド時シンタックスハイライト** — 言語タグ付きコードブロックはsyntectでビルド時に`hl-*`クラスのspanへ変換される。実行時JSは無く、色はテーマCSSで定義する。未知の言語タグは行番号付きビルドエラー（タグ無しならプレーン表示）
-- **Keynote風の発表体験** — `peitho present` で、外部ディスプレイにスライドをフルスクリーン、手元に発表者ビュー（現在/次スライド・ノート・タイマー）を自動配置。Escで全終了
+- **Build-time syntax highlighting** — code blocks with a language tag are turned into `hl-*` class spans by syntect at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering)
+- **Keynote-style presenting** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Esc closes everything
 
-## 使い方
+## Usage
 
 ```sh
-# 配布物の生成（dist/ に slides/断片 + manifest.json + index.html + peitho.css）
+# Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
 peitho build deck.md
 
-# 保存のたびに再ビルド
+# Rebuild on every save
 peitho build deck.md --watch
 
-# 発表（揮発キャッシュ生成 + ローカルサーバ + ブラウザ起動。2画面なら自動配置）
+# Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
 peitho present deck.md
 
-# デバッグ用: フルスクリーンにせず通常ウィンドウで開く（位置・サイズは前回の状態をChromeが復元。1画面ならスライドも窓で開く）
+# Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
 peitho present deck.md --presenter-windowed
 
-# 公開（検査してから既存のデプロイコマンドに委譲。デプロイは再発明しない）
+# Publish (inspects, then delegates to your existing deploy command. Don't reinvent the deploy)
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
 
-レイアウト・テーマ・発表シェルはバイナリに内蔵されたデフォルトが使われるため、デッキファイルだけあればどのディレクトリでも動く。差し替えるときだけ`--layout`/`--base-css`/`--overrides-css`/`--shell`を渡す。
+Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Pass `--layout`/`--base-css`/`--overrides-css`/`--shell` only when you want to swap them out.
 
-発表シェル（TS）を開発するときは`cd packages/peitho-present && npm ci && npm run build`で`dist/shell.js`を再生成する（コミット対象。CIがdriftを検査する）。
+When developing the presentation shell (TS), rebuild `dist/shell.js` with `cd packages/peitho-present && npm ci && npm run build` (it's committed; CI checks for drift).
 
-## デッキの書き方
+## Writing a deck
 
-規約マッピングにより、素のMarkdownがそのままスライドになる。スライド区切りは `---`、最も浅い見出しがタイトル、コードブロックはcodeスロット、残りはbodyへ。
+Convention mapping turns plain Markdown into slides as-is. Slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest goes to the body.
 
 ```markdown
 <!-- {"key":"intro"} -->
-# タイトル
+# Title
 
-本文の段落。
+A body paragraph.
 
-- リストも
-- 使える
+- Lists work
+- too
 
 ---
 
-# 次のスライド
+# Next slide
 
 ```rust
 enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
 ```
 
-## 複数レイアウト
+## Multiple layouts
 
-`--layouts`にディレクトリを渡すと中の`*.html`が全てレイアウトになる（名前はファイルstem、順序はファイル名順で決定論的）。スライドごとのレイアウトは次の順で決まる（[k1LoW/deck](https://github.com/k1LoW/deck)のページ設定を参考にしたハイブリッド方式）:
+Passing a directory to `--layouts` turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):
 
-1. **明示指定** — ページ設定コメント`<!-- {"layout":"cover"} -->`があればそのレイアウト（未知の名前は候補一覧つきビルドエラー）
-2. **1枚なら無条件** — レイアウトが1枚だけなら常にそれ（契約違反は従来どおりの行番号付きエラー）
-3. **型駆動ディスパッチ** — 複数枚なら、スライドの内容の形（タイトルだけ・本文あり・コードあり等）にスロット契約が一致するレイアウトへ自動で振り分ける。ちょうど1枚に一致することが条件で、**複数一致（曖昧）も0枚一致も黙って解決せずビルドエラー**にし、明示指定を促す
+1. **Explicit** — if a page-settings comment `<!-- {"layout":"cover"} -->` is present, use that layout (an unknown name is a build error with a candidate list)
+2. **Single layout, unconditional** — if there is only one layout, always use it (contract violations still error with line numbers, as usual)
+3. **Type-driven dispatch** — with multiple layouts, each slide is routed to the layout whose slot contract matches the shape of its content (title only / has body / has code, etc.). Exactly one match is required; **multiple matches (ambiguous) and zero matches are both build errors** rather than silently resolved, prompting an explicit choice
 
-## サンプル
+## Examples
 
-`examples/`に、内容・レイアウト構造・テーマが全て異なるサンプルを置いている。各ディレクトリは`deck.md`+`layouts/`+`css/`で自己完結する。
+`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained with `deck.md` + `layouts/` + `css/`.
 
-| サンプル | 内容 | デザイン | 契約の見どころ |
+| Sample | Content | Design | Contract highlight |
 |---|---|---|---|
-| `examples/deck.md` | 最小デモ | デフォルトテーマ | デフォルトフラグでそのまま動く |
-| `examples/lightning-talk/` | 日本語LT | ダーク+大型タイポのポスター風 | codeスロットが無い=コードを書くとビルドエラー |
-| `examples/code-walkthrough/` | Rustのtypestate解説 | ターミナル風2カラム | `code`が`arity="1"`=毎スライドコード必須。キー付きoverrideの実用例 |
-| `examples/keynote/` | 日本語キーノート | クリーム地+セリフ体+中央寄せ | 2レイアウト構成。タイトルだけのスライドは`cover`へ、本文ありは`statement`へ型駆動ディスパッチ |
+| `examples/deck.md` | Minimal demo | Default theme | Works as-is with default flags |
+| `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
+| `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
+| `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
 
 ```sh
-# 各サンプルはlayouts/・css/が隣にあるので、規約によりフラグ不要
+# Each sample has its layouts/ and css/ alongside it, so no flags are needed by convention
 peitho present examples/keynote/deck.md
 ```
 
-動作確認にはMakefileのターゲットが便利（`make help`で一覧。`make keynote`、`make lightning-talk`等。シェルバンドルのビルド込みで`cargo run`する）。
+The Makefile targets are handy for smoke-testing (`make help` for a list; `make keynote`, `make lightning-talk`, etc. They `cargo run` including the shell-bundle build).
 
-## アーキテクチャ
+## Architecture
 
 ```
-Markdown ─→ peitho build（解析・マッピング・4段検査。決定論的・純粋関数）
-              ├─ emit distribute → dist/（配布物のみ。シェル・ノート非混入）
-              └─ emit present    → .peitho/present-cache/（発表シェル・揮発）
+Markdown ─→ peitho build (parse, map, 4-stage check. Deterministic, pure functions)
+              ├─ emit distribute → dist/ (distribution only; no shell or notes mixed in)
+              └─ emit present    → .peitho/present-cache/ (presentation shell; volatile)
 ```
 
-- ビルドコアはRust（typestate: `Parsed→Mapped→Checked→Rendered`。未検査スライドはレンダラに渡せない）
-- 発表シェルはTypeScript。契約（manifest等のドメイン型）はRustが唯一のsourceで、`bindings/` にTS型を生成してdriftをCIで検査
-- 詳細な設計は `docs/PEITHO_KICKOFF.md` を参照
+- The build core is Rust (typestate: `Parsed→Mapped→Checked→Rendered`. Unchecked slides can't reach the renderer)
+- The presentation shell is TypeScript. The contract (domain types like the manifest) has Rust as its single source; TS types are generated into `bindings/` and CI checks for drift
+- See `docs/PEITHO_KICKOFF.md` for the detailed design
 
 ## License
 

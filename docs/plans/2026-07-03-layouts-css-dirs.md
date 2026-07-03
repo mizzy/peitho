@@ -1,40 +1,40 @@
-# --layouts/--cssのディレクトリ指定化
+# Make --layouts/--css directory-specifiable
 
-## 目的（著者提案）
+## Purpose (author's proposal)
 
-- `--layout`の繰り返し指定をやめ、`--layouts <パス>`でディレクトリごと渡せるようにする
-- `--base-css`/`--overrides-css`の2フラグを`--css <パス>`に統合する。base/overridesの区別は出力2層ではなく「検証範囲の区別」でしかなく、検証規則を一様化すればCLIから消せる
+- Stop repeating `--layout` and instead pass a whole directory via `--layouts <path>`
+- Consolidate the two flags `--base-css`/`--overrides-css` into `--css <path>`. The base/overrides distinction is not a two-layer output distinction, it's only a "difference in validation scope" — once the validation rules are made uniform, it can be dropped from the CLI
 
 ## CLI
 
 ```
---layouts <PATH>  レイアウトHTMLファイル、または*.htmlを含むディレクトリ（省略時: 内蔵title-body-code）
---css <PATH>      CSSファイル、または*.cssを含むディレクトリ（省略時: 内蔵baseテーマ）
+--layouts <PATH>  A layout HTML file, or a directory containing *.html (default: built-in title-body-code)
+--css <PATH>      A CSS file, or a directory containing *.css (default: built-in base theme)
 ```
 
-- ディレクトリはファイル名順に読む（決定論的）。ディスパッチの試行順・CSSの連結順もファイル名順（`base.css`→`overrides.css`は自然にこの順）
-- ディレクトリに対象拡張子のファイルが無ければビルドエラー
-- 単発利用のためファイル指定も受け付ける
+- Directories are read in filename order (deterministic). Both the dispatch trial order and the CSS concatenation order follow filename order (`base.css` → `overrides.css` naturally follows this order)
+- If a directory has no files with the target extension, it's a build error
+- File specification is also accepted for one-off use
 
-## 検証規則の一様化（theme.rs）
+## Uniformizing validation rules (theme.rs)
 
-旧: base.cssは無検証、overrides.cssはスロットクラスのみ許可+キー/スロット検証。
-新: 全CSSファイルに同一規則を適用する。
+Old: base.css was unvalidated, overrides.css only allowed slot classes + key/slot validation.
+New: apply the same rules to all CSS files.
 
-- `[data-slide-key=...]`を含むセレクタ: キーの実在+そのセレクタ内の`.slot-*`が**当該スライドのレイアウト**のスロットであることを検証（参照切れ=ビルドエラー、三本柱3は不変）
-- 裸の`.slot-*`クラス: **提供された全レイアウトの和集合**に対して検証（typo検出。スライドが使っていないレイアウトのスロットでも提供されていれば許可=共有テーマを壊さない）
-- それ以外のセレクタ・プロパティは自由（テーマの表現力は無制限のまま）
-- エラーはファイル名+行番号付き（`overrides.css: line 3: ...`）
+- Selectors containing `[data-slide-key=...]`: validate that the key exists and that the `.slot-*` within that selector are slots of **that slide's layout** (a broken reference is a build error, invariant 3 of the three pillars holds)
+- Bare `.slot-*` classes: validate against **the union of all provided layouts** (typo detection; a slot from a layout the slide doesn't use is still allowed as long as it's provided = doesn't break shared themes)
+- All other selectors/properties are free (the theme's expressive power remains unlimited)
+- Errors come with filename + line number (`overrides.css: line 3: ...`)
 
-## 追随
+## Follow-up
 
-- examplesを`deck.md`+`layouts/`+`css/`構成に再編（空のoverrides.cssは廃止=ファイルが無ければ無いだけ）
-- `themes/overrides.css`（空）を削除。`themes/base.css`は内蔵デフォルトのsourceとして残す
-- `--watch`はlayouts/cssディレクトリ内の`*.html`/`*.css`変更で再ビルド
-- Makefile/README/CLAUDE.md追随
+- Reorganize examples into a `deck.md` + `layouts/` + `css/` structure (drop the empty overrides.css = if there's no file, there's simply nothing)
+- Delete `themes/overrides.css` (empty). Keep `themes/base.css` as the source for the built-in default
+- `--watch` rebuilds on `*.html`/`*.css` changes within the layouts/css directories
+- Follow up in Makefile/README/CLAUDE.md
 
-## 検証
+## Verification
 
-- 単体: ファイル/ディレクトリ/内蔵の読み込み、ファイル名順、空ディレクトリエラー、一様検証規則（キー付きセレクタの検証が全ファイルに効く、裸slot-*の和集合検証）
-- 統合: ディレクトリ指定でのbuild成功
-- E2E: keynote（2レイアウト）をディレクトリ指定でビルドし実ブラウザ確認
+- Unit: loading from file/directory/built-in, filename order, empty-directory error, uniform validation rules (keyed-selector validation applies to all files, bare slot-* union validation)
+- Integration: successful build with directory specification
+- E2E: build keynote (2 layouts) with directory specification and verify in a real browser

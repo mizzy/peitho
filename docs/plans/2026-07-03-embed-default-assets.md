@@ -1,17 +1,17 @@
-# デフォルトテンプレート・テーマのバイナリ内蔵
+# Embedding the Default Template and Theme in the Binary
 
-## 目的
+## Purpose
 
-`--template`/`--base-css`のデフォルトがリポジトリ相対パス（`templates/`・`themes/`）なので、インストールしたバイナリをデッキだけのディレクトリで実行すると即file not foundになる。デフォルトアセットをバイナリに内蔵し、`peitho build deck.md`をどこからでも動くようにする。
+Since the defaults for `--template`/`--base-css` are repository-relative paths (`templates/`, `themes/`), running the installed binary in a directory containing only a deck immediately results in file not found. Embed the default assets in the binary so that `peitho build deck.md` works from anywhere.
 
-## 方針
+## Approach
 
-- `include_str!`でビルド時に`templates/title-body-code.html`と`themes/base.css`を埋め込む。**リポジトリのファイルが単一ソースのまま**（コンパイル時に同一ファイルを取り込むためdrift不可能）
-- CLIの`--template`/`--base-css`/`--overrides-css`は`Option<PathBuf>`にし、未指定なら内蔵デフォルト（overridesは空文字列）。パスを渡せば従来どおりファイル優先
-- `--watch`は明示されたファイルだけを監視する（内蔵アセットに監視対象は存在しない）
-- shell.js（present用TSバンドル）はnpmビルド生成物で、内蔵するにはRust/npmのビルドパイプライン統合が要るため対象外（従来どおり`--shell`/リポジトリ相対デフォルト）
+- Embed `templates/title-body-code.html` and `themes/base.css` at build time with `include_str!`. **The repository files remain the single source** (drift is impossible since the same file is pulled in at compile time)
+- Make the CLI's `--template`/`--base-css`/`--overrides-css` `Option<PathBuf>`; when unspecified, use the embedded defaults (an empty string for overrides). Passing a path still takes priority over the file as before
+- `--watch` only watches explicitly specified files (there is nothing to watch for embedded assets)
+- shell.js (the present TS bundle) is an npm build artifact, and embedding it would require integrating the Rust/npm build pipelines, so it is out of scope (as before, `--shell`/repository-relative default)
 
-## 検証
+## Verification
 
-- 単体: watch_pathsのOption対応、CLIパース（未指定=None/指定=Some）
-- E2E: 一時ディレクトリにdeck.mdだけ置いて`peitho build deck.md`が成功し、出力のpeitho.cssが内蔵baseテーマと一致することを確認
+- Unit: Option support for watch_paths, CLI parsing (unspecified=None/specified=Some)
+- E2E: confirm that placing only deck.md in a temporary directory and running `peitho build deck.md` succeeds, and that the output peitho.css matches the embedded base theme

@@ -1,18 +1,18 @@
-# 発表シェル(shell.js)のバイナリ内蔵
+# Embedding the presentation shell (shell.js) in the binary
 
-## 目的
+## Purpose
 
-テンプレート・テーマ内蔵後も、`present`だけは`packages/peitho-present/dist/shell.js`というリポジトリ相対パスに依存しており、インストールしたバイナリでリポジトリ外から`peitho present`できなかった。シェルも内蔵して3コマンド全てをスタンドアロンにする。
+Even after embedding templates and themes, `present` alone still depended on the repo-relative path `packages/peitho-present/dist/shell.js`, so an installed binary couldn't run `peitho present` from outside the repo. Embed the shell too, so all three commands are fully standalone.
 
-## 方針: bindings/と同じ「生成物をコミット+CI drift検査」
+## Approach: same discipline as bindings/ — commit the generated artifact + check drift in CI
 
-- build.rsでnpmを叩く案は不採用: `cargo build`にnode/npm依存を持ち込み、純Rustビルドを壊す
-- 採用: `dist/shell.js`をコミットし、`include_str!`で内蔵。CIのnodeジョブが`npm run build`後に`git diff --exit-code dist/shell.js`でdriftを検査（bindings/のTS型と同じ規律。esbuildはpackage-lockで固定されるため出力は決定的）
-- `.gitignore`は`dist/`→`dist/*`+`!dist/shell.js`に変更（親ディレクトリ除外だと再includeが効かないgitの仕様のため）。sourcemapはignoreのまま
-- `--shell`は`Option<PathBuf>`化。未指定=内蔵シェルをpresent-cacheへ書き出し、指定=従来どおりファイルコピー（"shell bundle not found"エラーは明示パス時のみ）
-- 開発フロー: TSを直したら`npm run build`→`include_str!`の依存追跡でcargoが再コンパイルし内蔵も更新される。Makefileの`shell`依存は従来どおり
+- Rejected: having build.rs invoke npm — this would drag a node/npm dependency into `cargo build` and break the pure-Rust build
+- Adopted: commit `dist/shell.js` and embed it via `include_str!`. CI's node job runs `npm run build` then checks drift with `git diff --exit-code dist/shell.js` (the same discipline as the TS types in bindings/. esbuild output is deterministic because it's pinned via package-lock)
+- `.gitignore` changes from `dist/` to `dist/*` + `!dist/shell.js` (because of git's behavior where re-including doesn't work if the parent directory is excluded). sourcemaps remain ignored
+- `--shell` becomes `Option<PathBuf>`. Unspecified = write the embedded shell out to present-cache; specified = copy the file as before (the "shell bundle not found" error only applies when an explicit path is given)
+- Dev flow: after editing TS, run `npm run build` → cargo recompiles via the `include_str!` dependency tracking, and the embedded copy updates too. The Makefile's `shell` dependency stays as before
 
-## 検証
+## Verification
 
-- 単体/統合: `--shell`未指定でpresent-cacheのshell.jsが内蔵内容で生成されること、明示パスの従来動作、missing時のエラーが明示パス限定になること
-- E2E: リポジトリ外の一時ディレクトリで`peitho present deck.md --no-open --port固定`が起動し、/shell.jsが配信されることを確認
+- Unit/integration: confirm that with `--shell` unspecified, present-cache's shell.js is generated with the embedded content; confirm the existing behavior with an explicit path; confirm that the missing-file error is limited to the explicit-path case
+- E2E: in a temporary directory outside the repo, confirm that `peitho present deck.md --no-open --port <fixed>` starts and that /shell.js is served
