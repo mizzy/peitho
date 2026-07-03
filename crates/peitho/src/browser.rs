@@ -321,12 +321,15 @@ fn graceful_quit_jxa(pid: &str) -> String {
 /// (`exit_type: Crashed`) and the next launch runs crash restore, which
 /// resurrects stale session windows and bounds over the saved placement.
 fn request_graceful_quit(pid: &str) {
+    // output() rather than status(): osascript echoes the value of the last
+    // JXA expression (`true` from terminate) to stdout, which would leak
+    // into the present command's own output.
     if cfg!(target_os = "macos") {
         let _ = Command::new("osascript")
             .args(["-l", "JavaScript", "-e", &graceful_quit_jxa(pid)])
-            .status();
+            .output();
     } else {
-        let _ = Command::new("kill").args(["--", pid]).status();
+        let _ = Command::new("kill").args(["--", pid]).output();
     }
 }
 
