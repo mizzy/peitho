@@ -26,13 +26,43 @@ pub struct ChromeDisplay {
     pub primary: bool,
 }
 
+/// How a browser window should be opened. `Fullscreen` positions the window
+/// on a display and fullscreens it there; `Windowed` positions and sizes a
+/// normal window explicitly; `Restored` passes no placement flags so Chrome
+/// restores the bounds saved in the profile from the last session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowPlacement {
+pub enum WindowPlacement {
+    Fullscreen {
+        x: i32,
+        y: i32,
+    },
+    Windowed {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    Restored,
+}
+
+/// Presenter window bounds recorded by Chrome in the profile
+/// (`browser.app_window_placement`), in Chrome's top-left screen coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedWindowBounds {
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
-    pub fullscreen: bool,
+}
+
+/// How the presenter window should be planned. In `Windowed` mode Chrome is
+/// left to restore the saved bounds, but only when they would be visible:
+/// without placement flags Chrome may drop a first-run window onto the
+/// slides display, where the fullscreen slides Space hides it entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenterMode {
+    Fullscreen,
+    Windowed { saved: Option<SavedWindowBounds> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,9 +106,31 @@ fn convert_nsscreen_frames(frames: &[NsscreenFrame]) -> Vec<ChromeDisplay> {
         .collect()
 }
 
+fn contains_point(display: &ChromeDisplay, x: i32, y: i32) -> bool {
+    x >= display.x
+        && x < display.x + display.width as i32
+        && y >= display.y
+        && y < display.y + display.height as i32
+}
+
+/// Saved bounds are only worth restoring when their center sits on a display
+/// other than the slides display; anywhere else the restored window would be
+/// hidden behind the fullscreen slides Space or off screen entirely.
+fn saved_bounds_visible(
+    saved: &SavedWindowBounds,
+    displays: &[ChromeDisplay],
+    slides: &ChromeDisplay,
+) -> bool {
+    let center_x = saved.x + (saved.width / 2) as i32;
+    let center_y = saved.y + (saved.height / 2) as i32;
+    displays
+        .iter()
+        .any(|display| display != slides && contains_point(display, center_x, center_y))
+}
+
 pub fn plan_presentation_layout(
     displays: &[ChromeDisplay],
-    presenter_windowed: bool,
+    presenter_mode: PresenterMode,
 ) -> Option<PresentationLayout> {
     let primary = displays.iter().find(|display| display.primary)?;
     let slides = displays.iter().find(|display| !display.primary)?;
@@ -88,33 +140,42 @@ pub fn plan_presentation_layout(
     let presenter_x = primary.x + ((primary.width - presenter_width) / 2) as i32;
     let presenter_y = primary.y + ((primary.height - presenter_height) / 2) as i32;
 
-    Some(PresentationLayout {
-        slides: WindowPlacement {
-            x: slides.x,
-            y: slides.y,
-            width: slides.width,
-            height: slides.height,
-            fullscreen: true,
+    let presenter = match presenter_mode {
+        PresenterMode::Fullscreen => WindowPlacement::Fullscreen {
+            x: presenter_x,
+            y: presenter_y,
         },
-        presenter: WindowPlacement {
+        PresenterMode::Windowed { saved: Some(saved) }
+            if saved_bounds_visible(&saved, displays, slides) =>
+        {
+            WindowPlacement::Restored
+        }
+        PresenterMode::Windowed { .. } => WindowPlacement::Windowed {
             x: presenter_x,
             y: presenter_y,
             width: presenter_width,
             height: presenter_height,
-            fullscreen: !presenter_windowed,
         },
+    };
+
+    Some(PresentationLayout {
+        slides: WindowPlacement::Fullscreen {
+            x: slides.x,
+            y: slides.y,
+        },
+        presenter,
     })
 }
 
 pub fn layout_from_jxa_output(
     stdout: &str,
-    presenter_windowed: bool,
+    presenter_mode: PresenterMode,
 ) -> Option<PresentationLayout> {
     let displays = parse_nsscreen_json(stdout).ok()?;
-    plan_presentation_layout(&displays, presenter_windowed)
+    plan_presentation_layout(&displays, presenter_mode)
 }
 
-pub fn detect_presentation_layout(presenter_windowed: bool) -> Option<PresentationLayout> {
+pub fn detect_presentation_layout(presenter_mode: PresenterMode) -> Option<PresentationLayout> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -126,7 +187,7 @@ pub fn detect_presentation_layout(presenter_windowed: bool) -> Option<Presentati
         return None;
     }
     let stdout = String::from_utf8(output.stdout).ok()?;
-    layout_from_jxa_output(&stdout, presenter_windowed)
+    layout_from_jxa_output(&stdout, presenter_mode)
 }
 
 #[cfg(test)]
@@ -163,9 +224,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn plans_slides_on_external_and_presenter_fullscreen_on_primary() {
-        let displays = vec![
+    fn two_displays() -> Vec<ChromeDisplay> {
+        vec![
             ChromeDisplay {
                 x: 0,
                 y: 0,
@@ -180,68 +240,116 @@ mod tests {
                 height: 666,
                 primary: false,
             },
-        ];
+        ]
+    }
 
-        let layout = plan_presentation_layout(&displays, false).unwrap();
+    #[test]
+    fn plans_slides_on_external_and_presenter_fullscreen_on_primary() {
+        let layout = plan_presentation_layout(&two_displays(), PresenterMode::Fullscreen).unwrap();
 
         assert_eq!(
             layout.slides,
-            WindowPlacement {
-                x: -1055,
-                y: 0,
-                width: 1055,
-                height: 666,
-                fullscreen: true,
-            }
+            WindowPlacement::Fullscreen { x: -1055, y: 0 }
         );
         assert_eq!(
             layout.presenter,
-            WindowPlacement {
+            WindowPlacement::Fullscreen { x: 156, y: 91 }
+        );
+    }
+
+    #[test]
+    fn windowed_first_run_seeds_centered_window_on_primary() {
+        let layout =
+            plan_presentation_layout(&two_displays(), PresenterMode::Windowed { saved: None })
+                .unwrap();
+
+        assert_eq!(
+            layout.presenter,
+            WindowPlacement::Windowed {
                 x: 156,
                 y: 91,
                 width: 1200,
                 height: 800,
-                fullscreen: true,
+            }
+        );
+        assert_eq!(
+            layout.slides,
+            WindowPlacement::Fullscreen { x: -1055, y: 0 }
+        );
+    }
+
+    #[test]
+    fn windowed_mode_restores_saved_bounds_on_primary() {
+        let layout = plan_presentation_layout(
+            &two_displays(),
+            PresenterMode::Windowed {
+                saved: Some(SavedWindowBounds {
+                    x: 300,
+                    y: 60,
+                    width: 1200,
+                    height: 900,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(layout.presenter, WindowPlacement::Restored);
+    }
+
+    #[test]
+    fn windowed_mode_reseeds_when_saved_bounds_sit_on_slides_display() {
+        let layout = plan_presentation_layout(
+            &two_displays(),
+            PresenterMode::Windowed {
+                saved: Some(SavedWindowBounds {
+                    x: -1000,
+                    y: 47,
+                    width: 900,
+                    height: 600,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.presenter,
+            WindowPlacement::Windowed {
+                x: 156,
+                y: 91,
+                width: 1200,
+                height: 800,
             }
         );
     }
 
     #[test]
-    fn windowed_mode_plans_presenter_without_fullscreen() {
-        let displays = vec![
-            ChromeDisplay {
-                x: 0,
-                y: 0,
-                width: 1512,
-                height: 982,
-                primary: true,
+    fn windowed_mode_reseeds_when_saved_bounds_are_off_screen() {
+        let layout = plan_presentation_layout(
+            &two_displays(),
+            PresenterMode::Windowed {
+                saved: Some(SavedWindowBounds {
+                    x: 9000,
+                    y: 9000,
+                    width: 1200,
+                    height: 800,
+                }),
             },
-            ChromeDisplay {
-                x: -1055,
-                y: 0,
-                width: 1055,
-                height: 666,
-                primary: false,
-            },
-        ];
-
-        let layout = plan_presentation_layout(&displays, true).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             layout.presenter,
-            WindowPlacement {
+            WindowPlacement::Windowed {
                 x: 156,
                 y: 91,
                 width: 1200,
                 height: 800,
-                fullscreen: false,
             }
         );
-        assert!(layout.slides.fullscreen);
     }
 
     #[test]
-    fn clamps_windowed_presenter_to_small_primary_display() {
+    fn centers_fullscreen_presenter_position_within_small_primary_display() {
         let displays = vec![
             ChromeDisplay {
                 x: 0,
@@ -259,18 +367,9 @@ mod tests {
             },
         ];
 
-        let layout = plan_presentation_layout(&displays, true).unwrap();
+        let layout = plan_presentation_layout(&displays, PresenterMode::Fullscreen).unwrap();
 
-        assert_eq!(
-            layout.presenter,
-            WindowPlacement {
-                x: 0,
-                y: 0,
-                width: 900,
-                height: 700,
-                fullscreen: false,
-            }
-        );
+        assert_eq!(layout.presenter, WindowPlacement::Fullscreen { x: 0, y: 0 });
     }
 
     #[test]
@@ -283,7 +382,10 @@ mod tests {
             primary: true,
         }];
 
-        assert_eq!(plan_presentation_layout(&displays, false), None);
+        assert_eq!(
+            plan_presentation_layout(&displays, PresenterMode::Fullscreen),
+            None
+        );
     }
 
     #[test]
@@ -295,7 +397,10 @@ mod tests {
 
     #[test]
     fn layout_from_jxa_output_returns_none_for_invalid_json() {
-        assert_eq!(layout_from_jxa_output("not json", false), None);
+        assert_eq!(
+            layout_from_jxa_output("not json", PresenterMode::Fullscreen),
+            None
+        );
     }
 
     #[test]
@@ -303,26 +408,28 @@ mod tests {
         let json = r#"[{"x":0,"y":0,"width":1512,"height":982},{"x":-1055,"y":316,"width":1055,"height":666}]"#;
 
         assert_eq!(
-            layout_from_jxa_output(json, false).unwrap().slides,
-            WindowPlacement {
-                x: -1055,
-                y: 0,
-                width: 1055,
-                height: 666,
-                fullscreen: true,
-            }
+            layout_from_jxa_output(json, PresenterMode::Fullscreen)
+                .unwrap()
+                .slides,
+            WindowPlacement::Fullscreen { x: -1055, y: 0 }
         );
     }
 
     #[test]
-    fn layout_from_jxa_output_passes_windowed_mode_through() {
+    fn layout_from_jxa_output_passes_presenter_mode_through() {
         let json = r#"[{"x":0,"y":0,"width":1512,"height":982},{"x":-1055,"y":316,"width":1055,"height":666}]"#;
+        let saved = SavedWindowBounds {
+            x: 200,
+            y: 100,
+            width: 1200,
+            height: 800,
+        };
 
-        assert!(
-            !layout_from_jxa_output(json, true)
+        assert_eq!(
+            layout_from_jxa_output(json, PresenterMode::Windowed { saved: Some(saved) })
                 .unwrap()
-                .presenter
-                .fullscreen
+                .presenter,
+            WindowPlacement::Restored
         );
     }
 }
