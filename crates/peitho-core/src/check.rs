@@ -8,8 +8,9 @@ use crate::{
 };
 
 pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
+    let (settings, mapped_slides) = deck.into_mapped_parts();
     let mut slides = Vec::new();
-    for slide in deck.into_mapped_slides() {
+    for slide in mapped_slides {
         let slide_number = slide.index + 1;
         let slide_key = slide.key.as_str().to_owned();
         check_slide(&slide).map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
@@ -25,7 +26,7 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
             checked_slots,
         ));
     }
-    Ok(Deck::checked(slides))
+    Ok(Deck::checked(settings, slides))
 }
 
 /// Validate one mapped slide against the layout it carries. Also used by

@@ -14,12 +14,13 @@ use crate::{
 };
 
 pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
+    let (settings, checked_slides) = deck.into_checked_parts();
     let mut slides = Vec::new();
-    for slide in deck.into_checked_slides() {
+    for slide in checked_slides {
         let html = render_slide(slide.key(), slide.slots(), slide.layout())?;
         slides.push(RenderedSlide::new(slide.index(), slide.key().clone(), html));
     }
-    Ok(Deck::rendered(slides, String::new()))
+    Ok(Deck::rendered(settings, slides, String::new()))
 }
 
 fn render_slide(
@@ -410,7 +411,8 @@ pub fn render_presenter_index() -> String {
 mod tests {
     use super::*;
     use crate::{
-        check::check_deck, layout::parse_layout, mapping::map_by_convention, parser::parse_markdown,
+        check::check_deck, layout::parse_layout, mapping::map_by_convention,
+        parser::parse_markdown, phase::PlannedTime,
     };
 
     #[test]
@@ -523,6 +525,27 @@ mod tests {
 
         assert_eq!(rendered.slides()[0].src(), "slides/000-intro.html");
         assert_eq!(rendered.slides()[1].src(), "slides/001-details.html");
+    }
+
+    #[test]
+    fn deck_settings_survive_all_typestate_transitions() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let parsed = parse_markdown("---\ntime: 15m\n---\n# Intro").unwrap();
+        let mapped = map_by_convention(parsed, &layout).unwrap();
+        let checked = check_deck(mapped).unwrap();
+        let rendered = render_deck(checked).unwrap();
+
+        assert_eq!(
+            rendered
+                .settings()
+                .planned_time()
+                .map(PlannedTime::as_millis),
+            Some(900_000)
+        );
     }
 
     #[test]

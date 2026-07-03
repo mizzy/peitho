@@ -5,8 +5,43 @@ use crate::{
     layout::Layout,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedTime(u64);
+
+impl PlannedTime {
+    pub(crate) const GREATER_THAN_ZERO_MESSAGE: &'static str = "time must be greater than zero";
+
+    pub(crate) fn from_millis(millis: u64) -> std::result::Result<Self, String> {
+        if millis == 0 {
+            Err(Self::GREATER_THAN_ZERO_MESSAGE.to_owned())
+        } else {
+            Ok(Self(millis))
+        }
+    }
+
+    pub fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeckSettings {
+    planned_time: Option<PlannedTime>,
+}
+
+impl DeckSettings {
+    pub fn new(planned_time: Option<PlannedTime>) -> Self {
+        Self { planned_time }
+    }
+
+    pub fn planned_time(&self) -> Option<PlannedTime> {
+        self.planned_time
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Deck<P> {
+    settings: DeckSettings,
     phase: P,
 }
 
@@ -125,9 +160,16 @@ pub struct Rendered {
     css: String,
 }
 
+impl<P> Deck<P> {
+    pub fn settings(&self) -> &DeckSettings {
+        &self.settings
+    }
+}
+
 impl Deck<Parsed> {
-    pub(crate) fn parsed(slides: Vec<ParsedSlide>) -> Self {
+    pub(crate) fn parsed(settings: DeckSettings, slides: Vec<ParsedSlide>) -> Self {
         Self {
+            settings,
             phase: Parsed { slides },
         }
     }
@@ -136,14 +178,15 @@ impl Deck<Parsed> {
         &self.phase.slides
     }
 
-    pub(crate) fn into_parsed_slides(self) -> Vec<ParsedSlide> {
-        self.phase.slides
+    pub(crate) fn into_parsed_parts(self) -> (DeckSettings, Vec<ParsedSlide>) {
+        (self.settings, self.phase.slides)
     }
 }
 
 impl Deck<Mapped> {
-    pub(crate) fn mapped(slides: Vec<MappedSlide>) -> Self {
+    pub(crate) fn mapped(settings: DeckSettings, slides: Vec<MappedSlide>) -> Self {
         Self {
+            settings,
             phase: Mapped { slides },
         }
     }
@@ -152,8 +195,8 @@ impl Deck<Mapped> {
         &self.phase.slides
     }
 
-    pub(crate) fn into_mapped_slides(self) -> Vec<MappedSlide> {
-        self.phase.slides
+    pub(crate) fn into_mapped_parts(self) -> (DeckSettings, Vec<MappedSlide>) {
+        (self.settings, self.phase.slides)
     }
 }
 
@@ -198,8 +241,9 @@ impl CheckedSlide {
 }
 
 impl Deck<Checked> {
-    pub(crate) fn checked(slides: Vec<CheckedSlide>) -> Self {
+    pub(crate) fn checked(settings: DeckSettings, slides: Vec<CheckedSlide>) -> Self {
         Self {
+            settings,
             phase: Checked { slides },
         }
     }
@@ -236,14 +280,19 @@ impl Deck<Checked> {
         &self.phase.slides
     }
 
-    pub(crate) fn into_checked_slides(self) -> Vec<CheckedSlide> {
-        self.phase.slides
+    pub(crate) fn into_checked_parts(self) -> (DeckSettings, Vec<CheckedSlide>) {
+        (self.settings, self.phase.slides)
     }
 }
 
 impl Deck<Rendered> {
-    pub(crate) fn rendered(slides: Vec<RenderedSlide>, css: String) -> Self {
+    pub(crate) fn rendered(
+        settings: DeckSettings,
+        slides: Vec<RenderedSlide>,
+        css: String,
+    ) -> Self {
         Self {
+            settings,
             phase: Rendered { slides, css },
         }
     }
@@ -277,13 +326,16 @@ mod tests {
 
     #[test]
     fn parsed_deck_owns_source_fragments() {
-        let deck = Deck::parsed(vec![ParsedSlide {
-            key: SlideKey::new("arch-1").unwrap(),
-            index: 0,
-            key_source: KeySource::Explicit { line: 1 },
-            layout_request: None,
-            fragments: vec![SourceFragment::paragraph(3, "body")],
-        }]);
+        let deck = Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                key: SlideKey::new("arch-1").unwrap(),
+                index: 0,
+                key_source: KeySource::Explicit { line: 1 },
+                layout_request: None,
+                fragments: vec![SourceFragment::paragraph(3, "body")],
+            }],
+        );
 
         assert_eq!(deck.parsed_slides()[0].fragments[0].line(), 3);
     }
