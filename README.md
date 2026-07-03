@@ -73,6 +73,24 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
 ```
 
+## サンプル
+
+`examples/`に、内容・テンプレート構造・テーマが全て異なるサンプルを置いている。各ディレクトリは`deck.md`+`template.html`+`base.css`+`overrides.css`で自己完結する。
+
+| サンプル | 内容 | デザイン | 契約の見どころ |
+|---|---|---|---|
+| `examples/deck.md` | 最小デモ | デフォルトテーマ | デフォルトフラグでそのまま動く |
+| `examples/lightning-talk/` | 日本語LT | ダーク+大型タイポのポスター風 | codeスロットが無い=コードを書くとビルドエラー |
+| `examples/code-walkthrough/` | Rustのtypestate解説 | ターミナル風2カラム | `code`が`arity="1"`=毎スライドコード必須。キー付きoverrideの実用例 |
+| `examples/keynote/` | 日本語キーノート | クリーム地+セリフ体+中央寄せ | title+bodyだけの最小契約 |
+
+```sh
+peitho present examples/keynote/deck.md \
+  --template examples/keynote/template.html \
+  --base-css examples/keynote/base.css \
+  --overrides-css examples/keynote/overrides.css
+```
+
 ## アーキテクチャ
 
 ```

@@ -1,0 +1,53 @@
+.peitho-slide {
+  width: 1280px;
+  height: 720px;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 96px;
+  background: #faf6ee;
+  color: #211f1c;
+  font-family: "Iowan Old Style", "Hiragino Mincho ProN", ui-serif, Georgia, serif;
+}
+
+.keynote-inner {
+  max-width: 880px;
+  text-align: center;
+}
+
+.keynote h1 {
+  margin: 0;
+  font-size: 58px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-break: strict;
+  word-break: auto-phrase;
+}
+
+.keynote h1::after {
+  content: "";
+  display: block;
+  width: 72px;
+  height: 1px;
+  margin: 40px auto 0;
+  background: #9c8f76;
+}
+
+.keynote-body {
+  margin-top: 40px;
+}
+
+.slot-body {
+  font-size: 27px;
+  line-height: 2;
+  color: #4c463d;
+  line-break: strict;
+  word-break: auto-phrase;
+}
+
+.slot-body p {
+  margin: 0 0 16px;
+}

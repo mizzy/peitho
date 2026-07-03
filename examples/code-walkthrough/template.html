@@ -1,0 +1,9 @@
+<section class="walkthrough">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <figure class="code-pane">
+    <slot name="code" accepts="code" arity="1"></slot>
+  </figure>
+  <aside class="notes-pane">
+    <slot name="body" accepts="blocks" arity="0..*"></slot>
+  </aside>
+</section>
