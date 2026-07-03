@@ -6,12 +6,21 @@ use serde::Deserialize;
 use crate::{
     domain::{FragmentKind, SlideKey, SourceFragment},
     error::{BuildError, ErrorKind, Result},
-    phase::{Deck, KeySource, Parsed, ParsedSlide},
+    phase::{Deck, KeySource, LayoutRequest, Parsed, ParsedSlide},
 };
 
+/// Page settings comment, deck-style: `<!-- {"key":"...","layout":"..."} -->`.
+/// Unknown fields are rejected so a typo never silently drops a setting.
 #[derive(Debug, Deserialize)]
-struct KeyComment {
-    key: String,
+#[serde(deny_unknown_fields)]
+struct PageComment {
+    key: Option<String>,
+    layout: Option<String>,
+}
+
+struct PageSettings {
+    key: Option<SlideKey>,
+    layout: Option<String>,
 }
 
 enum OpenBlock {
@@ -89,6 +98,7 @@ fn split_slide_ranges(source: &str) -> Result<Vec<SlideRange>> {
 fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSlide> {
     let slice = &source[range.start..range.end];
     let mut explicit_key: Option<(SlideKey, usize)> = None;
+    let mut layout_request: Option<LayoutRequest> = None;
     let mut fragments = Vec::new();
     let mut block: Option<OpenBlock> = None;
     let mut list_depth = 0usize;
@@ -137,15 +147,15 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                if let Some(key) = parse_key_comment(html.as_ref(), line).map_err(|err| {
+                if let Some(settings) = parse_page_comment(html.as_ref(), line).map_err(|err| {
                     attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
                 })? {
                     if list_depth > 0 || seen_content {
                         let err = BuildError::new(
                             ErrorKind::Parse,
                             Some(line),
-                            "slide key comment must appear before slide content",
-                            "move the key comment to the first non-blank line of the slide",
+                            "page settings comment must appear before slide content",
+                            "move the settings comment to the first non-blank line of the slide",
                         );
                         return Err(attach_slide_context(
                             err,
@@ -154,7 +164,12 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                             &fragments,
                         ));
                     }
-                    explicit_key = Some((key, line));
+                    if let Some(key) = settings.key {
+                        explicit_key = Some((key, line));
+                    }
+                    if let Some(name) = settings.layout {
+                        layout_request = Some(LayoutRequest { name, line });
+                    }
                 } else if !is_html_comment(html.as_ref()) && !html.trim().is_empty() {
                     let err = unsupported_construct(line, "html");
                     return Err(attach_slide_context(
@@ -301,6 +316,7 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
         index,
         key,
         key_source,
+        layout_request,
         fragments,
     })
 }
@@ -346,7 +362,7 @@ fn validate_unique_keys(slides: &[ParsedSlide]) -> Result<()> {
     Ok(())
 }
 
-fn parse_key_comment(raw: &str, line: usize) -> Result<Option<SlideKey>> {
+fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
         return Ok(None);
@@ -358,22 +374,39 @@ fn parse_key_comment(raw: &str, line: usize) -> Result<Option<SlideKey>> {
     if !json.starts_with('{') {
         return Ok(None);
     }
-    let parsed: KeyComment = serde_json::from_str(json).map_err(|err| {
+    let parsed: PageComment = serde_json::from_str(json).map_err(|err| {
         BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            format!("invalid slide key comment: {err}"),
-            r#"use <!-- {"key":"arch-1"} --> with a lowercase ascii, digit, or '-' key"#,
+            format!("invalid page settings comment: {err}"),
+            r#"use <!-- {"key":"arch-1","layout":"cover"} --> (both fields optional, no other fields)"#,
         )
     })?;
-    SlideKey::new(parsed.key).map(Some).map_err(|message| {
-        BuildError::new(
+    if parsed.key.is_none() && parsed.layout.is_none() {
+        return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            message,
-            "use lowercase ascii, digits, or '-' in the key string",
-        )
-    })
+            "page settings comment has no settings",
+            r#"set "key" and/or "layout", or remove the comment"#,
+        ));
+    }
+    let key = parsed
+        .key
+        .map(|key| {
+            SlideKey::new(key).map_err(|message| {
+                BuildError::new(
+                    ErrorKind::Parse,
+                    Some(line),
+                    message,
+                    "use lowercase ascii, digits, or '-' in the key string",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(PageSettings {
+        key,
+        layout: parsed.layout,
+    }))
 }
 
 fn is_html_comment(raw: &str) -> bool {
@@ -578,12 +611,56 @@ After list
     }
 
     #[test]
+    fn parses_layout_request_from_page_settings_comment() {
+        let deck =
+            parse_markdown("<!-- {\"key\":\"cover\",\"layout\":\"cover\"} -->\n# Title").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.key.as_str(), "cover");
+        assert_eq!(
+            slide.layout_request,
+            Some(LayoutRequest {
+                name: "cover".to_owned(),
+                line: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn layout_only_comment_keeps_derived_key() {
+        let deck = parse_markdown("<!-- {\"layout\":\"cover\"} -->\n# My Title").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.key.as_str(), "my-title");
+        assert_eq!(slide.layout_request.as_ref().unwrap().name, "cover");
+    }
+
+    #[test]
+    fn rejects_unknown_page_settings_fields() {
+        let err = parse_markdown("<!-- {\"key\":\"a\",\"freeze\":true} -->\n# Title").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err.to_string().contains("invalid page settings comment"));
+    }
+
+    #[test]
+    fn rejects_empty_page_settings_comment() {
+        let err = parse_markdown("<!-- {} -->\n# Title").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert!(err
+            .to_string()
+            .contains("page settings comment has no settings"));
+    }
+
+    #[test]
     fn rejects_broken_json_key_comments() {
         let err = parse_markdown("<!-- {\"kye\":\"arch-1\"} -->\n# Title").unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
-        assert!(err.to_string().contains("invalid slide key comment"));
+        assert!(err.to_string().contains("invalid page settings comment"));
     }
 
     #[test]

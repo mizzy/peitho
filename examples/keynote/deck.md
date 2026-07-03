@@ -1,17 +1,21 @@
 <!-- {"key":"cover"} -->
 # Peitho
 
-Markdownをsource of truthにする、HTMLネイティブなプレゼンテーションツール。
+---
+<!-- {"key":"what"} -->
+# Markdownがsource of truth
+
+Markdownをsource of truthにする、HTMLネイティブなプレゼンテーションツール。タイトルだけのスライドはcoverレイアウトに、本文のあるスライドはstatementレイアウトに、内容の形から自動で振り分けられる。
 
 ---
 <!-- {"key":"separation"} -->
 # コンテンツとデザインを分ける
 
-内容はMarkdownに、見た目はテンプレートとCSSに。書いている間、装飾のことは考えない。
+内容はMarkdownに、見た目はレイアウトとCSSに。書いている間、装飾のことは考えない。
 
 ---
 <!-- {"key":"contract"} -->
-# テンプレートはスキーマ
+# レイアウトはスキーマ
 
 スロットの過不足も、型の不整合も、参照切れも、ビルドが行番号付きで止める。黙って落ちるものは何もない。
 

@@ -38,6 +38,63 @@ impl Layout {
     }
 }
 
+/// The ordered set of layouts a deck can dispatch to. Names are unique;
+/// the order is the CLI order and keeps dispatch reporting deterministic.
+#[derive(Debug, Clone)]
+pub struct Layouts {
+    layouts: Vec<Layout>,
+}
+
+impl Layouts {
+    pub fn new(layouts: Vec<Layout>) -> Result<Self> {
+        if layouts.is_empty() {
+            return Err(BuildError::new(
+                ErrorKind::Layout,
+                None,
+                "no layouts provided",
+                "pass at least one layout HTML",
+            ));
+        }
+        for (index, layout) in layouts.iter().enumerate() {
+            if layouts[..index].iter().any(|l| l.name() == layout.name()) {
+                return Err(BuildError::new(
+                    ErrorKind::Layout,
+                    None,
+                    format!("duplicate layout name '{}'", layout.name()),
+                    "layout names come from file stems; rename one file",
+                ));
+            }
+        }
+        Ok(Self { layouts })
+    }
+
+    pub fn single(layout: Layout) -> Self {
+        Self {
+            layouts: vec![layout],
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Layout> {
+        self.layouts.iter().find(|layout| layout.name() == name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Layout> {
+        self.layouts.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.layouts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layouts.is_empty()
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.layouts.iter().map(Layout::name).collect()
+    }
+}
+
 pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
     let slots = Rc::new(RefCell::new(BTreeMap::new()));
     let sink = slots.clone();

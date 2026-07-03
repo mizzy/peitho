@@ -150,6 +150,98 @@ fn contract_error_uses_layout_file_stem_as_layout_name() {
 }
 
 #[test]
+fn build_dispatches_slides_across_multiple_layouts() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "<!-- {\"key\":\"cover\"} -->\n# Cover Only\n\n---\n<!-- {\"key\":\"body\"} -->\n# Statement\n\nBody paragraph\n",
+    )
+    .unwrap();
+    let cover = dir.path().join("cover.html");
+    fs::write(
+        &cover,
+        r#"<section class="cover"><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+    )
+    .unwrap();
+    let statement = dir.path().join("statement.html");
+    fs::write(
+        &statement,
+        r#"<section class="statement"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
+    )
+    .unwrap();
+    let base = write_base_css(dir.path());
+    let overrides = write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layout",
+            cover.to_str().unwrap(),
+            "--layout",
+            statement.to_str().unwrap(),
+            "--base-css",
+            base.to_str().unwrap(),
+            "--overrides-css",
+            overrides.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 2 slide(s)"));
+
+    let cover_html = fs::read_to_string(out.join("slides/000-cover.html")).unwrap();
+    let body_html = fs::read_to_string(out.join("slides/001-body.html")).unwrap();
+    assert!(cover_html.contains(r#"class="cover peitho-slide""#));
+    assert!(body_html.contains(r#"class="statement peitho-slide""#));
+}
+
+#[test]
+fn build_rejects_ambiguous_slide_with_disambiguation_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    fs::write(&deck, "# Title Only\n").unwrap();
+    let a = dir.path().join("cover-a.html");
+    let b = dir.path().join("cover-b.html");
+    for path in [&a, &b] {
+        fs::write(
+            path,
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+    }
+    let base = write_base_css(dir.path());
+    let overrides = write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layout",
+            a.to_str().unwrap(),
+            "--layout",
+            b.to_str().unwrap(),
+            "--base-css",
+            base.to_str().unwrap(),
+            "--overrides-css",
+            overrides.to_str().unwrap(),
+            "--out",
+            dir.path().join("dist").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide matches multiple layouts"))
+        .stderr(predicate::str::contains("cover-a"))
+        .stderr(predicate::str::contains("cover-b"))
+        .stderr(predicate::str::contains(r#"{"layout":"…"}"#));
+}
+
+#[test]
 fn build_writes_slide_fragments_in_slides_directory() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

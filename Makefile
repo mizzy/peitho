@@ -51,7 +51,8 @@ code-walkthrough: shell
 
 keynote: shell
 	$(PRESENT) examples/keynote/deck.md \
-		--layout examples/keynote/layout.html \
+		--layout examples/keynote/cover.html \
+		--layout examples/keynote/statement.html \
 		--base-css examples/keynote/base.css \
 		--overrides-css examples/keynote/overrides.css \
 		$(PRESENT_FLAGS)
