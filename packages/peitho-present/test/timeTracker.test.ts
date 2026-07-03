@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { installTimeTracker, type TimeTrackerShell } from "../src/index";
+import { installTimeTracker, isOverrun, type TimeTrackerShell } from "../src/index";
 
 const cleanups: Array<() => void> = [];
 
@@ -285,6 +285,11 @@ it("pins turtle at one hundred percent and marks overrun after planned time", ()
       "data-peitho-overrun"
     )
   ).toBe(true);
+});
+
+it("detects overrun with millisecond precision", () => {
+  expect(isOverrun(60_000, 60_000)).toBe(false);
+  expect(isOverrun(60_001, 60_000)).toBe(true);
 });
 
 it("updates turtle on a 250ms interval", () => {

@@ -2,6 +2,7 @@ import type { Notes } from "../../../bindings/Notes";
 import { installKeyboardNavigation } from "./keyboard";
 import { mountPresentShell, type PresentShell, type SlideChangeDetail } from "./shell";
 import { installSyncBridge, type SyncChannelFactory } from "./sync";
+import { installTimeTracker, isOverrun } from "./timeTracker";
 
 export type PresenterOptions = {
   root: HTMLElement;
@@ -12,6 +13,7 @@ export type PresenterOptions = {
   now?: () => number;
   syncChannelFactory?: SyncChannelFactory;
   closeWindow?: () => void;
+  console?: Pick<Console, "error">;
 };
 
 export type PresenterView = {
@@ -21,13 +23,30 @@ export type PresenterView = {
   destroy(): void;
 };
 
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
+function formatSeconds(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60)
     .toString()
     .padStart(2, "0");
   const seconds = (totalSeconds % 60).toString().padStart(2, "0");
   return `${minutes}:${seconds}`;
+}
+
+function formatElapsed(ms: number): string {
+  return formatSeconds(Math.floor(ms / 1000));
+}
+
+function formatOverrun(ms: number): string {
+  return formatSeconds(Math.ceil(ms / 1000));
+}
+
+function formatPresenterTimer(
+  elapsedMs: number,
+  plannedDurationMs: number | null | undefined
+): string {
+  if (plannedDurationMs == null) return formatElapsed(elapsedMs);
+  const base = `${formatElapsed(elapsedMs)} / ${formatElapsed(plannedDurationMs)}`;
+  if (!isOverrun(elapsedMs, plannedDurationMs)) return base;
+  return `${base} +${formatOverrun(elapsedMs - plannedDurationMs)}`;
 }
 
 function paneViewport(pane: HTMLElement): () => { width: number; height: number } {
@@ -43,6 +62,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
   const closeWindow = options.closeWindow ?? (() => win.close());
+  const log = options.console ?? console;
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -72,6 +92,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   )!;
   const notesRoot = options.root.querySelector<HTMLElement>('[data-peitho-presenter="notes"]')!;
   const timerRoot = options.root.querySelector<HTMLElement>('[data-peitho-presenter="timer"]')!;
+  const asideRoot = options.root.querySelector<HTMLElement>("aside")!;
 
   const mainShell = await mountPresentShell({
     root: currentRoot,
@@ -93,9 +114,36 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   });
   const keyboardCleanup = installKeyboardNavigation(win, bus);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
+  const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
+  const plannedDurationMs =
+    rawPlannedDurationMs != null &&
+    Number.isFinite(rawPlannedDurationMs) &&
+    rawPlannedDurationMs > 0
+      ? rawPlannedDurationMs
+      : null;
+  if (rawPlannedDurationMs != null && plannedDurationMs == null) {
+    log.error("Invalid plannedDurationMs in manifest.json");
+  }
+  const trackerCleanup =
+    plannedDurationMs == null
+      ? () => undefined
+      : installTimeTracker({
+          root: asideRoot,
+          shell: mainShell,
+          plannedDurationMs,
+          bus,
+          window: win,
+          document: doc,
+          variant: "presenter"
+        });
 
   function tick(): void {
-    timerRoot.textContent = formatElapsed(mainShell.elapsedMs());
+    const elapsedMs = mainShell.elapsedMs();
+    timerRoot.textContent = formatPresenterTimer(elapsedMs, plannedDurationMs);
+    timerRoot.toggleAttribute(
+      "data-peitho-overrun",
+      plannedDurationMs != null && isOverrun(elapsedMs, plannedDurationMs)
+    );
   }
 
   function updateFromSlide(detail: SlideChangeDetail): void {
@@ -153,6 +201,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     tick,
     destroy(): void {
       win.clearInterval(interval);
+      trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();
       syncCleanup();

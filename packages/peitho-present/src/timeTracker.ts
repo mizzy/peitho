@@ -19,6 +19,10 @@ export type TimeTrackerOptions = {
 
 const clamp01 = (ratio: number): number => Math.min(Math.max(ratio, 0), 1);
 
+export function isOverrun(elapsedMs: number, plannedDurationMs: number): boolean {
+  return elapsedMs > plannedDurationMs;
+}
+
 function isValidSlideChangeDetail(detail: unknown): detail is SlideChangeDetail {
   if (typeof detail !== "object" || detail === null) return false;
   const candidate = detail as Partial<SlideChangeDetail>;
@@ -64,9 +68,13 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
     setMarker(rabbit, clamp01(ratio));
   };
   const tick = (): void => {
-    const ratio = options.shell.elapsedMs() / options.plannedDurationMs;
+    const elapsedMs = options.shell.elapsedMs();
+    const ratio = elapsedMs / options.plannedDurationMs;
     setMarker(turtle, clamp01(ratio));
-    track.toggleAttribute("data-peitho-overrun", ratio > 1);
+    track.toggleAttribute(
+      "data-peitho-overrun",
+      isOverrun(elapsedMs, options.plannedDurationMs)
+    );
   };
   const onSlideChange = (event: Event): void => {
     const detail = (event as CustomEvent<unknown>).detail;
