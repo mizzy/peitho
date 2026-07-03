@@ -1,11 +1,11 @@
 # 動作確認用: 各サンプルデッキをcargo runでpresentする。
-# 追加フラグは PRESENT_FLAGS で渡す。例:
-#   make keynote PRESENT_FLAGS="--presenter-windowed"
+# 発表者画面を窓で開くなら <target>-windowed。その他の追加フラグは PRESENT_FLAGS で渡す。
 
 PRESENT_FLAGS ?=
 PRESENT = cargo run -q -p peitho -- present
 
-.PHONY: help minimal lightning-talk code-walkthrough keynote shell
+.PHONY: help minimal lightning-talk code-walkthrough keynote shell \
+	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -14,7 +14,20 @@ help:
 	@echo "  make code-walkthrough  typestate解説（ターミナル風2カラム）"
 	@echo "  make keynote           キーノート（セリフ体中央寄せ）"
 	@echo ""
-	@echo "追加フラグ: make keynote PRESENT_FLAGS=\"--presenter-windowed\""
+	@echo "発表者画面を窓で開く: make keynote-windowed など <target>-windowed"
+	@echo "その他の追加フラグ:   make keynote PRESENT_FLAGS=\"--port 8000\""
+
+minimal-windowed: PRESENT_FLAGS += --presenter-windowed
+minimal-windowed: minimal
+
+lightning-talk-windowed: PRESENT_FLAGS += --presenter-windowed
+lightning-talk-windowed: lightning-talk
+
+code-walkthrough-windowed: PRESENT_FLAGS += --presenter-windowed
+code-walkthrough-windowed: code-walkthrough
+
+keynote-windowed: PRESENT_FLAGS += --presenter-windowed
+keynote-windowed: keynote
 
 shell:
 	cd packages/peitho-present && npm run build
