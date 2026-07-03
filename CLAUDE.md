@@ -22,7 +22,7 @@ crates/peitho-core/   契約・パイプライン(parser/layout/mapping/check/re
 crates/peitho/        CLI(build/present/publish)、server.rs(配信+/syncロングポール)、browser.rs、displays.rs
 packages/peitho-present/  TS発表シェル(canvas/shell/controls/keyboard/sync/presenter)
 bindings/             ts-rs生成TS型（コミット対象）
-layouts/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのレイアウト/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）。`--layouts`/`--css`はファイルまたはディレクトリ（`*.html`/`*.css`をファイル名順に読む）。CSS検証は全ファイル一様: キー付きセレクタは当該スライドのレイアウトのスロットに対して、裸の`.slot-*`は提供レイアウトの和集合に対して検査
+layouts/ themes/ examples/  共有レイアウト・baseテーマ・サンプル（デフォルトのレイアウト/base.css/発表シェルdist/shell.jsはinclude_str!でバイナリに内蔵。CLIフラグ未指定時はそれが使われる。shell.jsは生成物だがbindings/と同じくコミット+CI drift検査）。`--layouts`/`--css`はファイルまたはディレクトリ（`*.html`/`*.css`をファイル名順に読む）。未指定時は**デッキの隣**の`layouts/`・`css/`を自動検出（ゼロコンフィグ規約、Issue #17の採用方針。無ければ内蔵デフォルト）。CSS検証は全ファイル一様: キー付きセレクタは当該スライドのレイアウトのスロットに対して、裸の`.slot-*`は提供レイアウトの和集合に対して検査
 docs/plans/           各マイルストーンの実装計画（履歴）
 ```
 
@@ -59,6 +59,6 @@ UX変更は必ず実ブラウザ/実ディスプレイでE2E確認する（jsdom
 - スピーカーノートのMarkdown記法（notes.jsonスキーマ・TS型・presenter表示配線は実装済み、常に空）
 - fenced div明示スロット記法 `::: {slot=...}`（§18）
 - シンタックスハイライタ選定
-- デッキ別リポジトリ運用の設定ファイル（peitho.toml等）とpeitho.gosu.keデプロイ
+- peitho.toml（カスタマイズの必要性が出てから。現状はゼロコンフィグ規約で運用）とpeitho.gosu.keデプロイ
 
 残タスクはGitHub Issuesに登録済み。着手時は`docs/plans/`に計画を書いてから実装する。

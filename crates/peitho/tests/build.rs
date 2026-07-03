@@ -197,6 +197,42 @@ fn build_dispatches_slides_across_multiple_layouts() {
 }
 
 #[test]
+fn build_zero_config_uses_layouts_and_css_dirs_next_to_the_deck() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Zero Config\n\nBody\n").unwrap();
+    let layouts_dir = dir.path().join("layouts");
+    fs::create_dir_all(&layouts_dir).unwrap();
+    fs::write(
+        layouts_dir.join("statement.html"),
+        r#"<section class="zero-config"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+    )
+    .unwrap();
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(css_dir.join("base.css"), ".zero-config { color: teal; }").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let html = fs::read_to_string(out.join("slides/000-zero-config.html")).unwrap();
+    assert!(html.contains(r#"class="zero-config peitho-slide""#));
+    assert!(fs::read_to_string(out.join("peitho.css"))
+        .unwrap()
+        .contains(".zero-config { color: teal; }"));
+}
+
+#[test]
 fn build_rejects_ambiguous_slide_with_disambiguation_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

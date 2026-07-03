@@ -91,9 +91,8 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 | `examples/keynote/` | 日本語キーノート | クリーム地+セリフ体+中央寄せ | 2レイアウト構成。タイトルだけのスライドは`cover`へ、本文ありは`statement`へ型駆動ディスパッチ |
 
 ```sh
-peitho present examples/keynote/deck.md \
-  --layouts examples/keynote/layouts \
-  --css examples/keynote/css
+# 各サンプルはlayouts/・css/が隣にあるので、規約によりフラグ不要
+peitho present examples/keynote/deck.md
 ```
 
 動作確認にはMakefileのターゲットが便利（`make help`で一覧。`make keynote`、`make lightning-talk`等。シェルバンドルのビルド込みで`cargo run`する）。
