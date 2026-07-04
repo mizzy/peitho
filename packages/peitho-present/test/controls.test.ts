@@ -203,3 +203,23 @@ it("toggles fullscreen from the f key through browser APIs", () => {
 
   expect(requestFullscreen).toHaveBeenCalledTimes(1);
 });
+
+it("fullscreen shortcut ignores chord-modified f", () => {
+  const requestFullscreen = vi.fn();
+  Object.defineProperty(document.documentElement, "requestFullscreen", {
+    value: requestFullscreen,
+    configurable: true
+  });
+  Object.defineProperty(document, "fullscreenElement", {
+    value: null,
+    configurable: true
+  });
+  const cleanup = installFullscreenShortcut({ window, document });
+  cleanups.push(cleanup);
+
+  const event = new KeyboardEvent("keydown", { key: "f", metaKey: true, cancelable: true });
+  window.dispatchEvent(event);
+
+  expect(event.defaultPrevented).toBe(false);
+  expect(requestFullscreen).not.toHaveBeenCalled();
+});

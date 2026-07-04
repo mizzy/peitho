@@ -184,11 +184,76 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
     let post_response = post_sync(addr, r#"{"index":1}"#);
     assert!(post_response.contains("204 No Content"));
 
-    let event = read_until_contains(&mut poll, r#""message":{"index":1}"#);
+    let event = read_until_contains(&mut poll, r#""swapped":false"#);
     assert!(event.contains("200 OK"));
     assert!(event.contains("application/json"));
     assert!(event.contains(r#""seq":1"#));
     assert!(event.contains(r#""message":{"index":1}"#));
+    assert!(event.contains(r#""index":1"#));
+    assert!(event.contains(r#""swapped":false"#));
+
+    drop(poll);
+    drop(handle);
+}
+
+#[test]
+fn present_server_poll_response_includes_current_replay_state() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.serve_forever());
+
+    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
+
+    let mut poll = TcpStream::connect(addr).unwrap();
+    poll.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    poll.write_all(b"GET /sync?seq=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+
+    assert!(post_sync(addr, r#"{"index":3}"#).contains("204 No Content"));
+
+    let event = read_until_contains(&mut poll, r#""swapped":true"#);
+    assert!(event.contains("200 OK"));
+    assert!(event.contains("application/json"));
+    assert!(event.contains(r#""seq":2"#));
+    assert!(event.contains(r#""message":{"index":3}"#));
+    assert!(event.contains(r#""index":3"#));
+    assert!(event.contains(r#""swapped":true"#));
+
+    drop(poll);
+    drop(handle);
+}
+
+#[test]
+fn present_server_relays_swap_sync_post_to_long_poll_subscriber() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let mut poll = TcpStream::connect(addr).unwrap();
+    poll.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    poll.write_all(b"GET /sync?seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+
+    let post_response = post_sync(addr, r#"{"swapped":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    let event = read_until_contains(&mut poll, r#""index":null"#);
+    assert!(event.contains("200 OK"));
+    assert!(event.contains("application/json"));
+    assert!(event.contains(r#""seq":1"#));
+    assert!(event.contains(r#""message":{"swapped":true}"#));
+    assert!(event.contains(r#""index":null"#));
+    assert!(event.contains(r#""swapped":true"#));
 
     drop(poll);
     drop(handle);
@@ -266,7 +331,86 @@ fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_me
     assert!(response.contains("200 OK"));
     assert!(response.contains(r#""seq":1"#));
     assert!(response.contains(r#""message":null"#));
+    assert!(response.contains(r#""index":null"#));
+    assert!(response.contains(r#""swapped":false"#));
     assert!(!response.contains(r#""close":true"#));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_sync_initial_handshake_returns_replay_state_defaults() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = get_http(addr, "/sync?seq=now");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert_eq!(body["seq"], 0);
+    assert!(body["message"].is_null());
+    assert!(body["index"].is_null());
+    assert_eq!(body["swapped"], false);
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || {
+        server.handle_one();
+        server.handle_one();
+        server.handle_one();
+    });
+
+    assert!(post_sync(addr, r#"{"index":2}"#).contains("204 No Content"));
+    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
+    let response = get_http(addr, "/sync");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert_eq!(body["seq"], 2);
+    assert!(body["message"].is_null());
+    assert_eq!(body["index"], 2);
+    assert_eq!(body["swapped"], true);
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_sync_close_does_not_clobber_replay_state() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || {
+        server.handle_one();
+        server.handle_one();
+        server.handle_one();
+        server.handle_one();
+    });
+
+    assert!(post_sync(addr, r#"{"index":2}"#).contains("204 No Content"));
+    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
+    assert!(post_sync(addr, r#"{"close":true}"#).contains("204 No Content"));
+    let response = get_http(addr, "/sync?seq=");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert_eq!(body["seq"], 3);
+    assert!(body["message"].is_null());
+    assert_eq!(body["index"], 2);
+    assert_eq!(body["swapped"], true);
     handle.join().unwrap();
 }
 
@@ -282,6 +426,40 @@ fn present_server_rejects_invalid_sync_post_body() {
     let handle = thread::spawn(move || server.handle_one());
 
     let response = post_sync(addr, r#"{"key":"x"}"#);
+
+    assert!(response.contains("400 Bad Request"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_rejects_non_boolean_swap_sync_post_body() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = post_sync(addr, r#"{"swapped":"x"}"#);
+
+    assert!(response.contains("400 Bad Request"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_rejects_swap_sync_post_body_with_extra_fields() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = post_sync(addr, r#"{"swapped":true,"extra":1}"#);
 
     assert!(response.contains("400 Bad Request"));
     handle.join().unwrap();
@@ -544,6 +722,21 @@ fn post_sync(addr: std::net::SocketAddr, body: &str) -> String {
     let mut response = String::new();
     post.read_to_string(&mut response).unwrap();
     response
+}
+
+fn get_http(addr: std::net::SocketAddr, path: &str) -> String {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn response_body(response: &str) -> &str {
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(response)
 }
 
 fn join_present_server(handle: thread::JoinHandle<miette::Result<()>>, timeout: Duration) {

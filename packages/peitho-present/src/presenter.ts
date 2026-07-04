@@ -140,6 +140,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
             <div>
               <span class="grp"><span class="kbd">←</span><span class="kbd">→</span> navigate</span>
               <span class="grp"><span class="kbd">Space</span> start / pause</span>
+              <span class="grp"><span class="kbd">S</span> swap</span>
               <span class="grp"><span class="kbd">Esc</span> close</span>
             </div>
           </div>
@@ -185,6 +186,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
             <button class="btn" type="button" data-peitho-action="prev">Prev <span class="k">←</span></button>
             <button class="btn" type="button" data-peitho-action="next">Next <span class="k">→</span></button>
             <button class="btn" type="button" data-peitho-action="reset">Reset</button>
+            <button class="btn" type="button" data-peitho-action="swap">Swap <span class="k">S</span></button>
             <button class="btn danger" type="button" data-peitho-action="close">Close <span class="k">Esc</span></button>
           </div>
         </section>
@@ -389,6 +391,9 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   addButtonListener("playpause", dispatchPlaypause);
   addButtonListener("reset", () => {
     dispatchTimerControl("reset");
+  });
+  addButtonListener("swap", () => {
+    bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
   });
   addButtonListener("close", () => {
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));

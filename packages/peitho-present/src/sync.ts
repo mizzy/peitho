@@ -1,4 +1,6 @@
-export type SyncMessage = { index: number } | { close: true };
+import { swapRoute } from "./swap";
+
+export type SyncMessage = { index: number } | { swapped: boolean } | { close: true };
 
 export type SyncChannel = {
   onmessage: ((event: { data: unknown }) => void) | null;
@@ -20,6 +22,8 @@ export type ServerSyncOptions = {
 type ServerSyncPollResponse = {
   seq: number;
   message: unknown;
+  index?: unknown;
+  swapped?: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,6 +36,10 @@ function isCloseSyncMessage(value: unknown): value is { close: true } {
 
 function isIndexSyncMessage(value: unknown): value is { index: number } {
   return isRecord(value) && typeof value.index === "number";
+}
+
+function isSwappedSyncMessage(value: unknown): value is { swapped: boolean } {
+  return isRecord(value) && typeof value.swapped === "boolean";
 }
 
 function defaultChannelFactory(name: string): SyncChannel {
@@ -71,6 +79,15 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
     let abortController: AbortController | null = null;
     let retryTimer: number | null = null;
 
+    const deliverReplayState = (body: Partial<ServerSyncPollResponse>): void => {
+      if (typeof body.index === "number") {
+        onmessage?.({ data: { index: body.index } });
+      }
+      if (typeof body.swapped === "boolean") {
+        onmessage?.({ data: { swapped: body.swapped } });
+      }
+    };
+
     const delay = (): Promise<void> =>
       new Promise((resolve) => {
         retryTimer = setTimeoutFn(() => {
@@ -95,6 +112,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           return false;
         }
         seq = body.seq;
+        deliverReplayState(body);
         return true;
       } catch (error: unknown) {
         if (!closed) {
@@ -130,6 +148,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           }
           seq = body.seq;
           onmessage?.({ data: body.message });
+          deliverReplayState(body);
         } catch (error: unknown) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
@@ -177,7 +196,9 @@ export function installSyncBridge(
   win: Window = window,
   channelFactory: SyncChannelFactory = defaultChannelFactory,
   bus: EventTarget = win,
-  closeWindow: () => void = () => win.close()
+  closeWindow: () => void = () => win.close(),
+  pathname: () => string = () => win.location.pathname,
+  navigate: (url: string) => void = (url) => win.location.replace(url)
 ): () => void {
   const channel = channelFactory("peitho-sync");
   const onSlideChange = (event: Event): void => {
@@ -187,6 +208,14 @@ export function installSyncBridge(
   };
   const onCloseRequest = (): void => {
     channel.postMessage({ close: true });
+  };
+  const onSwapRequest = (): void => {
+    const route = swapRoute(pathname());
+    if (route == null) {
+      console.error("peitho: swap unavailable on this route");
+      return;
+    }
+    channel.postMessage({ swapped: !route.swapped });
   };
   channel.onmessage = (event: { data: unknown }): void => {
     const data = event.data;
@@ -200,13 +229,25 @@ export function installSyncBridge(
       );
       return;
     }
+    if (isSwappedSyncMessage(data)) {
+      const route = swapRoute(pathname());
+      if (route == null) {
+        console.error("peitho: swap unavailable on this route");
+        return;
+      }
+      if (data.swapped === route.swapped) return;
+      navigate(route.counterpart);
+      return;
+    }
     console.error("Invalid peitho sync message");
   };
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:closerequest", onCloseRequest);
+  bus.addEventListener("peitho:swaprequest", onSwapRequest);
   return () => {
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
+    bus.removeEventListener("peitho:swaprequest", onSwapRequest);
     channel.onmessage = null;
     channel.close();
   };

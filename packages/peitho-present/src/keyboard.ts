@@ -11,6 +11,10 @@ const navigationKeyMap = new Map<string, NavigateTarget>([
 
 const keyMap = new Map<string, NavigateTarget>([...navigationKeyMap, [" ", "next"]]);
 
+export function hasChordModifier(event: KeyboardEvent): boolean {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+
 function dispatchNavigate(bus: EventTarget, to: NavigateTarget): void {
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
 }
@@ -20,6 +24,7 @@ export function installKeyboardNavigation(
   bus: EventTarget = win
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (hasChordModifier(event)) return;
     const to = keyMap.get(event.key);
     if (!to) return;
     event.preventDefault();
@@ -35,6 +40,7 @@ export function installPresenterKeyboard(
   onPlaypause: () => void
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (hasChordModifier(event)) return;
     const to = navigationKeyMap.get(event.key);
     if (to) {
       event.preventDefault();
@@ -52,6 +58,7 @@ export function installPresenterKeyboard(
 
 export function installCloseOnEscape(win: Window = window, bus: EventTarget = win): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (hasChordModifier(event)) return;
     if (event.key !== "Escape") return;
     event.preventDefault();
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));

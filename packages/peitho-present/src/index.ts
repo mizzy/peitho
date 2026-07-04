@@ -24,9 +24,15 @@ export {
   PRESENTER_URL
 } from "./presentDisplay";
 export type { OpenPresenterPopupOptions } from "./presentDisplay";
-export { installCloseOnEscape, installKeyboardNavigation, installPresenterKeyboard } from "./keyboard";
+export {
+  hasChordModifier,
+  installCloseOnEscape,
+  installKeyboardNavigation,
+  installPresenterKeyboard
+} from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
+export { installSwapShortcut, swapRoute } from "./swap";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";
 export {
   formatMinuteSeconds,

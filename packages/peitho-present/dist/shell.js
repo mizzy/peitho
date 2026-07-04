@@ -316,6 +316,61 @@ function diffSeconds(actual, planned) {
   return Math.round((actual - planned) / 1e3);
 }
 
+// src/keyboard.ts
+var navigationKeyMap = /* @__PURE__ */ new Map([
+  ["ArrowRight", "next"],
+  ["PageDown", "next"],
+  ["ArrowLeft", "prev"],
+  ["PageUp", "prev"],
+  ["Home", "first"],
+  ["End", "last"]
+]);
+var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
+function hasChordModifier(event) {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+function dispatchNavigate(bus, to) {
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+}
+function installKeyboardNavigation(win = window, bus = win) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    const to = keyMap.get(event.key);
+    if (!to) return;
+    event.preventDefault();
+    dispatchNavigate(bus, to);
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function installPresenterKeyboard(win, bus, onPlaypause) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    const to = navigationKeyMap.get(event.key);
+    if (to) {
+      event.preventDefault();
+      dispatchNavigate(bus, to);
+      return;
+    }
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (event.repeat) return;
+    onPlaypause();
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function installCloseOnEscape(win = window, bus = win) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+
 // src/presentDisplay.ts
 var PRESENTER_URL = "presenter.html";
 var PRESENTER_TARGET = "peitho-presenter";
@@ -408,6 +463,7 @@ function installFullscreenShortcut(options = {}) {
   const win = options.window ?? window;
   const doc = options.document ?? document;
   const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
     if (event.key !== "f") return;
     event.preventDefault();
     toggleFullscreen(doc);
@@ -421,55 +477,6 @@ function toggleFullscreen(doc = document) {
     return;
   }
   void doc.documentElement.requestFullscreen?.();
-}
-
-// src/keyboard.ts
-var navigationKeyMap = /* @__PURE__ */ new Map([
-  ["ArrowRight", "next"],
-  ["PageDown", "next"],
-  ["ArrowLeft", "prev"],
-  ["PageUp", "prev"],
-  ["Home", "first"],
-  ["End", "last"]
-]);
-var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
-function dispatchNavigate(bus, to) {
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
-}
-function installKeyboardNavigation(win = window, bus = win) {
-  const onKeyDown = (event) => {
-    const to = keyMap.get(event.key);
-    if (!to) return;
-    event.preventDefault();
-    dispatchNavigate(bus, to);
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-function installPresenterKeyboard(win, bus, onPlaypause) {
-  const onKeyDown = (event) => {
-    const to = navigationKeyMap.get(event.key);
-    if (to) {
-      event.preventDefault();
-      dispatchNavigate(bus, to);
-      return;
-    }
-    if (event.key !== " ") return;
-    event.preventDefault();
-    if (event.repeat) return;
-    onPlaypause();
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-function installCloseOnEscape(win = window, bus = win) {
-  const onKeyDown = (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
 }
 
 // src/shell.ts
@@ -697,6 +704,30 @@ var PresentShellController = class {
   }
 };
 
+// src/swap.ts
+var SWAP_ROUTES = Object.freeze({
+  "/present.html": Object.freeze({ swapped: false, counterpart: "presenter-swapped" }),
+  "/": Object.freeze({ swapped: false, counterpart: "presenter-swapped" }),
+  "/presenter": Object.freeze({ swapped: false, counterpart: "present-swapped" }),
+  "/presenter.html": Object.freeze({ swapped: false, counterpart: "present-swapped" }),
+  "/present-swapped": Object.freeze({ swapped: true, counterpart: "presenter" }),
+  "/presenter-swapped": Object.freeze({ swapped: true, counterpart: "present.html" })
+});
+function swapRoute(pathname) {
+  return SWAP_ROUTES[pathname] ?? null;
+}
+function installSwapShortcut(win = window, bus = win) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    if (event.key !== "s" && event.key !== "S") return;
+    if (event.repeat) return;
+    event.preventDefault();
+    bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+
 // src/sync.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null;
@@ -706,6 +737,9 @@ function isCloseSyncMessage(value) {
 }
 function isIndexSyncMessage(value) {
   return isRecord(value) && typeof value.index === "number";
+}
+function isSwappedSyncMessage(value) {
+  return isRecord(value) && typeof value.swapped === "boolean";
 }
 function defaultChannelFactory(name) {
   const channel = new BroadcastChannel(name);
@@ -741,6 +775,14 @@ function serverSyncChannelFactory(options = {}) {
     let seq = 0;
     let abortController = null;
     let retryTimer = null;
+    const deliverReplayState = (body) => {
+      if (typeof body.index === "number") {
+        onmessage?.({ data: { index: body.index } });
+      }
+      if (typeof body.swapped === "boolean") {
+        onmessage?.({ data: { swapped: body.swapped } });
+      }
+    };
     const delay = () => new Promise((resolve) => {
       retryTimer = setTimeoutFn(() => {
         retryTimer = null;
@@ -763,6 +805,7 @@ function serverSyncChannelFactory(options = {}) {
           return false;
         }
         seq = body.seq;
+        deliverReplayState(body);
         return true;
       } catch (error) {
         if (!closed) {
@@ -797,6 +840,7 @@ function serverSyncChannelFactory(options = {}) {
           }
           seq = body.seq;
           onmessage?.({ data: body.message });
+          deliverReplayState(body);
         } catch (error) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
@@ -836,7 +880,7 @@ function serverSyncChannelFactory(options = {}) {
     };
   };
 }
-function installSyncBridge(win = window, channelFactory = defaultChannelFactory, bus = win, closeWindow = () => win.close()) {
+function installSyncBridge(win = window, channelFactory = defaultChannelFactory, bus = win, closeWindow = () => win.close(), pathname = () => win.location.pathname, navigate = (url) => win.location.replace(url)) {
   const channel = channelFactory("peitho-sync");
   const onSlideChange = (event) => {
     const detail = event.detail;
@@ -845,6 +889,14 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   };
   const onCloseRequest = () => {
     channel.postMessage({ close: true });
+  };
+  const onSwapRequest = () => {
+    const route = swapRoute(pathname());
+    if (route == null) {
+      console.error("peitho: swap unavailable on this route");
+      return;
+    }
+    channel.postMessage({ swapped: !route.swapped });
   };
   channel.onmessage = (event) => {
     const data = event.data;
@@ -858,13 +910,25 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       );
       return;
     }
+    if (isSwappedSyncMessage(data)) {
+      const route = swapRoute(pathname());
+      if (route == null) {
+        console.error("peitho: swap unavailable on this route");
+        return;
+      }
+      if (data.swapped === route.swapped) return;
+      navigate(route.counterpart);
+      return;
+    }
     console.error("Invalid peitho sync message");
   };
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:closerequest", onCloseRequest);
+  bus.addEventListener("peitho:swaprequest", onSwapRequest);
   return () => {
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
+    bus.removeEventListener("peitho:swaprequest", onSwapRequest);
     channel.onmessage = null;
     channel.close();
   };
@@ -961,6 +1025,7 @@ async function mountPresenterView(options) {
             <div>
               <span class="grp"><span class="kbd">\u2190</span><span class="kbd">\u2192</span> navigate</span>
               <span class="grp"><span class="kbd">Space</span> start / pause</span>
+              <span class="grp"><span class="kbd">S</span> swap</span>
               <span class="grp"><span class="kbd">Esc</span> close</span>
             </div>
           </div>
@@ -1006,6 +1071,7 @@ async function mountPresenterView(options) {
             <button class="btn" type="button" data-peitho-action="prev">Prev <span class="k">\u2190</span></button>
             <button class="btn" type="button" data-peitho-action="next">Next <span class="k">\u2192</span></button>
             <button class="btn" type="button" data-peitho-action="reset">Reset</button>
+            <button class="btn" type="button" data-peitho-action="swap">Swap <span class="k">S</span></button>
             <button class="btn danger" type="button" data-peitho-action="close">Close <span class="k">Esc</span></button>
           </div>
         </section>
@@ -1192,6 +1258,9 @@ async function mountPresenterView(options) {
   addButtonListener("reset", () => {
     dispatchTimerControl("reset");
   });
+  addButtonListener("swap", () => {
+    bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
+  });
   addButtonListener("close", () => {
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   });
@@ -1247,6 +1316,7 @@ export {
   calculateCanvasFit,
   fallbackFeatures,
   formatMinuteSeconds,
+  hasChordModifier,
   installAgenda,
   installCanvasClickNavigation,
   installCanvasScaler,
@@ -1255,6 +1325,7 @@ export {
   installKeyboardNavigation,
   installPresentationControls,
   installPresenterKeyboard,
+  installSwapShortcut,
   installSyncBridge,
   installTimeTracker,
   isOverrun,
@@ -1263,6 +1334,7 @@ export {
   mountPresenterView,
   openPresenterPopup,
   serverSyncChannelFactory,
+  swapRoute,
   toggleFullscreen
 };
 //# sourceMappingURL=shell.js.map
