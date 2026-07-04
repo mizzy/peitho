@@ -48,6 +48,57 @@ it("moves rabbit by slide progress and turtle by elapsed progress", () => {
   expect(root.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')?.style.left).toBe("50%");
 });
 
+it("keeps the present variant DOM unchanged", () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  cleanups.push(
+    installTimeTracker({
+      root,
+      shell: shell(),
+      plannedDurationMs: 60_000,
+      bus,
+      window,
+      document,
+      variant: "present"
+    })
+  );
+
+  expect(root.innerHTML).toBe(
+    '<div class="peitho-time-tracker" data-peitho-time-tracker="present"><span data-peitho-marker="rabbit" aria-label="slide progress" style="left: 0%; transform: translateX(0%);">🐰</span><span data-peitho-marker="turtle" aria-label="time progress" style="left: 0%; transform: translateX(0%);">🐢</span></div>'
+  );
+});
+
+it("renders presenter variant with legend fill track and five-point time scale", () => {
+  let elapsed = 30_000;
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  cleanups.push(
+    installTimeTracker({
+      root,
+      shell: shell({ currentIndex: 1, elapsedMs: () => elapsed }),
+      plannedDurationMs: 60_000,
+      bus,
+      window,
+      document,
+      variant: "presenter"
+    })
+  );
+
+  const tracker = root.querySelector<HTMLElement>('[data-peitho-time-tracker="presenter"]')!;
+  expect(tracker.querySelector(".tracker-legend")?.textContent).toBe("Slide progressTime");
+  expect(tracker.querySelector(".tracker")).not.toBeNull();
+  expect(tracker.querySelector<HTMLElement>(".tracker-fill")?.style.width).toBe("50%");
+  expect(tracker.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')?.className).toBe("");
+  expect(tracker.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')?.className).toBe("");
+  expect(
+    Array.from(tracker.querySelectorAll(".tracker-scale span"), (span) => span.textContent)
+  ).toEqual(["0:00", "0:15", "0:30", "0:45", "1:00"]);
+
+  elapsed = 45_000;
+  vi.advanceTimersByTime(250);
+  expect(tracker.querySelector<HTMLElement>(".tracker-fill")?.style.width).toBe("75%");
+});
+
 it("clamps markers to the track edges so the glyph never overflows", () => {
   let elapsed = 0;
   const root = document.createElement("main");

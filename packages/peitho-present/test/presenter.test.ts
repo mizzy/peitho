@@ -64,9 +64,11 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (views.length > 0) views.pop()?.destroy();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
-it("renders current slide preview next slide note and starts timer from Start button", async () => {
+it("renders the redesigned presenter shell and starts timer from the playpause button", async () => {
   let now = 1000;
   const root = document.createElement("main");
   const { factory } = mockSyncChannelFactory();
@@ -89,11 +91,33 @@ it("renders current slide preview next slide note and starts timer from Start bu
   expect(root.querySelector('[data-peitho-presenter="notes"]')?.textContent).toContain(
     "Opening note"
   );
+  expect(root.querySelector(".left")).not.toBeNull();
+  expect(root.querySelector(".right")).not.toBeNull();
+  expect(root.querySelector(".agenda")).toBeNull();
+  expect(root.querySelector(".status-line")?.textContent).not.toContain("Section");
+  expect(root.querySelector(".kbdbar")?.textContent).toContain("Space");
+
+  const clock = root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')!;
+  const pill = root.querySelector<HTMLElement>('[data-peitho-presenter="state-pill"]')!;
+  const play = root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')!;
+  expect(root.querySelector('[data-peitho-action="start"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-action="pause"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-action="resume"]')).toBeNull();
   expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("00:00");
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
+  expect(clock.dataset.peithoState).toBe("stopped");
+  expect(pill.dataset.peithoState).toBe("stopped");
+  expect(pill.textContent).toContain("Stopped");
+  expect(play.textContent).toBe("Start");
+  expect(play.textContent).not.toContain("Space");
+
+  play.click();
   now = 65000;
   view.tick();
   expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("01:04");
+  expect(clock.dataset.peithoState).toBe("running");
+  expect(pill.dataset.peithoState).toBe("running");
+  expect(pill.textContent).toContain("Running");
+  expect(play.textContent).toBe("Pause");
 });
 
 it("shows planned duration in presenter timer when manifest has time", async () => {
@@ -110,12 +134,16 @@ it("shows planned duration in presenter timer when manifest has time", async () 
   });
   views.push(view);
 
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   now = 31_000;
   view.tick();
 
   expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("00:30 / 01:00");
-  expect(root.querySelector('[data-peitho-time-tracker="presenter"]')).not.toBeNull();
+  expect(
+    root.querySelector(
+      '[data-peitho-presenter="clock"] [data-peitho-presenter="tracker-slot"] > [data-peitho-time-tracker="presenter"]'
+    )
+  ).not.toBeNull();
 
   view.destroy();
   views.pop();
@@ -136,7 +164,7 @@ it("keeps legacy presenter timer text when manifest has no time", async () => {
   });
   views.push(view);
 
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   now = 65_000;
   view.tick();
 
@@ -160,7 +188,7 @@ it("logs invalid planned duration and keeps presenter mounted without a tracker"
   });
   views.push(view);
 
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   now = 65_000;
   view.tick();
 
@@ -183,12 +211,14 @@ it("marks presenter timer as overrun after the planned duration", async () => {
   });
   views.push(view);
 
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   now = 61_500;
   view.tick();
 
   const timer = root.querySelector<HTMLElement>('[data-peitho-presenter="timer"]')!;
   expect(timer.textContent).toBe("01:00 / 01:00 +00:01");
+  expect(timer.querySelector(".planned")?.textContent).toBe(" / 01:00");
+  expect(timer.querySelector(".overrun")?.textContent).toBe(" +00:01");
   expect(timer.hasAttribute("data-peitho-overrun")).toBe(true);
 });
 
@@ -273,8 +303,9 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   cleanups.push(() => window.removeEventListener("peitho:closerequest", onCloseRequest));
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]')?.click();
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
-  root.querySelector<HTMLButtonElement>('[data-peitho-action="pause"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="close"]')?.click();
 
@@ -282,8 +313,93 @@ it("buttons emit navigate timercontrol and close requests", async () => {
     { to: "next" },
     { action: "start" },
     { action: "pause" },
+    { action: "resume" },
     { action: "reset" }
   ]);
   expect(closeRequests).toEqual([null]);
   expect(channel.sent).toEqual([{ index: 1 }, { close: true }]);
+});
+
+it("derives playpause action labels and chrome from shell timer state", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+  const play = root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')!;
+  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')!;
+  const clock = root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')!;
+  const pill = root.querySelector<HTMLElement>('[data-peitho-presenter="state-pill"]')!;
+
+  expect(clock.dataset.peithoState).toBe("stopped");
+  expect(pill.textContent).toContain("Stopped");
+  expect(play.textContent).toBe("Start");
+
+  play.click();
+  expect(clock.dataset.peithoState).toBe("running");
+  expect(pill.textContent).toContain("Running");
+  expect(play.textContent).toBe("Pause");
+
+  play.click();
+  expect(clock.dataset.peithoState).toBe("paused");
+  expect(pill.textContent).toContain("Paused");
+  expect(play.textContent).toBe("Resume");
+
+  play.click();
+  expect(clock.dataset.peithoState).toBe("running");
+  expect(play.textContent).toBe("Pause");
+
+  reset.click();
+  expect(clock.dataset.peithoState).toBe("stopped");
+  expect(pill.textContent).toContain("Stopped");
+  expect(play.textContent).toBe("Start");
+});
+
+it("adds button ripple feedback and clears pending ripple timeout on destroy", async () => {
+  vi.useFakeTimers();
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+  const play = root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')!;
+  vi.spyOn(play, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 50,
+    width: 100,
+    height: 50,
+    toJSON: () => ({})
+  });
+
+  play.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 25, clientY: 10 }));
+
+  expect(play.style.getPropertyValue("--rx")).toBe("25%");
+  expect(play.style.getPropertyValue("--ry")).toBe("20%");
+  expect(play.classList.contains("pressed")).toBe(true);
+
+  vi.advanceTimersByTime(550);
+  expect(play.classList.contains("pressed")).toBe(false);
+
+  play.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 75, clientY: 25 }));
+  expect(play.classList.contains("pressed")).toBe(true);
+
+  view.destroy();
+  views.pop();
+  expect(vi.getTimerCount()).toBe(0);
 });

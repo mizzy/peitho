@@ -388,32 +388,125 @@ pub fn render_presenter_index() -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <title>Peitho Presenter</title>
   <style>
-    html, body { margin: 0; width: 100%; min-height: 100%; background: #111; color: #f5f5f5; }
-    body { font: 14px system-ui, sans-serif; }
-    #peitho-presenter-root { min-height: 100vh; }
-    .peitho-presenter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
-    .peitho-presenter-pane { position: relative; overflow: hidden; background: #000; min-height: 180px; }
-    [data-peitho-presenter="current"] { min-height: calc(100vh - 32px); }
-    .peitho-presenter-preview-slot { position: relative; aspect-ratio: 16 / 9; }
-    [data-peitho-presenter="preview"] { position: absolute; inset: 0; }
-    [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; display: flex; align-items: center; justify-content: center; background: #000; color: #aaa; font-size: 18px; }
-    .peitho-presenter-preview-slot > [hidden] { display: none; }
-    [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; margin-top: 16px; }
-    [data-peitho-presenter="timer"] { display: block; font-size: 40px; font-variant-numeric: tabular-nums; margin: 16px 0; }
-    .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
-    .peitho-time-tracker[data-peitho-time-tracker="presenter"] { position: relative; height: 26px; margin: 12px 0; z-index: 20; pointer-events: none; background: rgba(255, 255, 255, 0.16); }
-    .peitho-time-tracker [data-peitho-marker] { position: absolute; transition: left 120ms linear, transform 120ms linear; font-size: 18px; line-height: 1; }
-    .peitho-time-tracker [data-peitho-marker="rabbit"],
-    .peitho-time-tracker [data-peitho-marker="turtle"] { top: 4px; }
-    .peitho-time-tracker[data-peitho-overrun] { background: rgba(255, 92, 92, 0.35); }
-    [data-peitho-presenter="timer"][data-peitho-overrun] { color: #ff8a8a; }
+    :root {
+      --bg: oklch(15% 0.01 250);
+      --bg-elev: oklch(19% 0.012 250);
+      --bg-slide: oklch(8% 0.005 250);
+      --line: oklch(28% 0.015 250);
+      --line-soft: oklch(24% 0.012 250);
+      --fg: oklch(96% 0.005 250);
+      --fg-mute: oklch(72% 0.01 250);
+      --fg-dim: oklch(52% 0.012 250);
+      --accent: oklch(78% 0.14 195);
+      --accent-soft: oklch(78% 0.14 195 / 0.14);
+      --warn: oklch(72% 0.19 30);
+      --warn-soft: oklch(72% 0.19 30 / 0.18);
+      --pause: oklch(82% 0.15 90);
+    }
+    html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+    body { font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN", sans-serif; font-size: 14px; letter-spacing: 0; }
+    [hidden] { display: none !important; }
+    .mono { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    #peitho-presenter-root { min-height: 100vh; height: 100vh; }
+    .app { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(400px, 1fr); gap: 20px; padding: 20px; box-sizing: border-box; height: 100vh; max-height: 100vh; }
+    .left { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 12px; min-height: 0; min-width: 0; }
+    .right { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 16px; min-height: 0; min-width: 0; }
+    .colhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; min-width: 0; }
+    .status-line { display: inline-flex; align-items: center; gap: 10px; color: var(--fg-dim); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; min-width: 0; }
+    .status-line .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
+    .status-line .now { color: var(--accent); }
+    .deck-title { font-size: 12px; color: var(--fg-mute); letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .slide-frame { min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: center; container-type: size; }
+    .slide-pane { position: relative; width: min(100cqw, calc(100cqh * 16 / 9)); aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
+    .peitho-presenter-pane { position: relative; overflow: hidden; background: var(--bg-slide); min-height: 0; }
+    .kbdbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; color: var(--fg-dim); font-size: 12px; }
+    .kbdbar .pos { color: var(--fg-mute); font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    .kbd { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; color: var(--fg-mute); line-height: 1.2; }
+    .kbdbar .grp { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; white-space: nowrap; }
+    .kbdbar .grp:first-of-type { margin-left: 0; }
+    .notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, auto); min-height: 0; max-height: 42vh; overflow: hidden; }
+    .notes-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
+    .notes-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
+    .notes-body { overflow: auto; padding: 10px 16px 12px; font-size: 16px; line-height: 1.4; color: var(--fg); white-space: pre-wrap; }
+    .card { background: var(--bg-elev); border: 1px solid var(--line-soft); display: flex; flex-direction: column; min-height: 0; }
+    .card-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
+    .card-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
+    .next-wrap { padding: 12px; }
+    .next-preview { position: relative; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); overflow: hidden; }
+    .next-preview > [data-peitho-presenter="preview"] { position: absolute; inset: 0; }
+    [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-slide); color: var(--fg-dim); font-size: 18px; }
+    .clock { display: flex; flex-direction: column; min-height: 0; }
+    .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
+    .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }
+    .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
+    .timer .overrun { color: var(--warn); font-weight: 500; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
+    .clock[data-peitho-state="paused"] .timer { color: var(--pause); }
+    .clock[data-peitho-state="stopped"] .timer { color: var(--fg-dim); }
+    [data-peitho-presenter="timer"][data-peitho-overrun] { color: var(--warn); }
+    .state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }
+    .state-dot { width: 6px; height: 6px; background: var(--fg-dim); border-radius: 50%; transition: background 150ms ease, box-shadow 150ms ease; }
+    .state-pill[data-peitho-state="running"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
+    .state-pill[data-peitho-state="running"] .state-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: pulse 1.4s ease-in-out infinite; }
+    .state-pill[data-peitho-state="paused"] { color: var(--pause); border-color: color-mix(in oklch, var(--pause) 45%, var(--line)); }
+    .state-pill[data-peitho-state="paused"] .state-dot { background: var(--pause); animation: none; box-shadow: none; }
+    .state-pill[data-peitho-state="stopped"] { color: var(--fg-dim); }
+    .state-pill[data-peitho-state="stopped"] .state-dot { background: var(--fg-dim); animation: none; box-shadow: none; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 6px transparent; } }
+    .tracker-wrap { padding: 4px 16px 14px; }
+    .tracker-wrap:empty { display: none; }
+    .peitho-time-tracker[data-peitho-time-tracker="presenter"] { display: block; pointer-events: none; }
+    .tracker-legend { display: flex; justify-content: space-between; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px; }
+    .tracker { position: relative; height: 30px; background: color-mix(in oklch, var(--fg) 8%, transparent); border: 1px solid var(--line-soft); }
+    .tracker-fill { position: absolute; top: 0; bottom: 0; left: 0; background: linear-gradient(90deg, color-mix(in oklch, var(--accent) 22%, transparent), color-mix(in oklch, var(--accent) 8%, transparent)); }
+    .peitho-time-tracker[data-peitho-overrun] .tracker { border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); background: var(--warn-soft); }
+    .peitho-time-tracker[data-peitho-overrun] .tracker-fill { background: linear-gradient(90deg, color-mix(in oklch, var(--warn) 24%, transparent), color-mix(in oklch, var(--warn) 10%, transparent)); }
+    .tracker [data-peitho-marker="rabbit"],
+    .tracker [data-peitho-marker="turtle"] { position: absolute; transition: left 120ms linear, transform 120ms linear; font-size: 18px; line-height: 1; }
+    .tracker [data-peitho-marker="rabbit"] { top: -6px; }
+    .tracker [data-peitho-marker="turtle"] { bottom: -6px; }
+    .tracker-scale { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 6px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
+    .tracker-scale span { border-left: 1px solid var(--line-soft); padding-left: 6px; }
+    .tracker-scale span:first-child { border-left: none; padding-left: 0; }
+    .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
+    .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--fg-mute); padding: 4px 8px; font: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; transition: background 90ms ease, color 90ms ease, border-color 90ms ease, transform 60ms ease, box-shadow 90ms ease; min-width: 0; position: relative; overflow: hidden; -webkit-tap-highlight-color: transparent; }
+    .btn .k { color: var(--fg-dim); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: none; }
+    .btn:hover { color: var(--fg); border-color: color-mix(in oklch, var(--fg) 35%, var(--line)); background: color-mix(in oklch, var(--fg) 6%, transparent); }
+    .btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+    .btn:active { transform: translateY(2px); background: var(--accent); border-color: var(--accent); color: var(--bg); box-shadow: 0 0 24px var(--accent-soft), inset 0 2px 4px rgba(0, 0, 0, 0.2); }
+    .btn:active .k { color: var(--bg); }
+    .btn.primary { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; min-width: max-content; }
+    .btn.primary:hover { background: color-mix(in oklch, var(--accent) 88%, white); }
+    .btn.primary:active { background: color-mix(in oklch, var(--accent) 60%, black); border-color: color-mix(in oklch, var(--accent) 60%, black); color: white; box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.4); }
+    .clock[data-peitho-state="paused"] .btn.play.primary { background: var(--pause); border-color: var(--pause); color: var(--bg); }
+    .btn.danger { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); }
+    .btn.danger:hover { background: color-mix(in oklch, var(--warn) 12%, transparent); color: var(--warn); }
+    .btn.danger:active { background: var(--warn); color: var(--bg); border-color: var(--warn); box-shadow: 0 0 24px color-mix(in oklch, var(--warn) 30%, transparent); }
+    .btn::before { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at var(--rx, 50%) var(--ry, 50%), color-mix(in oklch, white 60%, transparent) 0%, transparent 45%); opacity: 0; pointer-events: none; transform: scale(0.3); }
+    .btn.primary::before { background: radial-gradient(circle at var(--rx, 50%) var(--ry, 50%), color-mix(in oklch, black 55%, transparent) 0%, transparent 45%); }
+    .btn.danger::before { background: radial-gradient(circle at var(--rx, 50%) var(--ry, 50%), color-mix(in oklch, white 55%, transparent) 0%, transparent 45%); }
+    .btn.pressed::before { animation: btn-ripple 500ms ease-out; }
+    @keyframes btn-ripple { 0% { opacity: 0.85; transform: scale(0.3); } 100% { opacity: 0; transform: scale(1.6); } }
+    @media (max-width: 1100px) {
+      html, body { overflow: auto; }
+      .app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; min-height: 100vh; height: auto; }
+      .right { grid-template-rows: auto auto; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+      .btn:active { transform: none; }
+      .btn.pressed::before { animation: none; }
+      .tracker [data-peitho-marker] { transition: none; }
+    }
   </style>
 </head>
 <body>
   <main id="peitho-presenter-root"></main>
-  <!-- Runtime presenter controls include data-peitho-action="close". -->
+  <!-- Runtime presenter controls include data-peitho-action="playpause" and data-peitho-action="close". -->
   <script type="module">
     import * as peitho from './shell.js';
 
@@ -684,12 +777,30 @@ mod tests {
         assert!(html.contains("await peitho.mountPresenterView({"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
         assert!(html.contains(r#"data-peitho-action="close""#));
-        assert!(html.contains(".peitho-presenter-pane"));
-        assert!(html.contains("grid-template-columns"));
+        assert!(html.contains(r#"data-peitho-action="playpause""#));
+        assert!(html.contains("fonts.googleapis.com"));
+        assert!(html.contains("family=Geist:wght@400;500;600;700"));
+        assert!(html.contains("family=Geist+Mono:wght@400;500;600"));
+        assert!(html.contains("display=swap"));
+        assert!(html.contains(r#"--accent: oklch(78% 0.14 195)"#));
+        assert!(html.contains(
+            ".app { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(400px, 1fr);"
+        ));
+        assert!(html.contains(".slide-pane"));
+        assert!(html.contains(".next-preview"));
+        assert!(html.contains(".notes-body"));
+        assert!(html.contains(".clock { display: flex; flex-direction: column;"));
+        assert!(html.contains(".controls {"));
+        assert!(html.contains("margin-top: auto"));
+        assert!(html.contains(".btn.pressed::before"));
+        assert!(html.contains("@media (prefers-reduced-motion: reduce)"));
         assert!(!html.contains("grid-layout-columns"));
         assert!(html.contains("overflow: hidden"));
         assert!(html.contains("Failed to load"));
         assert!(!html.contains("fetchOk(slide.src)"));
+        assert!(!html.contains(".agenda"));
+        assert!(!html.contains("Section —"));
+        assert!(!html.contains("data-omelette-injected"));
     }
 
     #[test]
@@ -698,16 +809,22 @@ mod tests {
 
         assert!(html.contains(".peitho-time-tracker"));
         assert!(html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
-        assert!(html.contains("height: 26px"));
+        assert!(html.contains(".tracker-wrap"));
+        assert!(html.contains(".tracker-wrap:empty { display: none; }"));
+        assert!(html.contains(".tracker-legend"));
+        assert!(html.contains(".tracker { position: relative; height: 30px;"));
+        assert!(html.contains(".tracker-fill"));
+        assert!(html.contains(".tracker-scale"));
         assert!(!html.contains("transform: translateX(-50%)"));
         assert!(html.contains("transition: left 120ms linear, transform 120ms linear"));
         assert!(html.contains(concat!(
-            r#".peitho-time-tracker [data-peitho-marker="rabbit"],"#,
+            r#".tracker [data-peitho-marker="rabbit"],"#,
             "\n",
-            r#"    .peitho-time-tracker [data-peitho-marker="turtle"] { top: 4px; }"#
+            r#"    .tracker [data-peitho-marker="turtle"] { position: absolute; transition: left 120ms linear, transform 120ms linear; font-size: 18px; line-height: 1; }"#
         )));
-        assert!(!html.contains(r#"[data-peitho-marker="rabbit"] { top: -18px; }"#));
-        assert!(!html.contains(r#"[data-peitho-marker="turtle"] { bottom: -18px; }"#));
+        assert!(html.contains(r#".tracker [data-peitho-marker="rabbit"] { top: -6px; }"#));
+        assert!(html.contains(r#".tracker [data-peitho-marker="turtle"] { bottom: -6px; }"#));
+        assert!(!html.contains(".mark"));
         assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
         assert!(!html.contains(".peitho-time-tracker { position: absolute"));
         assert!(!html.contains("bottom: 0; height: 6px"));

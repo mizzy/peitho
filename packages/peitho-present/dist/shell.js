@@ -573,6 +573,18 @@ var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
   return elapsedMs > plannedDurationMs;
 }
+function formatScaleTime(ms) {
+  const totalSeconds = Math.round(ms / 1e3);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+function timeScaleLabels(plannedDurationMs) {
+  return Array.from(
+    { length: 5 },
+    (_, index) => formatScaleTime(plannedDurationMs * index / 4)
+  );
+}
 function isValidSlideChangeDetail(detail) {
   if (typeof detail !== "object" || detail === null) return false;
   const candidate = detail;
@@ -587,16 +599,30 @@ function installTimeTracker(options) {
   const doc = options.document ?? document;
   const log = options.console ?? console;
   const bus = options.bus ?? win;
+  const variant = options.variant ?? "present";
   const track = doc.createElement("div");
   track.className = "peitho-time-tracker";
-  track.dataset.peithoTimeTracker = options.variant ?? "present";
-  track.innerHTML = [
-    '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
-    '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>'
-  ].join("");
+  track.dataset.peithoTimeTracker = variant;
+  if (variant === "presenter") {
+    track.innerHTML = [
+      '<div class="tracker-legend"><span>Slide progress</span><span>Time</span></div>',
+      '<div class="tracker">',
+      '<div class="tracker-fill"></div>',
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>',
+      "</div>",
+      `<div class="tracker-scale mono">${timeScaleLabels(options.plannedDurationMs).map((label) => `<span>${label}</span>`).join("")}</div>`
+    ].join("");
+  } else {
+    track.innerHTML = [
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>'
+    ].join("");
+  }
   options.root.appendChild(track);
   const rabbit = track.querySelector('[data-peitho-marker="rabbit"]');
   const turtle = track.querySelector('[data-peitho-marker="turtle"]');
+  const fill = track.querySelector(".tracker-fill");
   let autoStarted = false;
   const setMarker = (element, ratio) => {
     element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
@@ -609,7 +635,9 @@ function installTimeTracker(options) {
   const tick = () => {
     const elapsedMs = options.shell.elapsedMs();
     const ratio = elapsedMs / options.plannedDurationMs;
-    setMarker(turtle, clamp01(ratio));
+    const clampedRatio = clamp01(ratio);
+    setMarker(turtle, clampedRatio);
+    if (fill) fill.style.width = `${Math.round(clampedRatio * 1e4) / 100}%`;
     track.toggleAttribute(
       "data-peitho-overrun",
       isOverrun(elapsedMs, options.plannedDurationMs)
@@ -654,11 +682,43 @@ function formatElapsed(ms) {
 function formatOverrun(ms) {
   return formatSeconds(Math.ceil(ms / 1e3));
 }
-function formatPresenterTimer(elapsedMs, plannedDurationMs) {
-  if (plannedDurationMs == null) return formatElapsed(elapsedMs);
-  const base = `${formatElapsed(elapsedMs)} / ${formatElapsed(plannedDurationMs)}`;
-  if (!isOverrun(elapsedMs, plannedDurationMs)) return base;
-  return `${base} +${formatOverrun(elapsedMs - plannedDurationMs)}`;
+var STATE_LABELS = {
+  stopped: "Stopped",
+  running: "Running",
+  paused: "Paused"
+};
+var PLAY_LABELS = {
+  stopped: "Start",
+  running: "Pause",
+  paused: "Resume"
+};
+function deriveTimerState(shell) {
+  if (shell.startedAt() === null) return "stopped";
+  return shell.isPaused() ? "paused" : "running";
+}
+function playpauseActionFor(state) {
+  if (state === "stopped") return "start";
+  if (state === "paused") return "resume";
+  return "pause";
+}
+function formatSlideNumber(value) {
+  return value.toString().padStart(2, "0");
+}
+function renderPresenterTimer(doc, root, elapsedMs, plannedDurationMs) {
+  if (plannedDurationMs == null) {
+    root.textContent = formatElapsed(elapsedMs);
+    return;
+  }
+  root.replaceChildren(doc.createTextNode(formatElapsed(elapsedMs)));
+  const planned = doc.createElement("span");
+  planned.className = "planned";
+  planned.textContent = ` / ${formatElapsed(plannedDurationMs)}`;
+  root.appendChild(planned);
+  if (!isOverrun(elapsedMs, plannedDurationMs)) return;
+  const overrun = doc.createElement("span");
+  overrun.className = "overrun";
+  overrun.textContent = ` +${formatOverrun(elapsedMs - plannedDurationMs)}`;
+  root.appendChild(overrun);
 }
 function paneViewport(pane) {
   return () => ({
@@ -675,24 +735,77 @@ async function mountPresenterView(options) {
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
-    <section class="peitho-presenter">
-      <div class="peitho-presenter-pane" data-peitho-presenter="current"></div>
-      <aside>
-        <div class="peitho-presenter-preview-slot">
-          <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
-          <p data-peitho-presenter="preview-end" hidden>End of deck</p>
+    <section class="peitho-presenter app" data-screen-label="Presenter view">
+      <section class="left" aria-label="Current slide and notes">
+        <header class="colhead">
+          <div class="status-line">
+            <span class="now">Now</span>
+            <span class="sep"></span>
+            <span data-peitho-presenter="position">Slide 00 of 00</span>
+          </div>
+          <div class="deck-title" data-peitho-presenter="title">Peitho Deck</div>
+        </header>
+
+        <div class="slide-frame">
+          <div
+            class="peitho-presenter-pane slide-pane"
+            data-peitho-presenter="current"
+            role="img"
+            aria-label="Current slide preview"
+          ></div>
         </div>
-        <section data-peitho-presenter="notes"></section>
-        <output data-peitho-presenter="timer">00:00</output>
-        <div class="peitho-presenter-controls">
-          <button type="button" data-peitho-action="prev">Prev</button>
-          <button type="button" data-peitho-action="next">Next</button>
-          <button type="button" data-peitho-action="start">Start</button>
-          <button type="button" data-peitho-action="pause">Pause</button>
-          <button type="button" data-peitho-action="resume">Resume</button>
-          <button type="button" data-peitho-action="reset">Reset</button>
-          <button type="button" data-peitho-action="close">Close</button>
+
+        <div class="kbdbar">
+          <div class="pos" data-peitho-presenter="position-short">00 / 00</div>
+          <div>
+            <span class="grp"><span class="kbd">\u2190</span><span class="kbd">\u2192</span> navigate</span>
+            <span class="grp"><span class="kbd">Space</span> next</span>
+            <span class="grp"><span class="kbd">Esc</span> close</span>
+          </div>
         </div>
+
+        <section class="notes" aria-label="Speaker notes">
+          <div class="notes-head">
+            <span>Notes</span>
+            <span class="badge" data-peitho-presenter="notes-slide">Slide 00</span>
+          </div>
+          <div class="notes-body" data-peitho-presenter="notes"></div>
+        </section>
+      </section>
+
+      <aside class="right">
+        <section class="card" aria-label="Next slide">
+          <div class="card-head">
+            <span>Next</span>
+            <span class="badge mono" data-peitho-presenter="next-position">00 / 00</span>
+          </div>
+          <div class="next-wrap">
+            <div class="next-preview">
+              <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
+              <p data-peitho-presenter="preview-end" hidden>End of deck</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card clock" data-peitho-presenter="clock" data-peitho-state="stopped" aria-label="Timer">
+          <div class="clock-row">
+            <output class="timer mono" data-peitho-presenter="timer">00:00</output>
+            <span class="state-pill" data-peitho-presenter="state-pill" data-peitho-state="stopped">
+              <span class="state-dot"></span>
+              <span data-peitho-presenter="state-label">Stopped</span>
+            </span>
+          </div>
+
+          <div class="tracker-wrap" data-peitho-presenter="tracker-slot"></div>
+
+          <div class="controls">
+            <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span></button>
+            <button class="btn" type="button" data-peitho-action="prev">Prev <span class="k">\u2190</span></button>
+            <button class="btn" type="button" data-peitho-action="next">Next <span class="k">\u2192</span></button>
+            <button class="btn" type="button" data-peitho-action="reset">Reset</button>
+            <button class="btn danger" type="button" data-peitho-action="close">Close <span class="k">Esc</span></button>
+          </div>
+        </section>
       </aside>
     </section>`;
   const currentRoot = options.root.querySelector('[data-peitho-presenter="current"]');
@@ -702,7 +815,35 @@ async function mountPresenterView(options) {
   );
   const notesRoot = options.root.querySelector('[data-peitho-presenter="notes"]');
   const timerRoot = options.root.querySelector('[data-peitho-presenter="timer"]');
-  const asideRoot = options.root.querySelector("aside");
+  const clockRoot = options.root.querySelector('[data-peitho-presenter="clock"]');
+  const statePill = options.root.querySelector(
+    '[data-peitho-presenter="state-pill"]'
+  );
+  const stateLabel = options.root.querySelector(
+    '[data-peitho-presenter="state-label"]'
+  );
+  const playLabel = options.root.querySelector(
+    '[data-peitho-presenter="play-label"]'
+  );
+  const playButton = options.root.querySelector(
+    '[data-peitho-action="playpause"]'
+  );
+  const trackerSlot = options.root.querySelector(
+    '[data-peitho-presenter="tracker-slot"]'
+  );
+  const deckTitle = options.root.querySelector('[data-peitho-presenter="title"]');
+  const positionLong = options.root.querySelector(
+    '[data-peitho-presenter="position"]'
+  );
+  const positionShort = options.root.querySelector(
+    '[data-peitho-presenter="position-short"]'
+  );
+  const notesSlide = options.root.querySelector(
+    '[data-peitho-presenter="notes-slide"]'
+  );
+  const nextPosition = options.root.querySelector(
+    '[data-peitho-presenter="next-position"]'
+  );
   const mainShell = await mountPresentShell({
     root: currentRoot,
     fetcher,
@@ -729,7 +870,7 @@ async function mountPresenterView(options) {
     log.error("Invalid plannedDurationMs in manifest.json");
   }
   const trackerCleanup = plannedDurationMs == null ? () => void 0 : installTimeTracker({
-    root: asideRoot,
+    root: trackerSlot,
     shell: mainShell,
     plannedDurationMs,
     bus,
@@ -737,26 +878,44 @@ async function mountPresenterView(options) {
     document: doc,
     variant: "presenter"
   });
+  const rippleTimeouts = /* @__PURE__ */ new Set();
+  function setTimerStateChrome(state) {
+    clockRoot.dataset.peithoState = state;
+    statePill.dataset.peithoState = state;
+    stateLabel.textContent = STATE_LABELS[state];
+    playLabel.textContent = PLAY_LABELS[state];
+    playButton.setAttribute("aria-label", PLAY_LABELS[state]);
+  }
   function tick() {
     const elapsedMs = mainShell.elapsedMs();
-    timerRoot.textContent = formatPresenterTimer(elapsedMs, plannedDurationMs);
+    renderPresenterTimer(doc, timerRoot, elapsedMs, plannedDurationMs);
     timerRoot.toggleAttribute(
       "data-peitho-overrun",
       plannedDurationMs != null && isOverrun(elapsedMs, plannedDurationMs)
     );
+    setTimerStateChrome(deriveTimerState(mainShell));
   }
   function updateFromSlide(detail) {
     notesRoot.textContent = options.notes.notes[detail.key] ?? "No notes for this slide.";
+    const slideNumber = detail.index + 1;
+    const slide = formatSlideNumber(slideNumber);
+    const total = formatSlideNumber(detail.total);
+    deckTitle.textContent = mainShell.manifest?.title ?? "Peitho Deck";
+    positionLong.textContent = `Slide ${slide} of ${total}`;
+    positionShort.textContent = `${slide} / ${total}`;
+    notesSlide.textContent = `Slide ${slide}`;
     const nextIndex = detail.index + 1;
     if (nextIndex < detail.total) {
       previewRoot.hidden = false;
       previewEnd.hidden = true;
+      nextPosition.textContent = `${formatSlideNumber(nextIndex + 1)} / ${total}`;
       previewBus.dispatchEvent(
         new CustomEvent("peitho:navigate", { detail: { to: { index: nextIndex } } })
       );
     } else {
       previewRoot.hidden = true;
       previewEnd.hidden = false;
+      nextPosition.textContent = "End";
     }
     tick();
   }
@@ -773,28 +932,69 @@ async function mountPresenterView(options) {
       previousIndex: null
     });
   }
-  options.root.querySelector('[data-peitho-action="prev"]')?.addEventListener("click", () => {
+  const buttonCleanups = [];
+  const addButtonListener = (action, listener) => {
+    const button = options.root.querySelector(`[data-peitho-action="${action}"]`);
+    if (!button) return;
+    button.addEventListener("click", listener);
+    buttonCleanups.push(() => button.removeEventListener("click", listener));
+  };
+  const dispatchTimerControl = (action) => {
+    bus.dispatchEvent(
+      new CustomEvent("peitho:timercontrol", { detail: { action } })
+    );
+    tick();
+  };
+  addButtonListener("prev", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
   });
-  options.root.querySelector('[data-peitho-action="next"]')?.addEventListener("click", () => {
+  addButtonListener("next", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   });
-  for (const action of ["start", "pause", "resume", "reset"]) {
-    options.root.querySelector(`[data-peitho-action="${action}"]`)?.addEventListener("click", () => {
-      bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action } }));
-      tick();
-    });
-  }
-  options.root.querySelector('[data-peitho-action="close"]')?.addEventListener("click", () => {
+  addButtonListener("playpause", () => {
+    dispatchTimerControl(playpauseActionFor(deriveTimerState(mainShell)));
+  });
+  addButtonListener("reset", () => {
+    dispatchTimerControl("reset");
+  });
+  addButtonListener("close", () => {
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   });
+  const onPointerDown = (event) => {
+    const pointer = event;
+    const target = pointer.target;
+    if (!target || !("closest" in target)) return;
+    const button = target.closest(".btn");
+    if (!button || !options.root.contains(button)) return;
+    const rect = button.getBoundingClientRect();
+    const width = rect.width || 1;
+    const height = rect.height || 1;
+    const x = (pointer.clientX - rect.left) / width * 100;
+    const y = (pointer.clientY - rect.top) / height * 100;
+    button.style.setProperty("--rx", `${x}%`);
+    button.style.setProperty("--ry", `${y}%`);
+    button.classList.remove("pressed");
+    void button.offsetWidth;
+    button.classList.add("pressed");
+    const timeout = win.setTimeout(() => {
+      button.classList.remove("pressed");
+      rippleTimeouts.delete(timeout);
+    }, 550);
+    rippleTimeouts.add(timeout);
+  };
+  options.root.addEventListener("pointerdown", onPointerDown);
   const interval = win.setInterval(tick, 250);
+  tick();
   return {
     mainShell,
     previewShell,
     tick,
     destroy() {
       win.clearInterval(interval);
+      for (const timeout of rippleTimeouts) win.clearTimeout(timeout);
+      rippleTimeouts.clear();
+      options.root.removeEventListener("pointerdown", onPointerDown);
+      while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();
