@@ -23,6 +23,19 @@ export function isOverrun(elapsedMs: number, plannedDurationMs: number): boolean
   return elapsedMs > plannedDurationMs;
 }
 
+function formatScaleTime(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function timeScaleLabels(plannedDurationMs: number): string[] {
+  return Array.from({ length: 5 }, (_, index) =>
+    formatScaleTime((plannedDurationMs * index) / 4)
+  );
+}
+
 function isValidSlideChangeDetail(detail: unknown): detail is SlideChangeDetail {
   if (typeof detail !== "object" || detail === null) return false;
   const candidate = detail as Partial<SlideChangeDetail>;
@@ -47,17 +60,33 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
   const doc = options.document ?? document;
   const log = options.console ?? console;
   const bus = options.bus ?? win;
+  const variant = options.variant ?? "present";
   const track = doc.createElement("div");
   track.className = "peitho-time-tracker";
-  track.dataset.peithoTimeTracker = options.variant ?? "present";
-  track.innerHTML = [
-    '<span data-peitho-marker="rabbit" aria-label="slide progress">🐰</span>',
-    '<span data-peitho-marker="turtle" aria-label="time progress">🐢</span>'
-  ].join("");
+  track.dataset.peithoTimeTracker = variant;
+  if (variant === "presenter") {
+    track.innerHTML = [
+      '<div class="tracker-legend"><span>Slide progress</span><span>Time</span></div>',
+      '<div class="tracker">',
+      '<div class="tracker-fill"></div>',
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">🐰</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">🐢</span>',
+      "</div>",
+      `<div class="tracker-scale mono">${timeScaleLabels(options.plannedDurationMs)
+        .map((label) => `<span>${label}</span>`)
+        .join("")}</div>`
+    ].join("");
+  } else {
+    track.innerHTML = [
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">🐰</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">🐢</span>'
+    ].join("");
+  }
   options.root.appendChild(track);
 
   const rabbit = track.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')!;
   const turtle = track.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')!;
+  const fill = track.querySelector<HTMLElement>(".tracker-fill");
   let autoStarted = false;
 
   const setMarker = (element: HTMLElement, ratio: number): void => {
@@ -71,7 +100,9 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
   const tick = (): void => {
     const elapsedMs = options.shell.elapsedMs();
     const ratio = elapsedMs / options.plannedDurationMs;
-    setMarker(turtle, clamp01(ratio));
+    const clampedRatio = clamp01(ratio);
+    setMarker(turtle, clampedRatio);
+    if (fill) fill.style.width = `${Math.round(clampedRatio * 10_000) / 100}%`;
     track.toggleAttribute(
       "data-peitho-overrun",
       isOverrun(elapsedMs, options.plannedDurationMs)
