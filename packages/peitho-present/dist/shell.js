@@ -33,6 +33,13 @@ function installCanvasScaler(options) {
   return () => win.removeEventListener("resize", apply);
 }
 
+// src/sections.ts
+function sectionIndexForSlide(sections, slideIndex) {
+  return sections.findIndex(
+    (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
+  );
+}
+
 // src/timeTracker.ts
 var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
@@ -176,20 +183,15 @@ function installAgenda(options) {
   list.append(...rows.map(({ row }) => row));
   const actualMs = new Array(options.sections.length).fill(0);
   let lastElapsedMs = options.shell.elapsedMs();
-  function sectionIndexForSlide(slideIndex) {
-    return options.sections.findIndex(
-      (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
-    );
-  }
   function render() {
-    const currentSection = sectionIndexForSlide(options.shell.currentIndex);
+    const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
     rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
   }
   function flushElapsedToSectionOf(slideIndex) {
     if (slideIndex === null || options.shell.startedAt() === null) return;
     const elapsedMs = options.shell.elapsedMs();
     const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(slideIndex);
+    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
     if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
     lastElapsedMs = elapsedMs;
   }
@@ -938,9 +940,9 @@ async function mountPresenterView(options) {
         <div class="stage">
           <header class="colhead">
             <div class="status-line">
-              <span class="now">Now</span>
-              <span class="sep"></span>
               <span data-peitho-presenter="position">Slide 00 of 00</span>
+              <span class="sep" data-peitho-presenter="section-sep" hidden></span>
+              <span data-peitho-presenter="section" hidden></span>
             </div>
             <div class="deck-title" data-peitho-presenter="title">Peitho Deck</div>
           </header>
@@ -1039,6 +1041,12 @@ async function mountPresenterView(options) {
   const positionLong = options.root.querySelector(
     '[data-peitho-presenter="position"]'
   );
+  const sectionLabel = options.root.querySelector(
+    '[data-peitho-presenter="section"]'
+  );
+  const sectionSep = options.root.querySelector(
+    '[data-peitho-presenter="section-sep"]'
+  );
   const positionShort = options.root.querySelector(
     '[data-peitho-presenter="position-short"]'
   );
@@ -1118,6 +1126,16 @@ async function mountPresenterView(options) {
     positionLong.textContent = `Slide ${slide} of ${total}`;
     positionShort.textContent = `${slide} / ${total}`;
     notesSlide.textContent = `Slide ${slide}`;
+    const currentSectionIndex = sectionIndexForSlide(sections, detail.index);
+    if (currentSectionIndex >= 0) {
+      sectionLabel.textContent = `Section \u2014 \u201C${sections[currentSectionIndex].name}\u201D`;
+      sectionLabel.hidden = false;
+      sectionSep.hidden = false;
+    } else {
+      sectionLabel.textContent = "";
+      sectionLabel.hidden = true;
+      sectionSep.hidden = true;
+    }
     const nextIndex = detail.index + 1;
     if (nextIndex < detail.total) {
       previewRoot.hidden = false;

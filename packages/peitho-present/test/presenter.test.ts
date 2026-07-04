@@ -222,6 +222,59 @@ it("mounts agenda between tracker and controls when manifest has sections", asyn
   ).not.toBeNull();
 });
 
+it("shows the current section name in the status line and follows slide navigation", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({
+      plannedDurationMs: 180_000,
+      sections: [
+        { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
+        { name: "Demo", startIndex: 1, endIndex: 1, plannedDurationMs: 120_000 }
+      ]
+    }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  const sectionEl = root.querySelector<HTMLElement>('[data-peitho-presenter="section"]')!;
+  const sepEl = root.querySelector<HTMLElement>('[data-peitho-presenter="section-sep"]')!;
+  expect(sectionEl.hidden).toBe(false);
+  expect(sepEl.hidden).toBe(false);
+  expect(sectionEl.textContent).toBe("Section — “Setup”");
+  expect(root.querySelector(".status-line")?.textContent).not.toContain("Now");
+
+  window.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } })
+  );
+  await Promise.resolve();
+  expect(sectionEl.textContent).toBe("Section — “Demo”");
+});
+
+it("hides the section chip in the status line when the manifest has no sections", async () => {
+  const root = document.createElement("main");
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({ sections: [] }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: mockSyncChannelFactory().factory
+  });
+  views.push(view);
+
+  const sectionEl = root.querySelector<HTMLElement>('[data-peitho-presenter="section"]')!;
+  const sepEl = root.querySelector<HTMLElement>('[data-peitho-presenter="section-sep"]')!;
+  expect(sectionEl.hidden).toBe(true);
+  expect(sepEl.hidden).toBe(true);
+  expect(sectionEl.textContent).toBe("");
+  expect(root.querySelector(".status-line")?.textContent).not.toContain("Now");
+});
+
 it("logs invalid planned duration and keeps presenter mounted without a tracker", async () => {
   let now = 1_000;
   const root = document.createElement("main");

@@ -1,6 +1,7 @@
 import type { Notes } from "../../../bindings/Notes";
 import { installAgenda } from "./agenda";
 import { installPresenterKeyboard } from "./keyboard";
+import { sectionIndexForSlide } from "./sections";
 import {
   mountPresentShell,
   type PresentShell,
@@ -118,9 +119,9 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
         <div class="stage">
           <header class="colhead">
             <div class="status-line">
-              <span class="now">Now</span>
-              <span class="sep"></span>
               <span data-peitho-presenter="position">Slide 00 of 00</span>
+              <span class="sep" data-peitho-presenter="section-sep" hidden></span>
+              <span data-peitho-presenter="section" hidden></span>
             </div>
             <div class="deck-title" data-peitho-presenter="title">Peitho Deck</div>
           </header>
@@ -220,6 +221,12 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const positionLong = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="position"]'
   )!;
+  const sectionLabel = options.root.querySelector<HTMLElement>(
+    '[data-peitho-presenter="section"]'
+  )!;
+  const sectionSep = options.root.querySelector<HTMLElement>(
+    '[data-peitho-presenter="section-sep"]'
+  )!;
   const positionShort = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="position-short"]'
   )!;
@@ -309,6 +316,16 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     positionLong.textContent = `Slide ${slide} of ${total}`;
     positionShort.textContent = `${slide} / ${total}`;
     notesSlide.textContent = `Slide ${slide}`;
+    const currentSectionIndex = sectionIndexForSlide(sections, detail.index);
+    if (currentSectionIndex >= 0) {
+      sectionLabel.textContent = `Section — “${sections[currentSectionIndex].name}”`;
+      sectionLabel.hidden = false;
+      sectionSep.hidden = false;
+    } else {
+      sectionLabel.textContent = "";
+      sectionLabel.hidden = true;
+      sectionSep.hidden = true;
+    }
     const nextIndex = detail.index + 1;
     if (nextIndex < detail.total) {
       previewRoot.hidden = false;
