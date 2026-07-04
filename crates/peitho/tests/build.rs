@@ -482,6 +482,47 @@ fn lightning_talk_example_declares_agenda_sections() {
 }
 
 #[test]
+fn feature_tour_example_exercises_dispatch_sections_and_list_slot() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/feature-tour/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 7 slide(s)"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(480_000));
+    let sections = manifest["sections"].as_array().unwrap();
+    let expected = [
+        ("Basics", 0, 1, 120_000),
+        ("Contracts", 2, 3, 180_000),
+        ("Presenting", 4, 6, 180_000),
+    ];
+    assert_eq!(sections.len(), expected.len());
+    for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
+        assert_eq!(section["name"].as_str(), Some(name));
+        assert_eq!(section["startIndex"].as_u64(), Some(start));
+        assert_eq!(section["endIndex"].as_u64(), Some(end));
+        assert_eq!(section["plannedDurationMs"].as_u64(), Some(planned));
+    }
+
+    // The checks slide is list-only, which structurally matches both `topic`
+    // and `agenda`; its explicit {"layout":"agenda"} request must win.
+    let checks = fs::read_to_string(out.path().join("slides/002-checks.html")).unwrap();
+    assert!(checks.contains("tour-agenda"));
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();

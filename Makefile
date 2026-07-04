@@ -5,12 +5,12 @@ PRESENT_FLAGS ?=
 PRESENT = cargo run -q -p peitho -- present
 PEITHO = cargo run -q -p peitho --
 DEMO_OUT = .demo-site
-DEMO_DECKS = minimal lightning-talk code-walkthrough keynote
+DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour
 WRANGLER ?= npx -y wrangler
 
-.PHONY: help minimal lightning-talk code-walkthrough keynote shell \
+.PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	demo-site deploy-demo screenshots
+	feature-tour-windowed demo-site deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -18,6 +18,7 @@ help:
 	@echo "  make lightning-talk    日本語LT（ダーク+大型タイポ）"
 	@echo "  make code-walkthrough  typestate解説（ターミナル風2カラム）"
 	@echo "  make keynote           キーノート（セリフ体中央寄せ）"
+	@echo "  make feature-tour      機能総ざらい（明示layout・listスロット・複数ノート）"
 	@echo ""
 	@echo "発表者画面を窓で開く: make keynote-windowed など <target>-windowed"
 	@echo "その他の追加フラグ:   make keynote PRESENT_FLAGS=\"--port 8000\""
@@ -41,6 +42,9 @@ code-walkthrough-windowed: code-walkthrough
 keynote-windowed: PRESENT_FLAGS += --presenter-windowed
 keynote-windowed: keynote
 
+feature-tour-windowed: PRESENT_FLAGS += --presenter-windowed
+feature-tour-windowed: feature-tour
+
 shell:
 	cd packages/peitho-present && [ -d node_modules ] || npm ci
 	cd packages/peitho-present && npm run build
@@ -57,6 +61,9 @@ code-walkthrough: shell
 keynote: shell
 	$(PRESENT) examples/keynote/deck.md $(PRESENT_FLAGS)
 
+feature-tour: shell
+	$(PRESENT) examples/feature-tour/deck.md $(PRESENT_FLAGS)
+
 demo-site:
 	rm -rf $(DEMO_OUT)
 	mkdir -p $(DEMO_OUT)
@@ -64,6 +71,7 @@ demo-site:
 	$(PEITHO) build examples/lightning-talk/deck.md --out $(DEMO_OUT)/lightning-talk
 	$(PEITHO) build examples/code-walkthrough/deck.md --out $(DEMO_OUT)/code-walkthrough
 	$(PEITHO) build examples/keynote/deck.md --out $(DEMO_OUT)/keynote
+	$(PEITHO) build examples/feature-tour/deck.md --out $(DEMO_OUT)/feature-tour
 	for d in $(DEMO_DECKS); do \
 		$(PEITHO) publish --dist $(DEMO_OUT)/$$d -- true || exit 1; \
 	done
