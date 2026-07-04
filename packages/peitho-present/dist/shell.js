@@ -677,8 +677,10 @@ async function mountPresenterView(options) {
     <section class="peitho-presenter">
       <div class="peitho-presenter-pane" data-peitho-presenter="current"></div>
       <aside>
-        <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
-        <p data-peitho-presenter="preview-end" hidden>End of deck</p>
+        <div class="peitho-presenter-preview-slot">
+          <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
+          <p data-peitho-presenter="preview-end" hidden>End of deck</p>
+        </div>
         <section data-peitho-presenter="notes"></section>
         <output data-peitho-presenter="timer">00:00</output>
         <div class="peitho-presenter-controls">
