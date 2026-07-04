@@ -38,6 +38,9 @@ var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
   return elapsedMs > plannedDurationMs;
 }
+function isValidDurationMs(ms) {
+  return Number.isSafeInteger(ms) && ms > 0;
+}
 function formatMinuteSeconds(ms) {
   const totalSeconds = Math.round(ms / 1e3);
   const minutes = Math.floor(totalSeconds / 60);
@@ -57,7 +60,7 @@ function isValidSlideChangeDetail(detail) {
   return typeof index === "number" && Number.isFinite(index) && index >= 0 && typeof total === "number" && Number.isFinite(total) && total > 0 && (previousIndex === null || typeof previousIndex === "number" && Number.isFinite(previousIndex) && previousIndex >= 0);
 }
 function installTimeTracker(options) {
-  if (!Number.isFinite(options.plannedDurationMs) || options.plannedDurationMs <= 0) {
+  if (!isValidDurationMs(options.plannedDurationMs)) {
     throw new Error("plannedDurationMs must be a positive finite number");
   }
   const win = options.window ?? window;
@@ -143,6 +146,8 @@ function installAgenda(options) {
   const win = options.window ?? window;
   const doc = options.document ?? document;
   const bus = options.bus ?? win;
+  const log = options.log ?? console;
+  if (!validateSections(options.sections, log)) return () => void 0;
   const host = doc.createElement("section");
   host.dataset.peithoAgenda = "true";
   host.innerHTML = [
@@ -167,7 +172,7 @@ function installAgenda(options) {
     const currentSection = sectionIndexForSlide(options.shell.currentIndex);
     rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
   }
-  function flushElapsedToSlide(slideIndex) {
+  function flushElapsedToSectionOf(slideIndex) {
     if (slideIndex === null || options.shell.startedAt() === null) return;
     const elapsedMs = options.shell.elapsedMs();
     const delta = Math.max(0, elapsedMs - lastElapsedMs);
@@ -177,7 +182,7 @@ function installAgenda(options) {
   }
   function onSlideChange(event) {
     const previousIndex = event.detail?.previousIndex ?? null;
-    flushElapsedToSlide(previousIndex);
+    flushElapsedToSectionOf(previousIndex);
     render();
   }
   function onTimerControl(event) {
@@ -194,7 +199,7 @@ function installAgenda(options) {
       render();
       return;
     }
-    flushElapsedToSlide(options.shell.currentIndex);
+    flushElapsedToSectionOf(options.shell.currentIndex);
     render();
   }
   render();
@@ -207,6 +212,37 @@ function installAgenda(options) {
     bus.removeEventListener("peitho:timercontrol", onTimerControl);
     host.remove();
   };
+}
+function validateSections(sections, log) {
+  let expectedStartIndex = 0;
+  for (const [index, section] of sections.entries()) {
+    const label = `manifest section ${index + 1} "${section.name}"`;
+    if (!isValidDurationMs(section.plannedDurationMs)) {
+      log.error(`Invalid plannedDurationMs for ${label} in manifest.json`);
+      return false;
+    }
+    if (!isValidSlideIndex(section.startIndex) || !isValidSlideIndex(section.endIndex)) {
+      log.error(
+        `Invalid ${label}: startIndex and endIndex must be non-negative integers`
+      );
+      return false;
+    }
+    if (section.endIndex < section.startIndex) {
+      log.error(`Invalid ${label}: endIndex must be greater than or equal to startIndex`);
+      return false;
+    }
+    if (section.startIndex !== expectedStartIndex) {
+      log.error(
+        `Invalid ${label}: expected startIndex ${expectedStartIndex}, got ${section.startIndex}`
+      );
+      return false;
+    }
+    expectedStartIndex = section.endIndex + 1;
+  }
+  return true;
+}
+function isValidSlideIndex(index) {
+  return Number.isSafeInteger(index) && index >= 0;
 }
 function createRow(doc, section) {
   const row = doc.createElement("div");
@@ -875,18 +911,6 @@ function paneViewport(pane) {
     height: pane.clientHeight
   });
 }
-function validateAgendaSections(sections, log) {
-  for (const [index, section] of sections.entries()) {
-    const plannedDurationMs = section.plannedDurationMs;
-    if (!Number.isFinite(plannedDurationMs) || plannedDurationMs <= 0 || !Number.isSafeInteger(plannedDurationMs)) {
-      log.error(
-        `Invalid plannedDurationMs for manifest section ${index + 1} "${section.name}" in manifest.json`
-      );
-      return [];
-    }
-  }
-  return sections;
-}
 async function mountPresenterView(options) {
   const win = options.window ?? window;
   const doc = options.document ?? document;
@@ -1032,7 +1056,7 @@ async function mountPresenterView(options) {
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
-  const plannedDurationMs = rawPlannedDurationMs != null && Number.isFinite(rawPlannedDurationMs) && rawPlannedDurationMs > 0 ? rawPlannedDurationMs : null;
+  const plannedDurationMs = rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs) ? rawPlannedDurationMs : null;
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
     log.error("Invalid plannedDurationMs in manifest.json");
   }
@@ -1045,14 +1069,15 @@ async function mountPresenterView(options) {
     document: doc,
     variant: "presenter"
   });
-  const sections = validateAgendaSections(mainShell.manifest?.sections ?? [], log);
+  const sections = mainShell.manifest?.sections ?? [];
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
     sections,
     bus,
     window: win,
-    document: doc
+    document: doc,
+    log
   });
   const rippleTimeouts = /* @__PURE__ */ new Set();
   function setTimerStateChrome(state) {
@@ -1200,6 +1225,7 @@ export {
   installSyncBridge,
   installTimeTracker,
   isOverrun,
+  isValidDurationMs,
   mountPresentShell,
   mountPresenterView,
   openPresenterPopup,

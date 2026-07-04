@@ -1,4 +1,3 @@
-import type { ManifestSection } from "../../../bindings/ManifestSection";
 import type { Notes } from "../../../bindings/Notes";
 import { installAgenda } from "./agenda";
 import { installPresenterKeyboard } from "./keyboard";
@@ -9,7 +8,7 @@ import {
   type TimerControlDetail
 } from "./shell";
 import { installSyncBridge, type SyncChannelFactory } from "./sync";
-import { installTimeTracker, isOverrun } from "./timeTracker";
+import { installTimeTracker, isOverrun, isValidDurationMs } from "./timeTracker";
 
 export type PresenterOptions = {
   root: HTMLElement;
@@ -103,26 +102,6 @@ function paneViewport(pane: HTMLElement): () => { width: number; height: number 
     width: pane.clientWidth,
     height: pane.clientHeight
   });
-}
-
-function validateAgendaSections(
-  sections: ManifestSection[],
-  log: Pick<Console, "error">
-): ManifestSection[] {
-  for (const [index, section] of sections.entries()) {
-    const plannedDurationMs = section.plannedDurationMs;
-    if (
-      !Number.isFinite(plannedDurationMs) ||
-      plannedDurationMs <= 0 ||
-      !Number.isSafeInteger(plannedDurationMs)
-    ) {
-      log.error(
-        `Invalid plannedDurationMs for manifest section ${index + 1} "${section.name}" in manifest.json`
-      );
-      return [];
-    }
-  }
-  return sections;
 }
 
 export async function mountPresenterView(options: PresenterOptions): Promise<PresenterView> {
@@ -273,9 +252,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs =
-    rawPlannedDurationMs != null &&
-    Number.isFinite(rawPlannedDurationMs) &&
-    rawPlannedDurationMs > 0
+    rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs)
       ? rawPlannedDurationMs
       : null;
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
@@ -293,14 +270,15 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           document: doc,
           variant: "presenter"
         });
-  const sections = validateAgendaSections(mainShell.manifest?.sections ?? [], log);
+  const sections = mainShell.manifest?.sections ?? [];
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
     sections,
     bus,
     window: win,
-    document: doc
+    document: doc,
+    log
   });
   const rippleTimeouts = new Set<number>();
 

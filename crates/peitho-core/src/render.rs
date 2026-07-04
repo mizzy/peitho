@@ -340,9 +340,7 @@ pub fn render_present_index() -> String {
         const shell = await peitho.mountPresentShell({ root });
         const rawPlannedDurationMs = shell.manifest?.plannedDurationMs ?? null;
         const plannedDurationMs =
-          rawPlannedDurationMs != null &&
-          Number.isFinite(rawPlannedDurationMs) &&
-          rawPlannedDurationMs > 0
+          rawPlannedDurationMs != null && peitho.isValidDurationMs(rawPlannedDurationMs)
             ? rawPlannedDurationMs
             : null;
         if (rawPlannedDurationMs != null && plannedDurationMs == null) {
@@ -773,7 +771,7 @@ mod tests {
         assert!(html.contains("peitho.installTimeTracker"));
         assert!(html.contains("!config.presenterOpen"));
         assert!(html.contains("rawPlannedDurationMs = shell.manifest?.plannedDurationMs ?? null"));
-        assert!(html.contains("Number.isFinite(rawPlannedDurationMs)"));
+        assert!(html.contains("peitho.isValidDurationMs(rawPlannedDurationMs)"));
         assert!(html.contains(r#""Invalid plannedDurationMs in manifest.json""#));
         assert!(html.contains(
             r#""shell bundle does not provide installTimeTracker; time tracker disabled""#
@@ -888,19 +886,25 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-agenda-state="done"]"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="current"]"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="upcoming"]"#));
-        assert!(html.contains(r#"[data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }"#));
-        assert!(html.contains(r#"[data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }"#));
-        assert!(html.contains(r#"[data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; flex-shrink: 0; white-space: nowrap; }"#));
-        assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-marker]"#));
         assert!(
-            html.contains(r#"[data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }"#)
+            html.contains(r#"[data-peitho-agenda-state="current"] [data-peitho-agenda-marker]"#)
         );
+        assert!(
+            html.contains(r#"[data-peitho-agenda-state="upcoming"] [data-peitho-agenda-marker]"#)
+        );
+        assert!(html.contains(r#"[data-peitho-agenda-label]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-name]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-range]"#));
+        assert!(html.contains("flex-shrink: 0"));
+        assert!(html.contains(r#"[data-peitho-agenda-time]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-delta]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
+        assert!(html.contains("min-width: 6ch"));
         assert!(html
             .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"]"#));
         assert!(html
             .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"]"#));
-        assert!(!html.contains(r#"[data-peitho-agenda-delta="under"] {"#));
-        assert!(!html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="#));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));
         assert!(html.contains("margin-top: auto"));

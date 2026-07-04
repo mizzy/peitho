@@ -70,6 +70,12 @@ pub struct DeckSettings {
 }
 
 impl DeckSettings {
+    /// Creates deck settings without enforcing parser-end invariants.
+    ///
+    /// When `sections` is non-empty, the `planned_time == sum(sections.time)`
+    /// invariant is enforced only by `finalize_section_settings` at the end of
+    /// parsing. Direct callers of this constructor must uphold that invariant
+    /// themselves.
     pub fn new(planned_time: Option<PlannedTime>, sections: Vec<DeckSection>) -> Self {
         Self {
             planned_time,

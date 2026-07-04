@@ -23,6 +23,10 @@ export function isOverrun(elapsedMs: number, plannedDurationMs: number): boolean
   return elapsedMs > plannedDurationMs;
 }
 
+export function isValidDurationMs(ms: number): boolean {
+  return Number.isSafeInteger(ms) && ms > 0;
+}
+
 export function formatMinuteSeconds(ms: number): string {
   const totalSeconds = Math.round(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -53,7 +57,7 @@ function isValidSlideChangeDetail(detail: unknown): detail is SlideChangeDetail 
 }
 
 export function installTimeTracker(options: TimeTrackerOptions): () => void {
-  if (!Number.isFinite(options.plannedDurationMs) || options.plannedDurationMs <= 0) {
+  if (!isValidDurationMs(options.plannedDurationMs)) {
     throw new Error("plannedDurationMs must be a positive finite number");
   }
   const win = options.window ?? window;

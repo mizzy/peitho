@@ -3,6 +3,7 @@ import {
   formatMinuteSeconds,
   installTimeTracker,
   isOverrun,
+  isValidDurationMs,
   type TimeTrackerShell
 } from "../src/index";
 
@@ -34,6 +35,17 @@ it("formats durations as tracker-style m:ss", () => {
   expect(formatMinuteSeconds(15_000)).toBe("0:15");
   expect(formatMinuteSeconds(90_000)).toBe("1:30");
   expect(formatMinuteSeconds(3_600_000)).toBe("60:00");
+});
+
+it("validates positive safe integer durations", () => {
+  expect(isValidDurationMs(1)).toBe(true);
+  expect(isValidDurationMs(60_000)).toBe(true);
+  expect(isValidDurationMs(0)).toBe(false);
+  expect(isValidDurationMs(-1)).toBe(false);
+  expect(isValidDurationMs(1.5)).toBe(false);
+  expect(isValidDurationMs(Number.NaN)).toBe(false);
+  expect(isValidDurationMs(Number.POSITIVE_INFINITY)).toBe(false);
+  expect(isValidDurationMs(Number.MAX_SAFE_INTEGER + 1)).toBe(false);
 });
 
 it("moves rabbit by slide progress and turtle by elapsed progress", () => {

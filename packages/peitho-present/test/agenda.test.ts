@@ -47,6 +47,73 @@ it("does not mount agenda when sections are empty", () => {
   expect(root.innerHTML).toBe("");
 });
 
+it("does not mount agenda and logs when a section has invalid planned duration", () => {
+  const root = document.createElement("div");
+  const log = { error: vi.fn() };
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0 }),
+    sections: [
+      { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
+      {
+        name: "Demo",
+        startIndex: 1,
+        endIndex: 1,
+        plannedDurationMs: Number.MAX_SAFE_INTEGER + 1
+      }
+    ],
+    bus: new EventTarget(),
+    window,
+    document,
+    log
+  });
+  cleanups.push(cleanup);
+
+  expect(log.error).toHaveBeenCalledWith(
+    'Invalid plannedDurationMs for manifest section 2 "Demo" in manifest.json'
+  );
+  expect(root.innerHTML).toBe("");
+});
+
+it("does not mount agenda and logs when sections do not tile slide indexes", () => {
+  const cases = [
+    {
+      sections: [{ name: "Late", startIndex: 1, endIndex: 1, plannedDurationMs: 1_000 }],
+      message: 'Invalid manifest section 1 "Late": expected startIndex 0, got 1'
+    },
+    {
+      sections: [
+        { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 1_000 },
+        { name: "Demo", startIndex: 2, endIndex: 2, plannedDurationMs: 1_000 }
+      ],
+      message: 'Invalid manifest section 2 "Demo": expected startIndex 1, got 2'
+    },
+    {
+      sections: [{ name: "Bad", startIndex: 0, endIndex: 1.5, plannedDurationMs: 1_000 }],
+      message:
+        'Invalid manifest section 1 "Bad": startIndex and endIndex must be non-negative integers'
+    }
+  ];
+
+  for (const { sections, message } of cases) {
+    const root = document.createElement("div");
+    const log = { error: vi.fn() };
+    const cleanup = installAgenda({
+      root,
+      shell: shell({ currentIndex: 0 }),
+      sections,
+      bus: new EventTarget(),
+      window,
+      document,
+      log
+    });
+    cleanups.push(cleanup);
+
+    expect(log.error).toHaveBeenCalledWith(message);
+    expect(root.innerHTML).toBe("");
+  }
+});
+
 it("renders agenda header and rows with mock-compatible structure", () => {
   const root = document.createElement("div");
   const cleanup = installAgenda({
@@ -82,7 +149,7 @@ it("renders agenda header and rows with mock-compatible structure", () => {
 it("accumulates elapsed deltas into the current section and resumes when returning", () => {
   let elapsed = 0;
   let currentIndex = 0;
-  let startedAt: number | null = 100;
+  let timerStarted = true;
   const root = document.createElement("div");
   const bus = new EventTarget();
   const cleanup = installAgenda({
@@ -92,7 +159,7 @@ it("accumulates elapsed deltas into the current section and resumes when returni
         return currentIndex;
       },
       elapsedMs: () => elapsed,
-      startedAt: () => startedAt
+      startedAt: () => (timerStarted ? 100 : null)
     },
     sections: [
       { name: "Setup", startIndex: 0, endIndex: 1, plannedDurationMs: 1_000 },
@@ -153,8 +220,13 @@ it("accumulates elapsed deltas into the current section and resumes when returni
   expect(rows[0].dataset.peithoAgendaOutcome).toBe("over");
   expect(rows[0].querySelector("[data-peitho-agenda-delta]")?.textContent).toBe("+0:01");
 
-  startedAt = null;
   elapsed = 0;
+  timerStarted = false;
+  bus.dispatchEvent(
+    new CustomEvent<TimerControlDetail>("peitho:timercontrol", {
+      detail: { action: "reset" }
+    })
+  );
   vi.advanceTimersByTime(250);
   expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:00 / 0:01");
 });
