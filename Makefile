@@ -10,7 +10,7 @@ WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough keynote shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	demo-site deploy-demo
+	demo-site deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -25,6 +25,9 @@ help:
 	@echo "デモサイト:"
 	@echo "  make demo-site    examplesを$(DEMO_OUT)/に組み立てて検査"
 	@echo "  make deploy-demo  Cloudflare Pagesへデプロイ（要wrangler認証）"
+	@echo ""
+	@echo "README用スクリーンショット:"
+	@echo "  make screenshots  docs/images/をheadless Chromeで再生成"
 
 minimal-windowed: PRESENT_FLAGS += --presenter-windowed
 minimal-windowed: minimal
@@ -68,3 +71,6 @@ demo-site:
 
 deploy-demo: demo-site
 	$(WRANGLER) pages deploy $(DEMO_OUT) --project-name peitho --branch main
+
+screenshots: shell
+	./scripts/take-screenshots.sh

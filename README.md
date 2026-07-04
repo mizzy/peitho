@@ -27,7 +27,11 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 ```
 
 - **Build-time syntax highlighting** — code blocks with a language tag are turned into `hl-*` class spans by syntect at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering)
-- **Keynote-style presenting** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Esc closes everything
+- **Time tracking with agenda sections** — declare a planned time in frontmatter (`time: 15m`) and, optionally, per-section budgets on page-settings comments (`{"section":"Setup","time":"1m"}`). The presenter agenda shows planned vs. actual per section in real time. Section totals must equal the deck's planned time — mismatches are build errors with line numbers
+- **Speaker notes as HTML comments** — non-JSON HTML comments in a slide body become that slide's speaker note (Marp / k1LoW/deck-style). Notes ride only into the presenter view; `dist/` never contains them (the publish contamination check enforces this)
+- **Keynote-style presenting** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Space starts/pauses the timer; arrows navigate; Esc closes everything
+
+![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
 
 ## Usage
 
@@ -54,25 +58,32 @@ When developing the presentation shell (TS), rebuild `dist/shell.js` with `cd pa
 
 ## Writing a deck
 
-Convention mapping turns plain Markdown into slides as-is. Slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest goes to the body.
+Convention mapping turns plain Markdown into slides as-is. Slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest goes to the body. Deck-level settings live in YAML frontmatter at the top; per-slide settings live in a `<!-- { ... } -->` JSON comment; non-JSON HTML comments become speaker notes.
 
-```markdown
-<!-- {"key":"intro"} -->
+````markdown
+---
+time: 15m
+---
+
+<!-- {"key":"intro","section":"Setup","time":"3m"} -->
 # Title
 
 A body paragraph.
+
+<!-- Speaker note: introduce yourself, then move fast. -->
 
 - Lists work
 - too
 
 ---
 
+<!-- {"section":"Deep dive","time":"12m"} -->
 # Next slide
 
 ```rust
 enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
-```
+````
 
 ## Multiple layouts
 
@@ -92,6 +103,13 @@ Passing a directory to `--layouts` turns every `*.html` inside it into a layout 
 | `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
 | `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
+
+Same tool, same Markdown conventions — entirely different decks:
+
+| | |
+|---|---|
+| ![Minimal demo with the default theme](docs/images/example-minimal.png) | ![Japanese lightning talk: dark poster-style with large type](docs/images/example-lightning-talk.png) |
+| ![Rust typestate walkthrough: terminal-style two-column](docs/images/example-code-walkthrough.png) | ![Japanese keynote: cream background, serif, centered](docs/images/example-keynote.png) |
 
 ```sh
 # Each sample has its layouts/ and css/ alongside it, so no flags are needed by convention
