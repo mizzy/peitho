@@ -390,7 +390,10 @@ pub fn render_presenter_index() -> String {
     .peitho-presenter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; padding: 16px; box-sizing: border-box; min-height: 100vh; }
     .peitho-presenter-pane { position: relative; overflow: hidden; background: #000; min-height: 180px; }
     [data-peitho-presenter="current"] { min-height: calc(100vh - 32px); }
-    [data-peitho-presenter="preview"] { aspect-ratio: 16 / 9; }
+    .peitho-presenter-preview-slot { position: relative; aspect-ratio: 16 / 9; }
+    [data-peitho-presenter="preview"] { position: absolute; inset: 0; }
+    [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; display: flex; align-items: center; justify-content: center; background: #000; color: #aaa; font-size: 18px; }
+    .peitho-presenter-preview-slot > [hidden] { display: none; }
     [data-peitho-presenter="notes"] { white-space: pre-wrap; line-height: 1.5; margin-top: 16px; }
     [data-peitho-presenter="timer"] { display: block; font-size: 40px; font-variant-numeric: tabular-nums; margin: 16px 0; }
     .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
