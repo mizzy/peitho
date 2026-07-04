@@ -28,18 +28,66 @@ impl PlannedTime {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeckSection {
+    name: String,
+    planned: PlannedTime,
+    start: usize,
+    end: usize,
+}
+
+impl DeckSection {
+    pub(crate) fn new(name: String, planned: PlannedTime, start: usize, end: usize) -> Self {
+        Self {
+            name,
+            planned,
+            start,
+            end,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn planned(&self) -> PlannedTime {
+        self.planned
+    }
+
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    pub fn end(&self) -> usize {
+        self.end
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeckSettings {
     planned_time: Option<PlannedTime>,
+    sections: Vec<DeckSection>,
 }
 
 impl DeckSettings {
-    pub fn new(planned_time: Option<PlannedTime>) -> Self {
-        Self { planned_time }
+    pub fn new(planned_time: Option<PlannedTime>, sections: Vec<DeckSection>) -> Self {
+        Self {
+            planned_time,
+            sections,
+        }
     }
 
     pub fn planned_time(&self) -> Option<PlannedTime> {
         self.planned_time
+    }
+
+    pub fn sections(&self) -> &[DeckSection] {
+        &self.sections
+    }
+
+    pub(crate) fn with_sections(mut self, sections: Vec<DeckSection>) -> Self {
+        self.sections = sections;
+        self
     }
 }
 
@@ -354,6 +402,23 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, PlannedTime::TOO_LARGE_MESSAGE);
+    }
+
+    #[test]
+    fn deck_settings_carry_owned_sections() {
+        let setup = DeckSection::new(
+            "Setup".to_owned(),
+            PlannedTime::from_millis(60_000).unwrap(),
+            0,
+            1,
+        );
+        let settings = DeckSettings::new(Some(setup.planned()), vec![setup.clone()]);
+
+        assert_eq!(settings.planned_time().unwrap().as_millis(), 60_000);
+        assert_eq!(settings.sections(), &[setup]);
+        assert_eq!(settings.sections()[0].name(), "Setup");
+        assert_eq!(settings.sections()[0].start(), 0);
+        assert_eq!(settings.sections()[0].end(), 1);
     }
 
     #[test]
