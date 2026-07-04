@@ -454,11 +454,16 @@ pub fn render_presenter_index() -> String {
     .clock { display: flex; flex-direction: column; min-height: 0; }
     .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
     .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }
-    .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
+    .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; transition: color 200ms ease; }
     .timer .overrun { color: var(--warn); font-weight: 500; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
     .clock[data-peitho-state="paused"] .timer { color: var(--pause); }
     .clock[data-peitho-state="stopped"] .timer { color: var(--fg-dim); }
-    [data-peitho-presenter="timer"][data-peitho-overrun] { color: var(--warn); }
+    .clock[data-peitho-state="running"][data-peitho-urgency="warning"] .timer,
+    .clock[data-peitho-state="running"][data-peitho-urgency="warning"] .timer .planned { color: var(--pause); }
+    .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer,
+    .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer .planned { color: var(--warn); }
+    .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer,
+    .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
     .state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }
     .state-dot { width: 6px; height: 6px; background: var(--fg-dim); border-radius: 50%; transition: background 150ms ease, box-shadow 150ms ease; }
     .state-pill[data-peitho-state="running"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
@@ -911,7 +916,8 @@ mod tests {
         assert!(html.contains(r#".tracker [data-peitho-marker="rabbit"] { top: -6px; }"#));
         assert!(html.contains(r#".tracker [data-peitho-marker="turtle"] { bottom: -6px; }"#));
         assert!(!html.contains(".mark"));
-        assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
+        assert!(html.contains(r#"[data-peitho-urgency="urgent"]"#));
+        assert!(!html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
         assert!(!html.contains(".peitho-time-tracker { position: absolute"));
         assert!(!html.contains("bottom: 0; height: 6px"));
     }

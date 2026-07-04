@@ -179,6 +179,38 @@ it("keeps legacy presenter timer text when manifest has no time", async () => {
   expect(root.querySelector("[data-peitho-time-tracker]")).toBeNull();
 });
 
+it.each([
+  ["normal (no planned)", null, 65_000, "normal"],
+  ["normal (planned, plenty of runway)", 600_000, 60_000, "normal"],
+  ["warning", 600_000, 481_000, "warning"],
+  ["urgent", 600_000, 541_000, "urgent"],
+  ["overrun", 600_000, 601_000, "overrun"]
+] as const)(
+  "updates presenter timer urgency to %s on tick",
+  async (_label, plannedDurationMs, elapsedMs, expected) => {
+    let now = 1_000;
+    const root = document.createElement("main");
+    const { factory } = mockSyncChannelFactory();
+    const view = await mountPresenterView({
+      root,
+      notes,
+      fetcher: standardFetch({ plannedDurationMs }),
+      window,
+      now: () => now,
+      syncChannelFactory: factory
+    });
+    views.push(view);
+
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
+    now = 1_000 + elapsedMs;
+    view.tick();
+
+    expect(
+      root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')?.dataset.peithoUrgency
+    ).toBe(expected);
+  }
+);
+
 it("keeps agenda slot empty when manifest has no sections", async () => {
   const root = document.createElement("main");
   const view = await mountPresenterView({
@@ -323,7 +355,6 @@ it("marks presenter timer as overrun after the planned duration", async () => {
   expect(timer.textContent).toBe("01:00 / 01:00 +00:01");
   expect(timer.querySelector(".planned")?.textContent).toBe(" / 01:00");
   expect(timer.querySelector(".overrun")?.textContent).toBe(" +00:01");
-  expect(timer.hasAttribute("data-peitho-overrun")).toBe(true);
 });
 
 it("updates preview and shows end of deck on the last slide", async () => {

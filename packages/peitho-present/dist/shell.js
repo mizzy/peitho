@@ -934,6 +934,16 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   };
 }
 
+// src/timerUrgency.ts
+function urgencyFor(elapsedMs, plannedDurationMs) {
+  if (plannedDurationMs == null) return "normal";
+  if (isOverrun(elapsedMs, plannedDurationMs)) return "overrun";
+  const remainingMs = plannedDurationMs - elapsedMs;
+  if (remainingMs <= 6e4) return "urgent";
+  if (remainingMs <= 18e4) return "warning";
+  return "normal";
+}
+
 // src/presenter.ts
 function formatSeconds(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -1177,10 +1187,10 @@ async function mountPresenterView(options) {
   function tick() {
     const elapsedMs = mainShell.elapsedMs();
     renderPresenterTimer(doc, timerRoot, elapsedMs, plannedDurationMs);
-    timerRoot.toggleAttribute(
-      "data-peitho-overrun",
-      plannedDurationMs != null && isOverrun(elapsedMs, plannedDurationMs)
-    );
+    const nextUrgency = urgencyFor(elapsedMs, plannedDurationMs);
+    if (clockRoot.dataset.peithoUrgency !== nextUrgency) {
+      clockRoot.dataset.peithoUrgency = nextUrgency;
+    }
     setTimerStateChrome(deriveTimerState(mainShell));
   }
   function updateFromSlide(detail) {

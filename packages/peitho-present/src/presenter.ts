@@ -9,6 +9,7 @@ import {
   type TimerControlDetail
 } from "./shell";
 import { installSyncBridge, type SyncChannelFactory } from "./sync";
+import { urgencyFor } from "./timerUrgency";
 import { installTimeTracker, isOverrun, isValidDurationMs } from "./timeTracker";
 
 export type PresenterOptions = {
@@ -302,10 +303,10 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   function tick(): void {
     const elapsedMs = mainShell.elapsedMs();
     renderPresenterTimer(doc, timerRoot, elapsedMs, plannedDurationMs);
-    timerRoot.toggleAttribute(
-      "data-peitho-overrun",
-      plannedDurationMs != null && isOverrun(elapsedMs, plannedDurationMs)
-    );
+    const nextUrgency = urgencyFor(elapsedMs, plannedDurationMs);
+    if (clockRoot.dataset.peithoUrgency !== nextUrgency) {
+      clockRoot.dataset.peithoUrgency = nextUrgency;
+    }
     setTimerStateChrome(deriveTimerState(mainShell));
   }
 
