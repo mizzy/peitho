@@ -18,7 +18,13 @@ pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
     let mut slides = Vec::new();
     for slide in checked_slides {
         let html = render_slide(slide.key(), slide.slots(), slide.layout())?;
-        slides.push(RenderedSlide::new(slide.index(), slide.key().clone(), html));
+        let notes = slide.notes().map(|s| s.to_owned());
+        slides.push(RenderedSlide::new(
+            slide.index(),
+            slide.key().clone(),
+            html,
+            notes,
+        ));
     }
     Ok(Deck::rendered(settings, slides, String::new()))
 }

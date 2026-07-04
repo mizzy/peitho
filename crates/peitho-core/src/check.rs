@@ -24,6 +24,7 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
             slide.key,
             slide.layout,
             checked_slots,
+            slide.notes,
         ));
     }
     Ok(Deck::checked(settings, slides))

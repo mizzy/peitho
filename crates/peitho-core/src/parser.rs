@@ -416,10 +416,16 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
     let mut fragments = Vec::new();
+    let mut note_fragments: Vec<String> = Vec::new();
     let mut block: Option<OpenBlock> = None;
     let mut list_depth = 0usize;
     let mut list_start = None;
     let mut seen_content = false;
+    // An HTML block can span multiple `Event::Html` events (one per source line
+    // for a multi-line comment). We buffer them between Start(HtmlBlock)/End
+    // and analyse the joined text once, so a multi-line `<!-- ... -->` isn't
+    // mistaken for an "unsupported html" per line.
+    let mut html_buf: Option<(String, usize)> = None;
 
     for (event, local_range) in Parser::new_ext(slice, parser_options()).into_offset_iter() {
         let global_start = range.start + local_range.start;
@@ -463,37 +469,24 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                if let Some(settings) = parse_page_comment(html.as_ref(), line).map_err(|err| {
-                    attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
-                })? {
-                    if list_depth > 0 || seen_content {
-                        let err = BuildError::new(
-                            ErrorKind::Parse,
-                            Some(line),
-                            "page settings comment must appear before slide content",
-                            "move the settings comment to the first non-blank line of the slide",
-                        );
-                        return Err(attach_slide_context(
-                            err,
-                            index,
-                            explicit_key.as_ref(),
-                            &fragments,
-                        ));
-                    }
-                    if let Some(key) = settings.key {
-                        explicit_key = Some((key, line));
-                    }
-                    if let Some(name) = settings.layout {
-                        layout_request = Some(LayoutRequest { name, line });
-                    }
-                } else if !is_html_comment(html.as_ref()) && !html.trim().is_empty() {
-                    let err = unsupported_construct(line, "html");
-                    return Err(attach_slide_context(
-                        err,
+                if let Some((buf, _)) = html_buf.as_mut() {
+                    buf.push_str(html.as_ref());
+                } else {
+                    // InlineHtml (or a stray Html outside a HtmlBlock): process
+                    // as a single-event chunk immediately.
+                    let ctx = explicit_key.clone();
+                    process_html_chunk(
+                        html.as_ref(),
+                        line,
                         index,
-                        explicit_key.as_ref(),
                         &fragments,
-                    ));
+                        &ctx,
+                        list_depth,
+                        seen_content,
+                        &mut explicit_key,
+                        &mut layout_request,
+                        &mut note_fragments,
+                    )?;
                 }
             }
             Event::Start(Tag::MetadataBlock(_)) => {
@@ -603,7 +596,26 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                     text.push('\n');
                 }
             }
-            Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock) => {}
+            Event::Start(Tag::HtmlBlock) => {
+                html_buf = Some((String::new(), line));
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some((buf, start_line)) = html_buf.take() {
+                    let ctx = explicit_key.clone();
+                    process_html_chunk(
+                        &buf,
+                        start_line,
+                        index,
+                        &fragments,
+                        &ctx,
+                        list_depth,
+                        seen_content,
+                        &mut explicit_key,
+                        &mut layout_request,
+                        &mut note_fragments,
+                    )?;
+                }
+            }
             Event::Start(tag) if unsupported_tag(&tag) => {
                 let err = unsupported_construct(line, unsupported_tag_name(&tag));
                 return Err(attach_slide_context(
@@ -641,13 +653,92 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
             (key, key_source)
         });
 
+    let notes = if note_fragments.is_empty() {
+        None
+    } else {
+        Some(note_fragments.join("\n\n"))
+    };
+
     Ok(ParsedSlide {
         index,
         key,
         key_source,
         layout_request,
         fragments,
+        notes,
     })
+}
+
+/// Handle one whole HTML chunk (a completed HtmlBlock's joined text, or one
+/// stray inline HTML event). Dispatches to page-settings parsing, note
+/// collection, or an "unsupported html" error.
+#[allow(clippy::too_many_arguments)]
+fn process_html_chunk(
+    raw: &str,
+    line: usize,
+    index: usize,
+    fragments: &[SourceFragment],
+    explicit_key_ctx: &Option<(SlideKey, usize)>,
+    list_depth: usize,
+    seen_content: bool,
+    explicit_key: &mut Option<(SlideKey, usize)>,
+    layout_request: &mut Option<LayoutRequest>,
+    note_fragments: &mut Vec<String>,
+) -> Result<()> {
+    if let Some(settings) = parse_page_comment(raw, line)
+        .map_err(|err| attach_slide_context(err, index, explicit_key_ctx.as_ref(), fragments))?
+    {
+        if list_depth > 0 || seen_content {
+            let err = BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "page settings comment must appear before slide content",
+                "move the settings comment to the first non-blank line of the slide",
+            );
+            return Err(attach_slide_context(
+                err,
+                index,
+                explicit_key_ctx.as_ref(),
+                fragments,
+            ));
+        }
+        if let Some(key) = settings.key {
+            *explicit_key = Some((key, line));
+        }
+        if let Some(name) = settings.layout {
+            *layout_request = Some(LayoutRequest { name, line });
+        }
+        return Ok(());
+    }
+    if is_html_comment(raw) {
+        if let Some(text) = extract_html_comment_body(raw) {
+            note_fragments.push(text);
+        }
+        return Ok(());
+    }
+    if !raw.trim().is_empty() {
+        let err = unsupported_construct(line, "html");
+        return Err(attach_slide_context(
+            err,
+            index,
+            explicit_key_ctx.as_ref(),
+            fragments,
+        ));
+    }
+    Ok(())
+}
+
+/// Extract the inner text of an HTML comment (between `<!--` and `-->`).
+/// Trims surrounding whitespace and returns `None` if the body is empty,
+/// so `<!-- -->` and `<!--\n\n-->` are silently ignored (not treated as notes).
+fn extract_html_comment_body(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let body = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.to_owned())
+    }
 }
 
 fn attach_slide_context(
@@ -997,13 +1088,58 @@ After list
     }
 
     #[test]
-    fn ignores_plain_html_comments() {
-        let deck = parse_markdown("<!-- TODO: polish copy -->\n# Title").unwrap();
+    fn collects_speaker_note_from_html_comment() {
+        let deck = parse_markdown("# Title\n\n<!-- speaker note body -->").unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "title");
         assert_eq!(slide.fragments.len(), 1);
-        assert_eq!(slide.fragments[0].line(), 2);
+        assert_eq!(slide.notes.as_deref(), Some("speaker note body"));
+    }
+
+    #[test]
+    fn joins_multiple_html_comments_with_blank_line() {
+        let deck = parse_markdown("# Title\n\n<!-- first note -->\n\nbody\n\n<!-- second note -->")
+            .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.notes.as_deref(), Some("first note\n\nsecond note"));
+    }
+
+    #[test]
+    fn empty_html_comment_is_ignored_as_note() {
+        let deck = parse_markdown("# Title\n\n<!-- -->\n\n<!--\n\n-->").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert!(slide.notes.is_none());
+    }
+
+    #[test]
+    fn html_comment_before_content_is_still_a_note() {
+        let deck = parse_markdown("<!-- pre-title note -->\n# Title").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.key.as_str(), "title");
+        assert_eq!(slide.notes.as_deref(), Some("pre-title note"));
+    }
+
+    #[test]
+    fn page_settings_comment_and_note_coexist() {
+        let deck =
+            parse_markdown("<!-- {\"key\":\"cover\"} -->\n# Title\n\n<!-- this is a note -->")
+                .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.key.as_str(), "cover");
+        assert_eq!(slide.notes.as_deref(), Some("this is a note"));
+    }
+
+    #[test]
+    fn multiline_html_comment_preserves_internal_newlines() {
+        let deck = parse_markdown("# Title\n\n<!--\nline one\nline two\n-->").unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.notes.as_deref(), Some("line one\nline two"));
     }
 
     #[test]

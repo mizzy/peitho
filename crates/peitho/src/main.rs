@@ -699,7 +699,9 @@ fn emit_present_cache(
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         cache.join("notes.json"),
-        core(peitho_core::notes_json(&peitho_core::Notes::empty()))?,
+        core(peitho_core::notes_json(&peitho_core::Notes::from_slides(
+            artifacts.rendered.slides(),
+        )))?,
     )
     .into_diagnostic()?;
     fs::write(
