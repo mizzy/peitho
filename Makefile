@@ -39,6 +39,7 @@ keynote-windowed: PRESENT_FLAGS += --presenter-windowed
 keynote-windowed: keynote
 
 shell:
+	cd packages/peitho-present && [ -d node_modules ] || npm ci
 	cd packages/peitho-present && npm run build
 
 minimal: shell

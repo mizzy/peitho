@@ -299,8 +299,8 @@ pub fn render_present_index() -> String {
     .peitho-control-bar[hidden] { display: none; }
     .peitho-time-tracker { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; z-index: 5; pointer-events: none; background: rgba(255, 255, 255, 0.18); }
     .peitho-time-tracker [data-peitho-marker] { position: absolute; transform: translateX(-50%); transition: left 120ms linear; font-size: 18px; line-height: 1; }
-    .peitho-time-tracker [data-peitho-marker="rabbit"] { bottom: 20px; }
-    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: 2px; }
+    .peitho-time-tracker [data-peitho-marker="rabbit"],
+    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: 8px; }
     .peitho-time-tracker[data-peitho-overrun] { background: rgba(255, 92, 92, 0.35); }
   </style>
 </head>
@@ -396,8 +396,8 @@ pub fn render_presenter_index() -> String {
     .peitho-presenter-controls { display: flex; flex-wrap: wrap; gap: 8px; }
     .peitho-time-tracker[data-peitho-time-tracker="presenter"] { position: relative; height: 26px; margin: 12px 0; z-index: 20; pointer-events: none; background: rgba(255, 255, 255, 0.16); }
     .peitho-time-tracker [data-peitho-marker] { position: absolute; transform: translateX(-50%); transition: left 120ms linear; font-size: 18px; line-height: 1; }
-    .peitho-time-tracker [data-peitho-marker="rabbit"] { top: -18px; }
-    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: -18px; }
+    .peitho-time-tracker [data-peitho-marker="rabbit"],
+    .peitho-time-tracker [data-peitho-marker="turtle"] { top: 4px; }
     .peitho-time-tracker[data-peitho-overrun] { background: rgba(255, 92, 92, 0.35); }
     [data-peitho-presenter="timer"][data-peitho-overrun] { color: #ff8a8a; }
   </style>
@@ -647,11 +647,14 @@ mod tests {
         assert!(html.contains("variant: 'present'"));
         assert!(html.contains(".peitho-time-tracker"));
         assert!(html.contains("z-index: 5"));
-        assert!(html.contains(r#"[data-peitho-marker="rabbit"]"#));
-        assert!(html.contains(r#"[data-peitho-marker="turtle"]"#));
-        assert!(html.contains(r#"[data-peitho-marker="rabbit"] { bottom: 20px; }"#));
-        assert!(html.contains(r#"[data-peitho-marker="turtle"] { bottom: 2px; }"#));
-        assert!(!html.contains("bottom: -18px"));
+        assert!(html.contains("transform: translateX(-50%)"));
+        assert!(html.contains(concat!(
+            r#".peitho-time-tracker [data-peitho-marker="rabbit"],"#,
+            "\n",
+            r#"    .peitho-time-tracker [data-peitho-marker="turtle"] { bottom: 8px; }"#
+        )));
+        assert!(!html.contains(r#"[data-peitho-marker="rabbit"] { bottom: 20px; }"#));
+        assert!(!html.contains(r#"[data-peitho-marker="turtle"] { bottom: 2px; }"#));
         assert!(!html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
         let mount_index = html
             .find("await peitho.mountPresentShell({ root })")
@@ -687,8 +690,13 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
         assert!(html.contains("height: 26px"));
         assert!(html.contains("transform: translateX(-50%)"));
-        assert!(html.contains(r#"[data-peitho-marker="rabbit"]"#));
-        assert!(html.contains(r#"[data-peitho-marker="turtle"]"#));
+        assert!(html.contains(concat!(
+            r#".peitho-time-tracker [data-peitho-marker="rabbit"],"#,
+            "\n",
+            r#"    .peitho-time-tracker [data-peitho-marker="turtle"] { top: 4px; }"#
+        )));
+        assert!(!html.contains(r#"[data-peitho-marker="rabbit"] { top: -18px; }"#));
+        assert!(!html.contains(r#"[data-peitho-marker="turtle"] { bottom: -18px; }"#));
         assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
         assert!(!html.contains(".peitho-time-tracker { position: absolute"));
         assert!(!html.contains("bottom: 0; height: 6px"));

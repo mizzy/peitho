@@ -126,7 +126,7 @@ When `time` is set, on the **first forward navigation** (`peitho:slidechange` wh
 ### D7: Appearance
 
 - **Track**: a thin bar at the bottom edge of the screen (about 6px tall and semi-transparent on the presentation screen so it doesn't interfere with the slide; shown somewhat larger inside the sidebar on the presenter screen)
-- **Markers**: 🐰 and 🐢 emoji (no assets needed, an homage to rabbit-turtle). Rabbit offset slightly to the upper row and turtle to the lower row so they remain distinguishable even when overlapping
+- **Markers**: 🐰 and 🐢 emoji (no assets needed, an homage to rabbit-turtle). **Both sit on the same single lane at the same height** so they visibly chase each other along one track (this is the slidev-rabbit-turtle behavior). When they land on the same progress point they simply overlap — not offset into separate upper/lower rows (a 2026-07-04 correction: the original upper/lower offset made them look like two independent bars instead of one race)
 - **Presenter screen numeric display**: the existing timer `MM:SS` is extended to `MM:SS / MM:SS` (elapsed/planned) when `time` is set, and on overrun the excess is shown alongside as `+MM:SS` in a warning color
 - CSS is added to the `<style>` block in the entry HTML (render.rs), per existing convention. Theme CSS (themes/) is not touched (design separation)
 - The tracker is not shown in the dist/ viewer (this is a presentation-time feature)

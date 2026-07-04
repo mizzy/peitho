@@ -423,6 +423,28 @@ fn repository_example_builds_three_slide_distribution() {
 }
 
 #[test]
+fn lightning_talk_example_declares_five_minute_planned_duration() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/lightning-talk/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 5 slide(s)"));
+
+    assert!(fs::read_to_string(out.path().join("manifest.json"))
+        .unwrap()
+        .contains(r#""plannedDurationMs": 300000"#));
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
