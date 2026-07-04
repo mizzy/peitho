@@ -472,9 +472,8 @@ pub fn render_presenter_index() -> String {
     .tracker [data-peitho-marker="turtle"] { position: absolute; transition: left 120ms linear, transform 120ms linear; font-size: 18px; line-height: 1; }
     .tracker [data-peitho-marker="rabbit"] { top: -6px; }
     .tracker [data-peitho-marker="turtle"] { bottom: -6px; }
-    .tracker-scale { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 6px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
-    .tracker-scale span { border-left: 1px solid var(--line-soft); padding-left: 6px; }
-    .tracker-scale span:first-child { border-left: none; padding-left: 0; }
+    .tracker-scale { position: relative; height: 12px; margin-top: 6px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
+    .tracker-scale span { position: absolute; top: 0; white-space: nowrap; }
     [data-peitho-agenda] { overflow: hidden; padding: 0 16px 14px; }
     [data-peitho-agenda-head] { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
     [data-peitho-agenda-title] { color: var(--fg-mute); }
@@ -854,6 +853,9 @@ mod tests {
         assert!(html.contains(".tracker { position: relative; height: 30px;"));
         assert!(html.contains(".tracker-fill"));
         assert!(html.contains(".tracker-scale"));
+        assert!(html.contains(".tracker-scale { position: relative;"));
+        assert!(html.contains(".tracker-scale span { position: absolute;"));
+        assert!(!html.contains(".tracker-scale { display: grid;"));
         assert!(!html.contains("transform: translateX(-50%)"));
         assert!(html.contains("transition: left 120ms linear, transform 120ms linear"));
         assert!(html.contains(concat!(

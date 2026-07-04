@@ -117,6 +117,15 @@ it("renders presenter variant with legend fill track and five-point time scale",
   expect(
     Array.from(tracker.querySelectorAll(".tracker-scale span"), (span) => span.textContent)
   ).toEqual(["0:00", "0:15", "0:30", "0:45", "1:00"]);
+  const scaleSpans = Array.from(tracker.querySelectorAll<HTMLElement>(".tracker-scale span"));
+  expect(scaleSpans.map((s) => s.style.left)).toEqual(["0%", "25%", "50%", "75%", "100%"]);
+  expect(scaleSpans.map((s) => s.style.transform)).toEqual([
+    "translateX(0%)",
+    "translateX(-50%)",
+    "translateX(-50%)",
+    "translateX(-50%)",
+    "translateX(-100%)"
+  ]);
 
   elapsed = 45_000;
   vi.advanceTimersByTime(250);
