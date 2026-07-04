@@ -8,16 +8,28 @@ use serde::Deserialize;
 use crate::{
     domain::{FragmentKind, SlideKey, SourceFragment},
     error::{BuildError, ErrorKind, Result},
-    phase::{Deck, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime},
+    phase::{
+        Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime,
+    },
 };
 
-/// Page settings comment, deck-style: `<!-- {"key":"...","layout":"..."} -->`.
+/// Page settings comment, deck-style:
+/// `<!-- {"key":"...","layout":"...","section":"...","time":"..."} -->`.
 /// Unknown fields are rejected so a typo never silently drops a setting.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PageComment {
     key: Option<String>,
     layout: Option<String>,
+    section: Option<String>,
+    time: Option<PlannedTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PageSectionMarker {
+    name: String,
+    planned: PlannedTime,
+    line: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,9 +39,23 @@ struct DeckFrontmatter {
     time: Option<PlannedTime>,
 }
 
+#[derive(Debug)]
 struct PageSettings {
     key: Option<SlideKey>,
     layout: Option<String>,
+    section: Option<PageSectionMarker>,
+}
+
+#[derive(Debug)]
+struct ParsedSlideDraft {
+    slide: ParsedSlide,
+    section: Option<PageSectionMarker>,
+}
+
+#[derive(Debug)]
+struct ResolvedSection {
+    section: DeckSection,
+    line: usize,
 }
 
 enum OpenBlock {
@@ -80,10 +106,16 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
         ));
     }
 
-    let mut slides = Vec::new();
+    let mut drafts = Vec::new();
     for (index, range) in ranges.into_iter().enumerate() {
-        slides.push(parse_slide(source, range, index)?);
+        drafts.push(parse_slide(source, range, index)?);
     }
+    let resolved_sections = resolve_deck_sections(&drafts)?;
+    let settings = finalize_section_settings(settings, resolved_sections)?;
+    let slides = drafts
+        .into_iter()
+        .map(|draft| draft.slide)
+        .collect::<Vec<_>>();
     validate_unique_keys(&slides)?;
     Ok(Deck::parsed(settings, slides))
 }
@@ -129,6 +161,109 @@ fn split_slide_ranges(source: &str) -> Result<SplitSlides> {
         frontmatter,
         ranges,
     })
+}
+
+fn resolve_deck_sections(drafts: &[ParsedSlideDraft]) -> Result<Vec<ResolvedSection>> {
+    let markers = drafts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, draft)| draft.section.as_ref().map(|marker| (index, marker)))
+        .collect::<Vec<_>>();
+
+    if markers.is_empty() {
+        return Ok(Vec::new());
+    }
+    if markers[0].0 != 0 {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(markers[0].1.line),
+            "first slide must declare a section",
+            "add a section marker to the first slide or remove all section markers",
+        ));
+    }
+
+    Ok(markers
+        .iter()
+        .enumerate()
+        .map(|(marker_index, (start, marker))| {
+            let end = markers
+                .get(marker_index + 1)
+                .map(|(next_start, _)| next_start - 1)
+                .unwrap_or(drafts.len() - 1);
+            ResolvedSection {
+                section: DeckSection::new(marker.name.clone(), marker.planned, *start, end),
+                line: marker.line,
+            }
+        })
+        .collect())
+}
+
+fn finalize_section_settings(
+    settings: DeckSettings,
+    resolved_sections: Vec<ResolvedSection>,
+) -> Result<DeckSettings> {
+    if resolved_sections.is_empty() {
+        return Ok(settings.with_sections(Vec::new()));
+    }
+
+    let first_line = resolved_sections[0].line;
+    let total = section_total_from_millis(
+        resolved_sections
+            .iter()
+            .map(|resolved| (resolved.line, resolved.section.planned().as_millis())),
+    )?;
+    let section_total =
+        PlannedTime::from_millis(total).expect("section total was checked before conversion");
+    let sections = resolved_sections
+        .into_iter()
+        .map(|resolved| resolved.section)
+        .collect::<Vec<_>>();
+
+    if let Some(frontmatter) = settings.planned_time() {
+        if frontmatter.as_millis() != section_total.as_millis() {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(first_line),
+                format!(
+                    "frontmatter time {}ms does not match section total {}ms",
+                    frontmatter.as_millis(),
+                    section_total.as_millis()
+                ),
+                "adjust frontmatter time or section times so the totals match",
+            ));
+        }
+        return Ok(settings.with_sections(sections));
+    }
+
+    Ok(settings
+        .with_planned_time(Some(section_total))
+        .with_sections(sections))
+}
+
+fn section_total_from_millis<I>(items: I) -> Result<u64>
+where
+    I: IntoIterator<Item = (usize, u64)>,
+{
+    let mut total = 0_u64;
+    for (line, millis) in items {
+        total = total.checked_add(millis).ok_or_else(|| {
+            BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section time total overflowed",
+                "reduce section times so the total can be represented safely",
+            )
+        })?;
+        if total > PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section time total is too large",
+                "reduce section times so the total is at most Number.MAX_SAFE_INTEGER milliseconds",
+            ));
+        }
+    }
+    Ok(total)
 }
 
 fn deserialize_optional_planned_time<'de, D>(
@@ -268,7 +403,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
     let parsed: DeckFrontmatter =
         serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
 
-    Ok(DeckSettings::new(parsed.time))
+    Ok(DeckSettings::new(parsed.time, Vec::new()))
 }
 
 fn first_nonblank_yaml_line(yaml: &str) -> usize {
@@ -411,10 +546,12 @@ fn first_nonblank_source_line(source: &str) -> Option<(usize, &str)> {
     None
 }
 
-fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSlide> {
+fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSlideDraft> {
     let slice = &source[range.start..range.end];
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
+    let mut section_marker: Option<PageSectionMarker> = None;
+    let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
     let mut note_fragments: Vec<String> = Vec::new();
     let mut block: Option<OpenBlock> = None;
@@ -485,6 +622,8 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                         seen_content,
                         &mut explicit_key,
                         &mut layout_request,
+                        &mut section_marker,
+                        &mut page_settings_line,
                         &mut note_fragments,
                     )?;
                 }
@@ -612,6 +751,8 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                         seen_content,
                         &mut explicit_key,
                         &mut layout_request,
+                        &mut section_marker,
+                        &mut page_settings_line,
                         &mut note_fragments,
                     )?;
                 }
@@ -659,13 +800,16 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
         Some(note_fragments.join("\n\n"))
     };
 
-    Ok(ParsedSlide {
-        index,
-        key,
-        key_source,
-        layout_request,
-        fragments,
-        notes,
+    Ok(ParsedSlideDraft {
+        slide: ParsedSlide {
+            index,
+            key,
+            key_source,
+            layout_request,
+            fragments,
+            notes,
+        },
+        section: section_marker,
     })
 }
 
@@ -683,6 +827,8 @@ fn process_html_chunk(
     seen_content: bool,
     explicit_key: &mut Option<(SlideKey, usize)>,
     layout_request: &mut Option<LayoutRequest>,
+    section_marker: &mut Option<PageSectionMarker>,
+    page_settings_line: &mut Option<usize>,
     note_fragments: &mut Vec<String>,
 ) -> Result<()> {
     if let Some(settings) = parse_page_comment(raw, line)
@@ -702,11 +848,29 @@ fn process_html_chunk(
                 fragments,
             ));
         }
+        if page_settings_line.is_some() {
+            let err = BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "duplicate page settings comment",
+                "merge the settings into the first page settings comment",
+            );
+            return Err(attach_slide_context(
+                err,
+                index,
+                explicit_key_ctx.as_ref(),
+                fragments,
+            ));
+        }
+        *page_settings_line = Some(line);
         if let Some(key) = settings.key {
             *explicit_key = Some((key, line));
         }
         if let Some(name) = settings.layout {
             *layout_request = Some(LayoutRequest { name, line });
+        }
+        if let Some(section) = settings.section {
+            *section_marker = Some(section);
         }
         return Ok(());
     }
@@ -803,17 +967,53 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             ErrorKind::Parse,
             Some(line),
             format!("invalid page settings comment: {err}"),
-            r#"use <!-- {"key":"arch-1","layout":"cover"} --> (both fields optional, no other fields)"#,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#,
         )
     })?;
-    if parsed.key.is_none() && parsed.layout.is_none() {
+    if parsed.key.is_none()
+        && parsed.layout.is_none()
+        && parsed.section.is_none()
+        && parsed.time.is_none()
+    {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
             "page settings comment has no settings",
-            r#"set "key" and/or "layout", or remove the comment"#,
+            r#"set "key", "layout", and/or a "section" with "time", or remove the comment"#,
         ));
     }
+    let section = match (parsed.section.as_deref(), parsed.time) {
+        (Some(name), Some(planned)) if !name.trim().is_empty() => Some(PageSectionMarker {
+            name: name.trim().to_owned(),
+            planned,
+            line,
+        }),
+        (Some(_), Some(_)) => {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section name must not be empty",
+                r#"set "section" to the agenda label shown in presenter view"#,
+            ));
+        }
+        (Some(_), None) => {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section marker is missing time",
+                r#"add "time":"1m" to this section marker"#,
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section time requires a section name",
+                "put deck-wide time in YAML frontmatter instead",
+            ));
+        }
+        (None, None) => None,
+    };
     let key = parsed
         .key
         .map(|key| {
@@ -830,6 +1030,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
     Ok(Some(PageSettings {
         key,
         layout: parsed.layout,
+        section,
     }))
 }
 
@@ -1168,12 +1369,118 @@ After list
     }
 
     #[test]
+    fn parses_section_page_comment_with_time_key_and_layout() {
+        let settings = parse_page_comment(
+            r#"<!-- {"key":"cover","layout":"cover","section":"Setup","time":"1m"} -->"#,
+            7,
+        )
+        .unwrap()
+        .unwrap();
+
+        let section = settings.section.unwrap();
+        assert_eq!(section.name, "Setup");
+        assert_eq!(section.planned.as_millis(), 60_000);
+        assert_eq!(section.line, 7);
+        assert_eq!(settings.layout.as_deref(), Some("cover"));
+        assert_eq!(settings.key.unwrap().as_str(), "cover");
+    }
+
+    #[test]
+    fn rejects_invalid_section_page_comments_with_line_and_help() {
+        let cases = [
+            (
+                r#"<!-- {"section":"Setup"} -->"#,
+                "section marker is missing time",
+                r#"add "time":"1m" to this section marker"#,
+            ),
+            (
+                r#"<!-- {"time":"1m"} -->"#,
+                "section time requires a section name",
+                "put deck-wide time in YAML frontmatter instead",
+            ),
+            (
+                r#"<!-- {"section":"","time":"1m"} -->"#,
+                "section name must not be empty",
+                r#"set "section" to the agenda label shown in presenter view"#,
+            ),
+        ];
+
+        for (raw, message, help) in cases {
+            let err = parse_page_comment(raw, 3).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(3));
+            assert!(err.to_string().contains(message));
+            assert_eq!(err.help, help);
+        }
+    }
+
+    #[test]
+    fn rejects_second_page_settings_comment_that_would_override_section() {
+        let err = parse_markdown(
+            "<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"1m\"} -->\n\
+             # Title",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("duplicate page settings comment"));
+        assert_eq!(
+            err.help,
+            "merge the settings into the first page settings comment"
+        );
+    }
+
+    #[test]
+    fn rejects_second_page_settings_comment_that_only_sets_key() {
+        let err = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n\
+             <!-- {\"key\":\"cover\"} -->\n\
+             # Title",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("duplicate page settings comment"));
+        assert_eq!(
+            err.help,
+            "merge the settings into the first page settings comment"
+        );
+    }
+
+    #[test]
+    fn rejects_second_page_settings_comment_after_content_as_position_error() {
+        let err = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n\
+             # Title\n\
+             <!-- {\"key\":\"late\"} -->",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("page settings comment must appear before slide content"));
+        assert_eq!(
+            err.help,
+            "move the settings comment to the first non-blank line of the slide"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_page_settings_fields() {
         let err = parse_markdown("<!-- {\"key\":\"a\",\"freeze\":true} -->\n# Title").unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("invalid page settings comment"));
+        assert_eq!(
+            err.help,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#
+        );
     }
 
     #[test]
@@ -1281,6 +1588,171 @@ After list
         assert_eq!(slides[1].index, 1);
         assert_eq!(slides[1].key.as_str(), "two");
         assert_eq!(slides[1].fragments[0].line(), 5);
+    }
+
+    #[test]
+    fn resolves_section_ranges_from_marker_positions() {
+        let deck = parse_markdown(
+            "---\ntime: 3m\n---\n\
+             <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n# B\n\n---\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# C",
+        )
+        .unwrap();
+
+        let sections = deck.settings().sections();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            (sections[0].name(), sections[0].start(), sections[0].end()),
+            ("Setup", 0, 1)
+        );
+        assert_eq!(
+            (sections[1].name(), sections[1].start(), sections[1].end()),
+            ("Demo", 2, 2)
+        );
+    }
+
+    #[test]
+    fn allows_duplicate_section_names_as_separate_ranges() {
+        let deck = parse_markdown(
+            "<!-- {\"section\":\"Repeat\",\"time\":\"1m\"} -->\n# A\n\n---\n# B\n\n---\n\
+             <!-- {\"section\":\"Repeat\",\"time\":\"2m\"} -->\n# C\n\n---\n# D",
+        )
+        .unwrap();
+
+        let sections = deck.settings().sections();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            (
+                sections[0].name(),
+                sections[0].start(),
+                sections[0].end(),
+                sections[0].planned().as_millis()
+            ),
+            ("Repeat", 0, 1, 60_000)
+        );
+        assert_eq!(
+            (
+                sections[1].name(),
+                sections[1].start(),
+                sections[1].end(),
+                sections[1].planned().as_millis()
+            ),
+            ("Repeat", 2, 3, 120_000)
+        );
+    }
+
+    #[test]
+    fn single_section_marker_covers_the_whole_deck_and_derives_planned_time() {
+        let deck = parse_markdown(
+            "<!-- {\"section\":\"Full\",\"time\":\"2m\"} -->\n# A\n\n---\n# B\n\n---\n# C",
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().planned_time().unwrap().as_millis(), 120_000);
+        let sections = deck.settings().sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            (
+                sections[0].name(),
+                sections[0].start(),
+                sections[0].end(),
+                sections[0].planned().as_millis()
+            ),
+            ("Full", 0, 2, 120_000)
+        );
+    }
+
+    #[test]
+    fn decks_without_section_markers_keep_settings_unchanged() {
+        let deck = parse_markdown("# A\n\n---\n# B").unwrap();
+
+        assert_eq!(deck.settings().planned_time(), None);
+        assert!(deck.settings().sections().is_empty());
+    }
+
+    #[test]
+    fn rejects_section_markers_when_first_slide_has_no_marker() {
+        let err =
+            parse_markdown("# A\n\n---\n<!-- {\"section\":\"Late\",\"time\":\"1m\"} -->\n# B")
+                .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert!(err
+            .to_string()
+            .contains("first slide must declare a section"));
+        assert_eq!(
+            err.help,
+            "add a section marker to the first slide or remove all section markers"
+        );
+    }
+
+    #[test]
+    fn derives_deck_time_from_section_sum_when_frontmatter_time_is_absent() {
+        let deck = parse_markdown(
+            "<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# B",
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings().planned_time().map(PlannedTime::as_millis),
+            Some(180_000)
+        );
+    }
+
+    #[test]
+    fn rejects_frontmatter_time_that_differs_from_section_total() {
+        let err = parse_markdown(
+            "---\ntime: 5m\n---\n\
+             <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# B",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert!(err
+            .to_string()
+            .contains("frontmatter time 300000ms does not match section total 180000ms"));
+        assert_eq!(
+            err.help,
+            "adjust frontmatter time or section times so the totals match"
+        );
+    }
+
+    #[test]
+    fn rejects_section_time_total_above_manifest_safe_integer_limit() {
+        let err = parse_markdown(
+            "<!-- {\"section\":\"A\",\"time\":\"9007199254740s\"} -->\n# A\n\n---\n\
+             <!-- {\"section\":\"B\",\"time\":\"9007199254740s\"} -->\n# B",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("section time total is too large"));
+        assert_eq!(
+            err.help,
+            "reduce section times so the total is at most Number.MAX_SAFE_INTEGER milliseconds"
+        );
+    }
+
+    #[test]
+    fn checked_add_overflow_in_section_sum_reports_line_and_help() {
+        let err = section_total_from_millis([
+            (2, PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS),
+            (5, u64::MAX),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("section time total overflowed"));
+        assert_eq!(
+            err.help,
+            "reduce section times so the total can be represented safely"
+        );
     }
 
     #[test]

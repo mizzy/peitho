@@ -2,13 +2,13 @@
 time: 5m
 ---
 
-<!-- {"key":"cover"} -->
+<!-- {"key":"cover","section":"Setup","time":"1m"} -->
 # スライドはMarkdownで書きたい
 
 5分でわかる、発表資料をコードとして扱う話。
 
 ---
-<!-- {"key":"problem"} -->
+<!-- {"key":"problem","section":"Problem","time":"1m"} -->
 # デザインをいじりだすと準備が終わらない
 
 - 内容よりフォントサイズを触っている時間のほうが長い
@@ -16,7 +16,7 @@ time: 5m
 - 前回のスライドから使い回せるのは見た目だけ
 
 ---
-<!-- {"key":"separation"} -->
+<!-- {"key":"separation","section":"Approach","time":"2m"} -->
 # コンテンツとデザインを分ける
 
 - 内容はMarkdown、見た目はテンプレートとCSS
@@ -32,7 +32,7 @@ time: 5m
 - タイポの修正がワンライナーになる
 
 ---
-<!-- {"key":"closing"} -->
+<!-- {"key":"closing","section":"Wrap-up","time":"1m"} -->
 # 書くことに集中する
 
 道具の話はここまで。次の5分はあなたの内容の話をしてください。

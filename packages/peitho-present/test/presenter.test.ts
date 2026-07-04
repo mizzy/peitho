@@ -18,6 +18,7 @@ const manifest: Manifest = {
   title: "Demo",
   slideCount: 2,
   plannedDurationMs: null,
+  sections: [],
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
     { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
@@ -175,6 +176,50 @@ it("keeps legacy presenter timer text when manifest has no time", async () => {
 
   expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("01:04");
   expect(root.querySelector("[data-peitho-time-tracker]")).toBeNull();
+});
+
+it("keeps agenda slot empty when manifest has no sections", async () => {
+  const root = document.createElement("main");
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({ sections: [] }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: mockSyncChannelFactory().factory
+  });
+  views.push(view);
+
+  expect(root.querySelector('[data-peitho-presenter="agenda-slot"]')?.childElementCount).toBe(0);
+  expect(root.querySelector("[data-peitho-agenda]")).toBeNull();
+});
+
+it("mounts agenda between tracker and controls when manifest has sections", async () => {
+  const root = document.createElement("main");
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({
+      plannedDurationMs: 180_000,
+      sections: [
+        { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
+        { name: "Demo", startIndex: 1, endIndex: 1, plannedDurationMs: 120_000 }
+      ]
+    }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: mockSyncChannelFactory().factory
+  });
+  views.push(view);
+
+  const clockChildren = Array.from(
+    root.querySelector('[data-peitho-presenter="clock"]')?.children ?? [],
+    (node) => (node as HTMLElement).dataset.peithoPresenter ?? (node as HTMLElement).className
+  );
+  expect(clockChildren).toEqual(["clock-row", "tracker-slot", "agenda-slot", "controls"]);
+  expect(
+    root.querySelector('[data-peitho-presenter="agenda-slot"] [data-peitho-agenda]')
+  ).not.toBeNull();
 });
 
 it("logs invalid planned duration and keeps presenter mounted without a tracker", async () => {

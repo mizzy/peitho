@@ -1,4 +1,5 @@
 import type { Notes } from "../../../bindings/Notes";
+import { installAgenda } from "./agenda";
 import { installPresenterKeyboard } from "./keyboard";
 import {
   mountPresentShell,
@@ -7,7 +8,7 @@ import {
   type TimerControlDetail
 } from "./shell";
 import { installSyncBridge, type SyncChannelFactory } from "./sync";
-import { installTimeTracker, isOverrun } from "./timeTracker";
+import { installTimeTracker, isOverrun, isValidDurationMs } from "./timeTracker";
 
 export type PresenterOptions = {
   root: HTMLElement;
@@ -176,6 +177,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           </div>
 
           <div class="tracker-wrap" data-peitho-presenter="tracker-slot"></div>
+          <div data-peitho-presenter="agenda-slot"></div>
 
           <div class="controls">
             <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span> <span class="k">Space</span></button>
@@ -210,6 +212,9 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   )!;
   const trackerSlot = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="tracker-slot"]'
+  )!;
+  const agendaSlot = options.root.querySelector<HTMLElement>(
+    '[data-peitho-presenter="agenda-slot"]'
   )!;
   const deckTitle = options.root.querySelector<HTMLElement>('[data-peitho-presenter="title"]')!;
   const positionLong = options.root.querySelector<HTMLElement>(
@@ -247,9 +252,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs =
-    rawPlannedDurationMs != null &&
-    Number.isFinite(rawPlannedDurationMs) &&
-    rawPlannedDurationMs > 0
+    rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs)
       ? rawPlannedDurationMs
       : null;
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
@@ -267,6 +270,16 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           document: doc,
           variant: "presenter"
         });
+  const sections = mainShell.manifest?.sections ?? [];
+  const agendaCleanup = installAgenda({
+    root: agendaSlot,
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    document: doc,
+    log
+  });
   const rippleTimeouts = new Set<number>();
 
   function setTimerStateChrome(state: TimerState): void {
@@ -399,6 +412,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      agendaCleanup();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();

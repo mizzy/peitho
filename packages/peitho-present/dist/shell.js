@@ -33,6 +33,274 @@ function installCanvasScaler(options) {
   return () => win.removeEventListener("resize", apply);
 }
 
+// src/timeTracker.ts
+var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
+function isOverrun(elapsedMs, plannedDurationMs) {
+  return elapsedMs > plannedDurationMs;
+}
+function isValidDurationMs(ms) {
+  return Number.isSafeInteger(ms) && ms > 0;
+}
+function formatMinuteSeconds(ms) {
+  const totalSeconds = Math.round(ms / 1e3);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+function timeScaleLabels(plannedDurationMs) {
+  return Array.from(
+    { length: 5 },
+    (_, index) => formatMinuteSeconds(plannedDurationMs * index / 4)
+  );
+}
+function isValidSlideChangeDetail(detail) {
+  if (typeof detail !== "object" || detail === null) return false;
+  const candidate = detail;
+  const { index, previousIndex, total } = candidate;
+  return typeof index === "number" && Number.isFinite(index) && index >= 0 && typeof total === "number" && Number.isFinite(total) && total > 0 && (previousIndex === null || typeof previousIndex === "number" && Number.isFinite(previousIndex) && previousIndex >= 0);
+}
+function installTimeTracker(options) {
+  if (!isValidDurationMs(options.plannedDurationMs)) {
+    throw new Error("plannedDurationMs must be a positive finite number");
+  }
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const log = options.console ?? console;
+  const bus = options.bus ?? win;
+  const variant = options.variant ?? "present";
+  const track = doc.createElement("div");
+  track.className = "peitho-time-tracker";
+  track.dataset.peithoTimeTracker = variant;
+  if (variant === "presenter") {
+    track.innerHTML = [
+      '<div class="tracker-legend"><span>Slide progress</span><span>Time</span></div>',
+      '<div class="tracker">',
+      '<div class="tracker-fill"></div>',
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>',
+      "</div>",
+      `<div class="tracker-scale mono">${timeScaleLabels(options.plannedDurationMs).map((label) => `<span>${label}</span>`).join("")}</div>`
+    ].join("");
+  } else {
+    track.innerHTML = [
+      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
+      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>'
+    ].join("");
+  }
+  options.root.appendChild(track);
+  const rabbit = track.querySelector('[data-peitho-marker="rabbit"]');
+  const turtle = track.querySelector('[data-peitho-marker="turtle"]');
+  const fill = track.querySelector(".tracker-fill");
+  let autoStarted = false;
+  const setMarker = (element, ratio) => {
+    element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
+    element.style.transform = `translateX(${-Math.round(ratio * 1e4) / 100}%)`;
+  };
+  const updateSlides = (index, total) => {
+    const ratio = total <= 1 ? 0 : index / (total - 1);
+    setMarker(rabbit, clamp01(ratio));
+  };
+  const tick = () => {
+    const elapsedMs = options.shell.elapsedMs();
+    const ratio = elapsedMs / options.plannedDurationMs;
+    const clampedRatio = clamp01(ratio);
+    setMarker(turtle, clampedRatio);
+    if (fill) fill.style.width = `${Math.round(clampedRatio * 1e4) / 100}%`;
+    track.toggleAttribute(
+      "data-peitho-overrun",
+      isOverrun(elapsedMs, options.plannedDurationMs)
+    );
+  };
+  const onSlideChange = (event) => {
+    const detail = event.detail;
+    if (!isValidSlideChangeDetail(detail)) {
+      log.error("Invalid peitho:slidechange event");
+      return;
+    }
+    updateSlides(detail.index, detail.total);
+    if (!autoStarted && detail.previousIndex !== null && detail.index > detail.previousIndex) {
+      autoStarted = true;
+      bus.dispatchEvent(
+        new CustomEvent("peitho:timercontrol", {
+          detail: { action: "start" }
+        })
+      );
+    }
+  };
+  updateSlides(options.shell.currentIndex, options.shell.manifest?.slideCount ?? 0);
+  tick();
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  const interval = win.setInterval(tick, 250);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    track.remove();
+  };
+}
+
+// src/agenda.ts
+var EM_DASH = "\u2014";
+var MINUS_SIGN = "\u2212";
+function installAgenda(options) {
+  if (options.sections.length === 0) return () => void 0;
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const bus = options.bus ?? win;
+  const log = options.log ?? console;
+  if (!validateSections(options.sections, log)) return () => void 0;
+  const host = doc.createElement("section");
+  host.dataset.peithoAgenda = "true";
+  host.innerHTML = [
+    "<div data-peitho-agenda-head>",
+    "<span data-peitho-agenda-title>Agenda</span>",
+    "<span data-peitho-agenda-hint>Actual / Planned</span>",
+    "</div>",
+    "<div data-peitho-agenda-list></div>"
+  ].join("");
+  options.root.appendChild(host);
+  const list = host.querySelector("[data-peitho-agenda-list]");
+  const rows = options.sections.map((section) => createRow(doc, section));
+  list.append(...rows.map(({ row }) => row));
+  const actualMs = new Array(options.sections.length).fill(0);
+  let lastElapsedMs = options.shell.elapsedMs();
+  function sectionIndexForSlide(slideIndex) {
+    return options.sections.findIndex(
+      (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
+    );
+  }
+  function render() {
+    const currentSection = sectionIndexForSlide(options.shell.currentIndex);
+    rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
+  }
+  function flushElapsedToSectionOf(slideIndex) {
+    if (slideIndex === null || options.shell.startedAt() === null) return;
+    const elapsedMs = options.shell.elapsedMs();
+    const delta = Math.max(0, elapsedMs - lastElapsedMs);
+    const sectionIndex = sectionIndexForSlide(slideIndex);
+    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
+    lastElapsedMs = elapsedMs;
+  }
+  function onSlideChange(event) {
+    const previousIndex = event.detail?.previousIndex ?? null;
+    flushElapsedToSectionOf(previousIndex);
+    render();
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "reset") return;
+    actualMs.fill(0);
+    lastElapsedMs = 0;
+    render();
+  }
+  function tick() {
+    if (options.shell.startedAt() === null) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      render();
+      return;
+    }
+    flushElapsedToSectionOf(options.shell.currentIndex);
+    render();
+  }
+  render();
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  const interval = win.setInterval(tick, 250);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    host.remove();
+  };
+}
+function validateSections(sections, log) {
+  let expectedStartIndex = 0;
+  for (const [index, section] of sections.entries()) {
+    const label = `manifest section ${index + 1} "${section.name}"`;
+    if (!isValidDurationMs(section.plannedDurationMs)) {
+      log.error(`Invalid plannedDurationMs for ${label} in manifest.json`);
+      return false;
+    }
+    if (!isValidSlideIndex(section.startIndex) || !isValidSlideIndex(section.endIndex)) {
+      log.error(
+        `Invalid ${label}: startIndex and endIndex must be non-negative integers`
+      );
+      return false;
+    }
+    if (section.endIndex < section.startIndex) {
+      log.error(`Invalid ${label}: endIndex must be greater than or equal to startIndex`);
+      return false;
+    }
+    if (section.startIndex !== expectedStartIndex) {
+      log.error(
+        `Invalid ${label}: expected startIndex ${expectedStartIndex}, got ${section.startIndex}`
+      );
+      return false;
+    }
+    expectedStartIndex = section.endIndex + 1;
+  }
+  return true;
+}
+function isValidSlideIndex(index) {
+  return Number.isSafeInteger(index) && index >= 0;
+}
+function createRow(doc, section) {
+  const row = doc.createElement("div");
+  row.dataset.peithoAgendaRow = "true";
+  row.innerHTML = [
+    '<span data-peitho-agenda-marker aria-hidden="true"></span>',
+    "<span data-peitho-agenda-label><span data-peitho-agenda-name></span><span data-peitho-agenda-range></span></span>",
+    "<span data-peitho-agenda-time></span>",
+    "<span data-peitho-agenda-delta></span>"
+  ].join("");
+  row.querySelector("[data-peitho-agenda-name]").textContent = section.name;
+  row.querySelector("[data-peitho-agenda-range]").textContent = formatSlideRange(section);
+  return {
+    row,
+    section,
+    time: row.querySelector("[data-peitho-agenda-time]"),
+    delta: row.querySelector("[data-peitho-agenda-delta]")
+  };
+}
+function updateRow(view, index, currentSection, actual) {
+  const state = agendaState(index, currentSection);
+  view.row.dataset.peithoAgendaState = state;
+  if (state === "done") {
+    view.row.dataset.peithoAgendaOutcome = outcomeFor(actual, view.section.plannedDurationMs);
+  } else {
+    delete view.row.dataset.peithoAgendaOutcome;
+  }
+  view.time.textContent = `${actualText(state, actual)} / ${formatMinuteSeconds(
+    view.section.plannedDurationMs
+  )}`;
+  view.delta.textContent = deltaText(state, actual, view.section.plannedDurationMs);
+}
+function agendaState(index, currentSection) {
+  if (index < currentSection) return "done";
+  if (index === currentSection) return "current";
+  return "upcoming";
+}
+function actualText(state, actual) {
+  return state === "upcoming" ? EM_DASH : formatMinuteSeconds(actual);
+}
+function formatSlideRange(section) {
+  const start = String(section.startIndex + 1).padStart(2, "0");
+  const end = String(section.endIndex + 1).padStart(2, "0");
+  return section.startIndex === section.endIndex ? start : `${start}\u2013${end}`;
+}
+function deltaText(state, actual, planned) {
+  if (state !== "done") return "\xB7";
+  const diffSec = diffSeconds(actual, planned);
+  const sign = diffSec > 0 ? "+" : MINUS_SIGN;
+  return `${sign}${formatMinuteSeconds(Math.abs(diffSec) * 1e3)}`;
+}
+function outcomeFor(actual, planned) {
+  return diffSeconds(actual, planned) > 0 ? "over" : "under";
+}
+function diffSeconds(actual, planned) {
+  return Math.round((actual - planned) / 1e3);
+}
+
 // src/presentDisplay.ts
 var PRESENTER_URL = "presenter.html";
 var PRESENTER_TARGET = "peitho-presenter";
@@ -587,108 +855,6 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   };
 }
 
-// src/timeTracker.ts
-var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
-function isOverrun(elapsedMs, plannedDurationMs) {
-  return elapsedMs > plannedDurationMs;
-}
-function formatScaleTime(ms) {
-  const totalSeconds = Math.round(ms / 1e3);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-function timeScaleLabels(plannedDurationMs) {
-  return Array.from(
-    { length: 5 },
-    (_, index) => formatScaleTime(plannedDurationMs * index / 4)
-  );
-}
-function isValidSlideChangeDetail(detail) {
-  if (typeof detail !== "object" || detail === null) return false;
-  const candidate = detail;
-  const { index, previousIndex, total } = candidate;
-  return typeof index === "number" && Number.isFinite(index) && index >= 0 && typeof total === "number" && Number.isFinite(total) && total > 0 && (previousIndex === null || typeof previousIndex === "number" && Number.isFinite(previousIndex) && previousIndex >= 0);
-}
-function installTimeTracker(options) {
-  if (!Number.isFinite(options.plannedDurationMs) || options.plannedDurationMs <= 0) {
-    throw new Error("plannedDurationMs must be a positive finite number");
-  }
-  const win = options.window ?? window;
-  const doc = options.document ?? document;
-  const log = options.console ?? console;
-  const bus = options.bus ?? win;
-  const variant = options.variant ?? "present";
-  const track = doc.createElement("div");
-  track.className = "peitho-time-tracker";
-  track.dataset.peithoTimeTracker = variant;
-  if (variant === "presenter") {
-    track.innerHTML = [
-      '<div class="tracker-legend"><span>Slide progress</span><span>Time</span></div>',
-      '<div class="tracker">',
-      '<div class="tracker-fill"></div>',
-      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
-      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>',
-      "</div>",
-      `<div class="tracker-scale mono">${timeScaleLabels(options.plannedDurationMs).map((label) => `<span>${label}</span>`).join("")}</div>`
-    ].join("");
-  } else {
-    track.innerHTML = [
-      '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
-      '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>'
-    ].join("");
-  }
-  options.root.appendChild(track);
-  const rabbit = track.querySelector('[data-peitho-marker="rabbit"]');
-  const turtle = track.querySelector('[data-peitho-marker="turtle"]');
-  const fill = track.querySelector(".tracker-fill");
-  let autoStarted = false;
-  const setMarker = (element, ratio) => {
-    element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
-    element.style.transform = `translateX(${-Math.round(ratio * 1e4) / 100}%)`;
-  };
-  const updateSlides = (index, total) => {
-    const ratio = total <= 1 ? 0 : index / (total - 1);
-    setMarker(rabbit, clamp01(ratio));
-  };
-  const tick = () => {
-    const elapsedMs = options.shell.elapsedMs();
-    const ratio = elapsedMs / options.plannedDurationMs;
-    const clampedRatio = clamp01(ratio);
-    setMarker(turtle, clampedRatio);
-    if (fill) fill.style.width = `${Math.round(clampedRatio * 1e4) / 100}%`;
-    track.toggleAttribute(
-      "data-peitho-overrun",
-      isOverrun(elapsedMs, options.plannedDurationMs)
-    );
-  };
-  const onSlideChange = (event) => {
-    const detail = event.detail;
-    if (!isValidSlideChangeDetail(detail)) {
-      log.error("Invalid peitho:slidechange event");
-      return;
-    }
-    updateSlides(detail.index, detail.total);
-    if (!autoStarted && detail.previousIndex !== null && detail.index > detail.previousIndex) {
-      autoStarted = true;
-      bus.dispatchEvent(
-        new CustomEvent("peitho:timercontrol", {
-          detail: { action: "start" }
-        })
-      );
-    }
-  };
-  updateSlides(options.shell.currentIndex, options.shell.manifest?.slideCount ?? 0);
-  tick();
-  bus.addEventListener("peitho:slidechange", onSlideChange);
-  const interval = win.setInterval(tick, 250);
-  return () => {
-    win.clearInterval(interval);
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
-    track.remove();
-  };
-}
-
 // src/presenter.ts
 function formatSeconds(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -818,6 +984,7 @@ async function mountPresenterView(options) {
           </div>
 
           <div class="tracker-wrap" data-peitho-presenter="tracker-slot"></div>
+          <div data-peitho-presenter="agenda-slot"></div>
 
           <div class="controls">
             <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span> <span class="k">Space</span></button>
@@ -851,6 +1018,9 @@ async function mountPresenterView(options) {
   );
   const trackerSlot = options.root.querySelector(
     '[data-peitho-presenter="tracker-slot"]'
+  );
+  const agendaSlot = options.root.querySelector(
+    '[data-peitho-presenter="agenda-slot"]'
   );
   const deckTitle = options.root.querySelector('[data-peitho-presenter="title"]');
   const positionLong = options.root.querySelector(
@@ -886,7 +1056,7 @@ async function mountPresenterView(options) {
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
-  const plannedDurationMs = rawPlannedDurationMs != null && Number.isFinite(rawPlannedDurationMs) && rawPlannedDurationMs > 0 ? rawPlannedDurationMs : null;
+  const plannedDurationMs = rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs) ? rawPlannedDurationMs : null;
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
     log.error("Invalid plannedDurationMs in manifest.json");
   }
@@ -898,6 +1068,16 @@ async function mountPresenterView(options) {
     window: win,
     document: doc,
     variant: "presenter"
+  });
+  const sections = mainShell.manifest?.sections ?? [];
+  const agendaCleanup = installAgenda({
+    root: agendaSlot,
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    document: doc,
+    log
   });
   const rippleTimeouts = /* @__PURE__ */ new Set();
   function setTimerStateChrome(state) {
@@ -1017,6 +1197,7 @@ async function mountPresenterView(options) {
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      agendaCleanup();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();
@@ -1032,6 +1213,8 @@ export {
   PRESENTER_URL,
   calculateCanvasFit,
   fallbackFeatures,
+  formatMinuteSeconds,
+  installAgenda,
   installCanvasClickNavigation,
   installCanvasScaler,
   installCloseOnEscape,
@@ -1042,6 +1225,7 @@ export {
   installSyncBridge,
   installTimeTracker,
   isOverrun,
+  isValidDurationMs,
   mountPresentShell,
   mountPresenterView,
   openPresenterPopup,

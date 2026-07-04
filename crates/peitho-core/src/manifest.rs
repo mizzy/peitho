@@ -23,7 +23,26 @@ pub struct Manifest {
     #[serde(rename = "plannedDurationMs")]
     #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "number | null"))]
     planned_duration_ms: Option<u64>,
+    #[serde(default)]
+    sections: Vec<ManifestSection>,
     slides: Vec<ManifestSlide>,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestSection {
+    name: String,
+    #[serde(rename = "startIndex")]
+    start_index: usize,
+    #[serde(rename = "endIndex")]
+    end_index: usize,
+    #[serde(rename = "plannedDurationMs")]
+    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "number"))]
+    planned_duration_ms: u64,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -39,6 +58,38 @@ pub struct ManifestSlide {
     src: String,
     #[serde(rename = "hasNotes")]
     has_notes: bool,
+}
+
+impl ManifestSection {
+    pub fn new(
+        name: impl Into<String>,
+        start_index: usize,
+        end_index: usize,
+        planned_duration_ms: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            start_index,
+            end_index,
+            planned_duration_ms,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn start_index(&self) -> usize {
+        self.start_index
+    }
+
+    pub fn end_index(&self) -> usize {
+        self.end_index
+    }
+
+    pub fn planned_duration_ms(&self) -> u64 {
+        self.planned_duration_ms
+    }
 }
 
 impl ManifestSlide {
@@ -72,6 +123,7 @@ impl Manifest {
     pub fn new(
         title: impl Into<String>,
         planned_duration_ms: Option<u64>,
+        sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
     ) -> Self {
         let slide_count = slides.len();
@@ -81,6 +133,7 @@ impl Manifest {
             title: title.into(),
             slide_count,
             planned_duration_ms,
+            sections,
             slides,
         }
     }
@@ -91,6 +144,10 @@ impl Manifest {
 
     pub fn planned_duration_ms(&self) -> Option<u64> {
         self.planned_duration_ms
+    }
+
+    pub fn sections(&self) -> &[ManifestSection] {
+        &self.sections
     }
 
     pub fn slides(&self) -> &[ManifestSlide] {
@@ -110,6 +167,20 @@ pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| "Untitled".to_owned());
 
+    let sections = deck
+        .settings()
+        .sections()
+        .iter()
+        .map(|section| {
+            ManifestSection::new(
+                section.name(),
+                section.start(),
+                section.end(),
+                section.planned().as_millis(),
+            )
+        })
+        .collect();
+
     let slides = deck
         .checked_slides()
         .iter()
@@ -126,6 +197,7 @@ pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
     Manifest::new(
         title,
         deck.settings().planned_time().map(PlannedTime::as_millis),
+        sections,
         slides,
     )
 }
@@ -150,6 +222,7 @@ mod tests {
         let manifest = Manifest::new(
             "Peitho Architecture",
             None,
+            Vec::new(),
             vec![
                 ManifestSlide::new(
                     0,
@@ -179,6 +252,7 @@ mod tests {
                 "  \"title\": \"Peitho Architecture\",\n",
                 "  \"slideCount\": 2,\n",
                 "  \"plannedDurationMs\": null,\n",
+                "  \"sections\": [],\n",
                 "  \"slides\": [\n",
                 "    {\n",
                 "      \"index\": 0,\n",
@@ -216,10 +290,29 @@ mod tests {
     }
 
     #[test]
+    fn build_manifest_serializes_sections_from_checked_deck() {
+        let checked = checked_deck(
+            "---\ntime: 3m\n---\n\
+             <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# Intro\n\n---\n# More\n\n---\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# Demo",
+            title_body_layout(),
+        );
+
+        let manifest = build_manifest(&checked);
+
+        assert_eq!(manifest.sections()[0].name(), "Setup");
+        assert_eq!(manifest.sections()[0].start_index(), 0);
+        assert_eq!(manifest.sections()[0].end_index(), 1);
+        assert_eq!(manifest.sections()[0].planned_duration_ms(), 60_000);
+        assert_eq!(manifest.sections()[1].name(), "Demo");
+    }
+
+    #[test]
     fn manifest_serializes_planned_duration_ms() {
         let manifest = Manifest::new(
             "Deck",
             Some(900_000),
+            Vec::new(),
             vec![ManifestSlide::new(
                 0,
                 SlideKey::new("intro").unwrap(),
@@ -259,6 +352,23 @@ mod tests {
 
         assert_eq!(manifest.planned_duration_ms(), None);
         assert!(json.contains(r#""plannedDurationMs": null"#));
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_sections_as_empty_for_additive_compatibility() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.sections().is_empty());
     }
 
     #[test]
@@ -386,22 +496,29 @@ mod ts_tests {
 
     use ts_rs::{Config, TS};
 
-    use super::{Manifest, ManifestSlide};
+    use super::{Manifest, ManifestSection, ManifestSlide};
 
     #[test]
     fn exports_manifest_bindings_with_serde_field_names() {
         let cfg = Config::from_env();
         Manifest::export_all(&cfg).unwrap();
+        ManifestSection::export_all(&cfg).unwrap();
         ManifestSlide::export_all(&cfg).unwrap();
 
         let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
         let manifest = fs::read_to_string(root_bindings.join("Manifest.ts")).unwrap();
+        let section = fs::read_to_string(root_bindings.join("ManifestSection.ts")).unwrap();
         let slide = fs::read_to_string(root_bindings.join("ManifestSlide.ts")).unwrap();
 
+        assert!(manifest.contains(r#"import type { ManifestSection } from "./ManifestSection";"#));
         assert!(manifest.contains("peithoVersion: string"));
         assert!(manifest.contains("slideCount: number"));
         assert!(manifest.contains("plannedDurationMs: number | null"));
+        assert!(manifest.contains("sections: Array<ManifestSection>"));
         assert!(manifest.contains("slides: Array<ManifestSlide>"));
+        assert!(section.contains("startIndex: number"));
+        assert!(section.contains("endIndex: number"));
+        assert!(section.contains("plannedDurationMs: number"));
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
     }

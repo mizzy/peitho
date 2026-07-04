@@ -4,6 +4,8 @@ export {
   calculateCanvasFit,
   installCanvasScaler
 } from "./canvas";
+export { installAgenda } from "./agenda";
+export type { AgendaOptions } from "./agenda";
 export type { CanvasFit, CanvasScalerOptions, CanvasViewport } from "./canvas";
 export {
   installCanvasClickNavigation,
@@ -26,7 +28,12 @@ export { installCloseOnEscape, installKeyboardNavigation, installPresenterKeyboa
 export { mountPresenterView } from "./presenter";
 export { mountPresentShell } from "./shell";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";
-export { installTimeTracker, isOverrun } from "./timeTracker";
+export {
+  formatMinuteSeconds,
+  installTimeTracker,
+  isOverrun,
+  isValidDurationMs
+} from "./timeTracker";
 export type { PresenterOptions, PresenterView } from "./presenter";
 export type {
   NavigateDetail,

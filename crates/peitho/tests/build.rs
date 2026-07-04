@@ -445,6 +445,43 @@ fn lightning_talk_example_declares_five_minute_planned_duration() {
 }
 
 #[test]
+fn lightning_talk_example_declares_agenda_sections() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/lightning-talk/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 5 slide(s)"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(300_000));
+    let sections = manifest["sections"].as_array().unwrap();
+    let expected = [
+        ("Setup", 0, 0, 60_000),
+        ("Problem", 1, 1, 60_000),
+        ("Approach", 2, 3, 120_000),
+        ("Wrap-up", 4, 4, 60_000),
+    ];
+    assert_eq!(sections.len(), expected.len());
+    for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
+        assert_eq!(section["name"].as_str(), Some(name));
+        assert_eq!(section["startIndex"].as_u64(), Some(start));
+        assert_eq!(section["endIndex"].as_u64(), Some(end));
+        assert_eq!(section["plannedDurationMs"].as_u64(), Some(planned));
+    }
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
