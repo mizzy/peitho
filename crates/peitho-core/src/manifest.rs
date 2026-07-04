@@ -118,7 +118,7 @@ pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
                 slide.index(),
                 slide.key().clone(),
                 fragment_src(slide.index(), slide.key()),
-                false,
+                slide.notes().is_some(),
             )
         })
         .collect();
@@ -231,6 +231,16 @@ mod tests {
         let json = manifest_json(&manifest).unwrap();
 
         assert!(json.contains(r#""plannedDurationMs": 900000"#));
+    }
+
+    #[test]
+    fn build_manifest_marks_has_notes_from_slide_notes() {
+        let markdown = "# Intro\n\n<!-- pre-show reminder -->\n\n---\n\n# Plain";
+        let checked = checked_deck(markdown, title_body_layout());
+        let manifest = build_manifest(&checked);
+
+        assert!(manifest.slides()[0].has_notes());
+        assert!(!manifest.slides()[1].has_notes());
     }
 
     #[test]

@@ -121,6 +121,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> MappedSlide {
         layout: layout.clone(),
         slots,
         unassigned,
+        notes: slide.notes.clone(),
     }
 }
 

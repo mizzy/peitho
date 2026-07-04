@@ -290,11 +290,17 @@ pub struct RenderedSlide {
     index: usize,
     key: SlideKey,
     html: String,
+    notes: Option<String>,
 }
 
 impl RenderedSlide {
-    pub(crate) fn new(index: usize, key: SlideKey, html: String) -> Self {
-        Self { index, key, html }
+    pub(crate) fn new(index: usize, key: SlideKey, html: String, notes: Option<String>) -> Self {
+        Self {
+            index,
+            key,
+            html,
+            notes,
+        }
     }
 
     pub fn index(&self) -> usize {
@@ -307,6 +313,10 @@ impl RenderedSlide {
 
     pub fn html(&self) -> &str {
         &self.html
+    }
+
+    pub fn notes(&self) -> Option<&str> {
+        self.notes.as_deref()
     }
 
     pub fn src(&self) -> String {

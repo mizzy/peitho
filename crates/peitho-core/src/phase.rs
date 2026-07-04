@@ -76,6 +76,7 @@ pub struct ParsedSlide {
     pub key_source: KeySource,
     pub layout_request: Option<LayoutRequest>,
     pub fragments: Vec<SourceFragment>,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,7 @@ pub struct MappedSlide {
     pub(crate) layout: Layout,
     pub(crate) slots: BTreeMap<SlotName, MappedSlot>,
     pub(crate) unassigned: Vec<UnassignedFragment>,
+    pub(crate) notes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +158,7 @@ pub struct CheckedSlide {
     key: SlideKey,
     layout: Layout,
     slots: BTreeMap<SlotName, Vec<SourceFragment>>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,12 +213,14 @@ impl CheckedSlide {
         key: SlideKey,
         layout: Layout,
         slots: BTreeMap<SlotName, Vec<SourceFragment>>,
+        notes: Option<String>,
     ) -> Self {
         Self {
             index,
             key,
             layout,
             slots,
+            notes,
         }
     }
 
@@ -233,6 +238,10 @@ impl CheckedSlide {
 
     pub(crate) fn slots(&self) -> &BTreeMap<SlotName, Vec<SourceFragment>> {
         &self.slots
+    }
+
+    pub(crate) fn notes(&self) -> Option<&str> {
+        self.notes.as_deref()
     }
 
     pub(crate) fn title_text(&self) -> Option<String> {
@@ -357,6 +366,7 @@ mod tests {
                 key_source: KeySource::Explicit { line: 1 },
                 layout_request: None,
                 fragments: vec![SourceFragment::paragraph(3, "body")],
+                notes: None,
             }],
         );
 

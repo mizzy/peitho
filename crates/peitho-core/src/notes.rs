@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::{domain::SlideKey, error::Result, json::pretty_json};
+use crate::{
+    domain::{RenderedSlide, SlideKey},
+    error::Result,
+    json::pretty_json,
+};
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(
@@ -29,6 +33,21 @@ impl Notes {
 
     pub fn new(notes: BTreeMap<SlideKey, String>) -> Self {
         Self { version: 1, notes }
+    }
+
+    /// Collect speaker notes from a rendered deck. Slides without notes are
+    /// omitted from the map (they are represented by `hasNotes: false` in the
+    /// manifest, and by absence in `notes.json`).
+    pub fn from_slides(slides: &[RenderedSlide]) -> Self {
+        let map = slides
+            .iter()
+            .filter_map(|slide| {
+                slide
+                    .notes()
+                    .map(|text| (slide.key().clone(), text.to_owned()))
+            })
+            .collect();
+        Self::new(map)
     }
 }
 
@@ -79,5 +98,41 @@ mod tests {
         let json = serde_json::to_string(&notes).unwrap();
 
         assert!(json.contains(r#""arch-1":"speaker note""#));
+    }
+
+    #[test]
+    fn from_slides_skips_slides_without_notes() {
+        use crate::domain::RenderedSlide;
+
+        let slides = vec![
+            RenderedSlide::new(
+                0,
+                SlideKey::new("intro").unwrap(),
+                String::new(),
+                Some("only the intro has a note".to_owned()),
+            ),
+            RenderedSlide::new(1, SlideKey::new("plain").unwrap(), String::new(), None),
+            RenderedSlide::new(
+                2,
+                SlideKey::new("outro").unwrap(),
+                String::new(),
+                Some("closing thought".to_owned()),
+            ),
+        ];
+        let notes = Notes::new(
+            [
+                (
+                    SlideKey::new("intro").unwrap(),
+                    "only the intro has a note".to_owned(),
+                ),
+                (
+                    SlideKey::new("outro").unwrap(),
+                    "closing thought".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(super::Notes::from_slides(&slides), notes);
     }
 }
