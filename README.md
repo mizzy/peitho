@@ -33,6 +33,21 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 
 ![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
 
+## Install
+
+Grab a prebuilt binary from the [Releases page](https://github.com/mizzy/peitho/releases). Each release ships a tarball per target with a single `peitho` binary — everything (layouts, base theme, presentation shell) is embedded, so Node.js and npm are not needed at runtime.
+
+```sh
+# macOS arm64 (Apple Silicon) — replace vX.Y.Z with the version you want
+curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
+tar xzf peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
+mv peitho-vX.Y.Z-aarch64-apple-darwin/peitho /usr/local/bin/
+```
+
+Available targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Or build from source with `cargo install --path crates/peitho` after cloning (run `cd packages/peitho-present && npm ci && npm run build` first so the shell is up to date).
+
 ## Usage
 
 ```sh
