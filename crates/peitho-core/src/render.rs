@@ -407,6 +407,10 @@ pub fn render_presenter_index() -> String {
       --warn: oklch(72% 0.19 30);
       --warn-soft: oklch(72% 0.19 30 / 0.18);
       --pause: oklch(82% 0.15 90);
+      --stage-gap: 12px;
+      --colhead-h: 18px;
+      --kbdbar-h: 22px;
+      --notes-h: 24vh;
     }
     html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
     body { font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN", sans-serif; font-size: 14px; letter-spacing: 0; }
@@ -414,22 +418,23 @@ pub fn render_presenter_index() -> String {
     .mono { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
     #peitho-presenter-root { min-height: 100vh; height: 100vh; }
     .app { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(400px, 1fr); gap: 20px; padding: 20px; box-sizing: border-box; height: 100vh; max-height: 100vh; }
-    .left { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 12px; min-height: 0; min-width: 0; }
+    .left { container-type: size; min-height: 0; min-width: 0; display: flex; justify-content: center; }
+    .stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * 16 / 9))); }
     .right { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 16px; min-height: 0; min-width: 0; }
-    .colhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; min-width: 0; }
+    .colhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; min-width: 0; height: var(--colhead-h); }
     .status-line { display: inline-flex; align-items: center; gap: 10px; color: var(--fg-dim); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; min-width: 0; }
     .status-line .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
     .status-line .now { color: var(--accent); }
     .deck-title { font-size: 12px; color: var(--fg-mute); letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .slide-frame { min-height: 0; min-width: 0; display: flex; align-items: center; justify-content: center; container-type: size; }
-    .slide-pane { position: relative; width: min(100cqw, calc(100cqh * 16 / 9)); aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
+    .slide-frame { min-width: 0; }
+    .slide-pane { position: relative; width: 100%; box-sizing: border-box; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
     .peitho-presenter-pane { position: relative; overflow: hidden; background: var(--bg-slide); min-height: 0; }
-    .kbdbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; color: var(--fg-dim); font-size: 12px; }
+    .kbdbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; color: var(--fg-dim); font-size: 12px; height: var(--kbdbar-h); flex: 0 0 auto; }
     .kbdbar .pos { color: var(--fg-mute); font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
     .kbd { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; color: var(--fg-mute); line-height: 1.2; }
     .kbdbar .grp { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; white-space: nowrap; }
     .kbdbar .grp:first-of-type { margin-left: 0; }
-    .notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, auto); min-height: 0; max-height: 42vh; overflow: hidden; }
+    .notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, 1fr); flex: 1 0 var(--notes-h); max-height: 42vh; overflow: hidden; }
     .notes-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
     .notes-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
     .notes-body { overflow: auto; padding: 10px 16px 12px; font-size: 16px; line-height: 1.4; color: var(--fg); white-space: pre-wrap; }
@@ -791,6 +796,11 @@ mod tests {
         ));
         assert!(html.contains(".slide-pane"));
         assert!(html.contains(".next-preview"));
+        assert!(html.contains(".stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * 16 / 9))); }"));
+        assert!(
+            html.contains(".slide-pane { position: relative; width: 100%; box-sizing: border-box;")
+        );
+        assert!(html.contains(".notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, 1fr); flex: 1 0 var(--notes-h); max-height: 42vh; overflow: hidden; }"));
         assert!(html.contains(".notes-body"));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));

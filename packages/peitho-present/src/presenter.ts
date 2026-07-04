@@ -114,40 +114,42 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   options.root.innerHTML = `
     <section class="peitho-presenter app" data-screen-label="Presenter view">
       <section class="left" aria-label="Current slide and notes">
-        <header class="colhead">
-          <div class="status-line">
-            <span class="now">Now</span>
-            <span class="sep"></span>
-            <span data-peitho-presenter="position">Slide 00 of 00</span>
-          </div>
-          <div class="deck-title" data-peitho-presenter="title">Peitho Deck</div>
-        </header>
+        <div class="stage">
+          <header class="colhead">
+            <div class="status-line">
+              <span class="now">Now</span>
+              <span class="sep"></span>
+              <span data-peitho-presenter="position">Slide 00 of 00</span>
+            </div>
+            <div class="deck-title" data-peitho-presenter="title">Peitho Deck</div>
+          </header>
 
-        <div class="slide-frame">
-          <div
-            class="peitho-presenter-pane slide-pane"
-            data-peitho-presenter="current"
-            role="img"
-            aria-label="Current slide preview"
-          ></div>
+          <div class="slide-frame">
+            <div
+              class="peitho-presenter-pane slide-pane"
+              data-peitho-presenter="current"
+              role="img"
+              aria-label="Current slide preview"
+            ></div>
+          </div>
+
+          <div class="kbdbar">
+            <div class="pos" data-peitho-presenter="position-short">00 / 00</div>
+            <div>
+              <span class="grp"><span class="kbd">←</span><span class="kbd">→</span> navigate</span>
+              <span class="grp"><span class="kbd">Space</span> start / pause</span>
+              <span class="grp"><span class="kbd">Esc</span> close</span>
+            </div>
+          </div>
+
+          <section class="notes" aria-label="Speaker notes">
+            <div class="notes-head">
+              <span>Notes</span>
+              <span class="badge" data-peitho-presenter="notes-slide">Slide 00</span>
+            </div>
+            <div class="notes-body" data-peitho-presenter="notes"></div>
+          </section>
         </div>
-
-        <div class="kbdbar">
-          <div class="pos" data-peitho-presenter="position-short">00 / 00</div>
-          <div>
-            <span class="grp"><span class="kbd">←</span><span class="kbd">→</span> navigate</span>
-            <span class="grp"><span class="kbd">Space</span> start / pause</span>
-            <span class="grp"><span class="kbd">Esc</span> close</span>
-          </div>
-        </div>
-
-        <section class="notes" aria-label="Speaker notes">
-          <div class="notes-head">
-            <span>Notes</span>
-            <span class="badge" data-peitho-presenter="notes-slide">Slide 00</span>
-          </div>
-          <div class="notes-body" data-peitho-presenter="notes"></div>
-        </section>
       </section>
 
       <aside class="right">
