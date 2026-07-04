@@ -16,6 +16,7 @@ const manifest = {
   title: "Demo",
   slideCount: 2,
   plannedDurationMs: null,
+  sections: [],
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
     { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { installTimeTracker, isOverrun, type TimeTrackerShell } from "../src/index";
+import {
+  formatMinuteSeconds,
+  installTimeTracker,
+  isOverrun,
+  type TimeTrackerShell
+} from "../src/index";
 
 const cleanups: Array<() => void> = [];
 
@@ -22,6 +27,13 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   document.body.replaceChildren();
+});
+
+it("formats durations as tracker-style m:ss", () => {
+  expect(formatMinuteSeconds(0)).toBe("0:00");
+  expect(formatMinuteSeconds(15_000)).toBe("0:15");
+  expect(formatMinuteSeconds(90_000)).toBe("1:30");
+  expect(formatMinuteSeconds(3_600_000)).toBe("60:00");
 });
 
 it("moves rabbit by slide progress and turtle by elapsed progress", () => {

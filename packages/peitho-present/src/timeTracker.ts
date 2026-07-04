@@ -23,7 +23,7 @@ export function isOverrun(elapsedMs: number, plannedDurationMs: number): boolean
   return elapsedMs > plannedDurationMs;
 }
 
-function formatScaleTime(ms: number): string {
+export function formatMinuteSeconds(ms: number): string {
   const totalSeconds = Math.round(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = (totalSeconds % 60).toString().padStart(2, "0");
@@ -32,7 +32,7 @@ function formatScaleTime(ms: number): string {
 
 function timeScaleLabels(plannedDurationMs: number): string[] {
   return Array.from({ length: 5 }, (_, index) =>
-    formatScaleTime((plannedDurationMs * index) / 4)
+    formatMinuteSeconds((plannedDurationMs * index) / 4)
   );
 }
 

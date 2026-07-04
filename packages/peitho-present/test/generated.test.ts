@@ -34,6 +34,7 @@ describe("generated manifest contract", () => {
       title: "Demo",
       slideCount: 1,
       plannedDurationMs: null,
+      sections: [],
       slides: [
         {
           index: 0,
