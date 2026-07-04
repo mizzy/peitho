@@ -5,9 +5,10 @@
 `git tag vX.Y.Z && git push --tags` で GitHub Release が自動生成され、以下4ターゲットの `peitho` バイナリが tar.gz で添付される状態を作る。
 
 - `aarch64-apple-darwin` (macOS arm64)
-- `x86_64-apple-darwin` (macOS x86_64)
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
+
+**追記 (2026-07-04)**: `x86_64-apple-darwin` は当初対象に入れていたが、GitHub Actions の `macos-13` runner のキュー待ちがリリースをブロックするため、初回リリースからは外した。必要になったら `macos-latest` (arm64) 上で `--target x86_64-apple-darwin` のクロスビルドとして復活させる (別issue)。
 
 ## 方針
 

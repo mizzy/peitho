@@ -46,7 +46,7 @@ tar xzf peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
 mv peitho-vX.Y.Z-aarch64-apple-darwin/peitho /usr/local/bin/
 ```
 
-Available targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. Or build from source with `cargo install --path crates/peitho` after cloning (run `cd packages/peitho-present && npm ci && npm run build` first so the shell is up to date).
+Available targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (Intel Mac は現状 GitHub Actions の macos-13 runner キュー待ちが長すぎるため対象外)。 Or build from source with `cargo install --path crates/peitho` after cloning (run `cd packages/peitho-present && npm ci && npm run build` first so the shell is up to date).
 
 ## Usage
 
