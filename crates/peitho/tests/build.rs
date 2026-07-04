@@ -461,12 +461,24 @@ fn lightning_talk_example_declares_agenda_sections() {
         .success()
         .stdout(predicate::str::contains("built 5 slide(s)"));
 
-    let manifest = fs::read_to_string(out.path().join("manifest.json")).unwrap();
-    assert!(manifest.contains(r#""plannedDurationMs": 300000"#));
-    assert!(manifest.contains(r#""sections": ["#));
-    assert!(manifest.contains(r#""name": "Setup""#));
-    assert!(manifest.contains(r#""startIndex": 2"#));
-    assert!(manifest.contains(r#""endIndex": 3"#));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(300_000));
+    let sections = manifest["sections"].as_array().unwrap();
+    let expected = [
+        ("Setup", 0, 0, 60_000),
+        ("Problem", 1, 1, 60_000),
+        ("Approach", 2, 3, 120_000),
+        ("Wrap-up", 4, 4, 60_000),
+    ];
+    assert_eq!(sections.len(), expected.len());
+    for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
+        assert_eq!(section["name"].as_str(), Some(name));
+        assert_eq!(section["startIndex"].as_u64(), Some(start));
+        assert_eq!(section["endIndex"].as_u64(), Some(end));
+        assert_eq!(section["plannedDurationMs"].as_u64(), Some(planned));
+    }
 }
 
 #[test]

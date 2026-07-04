@@ -241,7 +241,9 @@ fn finalize_section_settings(
         return Ok(settings.with_sections(sections));
     }
 
-    Ok(DeckSettings::new(Some(section_total), sections))
+    Ok(settings
+        .with_planned_time(Some(section_total))
+        .with_sections(sections))
 }
 
 fn section_total_from_millis<I>(items: I) -> Result<u64>
@@ -547,6 +549,7 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
     let mut section_marker: Option<PageSectionMarker> = None;
+    let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
     let mut note_fragments: Vec<String> = Vec::new();
     let mut block: Option<OpenBlock> = None;
@@ -618,6 +621,7 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                         &mut explicit_key,
                         &mut layout_request,
                         &mut section_marker,
+                        &mut page_settings_line,
                         &mut note_fragments,
                     )?;
                 }
@@ -746,6 +750,7 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                         &mut explicit_key,
                         &mut layout_request,
                         &mut section_marker,
+                        &mut page_settings_line,
                         &mut note_fragments,
                     )?;
                 }
@@ -821,11 +826,26 @@ fn process_html_chunk(
     explicit_key: &mut Option<(SlideKey, usize)>,
     layout_request: &mut Option<LayoutRequest>,
     section_marker: &mut Option<PageSectionMarker>,
+    page_settings_line: &mut Option<usize>,
     note_fragments: &mut Vec<String>,
 ) -> Result<()> {
     if let Some(settings) = parse_page_comment(raw, line)
         .map_err(|err| attach_slide_context(err, index, explicit_key_ctx.as_ref(), fragments))?
     {
+        if page_settings_line.is_some() {
+            let err = BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "duplicate page settings comment",
+                "merge the settings into the first page settings comment",
+            );
+            return Err(attach_slide_context(
+                err,
+                index,
+                explicit_key_ctx.as_ref(),
+                fragments,
+            ));
+        }
         if list_depth > 0 || seen_content {
             let err = BuildError::new(
                 ErrorKind::Parse,
@@ -840,6 +860,7 @@ fn process_html_chunk(
                 fragments,
             ));
         }
+        *page_settings_line = Some(line);
         if let Some(key) = settings.key {
             *explicit_key = Some((key, line));
         }
@@ -1389,6 +1410,42 @@ After list
             assert!(err.to_string().contains(message));
             assert_eq!(err.help, help);
         }
+    }
+
+    #[test]
+    fn rejects_second_page_settings_comment_that_would_override_section() {
+        let err = parse_markdown(
+            "<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"1m\"} -->\n\
+             # Title",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("duplicate page settings comment"));
+        assert_eq!(
+            err.help,
+            "merge the settings into the first page settings comment"
+        );
+    }
+
+    #[test]
+    fn rejects_second_page_settings_comment_that_only_sets_key() {
+        let err = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n\
+             <!-- {\"key\":\"cover\"} -->\n\
+             # Title",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("duplicate page settings comment"));
+        assert_eq!(
+            err.help,
+            "merge the settings into the first page settings comment"
+        );
     }
 
     #[test]

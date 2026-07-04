@@ -496,10 +496,10 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-time],
     [data-peitho-agenda-delta] { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-dim); }
     [data-peitho-agenda-state="current"] [data-peitho-agenda-time] { color: var(--accent); }
-    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"] [data-peitho-agenda-time],
-    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
-    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"] [data-peitho-agenda-time],
-    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"] [data-peitho-agenda-delta] { color: var(--warn); }
+    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-time],
+    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
+    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-time],
+    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-delta] { color: var(--warn); }
     .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
     .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--fg-mute); padding: 4px 8px; font: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; transition: background 90ms ease, color 90ms ease, border-color 90ms ease, transform 60ms ease, box-shadow 90ms ease; min-width: 0; position: relative; overflow: hidden; -webkit-tap-highlight-color: transparent; }
     .btn .k { color: var(--fg-dim); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: none; }
@@ -886,13 +886,12 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }"#));
         assert!(html.contains(r#"[data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
-        assert!(
-            html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"]"#)
-        );
-        assert!(
-            html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"]"#)
-        );
+        assert!(html
+            .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"]"#));
+        assert!(html
+            .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"]"#));
         assert!(!html.contains(r#"[data-peitho-agenda-delta="under"] {"#));
+        assert!(!html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="#));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));
         assert!(html.contains("margin-top: auto"));

@@ -154,6 +154,8 @@ function installAgenda(options) {
   ].join("");
   options.root.appendChild(host);
   const list = host.querySelector("[data-peitho-agenda-list]");
+  const rows = options.sections.map((section) => createRow(doc, section));
+  list.append(...rows.map(({ row }) => row));
   const actualMs = new Array(options.sections.length).fill(0);
   let lastElapsedMs = options.shell.elapsedMs();
   function sectionIndexForSlide(slideIndex) {
@@ -163,46 +165,52 @@ function installAgenda(options) {
   }
   function render() {
     const currentSection = sectionIndexForSlide(options.shell.currentIndex);
-    list.replaceChildren(
-      ...options.sections.map(
-        (section, index) => renderRow(doc, section, index, currentSection, actualMs[index])
-      )
-    );
+    rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
   }
-  function onSlideChange() {
+  function flushElapsedToSlide(slideIndex) {
+    if (slideIndex === null || options.shell.startedAt() === null) return;
+    const elapsedMs = options.shell.elapsedMs();
+    const delta = Math.max(0, elapsedMs - lastElapsedMs);
+    const sectionIndex = sectionIndexForSlide(slideIndex);
+    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
+    lastElapsedMs = elapsedMs;
+  }
+  function onSlideChange(event) {
+    const previousIndex = event.detail?.previousIndex ?? null;
+    flushElapsedToSlide(previousIndex);
+    render();
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "reset") return;
+    actualMs.fill(0);
+    lastElapsedMs = 0;
     render();
   }
   function tick() {
-    const elapsedMs = options.shell.elapsedMs();
     if (options.shell.startedAt() === null) {
       actualMs.fill(0);
       lastElapsedMs = 0;
       render();
       return;
     }
-    const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(options.shell.currentIndex);
-    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
-    lastElapsedMs = elapsedMs;
+    flushElapsedToSlide(options.shell.currentIndex);
     render();
   }
   render();
   bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
   const interval = win.setInterval(tick, 250);
   return () => {
     win.clearInterval(interval);
     bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
     host.remove();
   };
 }
-function renderRow(doc, section, index, currentSection, actual) {
-  const state = agendaState(index, currentSection);
+function createRow(doc, section) {
   const row = doc.createElement("div");
   row.dataset.peithoAgendaRow = "true";
-  row.dataset.peithoAgendaState = state;
-  if (state === "done") {
-    row.dataset.peithoAgendaDelta = actual > section.plannedDurationMs ? "over" : "under";
-  }
   row.innerHTML = [
     '<span data-peitho-agenda-marker aria-hidden="true"></span>',
     "<span data-peitho-agenda-label><span data-peitho-agenda-name></span><span data-peitho-agenda-range></span></span>",
@@ -211,16 +219,25 @@ function renderRow(doc, section, index, currentSection, actual) {
   ].join("");
   row.querySelector("[data-peitho-agenda-name]").textContent = section.name;
   row.querySelector("[data-peitho-agenda-range]").textContent = formatSlideRange(section);
-  row.querySelector("[data-peitho-agenda-time]").textContent = `${actualText(
-    state,
-    actual
-  )} / ${formatMinuteSeconds(section.plannedDurationMs)}`;
-  row.querySelector("[data-peitho-agenda-delta]").textContent = deltaText(
-    state,
-    actual,
-    section.plannedDurationMs
-  );
-  return row;
+  return {
+    row,
+    section,
+    time: row.querySelector("[data-peitho-agenda-time]"),
+    delta: row.querySelector("[data-peitho-agenda-delta]")
+  };
+}
+function updateRow(view, index, currentSection, actual) {
+  const state = agendaState(index, currentSection);
+  view.row.dataset.peithoAgendaState = state;
+  if (state === "done") {
+    view.row.dataset.peithoAgendaOutcome = outcomeFor(actual, view.section.plannedDurationMs);
+  } else {
+    delete view.row.dataset.peithoAgendaOutcome;
+  }
+  view.time.textContent = `${actualText(state, actual)} / ${formatMinuteSeconds(
+    view.section.plannedDurationMs
+  )}`;
+  view.delta.textContent = deltaText(state, actual, view.section.plannedDurationMs);
 }
 function agendaState(index, currentSection) {
   if (index < currentSection) return "done";
@@ -237,9 +254,15 @@ function formatSlideRange(section) {
 }
 function deltaText(state, actual, planned) {
   if (state !== "done") return "\xB7";
-  const diff = actual - planned;
-  const sign = diff > 0 ? "+" : MINUS_SIGN;
-  return `${sign}${formatMinuteSeconds(Math.abs(diff))}`;
+  const diffSec = diffSeconds(actual, planned);
+  const sign = diffSec > 0 ? "+" : MINUS_SIGN;
+  return `${sign}${formatMinuteSeconds(Math.abs(diffSec) * 1e3)}`;
+}
+function outcomeFor(actual, planned) {
+  return diffSeconds(actual, planned) > 0 ? "over" : "under";
+}
+function diffSeconds(actual, planned) {
+  return Math.round((actual - planned) / 1e3);
 }
 
 // src/presentDisplay.ts
@@ -1011,7 +1034,7 @@ async function mountPresenterView(options) {
     variant: "presenter"
   });
   const sections = mainShell.manifest?.sections ?? [];
-  const agendaCleanup = sections.length === 0 ? () => void 0 : installAgenda({
+  const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
     sections,

@@ -273,17 +273,14 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           variant: "presenter"
         });
   const sections = mainShell.manifest?.sections ?? [];
-  const agendaCleanup =
-    sections.length === 0
-      ? () => undefined
-      : installAgenda({
-          root: agendaSlot,
-          shell: mainShell,
-          sections,
-          bus,
-          window: win,
-          document: doc
-        });
+  const agendaCleanup = installAgenda({
+    root: agendaSlot,
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    document: doc
+  });
   const rippleTimeouts = new Set<number>();
 
   function setTimerStateChrome(state: TimerState): void {

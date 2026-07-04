@@ -89,6 +89,11 @@ impl DeckSettings {
         self.sections = sections;
         self
     }
+
+    pub(crate) fn with_planned_time(mut self, planned_time: Option<PlannedTime>) -> Self {
+        self.planned_time = planned_time;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -419,6 +424,21 @@ mod tests {
         assert_eq!(settings.sections()[0].name(), "Setup");
         assert_eq!(settings.sections()[0].start(), 0);
         assert_eq!(settings.sections()[0].end(), 1);
+    }
+
+    #[test]
+    fn deck_settings_with_planned_time_preserves_sections() {
+        let setup = DeckSection::new(
+            "Setup".to_owned(),
+            PlannedTime::from_millis(60_000).unwrap(),
+            0,
+            1,
+        );
+        let settings = DeckSettings::new(None, vec![setup.clone()])
+            .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
+
+        assert_eq!(settings.planned_time().unwrap().as_millis(), 120_000);
+        assert_eq!(settings.sections(), &[setup]);
     }
 
     #[test]
