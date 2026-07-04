@@ -242,31 +242,35 @@ it("scales current and next preview shells to their pane sizes", async () => {
   );
 });
 
-it("buttons emit navigate and timercontrol requests only", async () => {
+it("buttons emit navigate timercontrol and close requests", async () => {
   const root = document.createElement("main");
   const { channel, factory } = mockSyncChannelFactory();
-  const closeWindow = vi.fn();
   const view = await mountPresenterView({
     root,
     notes,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
-    syncChannelFactory: factory,
-    closeWindow
+    syncChannelFactory: factory
   });
   views.push(view);
   const events: unknown[] = [];
+  const closeRequests: unknown[] = [];
   const onNavigate = (event: Event): void => {
     events.push((event as CustomEvent).detail);
   };
   const onTimerControl = (event: Event): void => {
     events.push((event as CustomEvent).detail);
   };
+  const onCloseRequest = (event: Event): void => {
+    closeRequests.push((event as CustomEvent).detail);
+  };
   window.addEventListener("peitho:navigate", onNavigate);
   window.addEventListener("peitho:timercontrol", onTimerControl);
+  window.addEventListener("peitho:closerequest", onCloseRequest);
   cleanups.push(() => window.removeEventListener("peitho:navigate", onNavigate));
   cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  cleanups.push(() => window.removeEventListener("peitho:closerequest", onCloseRequest));
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="start"]')?.click();
@@ -280,6 +284,6 @@ it("buttons emit navigate and timercontrol requests only", async () => {
     { action: "pause" },
     { action: "reset" }
   ]);
-  expect(channel.sent).toEqual([{ index: 1 }]);
-  expect(closeWindow).toHaveBeenCalledTimes(1);
+  expect(closeRequests).toEqual([null]);
+  expect(channel.sent).toEqual([{ index: 1 }, { close: true }]);
 });

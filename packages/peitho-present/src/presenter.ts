@@ -12,7 +12,6 @@ export type PresenterOptions = {
   document?: Document;
   now?: () => number;
   syncChannelFactory?: SyncChannelFactory;
-  closeWindow?: () => void;
   console?: Pick<Console, "error">;
 };
 
@@ -61,7 +60,6 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const doc = options.document ?? document;
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
-  const closeWindow = options.closeWindow ?? (() => win.close());
   const log = options.console ?? console;
   const bus = win;
   const previewBus = new EventTarget();
@@ -190,7 +188,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     });
   }
   options.root.querySelector('[data-peitho-action="close"]')?.addEventListener("click", () => {
-    closeWindow();
+    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   });
 
   const interval = win.setInterval(tick, 250);
