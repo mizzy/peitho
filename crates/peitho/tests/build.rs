@@ -445,6 +445,31 @@ fn lightning_talk_example_declares_five_minute_planned_duration() {
 }
 
 #[test]
+fn lightning_talk_example_declares_agenda_sections() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/lightning-talk/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 5 slide(s)"));
+
+    let manifest = fs::read_to_string(out.path().join("manifest.json")).unwrap();
+    assert!(manifest.contains(r#""plannedDurationMs": 300000"#));
+    assert!(manifest.contains(r#""sections": ["#));
+    assert!(manifest.contains(r#""name": "Setup""#));
+    assert!(manifest.contains(r#""startIndex": 2"#));
+    assert!(manifest.contains(r#""endIndex": 3"#));
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();

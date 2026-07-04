@@ -477,6 +477,29 @@ pub fn render_presenter_index() -> String {
     .tracker-scale { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 6px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
     .tracker-scale span { border-left: 1px solid var(--line-soft); padding-left: 6px; }
     .tracker-scale span:first-child { border-left: none; padding-left: 0; }
+    [data-peitho-agenda] { overflow: hidden; padding: 0 16px 14px; }
+    [data-peitho-agenda-head] { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
+    [data-peitho-agenda-title] { color: var(--fg-mute); }
+    [data-peitho-agenda-hint] { white-space: nowrap; }
+    [data-peitho-agenda-list] { display: grid; }
+    [data-peitho-agenda-row] { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; min-height: 28px; padding: 6px 0; }
+    [data-peitho-agenda-row] + [data-peitho-agenda-row] { border-top: 1px solid var(--line-soft); }
+    [data-peitho-agenda-marker] { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--fg-dim); box-sizing: border-box; }
+    [data-peitho-agenda-state="done"] [data-peitho-agenda-marker] { background: var(--fg-dim); border-color: var(--fg-dim); }
+    [data-peitho-agenda-state="current"] [data-peitho-agenda-marker] { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    [data-peitho-agenda-state="upcoming"] [data-peitho-agenda-marker] { background: transparent; border-color: var(--fg-dim); }
+    [data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+    [data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }
+    [data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }
+    [data-peitho-agenda-state="current"] [data-peitho-agenda-name] { color: var(--fg); font-weight: 600; }
+    [data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
+    [data-peitho-agenda-time],
+    [data-peitho-agenda-delta] { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-dim); }
+    [data-peitho-agenda-state="current"] [data-peitho-agenda-time] { color: var(--accent); }
+    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"] [data-peitho-agenda-time],
+    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
+    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"] [data-peitho-agenda-time],
+    [data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"] [data-peitho-agenda-delta] { color: var(--warn); }
     .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
     .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--fg-mute); padding: 4px 8px; font: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; transition: background 90ms ease, color 90ms ease, border-color 90ms ease, transform 60ms ease, box-shadow 90ms ease; min-width: 0; position: relative; overflow: hidden; -webkit-tap-highlight-color: transparent; }
     .btn .k { color: var(--fg-dim); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: none; }
@@ -844,6 +867,36 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
         assert!(!html.contains(".peitho-time-tracker { position: absolute"));
         assert!(!html.contains("bottom: 0; height: 6px"));
+    }
+
+    #[test]
+    fn presenter_index_includes_agenda_css_with_data_selectors() {
+        let html = render_presenter_index();
+
+        assert!(html.contains(r#"[data-peitho-agenda] { overflow: hidden;"#));
+        assert!(html.contains(r#"[data-peitho-agenda-head]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-list]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-row]"#));
+        assert!(html.contains("grid-template-columns: 10px minmax(0, 1fr) auto auto"));
+        assert!(html.contains(r#"[data-peitho-agenda-row] + [data-peitho-agenda-row]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-marker]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="done"]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="current"]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="upcoming"]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }"#));
+        assert!(html.contains(r#"[data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }"#));
+        assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
+        assert!(
+            html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="under"]"#)
+        );
+        assert!(
+            html.contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-delta="over"]"#)
+        );
+        assert!(!html.contains(r#"[data-peitho-agenda-delta="under"] {"#));
+        assert!(html.contains(".clock { display: flex; flex-direction: column;"));
+        assert!(html.contains(".controls {"));
+        assert!(html.contains("margin-top: auto"));
+        assert!(!html.contains(".agenda"));
     }
 
     #[test]
