@@ -101,6 +101,7 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(root.querySelector(".status-line")?.textContent).not.toContain("Section");
   expect(root.querySelector(".kbdbar")?.textContent).toContain("Space");
   expect(root.querySelector(".kbdbar")?.textContent).toContain("start / pause");
+  expect(root.querySelector(".kbdbar")?.textContent?.replace(/\s+/g, " ")).toContain("S swap");
 
   const clock = root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')!;
   const pill = root.querySelector<HTMLElement>('[data-peitho-presenter="state-pill"]')!;
@@ -389,6 +390,7 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   views.push(view);
   const events: unknown[] = [];
   const closeRequests: unknown[] = [];
+  const swapRequests: unknown[] = [];
   const onNavigate = (event: Event): void => {
     events.push((event as CustomEvent).detail);
   };
@@ -398,18 +400,24 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   const onCloseRequest = (event: Event): void => {
     closeRequests.push((event as CustomEvent).detail);
   };
+  const onSwapRequest = (event: Event): void => {
+    swapRequests.push((event as CustomEvent).detail);
+  };
   window.addEventListener("peitho:navigate", onNavigate);
   window.addEventListener("peitho:timercontrol", onTimerControl);
   window.addEventListener("peitho:closerequest", onCloseRequest);
+  window.addEventListener("peitho:swaprequest", onSwapRequest);
   cleanups.push(() => window.removeEventListener("peitho:navigate", onNavigate));
   cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
   cleanups.push(() => window.removeEventListener("peitho:closerequest", onCloseRequest));
+  cleanups.push(() => window.removeEventListener("peitho:swaprequest", onSwapRequest));
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="swap"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="close"]')?.click();
 
   expect(events).toEqual([
@@ -420,7 +428,8 @@ it("buttons emit navigate timercontrol and close requests", async () => {
     { action: "reset" }
   ]);
   expect(closeRequests).toEqual([null]);
-  expect(channel.sent).toEqual([{ index: 1 }, { close: true }]);
+  expect(swapRequests).toEqual([null]);
+  expect(channel.sent).toEqual([{ index: 1 }, { swapped: true }, { close: true }]);
 });
 
 it("maps presenter Space to timer playpause without navigating", async () => {

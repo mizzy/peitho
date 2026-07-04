@@ -331,13 +331,27 @@ pub fn render_present_index() -> String {
       const root = document.getElementById('peitho-present-root');
       try {
         window.peithoNotes = await fetchOk('notes.json').then((response) => response.json());
+        const configPromise = fetchOk('present.json')
+          .then((response) => response.json())
+          .catch((_error) => {
+            console.error("failed to load present.json; time tracker and display swap disabled");
+            return null;
+          });
         peitho.installCloseOnEscape(window);
         peitho.installKeyboardNavigation(window);
-        peitho.installSyncBridge(window, peitho.serverSyncChannelFactory());
         peitho.installPresentationControls({ root, window, document });
         peitho.installCanvasClickNavigation({ root, window });
         peitho.installFullscreenShortcut({ window, document });
         const shell = await peitho.mountPresentShell({ root });
+        peitho.installSyncBridge(window, peitho.serverSyncChannelFactory());
+        const config = await configPromise;
+        if (config != null && config.presenterOpen) {
+          if (typeof peitho.installSwapShortcut === 'function') {
+            peitho.installSwapShortcut(window);
+          } else {
+            console.error("shell bundle does not provide installSwapShortcut; display swap disabled");
+          }
+        }
         const rawPlannedDurationMs = shell.manifest?.plannedDurationMs ?? null;
         const plannedDurationMs =
           rawPlannedDurationMs != null && peitho.isValidDurationMs(rawPlannedDurationMs)
@@ -348,12 +362,6 @@ pub fn render_present_index() -> String {
         }
         if (plannedDurationMs != null) {
           if (typeof peitho.installTimeTracker === 'function') {
-            let config = null;
-            try {
-              config = await fetchOk('present.json').then((response) => response.json());
-            } catch (_error) {
-              console.error("failed to load present.json; time tracker disabled");
-            }
             if (config != null && !config.presenterOpen) {
               peitho.installTimeTracker({
                 root,
@@ -499,7 +507,7 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-time],
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-delta] { color: var(--warn); }
-    .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
+    .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
     .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--fg-mute); padding: 4px 8px; font: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; transition: background 90ms ease, color 90ms ease, border-color 90ms ease, transform 60ms ease, box-shadow 90ms ease; min-width: 0; position: relative; overflow: hidden; -webkit-tap-highlight-color: transparent; }
     .btn .k { color: var(--fg-dim); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: none; }
     .btn:hover { color: var(--fg); border-color: color-mix(in oklch, var(--fg) 35%, var(--line)); background: color-mix(in oklch, var(--fg) 6%, transparent); }
@@ -561,6 +569,11 @@ pub fn render_presenter_index() -> String {
           notes,
           syncChannelFactory: peitho.serverSyncChannelFactory()
         });
+        if (typeof peitho.installSwapShortcut === 'function') {
+          peitho.installSwapShortcut(window);
+        } else {
+          console.error("shell bundle does not provide installSwapShortcut; display swap disabled");
+        }
       } catch (error) {
         showError(error.message);
       }
@@ -747,6 +760,12 @@ mod tests {
         assert!(html.contains("await peitho.mountPresentShell({ root })"));
         assert!(html.contains("installKeyboardNavigation(window)"));
         assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
+        assert!(html.contains("typeof peitho.installSwapShortcut === 'function'"));
+        assert!(html.contains("config != null && config.presenterOpen"));
+        assert!(html.contains("peitho.installSwapShortcut(window)"));
+        assert!(html.contains(
+            r#""shell bundle does not provide installSwapShortcut; display swap disabled""#
+        ));
         assert!(html.contains(r#"data-peitho-action="close""#));
         let controls_index = html
             .find("peitho.installPresentationControls({ root, window, document })")
@@ -754,7 +773,13 @@ mod tests {
         let mount_index = html
             .find("await peitho.mountPresentShell({ root })")
             .unwrap();
+        let sync_index = html
+            .find("peitho.installSyncBridge(window, peitho.serverSyncChannelFactory())")
+            .unwrap();
+        let swap_index = html.find("peitho.installSwapShortcut(window)").unwrap();
         assert!(controls_index < mount_index);
+        assert!(mount_index < sync_index);
+        assert!(sync_index < swap_index);
         assert!(!html.contains("peitho-presenter-link"));
         assert!(!html.contains(">Presenter view</a>"));
         assert!(!html.contains("fetchOk(slide.src)"));
@@ -775,7 +800,9 @@ mod tests {
         assert!(html.contains(
             r#""shell bundle does not provide installTimeTracker; time tracker disabled""#
         ));
-        assert!(html.contains(r#""failed to load present.json; time tracker disabled""#));
+        assert!(html.contains(r#"const configPromise = fetchOk('present.json')"#));
+        assert!(html
+            .contains(r#""failed to load present.json; time tracker and display swap disabled""#));
         assert!(html.contains("variant: 'present'"));
         assert!(html.contains(".peitho-time-tracker"));
         assert!(html.contains("z-index: 5"));
@@ -792,8 +819,16 @@ mod tests {
         let mount_index = html
             .find("await peitho.mountPresentShell({ root })")
             .unwrap();
-        let config_index = html.find("fetchOk('present.json')").unwrap();
-        assert!(mount_index < config_index);
+        let sync_index = html
+            .find("peitho.installSyncBridge(window, peitho.serverSyncChannelFactory())")
+            .unwrap();
+        let config_fetch_index = html
+            .find("const configPromise = fetchOk('present.json')")
+            .unwrap();
+        let config_await_index = html.find("const config = await configPromise").unwrap();
+        assert!(config_fetch_index < mount_index);
+        assert!(mount_index < sync_index);
+        assert!(sync_index < config_await_index);
     }
 
     #[test]
@@ -804,6 +839,11 @@ mod tests {
         assert!(html.contains("import * as peitho from './shell.js';"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("installCloseOnEscape(window)"));
+        assert!(html.contains("typeof peitho.installSwapShortcut === 'function'"));
+        assert!(html.contains("peitho.installSwapShortcut(window)"));
+        assert!(html.contains(
+            r#""shell bundle does not provide installSwapShortcut; display swap disabled""#
+        ));
         assert!(html.contains("await peitho.mountPresenterView({"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
         assert!(html.contains(r#"data-peitho-action="close""#));
@@ -826,6 +866,8 @@ mod tests {
         assert!(html.contains(".notes-body"));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));
+        assert!(html
+            .contains("grid-template-columns: minmax(max-content, 1fr) auto auto auto auto auto"));
         assert!(html.contains("margin-top: auto"));
         assert!(html.contains(
             ".btn.primary .k { color: color-mix(in oklch, var(--bg) 60%, var(--accent)); }"
@@ -839,6 +881,9 @@ mod tests {
         assert!(!html.contains(".agenda"));
         assert!(!html.contains("Section —"));
         assert!(!html.contains("data-omelette-injected"));
+        let mount_index = html.find("await peitho.mountPresenterView({").unwrap();
+        let swap_index = html.find("peitho.installSwapShortcut(window)").unwrap();
+        assert!(mount_index < swap_index);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import type { NavigateDetail, SlideChangeDetail } from "./shell";
+import { hasChordModifier } from "./keyboard";
 import { openPresenterPopup, type OpenPresenterPopupOptions } from "./presentDisplay";
 
 export type PresentationControlsOptions = {
@@ -109,6 +110,7 @@ export function installFullscreenShortcut(options: FullscreenShortcutOptions = {
   const win = options.window ?? window;
   const doc = options.document ?? document;
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (hasChordModifier(event)) return;
     if (event.key !== "f") return;
     event.preventDefault();
     toggleFullscreen(doc);

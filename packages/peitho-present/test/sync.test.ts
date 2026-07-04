@@ -101,6 +101,26 @@ it("server sync channel polls and forwards long-poll messages", async () => {
   channel.close();
 });
 
+it("server sync channel replays poll response state after the poll message", async () => {
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return Promise.resolve(okJson({ seq: 6, message: { index: 1 }, index: 2, swapped: true }));
+    }
+    return new Promise<Response>(() => undefined);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([{ index: 1 }, { index: 2 }, { swapped: true }])
+  );
+
+  channel.close();
+});
+
 it("server sync channel does not replay backlog close messages after handshake", async () => {
   const fetcher = vi.fn((url: string) => {
     if (url === "/sync") return Promise.resolve(okJson({ seq: 9, message: null }));
@@ -117,6 +137,28 @@ it("server sync channel does not replay backlog close messages after handshake",
 
   expect(received).toEqual([]);
   expect(fetcher).not.toHaveBeenCalledWith("/sync?seq=0", expect.anything());
+  channel.close();
+});
+
+it("server sync channel replays handshake index then swapped through onmessage", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(okJson({ seq: 4, message: null, index: 2, swapped: true }));
+    }
+    if (url === "/sync?seq=4") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ index: 2 }, { swapped: true }]));
+
+  expect(fetcher).toHaveBeenCalledWith("/sync");
+  expect(fetcher).toHaveBeenCalledWith(
+    "/sync?seq=4",
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  );
   channel.close();
 });
 
@@ -144,6 +186,7 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (shells.length > 0) shells.pop()?.destroy();
+  vi.restoreAllMocks();
 });
 
 it("posts local slidechange index to peitho-sync", async () => {
@@ -165,8 +208,17 @@ it("dispatches closerequest from Escape", () => {
   const cleanup = installCloseOnEscape(window, bus);
   cleanups.push(cleanup);
 
-  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  const chordEscape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    metaKey: true,
+    cancelable: true
+  });
+  const bareEscape = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(chordEscape);
+  window.dispatchEvent(bareEscape);
 
+  expect(chordEscape.defaultPrevented).toBe(false);
+  expect(bareEscape.defaultPrevented).toBe(true);
   expect(requests).toEqual([null]);
 });
 
@@ -179,6 +231,49 @@ it("posts close sync messages from closerequest", () => {
   bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
 
   expect(channel.sent).toEqual([{ close: true }]);
+});
+
+it("posts absolute swap state from swaprequest based on the current route", () => {
+  for (const [path, expected] of [
+    ["/present.html", { swapped: true }],
+    ["/present-swapped", { swapped: false }]
+  ] as const) {
+    const channel = mockChannel();
+    const bus = new EventTarget();
+    const cleanup = installSyncBridge(
+      window,
+      () => channel,
+      bus,
+      () => undefined,
+      () => path,
+      () => undefined
+    );
+
+    bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
+
+    expect(channel.sent).toEqual([expected]);
+    cleanup();
+  }
+});
+
+it("does not post swap state on unknown routes", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(
+    window,
+    () => channel,
+    bus,
+    () => undefined,
+    () => "/unknown",
+    () => undefined
+  );
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
+
+  expect(channel.sent).toEqual([]);
+  expect(error).toHaveBeenCalledWith("peitho: swap unavailable on this route");
 });
 
 it("closes the window when a remote close sync message arrives", () => {
@@ -203,6 +298,142 @@ it("turns remote index messages into navigate requests", () => {
   channel.onmessage?.({ data: { index: 1 } });
 
   expect(requests).toEqual([{ to: { index: 1 } }]);
+});
+
+it("navigates to the same-window counterpart when remote swapped state differs", () => {
+  const cases: Array<{ path: string; swapped: boolean; counterpart: string }> = [
+    { path: "/present.html", swapped: true, counterpart: "presenter-swapped" },
+    { path: "/", swapped: true, counterpart: "presenter-swapped" },
+    { path: "/presenter", swapped: true, counterpart: "present-swapped" },
+    { path: "/presenter.html", swapped: true, counterpart: "present-swapped" },
+    { path: "/present-swapped", swapped: false, counterpart: "presenter" },
+    { path: "/presenter-swapped", swapped: false, counterpart: "present.html" }
+  ];
+
+  for (const testCase of cases) {
+    const channel = mockChannel();
+    const bus = new EventTarget();
+    const navigate = vi.fn();
+    const cleanup = installSyncBridge(
+      window,
+      () => channel,
+      bus,
+      () => undefined,
+      () => testCase.path,
+      navigate
+    );
+
+    channel.onmessage?.({ data: { swapped: testCase.swapped } });
+
+    expect(navigate).toHaveBeenCalledWith(testCase.counterpart);
+    cleanup();
+  }
+});
+
+it("does not navigate when remote swapped state already matches the route", () => {
+  const cases: Array<{ path: string; swapped: boolean }> = [
+    { path: "/present.html", swapped: false },
+    { path: "/", swapped: false },
+    { path: "/presenter", swapped: false },
+    { path: "/presenter.html", swapped: false },
+    { path: "/present-swapped", swapped: true },
+    { path: "/presenter-swapped", swapped: true }
+  ];
+
+  for (const testCase of cases) {
+    const channel = mockChannel();
+    const bus = new EventTarget();
+    const navigate = vi.fn();
+    const cleanup = installSyncBridge(
+      window,
+      () => channel,
+      bus,
+      () => undefined,
+      () => testCase.path,
+      navigate
+    );
+
+    channel.onmessage?.({ data: { swapped: testCase.swapped } });
+
+    expect(navigate).not.toHaveBeenCalled();
+    cleanup();
+  }
+});
+
+it("does not navigate on swapped messages received on unknown routes", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const navigate = vi.fn();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(
+    window,
+    () => channel,
+    bus,
+    () => undefined,
+    () => "/unknown",
+    navigate
+  );
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { swapped: true } });
+
+  expect(navigate).not.toHaveBeenCalled();
+  expect(error).toHaveBeenCalledWith("peitho: swap unavailable on this route");
+});
+
+it("does not navigate when replayed swapped state equals the current route", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(okJson({ seq: 7, message: null, index: 1, swapped: false }));
+    }
+    if (url === "/sync?seq=7") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const bus = new EventTarget();
+  const navigate = vi.fn();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) =>
+    requests.push((event as CustomEvent).detail)
+  );
+  const cleanup = installSyncBridge(
+    window,
+    serverSyncChannelFactory({ fetcher }),
+    bus,
+    () => undefined,
+    () => "/present.html",
+    navigate
+  );
+  cleanups.push(cleanup);
+
+  await vi.waitFor(() => expect(requests).toEqual([{ to: { index: 1 } }]));
+
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it("converges from poll response swapped state when the poll message is unrelated", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(okJson({ seq: 7, message: null, index: 0, swapped: false }));
+    }
+    if (url === "/sync?seq=7") {
+      return Promise.resolve(okJson({ seq: 8, message: { index: 1 }, index: 1, swapped: true }));
+    }
+    if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const bus = new EventTarget();
+  const navigate = vi.fn();
+  const cleanup = installSyncBridge(
+    window,
+    serverSyncChannelFactory({ fetcher }),
+    bus,
+    () => undefined,
+    () => "/present.html",
+    navigate
+  );
+  cleanups.push(cleanup);
+
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith("presenter-swapped"));
 });
 
 it("dispatches remote sync navigation to the injected bus", () => {

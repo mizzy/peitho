@@ -244,6 +244,25 @@ it("keyboard emits navigate events instead of calling shell directly", () => {
   ]);
 });
 
+it("keyboard navigation ignores chord-modified navigation keys", () => {
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+
+  const teardown = installKeyboardNavigation(window);
+  windowListenerCleanups.push(teardown);
+  const event = new KeyboardEvent("keydown", {
+    key: "ArrowRight",
+    metaKey: true,
+    cancelable: true
+  });
+  window.dispatchEvent(event);
+
+  expect(event.defaultPrevented).toBe(false);
+  expect(requests).toEqual([]);
+});
+
 it("keyboard emits navigate events to an injected bus", () => {
   const bus = new EventTarget();
   const requests: unknown[] = [];
@@ -299,6 +318,36 @@ it("presenter keyboard maps Space to playpause and navigation keys to navigate",
     { to: "first" },
     { to: "last" }
   ]);
+});
+
+it("presenter keyboard ignores chord-modified shortcuts", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  const onPlaypause = vi.fn();
+  bus.addEventListener("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+
+  const teardown = installPresenterKeyboard(window, bus, onPlaypause);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", {
+    key: " ",
+    metaKey: true,
+    cancelable: true
+  });
+  const arrowRight = new KeyboardEvent("keydown", {
+    key: "ArrowRight",
+    metaKey: true,
+    cancelable: true
+  });
+
+  window.dispatchEvent(space);
+  window.dispatchEvent(arrowRight);
+
+  expect(space.defaultPrevented).toBe(false);
+  expect(arrowRight.defaultPrevented).toBe(false);
+  expect(onPlaypause).not.toHaveBeenCalled();
+  expect(requests).toEqual([]);
 });
 
 it("shows a visible error when a fragment fetch fails", async () => {

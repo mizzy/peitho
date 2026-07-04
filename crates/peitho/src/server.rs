@@ -20,20 +20,35 @@ pub(crate) struct SyncHub {
 struct SyncState {
     seq: u64,
     latest: Option<String>,
+    index: Option<usize>,
+    swapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncPoll {
-    seq: u64,
+    snapshot: SyncSnapshot,
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncSnapshot {
+    seq: u64,
+    index: Option<usize>,
+    swapped: bool,
+}
+
 impl SyncHub {
-    pub(crate) fn broadcast(&self, message: &str) -> u64 {
+    fn broadcast_sync_message(&self, message: &SyncMessage) -> u64 {
         let (lock, cvar) = &*self.state;
         let mut state = lock.lock().expect("sync hub mutex");
+        match message {
+            SyncMessage::Index(message) => state.index = Some(message.index),
+            SyncMessage::Swap(message) => state.swapped = message.swapped,
+            SyncMessage::Close(_) => {}
+        }
+        let json = serde_json::to_string(message).expect("SyncMessage serializes");
         state.seq += 1;
-        state.latest = Some(message.to_owned());
+        state.latest = Some(json);
         let seq = state.seq;
         cvar.notify_all();
         seq
@@ -49,14 +64,23 @@ impl SyncHub {
             return None;
         }
         Some(SyncPoll {
-            seq: state.seq,
+            snapshot: SyncSnapshot {
+                seq: state.seq,
+                index: state.index,
+                swapped: state.swapped,
+            },
             message: state.latest.clone().expect("latest sync message"),
         })
     }
 
-    fn current_seq(&self) -> u64 {
+    fn snapshot(&self) -> SyncSnapshot {
         let (lock, _) = &*self.state;
-        lock.lock().expect("sync hub mutex").seq
+        let state = lock.lock().expect("sync hub mutex");
+        SyncSnapshot {
+            seq: state.seq,
+            index: state.index,
+            swapped: state.swapped,
+        }
     }
 }
 
@@ -69,10 +93,12 @@ pub(crate) fn resolve_request_path(root: &Path, url: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return Some(root.join("present.html"));
     }
-    // Extensionless alias keeping the Chrome app name dot-free so app window
+    // Extensionless aliases keeping Chrome app names dot-free so app window
     // placement is saved and restored (see browser::presenter_url).
-    if trimmed == "presenter" {
-        return Some(root.join("presenter.html"));
+    match trimmed {
+        "presenter" | "presenter-swapped" => return Some(root.join("presenter.html")),
+        "present-swapped" => return Some(root.join("present.html")),
+        _ => {}
     }
 
     let mut out = root.to_path_buf();
@@ -172,18 +198,17 @@ impl PresentServer {
             return;
         };
         let SyncGet::Poll(seq) = sync_get else {
-            send_json_response(
-                request,
-                format!(r#"{{"seq":{},"message":null}}"#, self.sync.current_seq()),
-            );
+            send_json_response(request, sync_response_body(self.sync.snapshot(), None));
             return;
         };
         let sync = self.sync.clone();
         thread::spawn(
             move || match sync.wait_after(seq, Duration::from_secs(30)) {
                 Some(event) => {
-                    let body = format!(r#"{{"seq":{},"message":{}}}"#, event.seq, event.message);
-                    send_json_response(request, body);
+                    send_json_response(
+                        request,
+                        sync_response_body(event.snapshot, Some(&event.message)),
+                    );
                 }
                 None => send_response(request, Response::empty(StatusCode(204))),
             },
@@ -213,8 +238,7 @@ impl PresentServer {
             );
             return;
         }
-        let json = serde_json::to_string(&message).expect("SyncMessage serializes");
-        self.sync.broadcast(&json);
+        self.sync.broadcast_sync_message(&message);
         send_response(request, Response::empty(StatusCode(204)));
         if matches!(message, SyncMessage::Close(_)) {
             if let Some(shutdown) = shutdown {
@@ -270,6 +294,7 @@ impl ShutdownHandle {
 #[serde(untagged)]
 enum SyncMessage {
     Index(SyncIndexMessage),
+    Swap(SyncSwapMessage),
     Close(SyncCloseMessage),
 }
 
@@ -277,6 +302,12 @@ enum SyncMessage {
 #[serde(deny_unknown_fields)]
 struct SyncIndexMessage {
     index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncSwapMessage {
+    swapped: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -315,6 +346,19 @@ fn sync_get(url: &str) -> Option<SyncGet> {
         }
     }
     Some(SyncGet::Handshake)
+}
+
+fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
+    let index = snapshot
+        .index
+        .map_or_else(|| "null".to_owned(), |index| index.to_string());
+    format!(
+        r#"{{"seq":{},"message":{},"index":{},"swapped":{}}}"#,
+        snapshot.seq,
+        message.unwrap_or("null"),
+        index,
+        snapshot.swapped
+    )
 }
 
 fn send_json_response(request: tiny_http::Request, body: String) {
@@ -361,6 +405,26 @@ mod tests {
     }
 
     #[test]
+    fn resolves_swapped_routes_to_role_pages() {
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/present-swapped").unwrap(),
+            Path::new("/cache").join("present.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/present-swapped?seq=1").unwrap(),
+            Path::new("/cache").join("present.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/presenter-swapped").unwrap(),
+            Path::new("/cache").join("presenter.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/presenter-swapped?seq=1").unwrap(),
+            Path::new("/cache").join("presenter.html")
+        );
+    }
+
+    #[test]
     fn rejects_path_traversal() {
         assert!(resolve_request_path(Path::new("/cache"), "/../manifest.json").is_none());
         assert!(resolve_request_path(Path::new("/cache"), "/slides/../../secret").is_none());
@@ -395,13 +459,18 @@ mod tests {
     fn sync_hub_returns_latest_message_after_requested_sequence() {
         let hub = SyncHub::default();
 
-        let seq = hub.broadcast(r#"{"index":2}"#);
+        let message = SyncMessage::Index(SyncIndexMessage { index: 2 });
+        let seq = hub.broadcast_sync_message(&message);
 
         assert_eq!(seq, 1);
         assert_eq!(
             hub.wait_after(0, Duration::from_secs(1)).unwrap(),
             SyncPoll {
-                seq: 1,
+                snapshot: SyncSnapshot {
+                    seq: 1,
+                    index: Some(2),
+                    swapped: false
+                },
                 message: r#"{"index":2}"#.to_owned()
             }
         );
