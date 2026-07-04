@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO_VER="$(awk -F\" '/^version = /{print $2; exit}' Cargo.toml)"
+          if [ "$TAG" != "$CARGO_VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $CARGO_VER"
+            exit 1
+          fi
+
+  build:
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/peitho-present/package-lock.json
+      - run: npm ci
+        working-directory: packages/peitho-present
+      - run: npm run build
+        working-directory: packages/peitho-present
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross linker (linux arm64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          {
+            echo '[target.aarch64-unknown-linux-gnu]'
+            echo 'linker = "aarch64-linux-gnu-gcc"'
+          } > .cargo/config.toml
+      - run: cargo build --release --locked -p peitho --target ${{ matrix.target }}
+      - name: Package tarball
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          NAME="peitho-v${VER}-${{ matrix.target }}"
+          STAGE="dist/${NAME}"
+          mkdir -p "${STAGE}"
+          cp "target/${{ matrix.target }}/release/peitho" "${STAGE}/"
+          cp README.md "${STAGE}/" 2>/dev/null || true
+          cp LICENSE "${STAGE}/" 2>/dev/null || true
+          tar czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/peitho-v*.tar.gz
+            dist/peitho-v*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
