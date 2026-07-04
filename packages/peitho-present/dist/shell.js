@@ -1118,7 +1118,9 @@ async function mountPresenterView(options) {
     setTimerStateChrome(deriveTimerState(mainShell));
   }
   function updateFromSlide(detail) {
-    notesRoot.textContent = options.notes.notes[detail.key] ?? "No notes for this slide.";
+    const slideNotes = options.notes.notes[detail.key];
+    notesRoot.textContent = slideNotes ?? "No notes for this slide.";
+    notesRoot.classList.toggle("is-empty", slideNotes == null);
     const slideNumber = detail.index + 1;
     const slide = formatSlideNumber(slideNumber);
     const total = formatSlideNumber(detail.total);
