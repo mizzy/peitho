@@ -875,6 +875,18 @@ function paneViewport(pane) {
     height: pane.clientHeight
   });
 }
+function validateAgendaSections(sections, log) {
+  for (const [index, section] of sections.entries()) {
+    const plannedDurationMs = section.plannedDurationMs;
+    if (!Number.isFinite(plannedDurationMs) || plannedDurationMs <= 0 || !Number.isSafeInteger(plannedDurationMs)) {
+      log.error(
+        `Invalid plannedDurationMs for manifest section ${index + 1} "${section.name}" in manifest.json`
+      );
+      return [];
+    }
+  }
+  return sections;
+}
 async function mountPresenterView(options) {
   const win = options.window ?? window;
   const doc = options.document ?? document;
@@ -1033,7 +1045,7 @@ async function mountPresenterView(options) {
     document: doc,
     variant: "presenter"
   });
-  const sections = mainShell.manifest?.sections ?? [];
+  const sections = validateAgendaSections(mainShell.manifest?.sections ?? [], log);
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,

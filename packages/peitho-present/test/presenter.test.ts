@@ -222,6 +222,38 @@ it("mounts agenda between tracker and controls when manifest has sections", asyn
   ).not.toBeNull();
 });
 
+it("logs invalid section planned duration and keeps agenda unmounted", async () => {
+  const root = document.createElement("main");
+  const log = { error: vi.fn() };
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({
+      plannedDurationMs: 180_000,
+      sections: [
+        { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
+        {
+          name: "Demo",
+          startIndex: 1,
+          endIndex: 1,
+          plannedDurationMs: Number.MAX_SAFE_INTEGER + 1
+        }
+      ]
+    }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: mockSyncChannelFactory().factory,
+    console: log
+  });
+  views.push(view);
+
+  expect(log.error).toHaveBeenCalledWith(
+    'Invalid plannedDurationMs for manifest section 2 "Demo" in manifest.json'
+  );
+  expect(root.querySelector('[data-peitho-presenter="agenda-slot"]')?.childElementCount).toBe(0);
+  expect(root.querySelector("[data-peitho-agenda]")).toBeNull();
+});
+
 it("logs invalid planned duration and keeps presenter mounted without a tracker", async () => {
   let now = 1_000;
   const root = document.createElement("main");

@@ -1,3 +1,4 @@
+import type { ManifestSection } from "../../../bindings/ManifestSection";
 import type { Notes } from "../../../bindings/Notes";
 import { installAgenda } from "./agenda";
 import { installPresenterKeyboard } from "./keyboard";
@@ -102,6 +103,26 @@ function paneViewport(pane: HTMLElement): () => { width: number; height: number 
     width: pane.clientWidth,
     height: pane.clientHeight
   });
+}
+
+function validateAgendaSections(
+  sections: ManifestSection[],
+  log: Pick<Console, "error">
+): ManifestSection[] {
+  for (const [index, section] of sections.entries()) {
+    const plannedDurationMs = section.plannedDurationMs;
+    if (
+      !Number.isFinite(plannedDurationMs) ||
+      plannedDurationMs <= 0 ||
+      !Number.isSafeInteger(plannedDurationMs)
+    ) {
+      log.error(
+        `Invalid plannedDurationMs for manifest section ${index + 1} "${section.name}" in manifest.json`
+      );
+      return [];
+    }
+  }
+  return sections;
 }
 
 export async function mountPresenterView(options: PresenterOptions): Promise<PresenterView> {
@@ -272,7 +293,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           document: doc,
           variant: "presenter"
         });
-  const sections = mainShell.manifest?.sections ?? [];
+  const sections = validateAgendaSections(mainShell.manifest?.sections ?? [], log);
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,

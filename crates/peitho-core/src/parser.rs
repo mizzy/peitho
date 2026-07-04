@@ -967,7 +967,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             ErrorKind::Parse,
             Some(line),
             format!("invalid page settings comment: {err}"),
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (all fields optional, no other fields)"#,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#,
         )
     })?;
     if parsed.key.is_none()
@@ -1477,6 +1477,10 @@ After list
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("invalid page settings comment"));
+        assert_eq!(
+            err.help,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#
+        );
     }
 
     #[test]

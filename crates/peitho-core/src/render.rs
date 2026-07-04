@@ -481,6 +481,7 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-head] { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; }
     [data-peitho-agenda-title] { color: var(--fg-mute); }
     [data-peitho-agenda-hint] { white-space: nowrap; }
+    [data-peitho-presenter="agenda-slot"] { min-height: 0; overflow: hidden; }
     [data-peitho-agenda-list] { display: grid; }
     [data-peitho-agenda-row] { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; min-height: 28px; padding: 6px 0; }
     [data-peitho-agenda-row] + [data-peitho-agenda-row] { border-top: 1px solid var(--line-soft); }
@@ -492,7 +493,7 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }
     [data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }
     [data-peitho-agenda-state="current"] [data-peitho-agenda-name] { color: var(--fg); font-weight: 600; }
-    [data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
+    [data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; flex-shrink: 0; white-space: nowrap; }
     [data-peitho-agenda-time],
     [data-peitho-agenda-delta] { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-dim); }
     [data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }
@@ -877,6 +878,9 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-agenda] { overflow: hidden;"#));
         assert!(html.contains(r#"[data-peitho-agenda-head]"#));
         assert!(html.contains(r#"[data-peitho-agenda-list]"#));
+        assert!(html.contains(
+            r#"[data-peitho-presenter="agenda-slot"] { min-height: 0; overflow: hidden; }"#
+        ));
         assert!(html.contains(r#"[data-peitho-agenda-row]"#));
         assert!(html.contains("grid-template-columns: 10px minmax(0, 1fr) auto auto"));
         assert!(html.contains(r#"[data-peitho-agenda-row] + [data-peitho-agenda-row]"#));
@@ -886,6 +890,7 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-agenda-state="upcoming"]"#));
         assert!(html.contains(r#"[data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }"#));
         assert!(html.contains(r#"[data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }"#));
+        assert!(html.contains(r#"[data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; flex-shrink: 0; white-space: nowrap; }"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
         assert!(
             html.contains(r#"[data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }"#)
