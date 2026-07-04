@@ -83,13 +83,13 @@ function installPresentationControls(options) {
       hideTimer = null;
     }, idleMs);
   };
-  const dispatchNavigate = (to) => {
+  const dispatchNavigate2 = (to) => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
   };
   const onClick = (event) => {
     event.stopPropagation();
     const action = event.target.closest("[data-peitho-action]")?.dataset.peithoAction;
-    if (action === "prev" || action === "next") dispatchNavigate(action);
+    if (action === "prev" || action === "next") dispatchNavigate2(action);
     if (action === "presenter") void openPresenter();
     if (action === "fullscreen") toggleFullscreen(doc);
     if (action === "close") bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
@@ -141,21 +141,40 @@ function toggleFullscreen(doc = document) {
 }
 
 // src/keyboard.ts
-var keyMap = /* @__PURE__ */ new Map([
+var navigationKeyMap = /* @__PURE__ */ new Map([
   ["ArrowRight", "next"],
   ["PageDown", "next"],
-  [" ", "next"],
   ["ArrowLeft", "prev"],
   ["PageUp", "prev"],
   ["Home", "first"],
   ["End", "last"]
 ]);
+var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
+function dispatchNavigate(bus, to) {
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+}
 function installKeyboardNavigation(win = window, bus = win) {
   const onKeyDown = (event) => {
     const to = keyMap.get(event.key);
     if (!to) return;
     event.preventDefault();
-    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+    dispatchNavigate(bus, to);
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function installPresenterKeyboard(win, bus, onPlaypause) {
+  const onKeyDown = (event) => {
+    const to = navigationKeyMap.get(event.key);
+    if (to) {
+      event.preventDefault();
+      dispatchNavigate(bus, to);
+      return;
+    }
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (event.repeat) return;
+    onPlaypause();
   };
   win.addEventListener("keydown", onKeyDown);
   return () => win.removeEventListener("keydown", onKeyDown);
@@ -759,7 +778,7 @@ async function mountPresenterView(options) {
           <div class="pos" data-peitho-presenter="position-short">00 / 00</div>
           <div>
             <span class="grp"><span class="kbd">\u2190</span><span class="kbd">\u2192</span> navigate</span>
-            <span class="grp"><span class="kbd">Space</span> next</span>
+            <span class="grp"><span class="kbd">Space</span> start / pause</span>
             <span class="grp"><span class="kbd">Esc</span> close</span>
           </div>
         </div>
@@ -799,7 +818,7 @@ async function mountPresenterView(options) {
           <div class="tracker-wrap" data-peitho-presenter="tracker-slot"></div>
 
           <div class="controls">
-            <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span></button>
+            <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span> <span class="k">Space</span></button>
             <button class="btn" type="button" data-peitho-action="prev">Prev <span class="k">\u2190</span></button>
             <button class="btn" type="button" data-peitho-action="next">Next <span class="k">\u2192</span></button>
             <button class="btn" type="button" data-peitho-action="reset">Reset</button>
@@ -862,7 +881,7 @@ async function mountPresenterView(options) {
     now,
     viewport: paneViewport(previewRoot)
   });
-  const keyboardCleanup = installKeyboardNavigation(win, bus);
+  const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs = rawPlannedDurationMs != null && Number.isFinite(rawPlannedDurationMs) && rawPlannedDurationMs > 0 ? rawPlannedDurationMs : null;
@@ -939,21 +958,22 @@ async function mountPresenterView(options) {
     button.addEventListener("click", listener);
     buttonCleanups.push(() => button.removeEventListener("click", listener));
   };
-  const dispatchTimerControl = (action) => {
+  function dispatchTimerControl(action) {
     bus.dispatchEvent(
       new CustomEvent("peitho:timercontrol", { detail: { action } })
     );
     tick();
-  };
+  }
+  function dispatchPlaypause() {
+    dispatchTimerControl(playpauseActionFor(deriveTimerState(mainShell)));
+  }
   addButtonListener("prev", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
   });
   addButtonListener("next", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   });
-  addButtonListener("playpause", () => {
-    dispatchTimerControl(playpauseActionFor(deriveTimerState(mainShell)));
-  });
+  addButtonListener("playpause", dispatchPlaypause);
   addButtonListener("reset", () => {
     dispatchTimerControl("reset");
   });
@@ -1016,6 +1036,7 @@ export {
   installFullscreenShortcut,
   installKeyboardNavigation,
   installPresentationControls,
+  installPresenterKeyboard,
   installSyncBridge,
   installTimeTracker,
   isOverrun,

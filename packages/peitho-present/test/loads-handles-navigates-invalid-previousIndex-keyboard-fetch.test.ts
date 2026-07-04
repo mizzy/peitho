@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { installKeyboardNavigation, mountPresentShell } from "../src/index";
+import { installKeyboardNavigation, installPresenterKeyboard, mountPresentShell } from "../src/index";
 import type { PresentShell } from "../src/index";
 
 function okJson(value: unknown): Response {
@@ -255,6 +255,49 @@ it("keyboard emits navigate events to an injected bus", () => {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
 
   expect(requests).toEqual([{ to: "next" }]);
+});
+
+it("presenter keyboard maps Space to playpause and navigation keys to navigate", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  const onPlaypause = vi.fn();
+  bus.addEventListener("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+
+  const teardown = installPresenterKeyboard(window, bus, onPlaypause);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+  const repeatedSpace = new KeyboardEvent("keydown", {
+    key: " ",
+    repeat: true,
+    cancelable: true
+  });
+  const arrowRight = new KeyboardEvent("keydown", { key: "ArrowRight", cancelable: true });
+  const arrowLeft = new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true });
+  const home = new KeyboardEvent("keydown", { key: "Home", cancelable: true });
+  const end = new KeyboardEvent("keydown", { key: "End", cancelable: true });
+
+  window.dispatchEvent(space);
+  window.dispatchEvent(repeatedSpace);
+  window.dispatchEvent(arrowRight);
+  window.dispatchEvent(arrowLeft);
+  window.dispatchEvent(home);
+  window.dispatchEvent(end);
+
+  expect(space.defaultPrevented).toBe(true);
+  expect(repeatedSpace.defaultPrevented).toBe(true);
+  expect(arrowRight.defaultPrevented).toBe(true);
+  expect(arrowLeft.defaultPrevented).toBe(true);
+  expect(home.defaultPrevented).toBe(true);
+  expect(end.defaultPrevented).toBe(true);
+  expect(onPlaypause).toHaveBeenCalledTimes(1);
+  expect(requests).toEqual([
+    { to: "next" },
+    { to: "prev" },
+    { to: "first" },
+    { to: "last" }
+  ]);
 });
 
 it("shows a visible error when a fragment fetch fails", async () => {
