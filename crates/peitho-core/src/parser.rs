@@ -212,14 +212,8 @@ fn finalize_section_settings(
             .iter()
             .map(|resolved| (resolved.line, resolved.section.planned().as_millis())),
     )?;
-    let section_total = PlannedTime::from_millis(total).map_err(|message| {
-        BuildError::new(
-            ErrorKind::Parse,
-            Some(first_line),
-            message,
-            "reduce section times so the total is at most Number.MAX_SAFE_INTEGER milliseconds",
-        )
-    })?;
+    let section_total =
+        PlannedTime::from_millis(total).expect("section total was checked before conversion");
     let sections = resolved_sections
         .into_iter()
         .map(|resolved| resolved.section)
@@ -260,6 +254,14 @@ where
                 "reduce section times so the total can be represented safely",
             )
         })?;
+        if total > PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                "section time total is too large",
+                "reduce section times so the total is at most Number.MAX_SAFE_INTEGER milliseconds",
+            ));
+        }
     }
     Ok(total)
 }
@@ -832,12 +834,12 @@ fn process_html_chunk(
     if let Some(settings) = parse_page_comment(raw, line)
         .map_err(|err| attach_slide_context(err, index, explicit_key_ctx.as_ref(), fragments))?
     {
-        if page_settings_line.is_some() {
+        if list_depth > 0 || seen_content {
             let err = BuildError::new(
                 ErrorKind::Parse,
                 Some(line),
-                "duplicate page settings comment",
-                "merge the settings into the first page settings comment",
+                "page settings comment must appear before slide content",
+                "move the settings comment to the first non-blank line of the slide",
             );
             return Err(attach_slide_context(
                 err,
@@ -846,12 +848,12 @@ fn process_html_chunk(
                 fragments,
             ));
         }
-        if list_depth > 0 || seen_content {
+        if page_settings_line.is_some() {
             let err = BuildError::new(
                 ErrorKind::Parse,
                 Some(line),
-                "page settings comment must appear before slide content",
-                "move the settings comment to the first non-blank line of the slide",
+                "duplicate page settings comment",
+                "merge the settings into the first page settings comment",
             );
             return Err(attach_slide_context(
                 err,
@@ -1449,6 +1451,26 @@ After list
     }
 
     #[test]
+    fn rejects_second_page_settings_comment_after_content_as_position_error() {
+        let err = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n\
+             # Title\n\
+             <!-- {\"key\":\"late\"} -->",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("page settings comment must appear before slide content"));
+        assert_eq!(
+            err.help,
+            "move the settings comment to the first non-blank line of the slide"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_page_settings_fields() {
         let err = parse_markdown("<!-- {\"key\":\"a\",\"freeze\":true} -->\n# Title").unwrap_err();
 
@@ -1704,7 +1726,8 @@ After list
         .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
-        assert!(err.to_string().contains(PlannedTime::TOO_LARGE_MESSAGE));
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("section time total is too large"));
         assert_eq!(
             err.help,
             "reduce section times so the total is at most Number.MAX_SAFE_INTEGER milliseconds"
@@ -1713,7 +1736,11 @@ After list
 
     #[test]
     fn checked_add_overflow_in_section_sum_reports_line_and_help() {
-        let err = section_total_from_millis([(2, u64::MAX), (5, 1)]).unwrap_err();
+        let err = section_total_from_millis([
+            (2, PlannedTime::MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS),
+            (5, u64::MAX),
+        ])
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(5));

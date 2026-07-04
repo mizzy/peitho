@@ -3,6 +3,8 @@
 <!-- constrained-by ../specs/2026-07-04-presenter-agenda-design.md -->
 <!-- constrained-by ../../CLAUDE.md -->
 
+> **注(2026-07-04、実装完了後)**: 本計画は着手時点のスナップショット(docs/plans/は履歴)。実装レビューで仕様が改訂され、以下は計画記載と最終実装が異なる: 行の状態属性は`data-peitho-agenda-outcome`に改名(Task 8/11の`data-peitho-agenda-delta`表記は旧称)、presenter.tsは`installAgenda`を無条件に呼ぶ(Task 10の三項ガードは廃止)、Task 9には`previousIndex`へのflushと`peitho:timercontrol` reset購読が追加、under/over判定は丸め秒が単一判定源、同一スライドの2個目ページ設定コメントは一律エラー。正は仕様書を参照。
+
 ## Premises
 
 - Implement only the approved design in `docs/specs/2026-07-04-presenter-agenda-design.md`.

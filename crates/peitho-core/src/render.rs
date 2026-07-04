@@ -495,6 +495,7 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; }
     [data-peitho-agenda-time],
     [data-peitho-agenda-delta] { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-dim); }
+    [data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }
     [data-peitho-agenda-state="current"] [data-peitho-agenda-time] { color: var(--accent); }
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-time],
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
@@ -886,6 +887,9 @@ mod tests {
         assert!(html.contains(r#"[data-peitho-agenda-label] { min-width: 0; display: flex; align-items: baseline; gap: 8px; }"#));
         assert!(html.contains(r#"[data-peitho-agenda-name] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-mute); }"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
+        assert!(
+            html.contains(r#"[data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }"#)
+        );
         assert!(html
             .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"]"#));
         assert!(html
