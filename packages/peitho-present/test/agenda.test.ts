@@ -209,6 +209,35 @@ it("clears actuals immediately when the timer is reset before restarting", () =>
   expect(rows[1].querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:00 / 0:01");
 });
 
+it("keeps actuals stable while paused with a non-null startedAt", () => {
+  let elapsed = 0;
+  let startedAt: number | null = 100;
+  const root = document.createElement("div");
+  const cleanup = installAgenda({
+    root,
+    shell: {
+      currentIndex: 0,
+      elapsedMs: () => elapsed,
+      startedAt: () => startedAt
+    },
+    sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 2_000 }],
+    bus: new EventTarget(),
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  elapsed = 1_000;
+  vi.advanceTimersByTime(250);
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 0:02");
+
+  // Paused means elapsed is frozen while startedAt stays non-null.
+  expect(startedAt).not.toBeNull();
+  vi.advanceTimersByTime(750);
+
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 0:02");
+});
+
 it("flushes pending elapsed time to the previous section on slidechange", () => {
   let elapsed = 0;
   let currentIndex = 0;

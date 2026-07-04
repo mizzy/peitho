@@ -1586,6 +1586,57 @@ After list
     }
 
     #[test]
+    fn allows_duplicate_section_names_as_separate_ranges() {
+        let deck = parse_markdown(
+            "<!-- {\"section\":\"Repeat\",\"time\":\"1m\"} -->\n# A\n\n---\n# B\n\n---\n\
+             <!-- {\"section\":\"Repeat\",\"time\":\"2m\"} -->\n# C\n\n---\n# D",
+        )
+        .unwrap();
+
+        let sections = deck.settings().sections();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(
+            (
+                sections[0].name(),
+                sections[0].start(),
+                sections[0].end(),
+                sections[0].planned().as_millis()
+            ),
+            ("Repeat", 0, 1, 60_000)
+        );
+        assert_eq!(
+            (
+                sections[1].name(),
+                sections[1].start(),
+                sections[1].end(),
+                sections[1].planned().as_millis()
+            ),
+            ("Repeat", 2, 3, 120_000)
+        );
+    }
+
+    #[test]
+    fn single_section_marker_covers_the_whole_deck_and_derives_planned_time() {
+        let deck = parse_markdown(
+            "<!-- {\"section\":\"Full\",\"time\":\"2m\"} -->\n# A\n\n---\n# B\n\n---\n# C",
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().planned_time().unwrap().as_millis(), 120_000);
+        let sections = deck.settings().sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            (
+                sections[0].name(),
+                sections[0].start(),
+                sections[0].end(),
+                sections[0].planned().as_millis()
+            ),
+            ("Full", 0, 2, 120_000)
+        );
+    }
+
+    #[test]
     fn decks_without_section_markers_keep_settings_unchanged() {
         let deck = parse_markdown("# A\n\n---\n# B").unwrap();
 

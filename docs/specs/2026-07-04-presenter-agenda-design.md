@@ -47,6 +47,7 @@ time: 15m
 4. マーカーがひとつでも存在する場合、**先頭スライドにマーカー必須**。無ければエラー(暗黙の無名セクションは作らない — 曖昧さの暗黙解決の禁止)
 5. **合計一致検証**(著者決定 2026-07-04): frontmatter `time`とセクション`time`合計が両方あれば一致必須。不一致は両方の値をメッセージに含めてエラー。frontmatter `time`省略時はセクション合計を総時間として導出する。合計は`checked_add`で計算し、オーバーフローと`PlannedTime`上限超過はエラー
 6. セクション名の重複は許容(キーではなく表示ラベル。位置ベースで状態判定するため一意性は不要)
+7. **同一スライドに2個目のページ設定コメントはエラー**(`key`/`layout`/`section`共通の一律規則)。従来のフィールド単位last-winsマージは2個目のコメントがsectionマーカーを黙って上書きする(=サイレントドロップ)ため、フィールド個別のガードではなくコメント自体の重複を根本で禁止した(実装レビューで確定 2026-07-04)
 
 検証はパース終端(`parse_markdown`内、全スライドのマーカーが出揃った時点)で一度だけ行い、解決済みの`Vec<DeckSection>`を`Deck<Parsed>`構築時に確定させる。以降のフェーズは検証済みの値を運ぶだけ(`PlannedTime`と同じ「構築時に一度だけ検証」の方針)。**導出後は`DeckSettings`の`planned_time`が常に総時間を持つ**(省略時はここで合計から埋める)ので、下流(トラッカー・manifest `plannedDurationMs`)は無変更で動く。
 
@@ -74,7 +75,7 @@ presenter.ts / agenda.ts(新設)が shell.manifest.sections を消費
 
 - 250ms tickごとに`elapsedMs()`の前回値との差分を「**いま表示中のスライドが属するセクション**」に加算する。戻って再説明した時間もそのセクションの実績に入る。pause中は`elapsedMs`が進まないので自然に除外される
 - `done`/`current`/`upcoming`は現在スライドの位置基準で判定: current = 現在スライドが属するセクション、done = それより前、upcoming = それより後。前のセクションに戻ればそこが再びcurrentになる
-- doneの`under`/`over`はライブ判定: 実績≤計画なら`under`、超えたら`over`
+- doneの`under`/`over`はライブ判定。判定源は**秒に丸めた差分** `Math.round((実績−計画)/1000)` の1つだけで、差分表示の符号・色と構造的に矛盾しない(生ミリ秒で判定すると「+0:00がover色」「ちょうど達成が−0:00のunder」という矛盾表示が生じるため。実装レビューで確定 2026-07-04)。丸め差分>0なら`over`、それ以外は`under`
 - タイマー未開始(stopped)時は全セクション実績0。実績表示はモックに従い、done/currentは`実績 / 計画`、upcomingは`— / 計画`、差分はdoneのみ`±M:SS`表示(current/upcomingは`·`)
 - 時間表示フォーマットはトラッカー目盛りと同じ`m:ss`(`timeTracker.ts`の既存フォーマッタを共有)
 
@@ -87,8 +88,9 @@ presenter.ts / agenda.ts(新設)が shell.manifest.sections を消費
 - `render.rs` `render_presenter_index()`: モックの`.agenda`系CSSを移植(セレクタは`data-peitho-*`ベースに書き換え)。renderテスト更新
 
 **TS (packages/peitho-present)**
-- `agenda.ts`新設(`timeTracker.ts`と同型の構造): `installAgenda({root, shell, sections})`。`peitho:slidechange`購読+250ms interval。teardown必須(vitestのリスナー汚染対策)。`sections`が空なら何もマウントしない
-- `presenter.ts`: `.clock`カード内、tracker-slotとcontrolsの間にagenda-slotを追加し、`manifest.sections`が非空のときだけ`installAgenda`。**`.clock`はflex column+`.controls { margin-top: auto }`を維持**(gridにするとボタンが縦に太るバグが再発する — 実測済み)
+- `agenda.ts`新設(`timeTracker.ts`と同型の構造): `installAgenda({root, shell, sections})`。`peitho:slidechange`購読+250ms interval。teardown必須(vitestのリスナー汚染対策)。**空チェックは`installAgenda`内の1箇所だけ**: `sections`が空なら何もマウントしないno-opを返し、`presenter.ts`は無条件に呼ぶ(ガードの二重化禁止)
+- スライド遷移時は`slidechange`の`previousIndex`を使い、直前tickからの未計上差分を**遷移前スライドのセクション**にflushしてから表示更新する(tick粒度250msの誤配賦防止)。また`peitho:timercontrol`の`reset`リクエストを購読して実績を即時ゼロにする(reset→即startが250msポーリングの隙間に入ると旧実績が残るため。§16の「shellだけが遷移を実行する」に対しリクエストイベントの観測で代用している点は自覚的な選択 — shellのreset実行を購読可能にする専用イベントは現状過剰と判断。実装レビューで確定 2026-07-04)
+- `presenter.ts`: `.clock`カード内、tracker-slotとcontrolsの間にagenda-slotを追加(slot自体は常に存在)。**`.clock`はflex column+`.controls { margin-top: auto }`を維持**(gridにするとボタンが縦に太るバグが再発する — 実測済み)
 - `bindings/`再生成コミット、`dist/shell.js`再ビルドコミット
 
 **examples**
@@ -96,7 +98,7 @@ presenter.ts / agenda.ts(新設)が shell.manifest.sections を消費
 
 ## DOM/CSSの制約
 
-- DOMフックは`data-peitho-*`属性のみ(クラス依存セレクタ禁止 — 確定済み設計判断)。状態は`data-peitho-agenda-state="done|current|upcoming"`+`data-peitho-agenda-delta="under|over"`で表現し、CSSはそれに当てる
+- DOMフックは`data-peitho-*`属性のみ(クラス依存セレクタ禁止 — 確定済み設計判断)。状態は`data-peitho-agenda-state="done|current|upcoming"`+`data-peitho-agenda-outcome="under|over"`(done行のみ付与)で表現し、CSSはstate+outcomeの複合セレクタで当てる。当初案の`data-peitho-agenda-delta`は差分セルspanのフック名と衝突し、素の`[data-peitho-agenda-delta]`セレクタがdone行全体にマッチしてしまうため`outcome`に改名した(実装レビューで確定 2026-07-04)
 - モックの`.agenda`は`overflow: hidden`(はみ出しは切る)。セクション数が多い場合のスクロール対応は今回スコープ外(必要になったら別Issue)
 - present(聴衆)側の`timeTracker` presentバリアントDOMは**バイト不変**(スナップショットテストで固定)。触らない
 
