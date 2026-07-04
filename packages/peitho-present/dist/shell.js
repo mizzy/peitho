@@ -600,6 +600,7 @@ function installTimeTracker(options) {
   let autoStarted = false;
   const setMarker = (element, ratio) => {
     element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
+    element.style.transform = `translateX(${-Math.round(ratio * 1e4) / 100}%)`;
   };
   const updateSlides = (index, total) => {
     const ratio = total <= 1 ? 0 : index / (total - 1);
