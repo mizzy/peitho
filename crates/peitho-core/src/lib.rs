@@ -16,7 +16,9 @@ pub mod theme;
 pub use check::check_deck;
 pub use error::{BuildError, Result};
 pub use layout::{parse_layout, Layout, Layouts};
-pub use manifest::{build_manifest, fragment_src, manifest_json, Manifest, ManifestSlide};
+pub use manifest::{
+    build_manifest, fragment_src, manifest_json, Manifest, ManifestSection, ManifestSlide,
+};
 pub use mapping::{dispatch_by_convention, map_by_convention};
 pub use notes::{notes_json, Notes};
 pub use parser::parse_markdown;
