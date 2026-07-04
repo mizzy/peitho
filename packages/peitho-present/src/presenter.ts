@@ -1,5 +1,5 @@
 import type { Notes } from "../../../bindings/Notes";
-import { installKeyboardNavigation } from "./keyboard";
+import { installPresenterKeyboard } from "./keyboard";
 import {
   mountPresentShell,
   type PresentShell,
@@ -136,7 +136,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           <div class="pos" data-peitho-presenter="position-short">00 / 00</div>
           <div>
             <span class="grp"><span class="kbd">←</span><span class="kbd">→</span> navigate</span>
-            <span class="grp"><span class="kbd">Space</span> next</span>
+            <span class="grp"><span class="kbd">Space</span> start / pause</span>
             <span class="grp"><span class="kbd">Esc</span> close</span>
           </div>
         </div>
@@ -176,7 +176,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           <div class="tracker-wrap" data-peitho-presenter="tracker-slot"></div>
 
           <div class="controls">
-            <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span></button>
+            <button class="btn play primary" type="button" data-peitho-action="playpause"><span data-peitho-presenter="play-label">Start</span> <span class="k">Space</span></button>
             <button class="btn" type="button" data-peitho-action="prev">Prev <span class="k">←</span></button>
             <button class="btn" type="button" data-peitho-action="next">Next <span class="k">→</span></button>
             <button class="btn" type="button" data-peitho-action="reset">Reset</button>
@@ -241,7 +241,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     now,
     viewport: paneViewport(previewRoot)
   });
-  const keyboardCleanup = installKeyboardNavigation(win, bus);
+  const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
   const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs =
@@ -335,12 +335,16 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     button.addEventListener("click", listener);
     buttonCleanups.push(() => button.removeEventListener("click", listener));
   };
-  const dispatchTimerControl = (action: TimerControlDetail["action"]): void => {
+  function dispatchTimerControl(action: TimerControlDetail["action"]): void {
     bus.dispatchEvent(
       new CustomEvent<TimerControlDetail>("peitho:timercontrol", { detail: { action } })
     );
     tick();
-  };
+  }
+
+  function dispatchPlaypause(): void {
+    dispatchTimerControl(playpauseActionFor(deriveTimerState(mainShell)));
+  }
 
   addButtonListener("prev", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
@@ -348,9 +352,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   addButtonListener("next", () => {
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   });
-  addButtonListener("playpause", () => {
-    dispatchTimerControl(playpauseActionFor(deriveTimerState(mainShell)));
-  });
+  addButtonListener("playpause", dispatchPlaypause);
   addButtonListener("reset", () => {
     dispatchTimerControl("reset");
   });

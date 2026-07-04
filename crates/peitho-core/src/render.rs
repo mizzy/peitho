@@ -480,9 +480,12 @@ pub fn render_presenter_index() -> String {
     .btn:active { transform: translateY(2px); background: var(--accent); border-color: var(--accent); color: var(--bg); box-shadow: 0 0 24px var(--accent-soft), inset 0 2px 4px rgba(0, 0, 0, 0.2); }
     .btn:active .k { color: var(--bg); }
     .btn.primary { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; min-width: max-content; }
+    .btn.primary .k { color: color-mix(in oklch, var(--bg) 60%, var(--accent)); }
     .btn.primary:hover { background: color-mix(in oklch, var(--accent) 88%, white); }
     .btn.primary:active { background: color-mix(in oklch, var(--accent) 60%, black); border-color: color-mix(in oklch, var(--accent) 60%, black); color: white; box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.4); }
+    .btn.primary:active .k { color: color-mix(in oklch, white 60%, var(--accent)); }
     .clock[data-peitho-state="paused"] .btn.play.primary { background: var(--pause); border-color: var(--pause); color: var(--bg); }
+    .clock[data-peitho-state="paused"] .btn.play.primary .k { color: color-mix(in oklch, var(--bg) 60%, var(--pause)); }
     .btn.danger { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); }
     .btn.danger:hover { background: color-mix(in oklch, var(--warn) 12%, transparent); color: var(--warn); }
     .btn.danger:active { background: var(--warn); color: var(--bg); border-color: var(--warn); box-shadow: 0 0 24px color-mix(in oklch, var(--warn) 30%, transparent); }
@@ -792,6 +795,9 @@ mod tests {
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));
         assert!(html.contains("margin-top: auto"));
+        assert!(html.contains(
+            ".btn.primary .k { color: color-mix(in oklch, var(--bg) 60%, var(--accent)); }"
+        ));
         assert!(html.contains(".btn.pressed::before"));
         assert!(html.contains("@media (prefers-reduced-motion: reduce)"));
         assert!(!html.contains("grid-layout-columns"));

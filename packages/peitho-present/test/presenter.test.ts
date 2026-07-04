@@ -96,6 +96,7 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(root.querySelector(".agenda")).toBeNull();
   expect(root.querySelector(".status-line")?.textContent).not.toContain("Section");
   expect(root.querySelector(".kbdbar")?.textContent).toContain("Space");
+  expect(root.querySelector(".kbdbar")?.textContent).toContain("start / pause");
 
   const clock = root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')!;
   const pill = root.querySelector<HTMLElement>('[data-peitho-presenter="state-pill"]')!;
@@ -107,8 +108,8 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(clock.dataset.peithoState).toBe("stopped");
   expect(pill.dataset.peithoState).toBe("stopped");
   expect(pill.textContent).toContain("Stopped");
-  expect(play.textContent).toBe("Start");
-  expect(play.textContent).not.toContain("Space");
+  expect(play.textContent).toContain("Start");
+  expect(play.textContent).toContain("Space");
 
   play.click();
   now = 65000;
@@ -117,7 +118,8 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(clock.dataset.peithoState).toBe("running");
   expect(pill.dataset.peithoState).toBe("running");
   expect(pill.textContent).toContain("Running");
-  expect(play.textContent).toBe("Pause");
+  expect(play.textContent).toContain("Pause");
+  expect(play.textContent).toContain("Space");
 });
 
 it("shows planned duration in presenter timer when manifest has time", async () => {
@@ -320,6 +322,86 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   expect(channel.sent).toEqual([{ index: 1 }, { close: true }]);
 });
 
+it("maps presenter Space to timer playpause without navigating", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+  const timerRequests: unknown[] = [];
+  const navigateRequests: unknown[] = [];
+  const onTimerControl = (event: Event): void => {
+    timerRequests.push((event as CustomEvent).detail);
+  };
+  const onNavigate = (event: Event): void => {
+    navigateRequests.push((event as CustomEvent).detail);
+  };
+  window.addEventListener("peitho:timercontrol", onTimerControl);
+  window.addEventListener("peitho:navigate", onNavigate);
+  cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  cleanups.push(() => window.removeEventListener("peitho:navigate", onNavigate));
+
+  const startEvent = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+  window.dispatchEvent(startEvent);
+  const pauseEvent = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+  window.dispatchEvent(pauseEvent);
+  const resumeEvent = new KeyboardEvent("keydown", { key: " ", cancelable: true });
+  window.dispatchEvent(resumeEvent);
+
+  expect(startEvent.defaultPrevented).toBe(true);
+  expect(pauseEvent.defaultPrevented).toBe(true);
+  expect(resumeEvent.defaultPrevented).toBe(true);
+  expect(timerRequests).toEqual([{ action: "start" }, { action: "pause" }, { action: "resume" }]);
+  expect(navigateRequests).toEqual([]);
+  expect(view.mainShell.currentIndex).toBe(0);
+});
+
+it("ignores repeated presenter Space keydown and keeps arrow navigation", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+  const timerRequests: unknown[] = [];
+  const navigateRequests: unknown[] = [];
+  const onTimerControl = (event: Event): void => {
+    timerRequests.push((event as CustomEvent).detail);
+  };
+  const onNavigate = (event: Event): void => {
+    navigateRequests.push((event as CustomEvent).detail);
+  };
+  window.addEventListener("peitho:timercontrol", onTimerControl);
+  window.addEventListener("peitho:navigate", onNavigate);
+  cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  cleanups.push(() => window.removeEventListener("peitho:navigate", onNavigate));
+
+  const repeatEvent = new KeyboardEvent("keydown", { key: " ", repeat: true, cancelable: true });
+  window.dispatchEvent(repeatEvent);
+  const nextEvent = new KeyboardEvent("keydown", { key: "ArrowRight", cancelable: true });
+  window.dispatchEvent(nextEvent);
+  const prevEvent = new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true });
+  window.dispatchEvent(prevEvent);
+
+  expect(repeatEvent.defaultPrevented).toBe(true);
+  expect(nextEvent.defaultPrevented).toBe(true);
+  expect(prevEvent.defaultPrevented).toBe(true);
+  expect(timerRequests).toEqual([]);
+  expect(navigateRequests).toEqual([{ to: "next" }, { to: "prev" }]);
+  expect(view.mainShell.currentIndex).toBe(0);
+});
+
 it("derives playpause action labels and chrome from shell timer state", async () => {
   const root = document.createElement("main");
   const { factory } = mockSyncChannelFactory();
@@ -339,26 +421,26 @@ it("derives playpause action labels and chrome from shell timer state", async ()
 
   expect(clock.dataset.peithoState).toBe("stopped");
   expect(pill.textContent).toContain("Stopped");
-  expect(play.textContent).toBe("Start");
+  expect(play.textContent).toContain("Start");
 
   play.click();
   expect(clock.dataset.peithoState).toBe("running");
   expect(pill.textContent).toContain("Running");
-  expect(play.textContent).toBe("Pause");
+  expect(play.textContent).toContain("Pause");
 
   play.click();
   expect(clock.dataset.peithoState).toBe("paused");
   expect(pill.textContent).toContain("Paused");
-  expect(play.textContent).toBe("Resume");
+  expect(play.textContent).toContain("Resume");
 
   play.click();
   expect(clock.dataset.peithoState).toBe("running");
-  expect(play.textContent).toBe("Pause");
+  expect(play.textContent).toContain("Pause");
 
   reset.click();
   expect(clock.dataset.peithoState).toBe("stopped");
   expect(pill.textContent).toContain("Stopped");
-  expect(play.textContent).toBe("Start");
+  expect(play.textContent).toContain("Start");
 });
 
 it("adds button ripple feedback and clears pending ripple timeout on destroy", async () => {
