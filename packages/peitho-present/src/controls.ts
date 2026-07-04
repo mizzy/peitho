@@ -9,7 +9,6 @@ export type PresentationControlsOptions = {
   idleMs?: number;
   openPresenter?: () => void | Promise<void>;
   openPresenterWindow?: OpenPresenterPopupOptions["openWindow"];
-  closeWindow?: () => void;
 };
 
 export type CanvasClickNavigationOptions = {
@@ -35,7 +34,6 @@ export function installPresentationControls(options: PresentationControlsOptions
         window: win,
         openWindow: options.openPresenterWindow
       }));
-  const closeWindow = options.closeWindow ?? (() => win.close());
 
   const bar = doc.createElement("nav");
   bar.dataset.peithoControlBar = "true";
@@ -74,7 +72,7 @@ export function installPresentationControls(options: PresentationControlsOptions
     if (action === "prev" || action === "next") dispatchNavigate(action);
     if (action === "presenter") void openPresenter();
     if (action === "fullscreen") toggleFullscreen(doc);
-    if (action === "close") closeWindow();
+    if (action === "close") bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   };
   const onSlideChange = (event: Event): void => {
     const detail = (event as CustomEvent<SlideChangeDetail>).detail;

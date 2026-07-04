@@ -57,7 +57,6 @@ function installPresentationControls(options) {
     window: win,
     openWindow: options.openPresenterWindow
   }));
-  const closeWindow = options.closeWindow ?? (() => win.close());
   const bar = doc.createElement("nav");
   bar.dataset.peithoControlBar = "true";
   bar.className = "peitho-control-bar";
@@ -93,7 +92,7 @@ function installPresentationControls(options) {
     if (action === "prev" || action === "next") dispatchNavigate(action);
     if (action === "presenter") void openPresenter();
     if (action === "fullscreen") toggleFullscreen(doc);
-    if (action === "close") closeWindow();
+    if (action === "close") bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   };
   const onSlideChange = (event) => {
     const detail = event.detail;
@@ -671,7 +670,6 @@ async function mountPresenterView(options) {
   const doc = options.document ?? document;
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
-  const closeWindow = options.closeWindow ?? (() => win.close());
   const log = options.console ?? console;
   const bus = win;
   const previewBus = new EventTarget();
@@ -785,7 +783,7 @@ async function mountPresenterView(options) {
     });
   }
   options.root.querySelector('[data-peitho-action="close"]')?.addEventListener("click", () => {
-    closeWindow();
+    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
   });
   const interval = win.setInterval(tick, 250);
   return {

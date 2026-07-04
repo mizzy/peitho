@@ -108,21 +108,23 @@ it("opens presenter popup with default display management", async () => {
   );
 });
 
-it("closes the presentation window from the close button", () => {
+it("dispatches a close request from the close button", () => {
   const root = document.createElement("main");
-  const closeWindow = vi.fn();
+  const requests: unknown[] = [];
+  listenWindow("peitho:closerequest", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
   const cleanup = installPresentationControls({
     root,
     window,
     document,
-    bus: window,
-    closeWindow
+    bus: window
   });
   cleanups.push(cleanup);
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="close"]')?.click();
 
-  expect(closeWindow).toHaveBeenCalledTimes(1);
+  expect(requests).toEqual([null]);
 });
 
 it("keeps the explicit openPresenter injection as the highest priority", () => {
