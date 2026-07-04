@@ -48,6 +48,52 @@ it("moves rabbit by slide progress and turtle by elapsed progress", () => {
   expect(root.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')?.style.left).toBe("50%");
 });
 
+it("clamps markers to the track edges so the glyph never overflows", () => {
+  let elapsed = 0;
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  cleanups.push(
+    installTimeTracker({
+      root,
+      shell: shell({ manifest: { slideCount: 3 }, elapsedMs: () => elapsed }),
+      plannedDurationMs: 60_000,
+      bus,
+      window,
+      document
+    })
+  );
+
+  const rabbit = root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')!;
+  const turtle = root.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')!;
+
+  expect(rabbit.style.left).toBe("0%");
+  expect(rabbit.style.transform).toBe("translateX(0%)");
+  expect(turtle.style.left).toBe("0%");
+  expect(turtle.style.transform).toBe("translateX(0%)");
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:slidechange", {
+      detail: { index: 1, total: 3, previousIndex: 0, key: "middle" }
+    })
+  );
+  elapsed = 30_000;
+  vi.advanceTimersByTime(250);
+  expect(rabbit.style.transform).toBe("translateX(-50%)");
+  expect(turtle.style.transform).toBe("translateX(-50%)");
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:slidechange", {
+      detail: { index: 2, total: 3, previousIndex: 1, key: "last" }
+    })
+  );
+  elapsed = 60_000;
+  vi.advanceTimersByTime(250);
+  expect(rabbit.style.left).toBe("100%");
+  expect(rabbit.style.transform).toBe("translateX(-100%)");
+  expect(turtle.style.left).toBe("100%");
+  expect(turtle.style.transform).toBe("translateX(-100%)");
+});
+
 it("rejects non-positive and non-finite planned durations", () => {
   for (const plannedDurationMs of [0, -1, Number.NaN]) {
     const root = document.createElement("main");

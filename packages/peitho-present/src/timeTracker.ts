@@ -62,6 +62,7 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
 
   const setMarker = (element: HTMLElement, ratio: number): void => {
     element.style.left = `${Math.round(ratio * 10_000) / 100}%`;
+    element.style.transform = `translateX(${-Math.round(ratio * 10_000) / 100}%)`;
   };
   const updateSlides = (index: number, total: number): void => {
     const ratio = total <= 1 ? 0 : index / (total - 1);
