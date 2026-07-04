@@ -1,4 +1,5 @@
 import type { ManifestSection } from "../../../bindings/ManifestSection";
+import { sectionIndexForSlide } from "./sections";
 import type { PresentShell, SlideChangeDetail, TimerControlDetail } from "./shell";
 import { formatMinuteSeconds, isValidDurationMs } from "./timeTracker";
 
@@ -49,14 +50,8 @@ export function installAgenda(options: AgendaOptions): () => void {
   const actualMs = new Array<number>(options.sections.length).fill(0);
   let lastElapsedMs = options.shell.elapsedMs();
 
-  function sectionIndexForSlide(slideIndex: number): number {
-    return options.sections.findIndex(
-      (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
-    );
-  }
-
   function render(): void {
-    const currentSection = sectionIndexForSlide(options.shell.currentIndex);
+    const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
     rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
   }
 
@@ -64,7 +59,7 @@ export function installAgenda(options: AgendaOptions): () => void {
     if (slideIndex === null || options.shell.startedAt() === null) return;
     const elapsedMs = options.shell.elapsedMs();
     const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(slideIndex);
+    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
     if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
     lastElapsedMs = elapsedMs;
   }

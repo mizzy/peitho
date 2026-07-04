@@ -422,7 +422,6 @@ pub fn render_presenter_index() -> String {
     .colhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; min-width: 0; height: var(--colhead-h); }
     .status-line { display: inline-flex; align-items: center; gap: 10px; color: var(--fg-dim); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; min-width: 0; }
     .status-line .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
-    .status-line .now { color: var(--accent); }
     .deck-title { font-size: 12px; color: var(--fg-mute); letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .slide-frame { min-width: 0; }
     .slide-pane { position: relative; width: 100%; box-sizing: border-box; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
