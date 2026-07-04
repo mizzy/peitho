@@ -53,6 +53,16 @@ function timeScaleLabels(plannedDurationMs) {
     (_, index) => formatMinuteSeconds(plannedDurationMs * index / 4)
   );
 }
+function timeScaleLabelTransform(index, labelCount) {
+  if (index === 0) return "translateX(0%)";
+  if (index === labelCount - 1) return "translateX(-100%)";
+  return "translateX(-50%)";
+}
+function timeScaleLabelStyle(index, labelCount) {
+  const left = Math.round(index / (labelCount - 1) * 1e4) / 100;
+  const transform = timeScaleLabelTransform(index, labelCount);
+  return `left: ${left}%; transform: ${transform}`;
+}
 function isValidSlideChangeDetail(detail) {
   if (typeof detail !== "object" || detail === null) return false;
   const candidate = detail;
@@ -72,6 +82,7 @@ function installTimeTracker(options) {
   track.className = "peitho-time-tracker";
   track.dataset.peithoTimeTracker = variant;
   if (variant === "presenter") {
+    const scaleLabels = timeScaleLabels(options.plannedDurationMs);
     track.innerHTML = [
       '<div class="tracker-legend"><span>Slide progress</span><span>Time</span></div>',
       '<div class="tracker">',
@@ -79,7 +90,9 @@ function installTimeTracker(options) {
       '<span data-peitho-marker="rabbit" aria-label="slide progress">\u{1F430}</span>',
       '<span data-peitho-marker="turtle" aria-label="time progress">\u{1F422}</span>',
       "</div>",
-      `<div class="tracker-scale mono">${timeScaleLabels(options.plannedDurationMs).map((label) => `<span>${label}</span>`).join("")}</div>`
+      `<div class="tracker-scale mono">${scaleLabels.map(
+        (label, index) => `<span style="${timeScaleLabelStyle(index, scaleLabels.length)}">${label}</span>`
+      ).join("")}</div>`
     ].join("");
   } else {
     track.innerHTML = [
