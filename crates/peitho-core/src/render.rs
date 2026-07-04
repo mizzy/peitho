@@ -429,7 +429,7 @@ pub fn render_presenter_index() -> String {
     .kbd { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; color: var(--fg-mute); line-height: 1.2; }
     .kbdbar .grp { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; white-space: nowrap; }
     .kbdbar .grp:first-of-type { margin-left: 0; }
-    .notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, auto); min-height: 0; max-height: 42vh; overflow: hidden; }
+    .notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 42vh; max-height: 42vh; overflow: hidden; }
     .notes-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
     .notes-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
     .notes-body { overflow: auto; padding: 10px 16px 12px; font-size: 16px; line-height: 1.4; color: var(--fg); white-space: pre-wrap; }
@@ -791,6 +791,7 @@ mod tests {
         ));
         assert!(html.contains(".slide-pane"));
         assert!(html.contains(".next-preview"));
+        assert!(html.contains(".notes { background: var(--bg-elev); border: 1px solid var(--line-soft); display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 42vh; max-height: 42vh; overflow: hidden; }"));
         assert!(html.contains(".notes-body"));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
         assert!(html.contains(".controls {"));
