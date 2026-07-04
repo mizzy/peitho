@@ -89,9 +89,9 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
       '[data-peitho-presenter="preview"] [data-slide-index="1"]'
     )?.shadowRoot?.textContent
   ).toContain("Details");
-  expect(root.querySelector('[data-peitho-presenter="notes"]')?.textContent).toContain(
-    "Opening note"
-  );
+  const notesEl = root.querySelector<HTMLElement>('[data-peitho-presenter="notes"]');
+  expect(notesEl?.textContent).toContain("Opening note");
+  expect(notesEl?.classList.contains("is-empty")).toBe(false);
   expect(root.querySelector(".left")).not.toBeNull();
   expect(root.querySelector(".right")).not.toBeNull();
   expect(
@@ -340,9 +340,9 @@ it("updates preview and shows end of deck on the last slide", async () => {
 
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
 
-  expect(root.querySelector('[data-peitho-presenter="notes"]')?.textContent).toContain(
-    "No notes for this slide."
-  );
+  const notesEl = root.querySelector<HTMLElement>('[data-peitho-presenter="notes"]');
+  expect(notesEl?.textContent).toContain("No notes for this slide.");
+  expect(notesEl?.classList.contains("is-empty")).toBe(true);
   expect(root.querySelector('[data-peitho-presenter="preview-end"]')?.textContent).toContain(
     "End of deck"
   );
