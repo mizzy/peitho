@@ -93,6 +93,9 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   );
   expect(root.querySelector(".left")).not.toBeNull();
   expect(root.querySelector(".right")).not.toBeNull();
+  expect(
+    Array.from(root.querySelector(".stage")?.children ?? []).map((child) => child.className)
+  ).toEqual(["colhead", "slide-frame", "kbdbar", "notes"]);
   expect(root.querySelector(".agenda")).toBeNull();
   expect(root.querySelector(".status-line")?.textContent).not.toContain("Section");
   expect(root.querySelector(".kbdbar")?.textContent).toContain("Space");
