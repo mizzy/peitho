@@ -9,7 +9,9 @@ use pulldown_cmark::{
 use serde::Deserialize;
 
 use crate::{
-    domain::{ExplicitSlot, FragmentKind, RawImagePath, SlideKey, SlotName, SourceFragment},
+    domain::{
+        AspectRatio, ExplicitSlot, FragmentKind, RawImagePath, SlideKey, SlotName, SourceFragment,
+    },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     phase::{
@@ -42,6 +44,8 @@ struct PageSectionMarker {
 struct DeckFrontmatter {
     #[serde(default, deserialize_with = "deserialize_optional_planned_time")]
     time: Option<PlannedTime>,
+    #[serde(default)]
+    aspect_ratio: Option<String>,
     #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
@@ -478,11 +482,17 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         ));
     }
 
+    let key_lines = frontmatter_key_lines(Some(raw));
     let parsed: DeckFrontmatter =
         serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+    let aspect_ratio = parse_frontmatter_aspect_ratio(
+        parsed.aspect_ratio,
+        key_lines.get("aspect_ratio").copied(),
+    )?;
 
     Ok(DeckSettings::new(
         parsed.time,
+        aspect_ratio,
         Vec::new(),
         parsed.layouts,
         parsed.css,
@@ -497,7 +507,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
     };
 
     for (index, line) in raw.yaml.lines().enumerate() {
-        for key in ["time", "layouts", "css", "syntaxes"] {
+        for key in ["time", "aspect_ratio", "layouts", "css", "syntaxes"] {
             if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
                 key_lines.entry(key).or_insert(raw.line + index + 1);
             }
@@ -512,6 +522,33 @@ fn first_nonblank_yaml_line(yaml: &str) -> usize {
         .position(|line| !line.trim().is_empty())
         .map(|index| index + 1)
         .unwrap_or(1)
+}
+
+fn parse_frontmatter_aspect_ratio(
+    value: Option<String>,
+    line: Option<usize>,
+) -> Result<AspectRatio> {
+    match (value.as_deref(), line) {
+        (None, None) => Ok(AspectRatio::default()),
+        (Some(value), line) => value
+            .parse()
+            .map_err(|_| unknown_aspect_ratio_error(value, line)),
+        (None, Some(line)) => Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "aspect_ratio has no value",
+            "set aspect_ratio to 16:9 or 4:3",
+        )),
+    }
+}
+
+fn unknown_aspect_ratio_error(value: &str, line: Option<usize>) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        line,
+        format!("unknown aspect_ratio '{value}'; use one of: 16:9, 4:3"),
+        "set aspect_ratio to 16:9 or 4:3",
+    )
 }
 
 fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
@@ -563,7 +600,9 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
+    } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
+        "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -1689,7 +1728,11 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{domain::FragmentKind, error::ErrorKind, phase::KeySource};
+    use crate::{
+        domain::{AspectRatio, FragmentKind},
+        error::ErrorKind,
+        phase::KeySource,
+    };
     use std::path::Path;
 
     fn parse_markdown(
@@ -1743,6 +1786,66 @@ mod tests {
             settings.planned_time().map(PlannedTime::as_millis),
             Some(900_000)
         );
+    }
+
+    #[test]
+    fn parses_frontmatter_aspect_ratio_16_9_as_default() {
+        let deck = parse_markdown(
+            "---\naspect_ratio: 16:9\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().aspect_ratio(), AspectRatio::Ratio16To9);
+    }
+
+    #[test]
+    fn parses_frontmatter_aspect_ratio_4_3() {
+        let deck = parse_markdown(
+            "---\naspect_ratio: 4:3\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().aspect_ratio().width(), 960);
+        assert_eq!(deck.settings().aspect_ratio().height(), 720);
+    }
+
+    #[test]
+    fn missing_frontmatter_aspect_ratio_defaults_to_16_9() {
+        let frontmatter = parse_frontmatter("# Intro").unwrap();
+
+        assert_eq!(
+            frontmatter.settings().aspect_ratio(),
+            AspectRatio::Ratio16To9
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_frontmatter_aspect_ratio_with_line_and_message() {
+        for value in ["16:10", "1920x1080"] {
+            let markdown = format!("---\ntime: 15m\naspect_ratio: {value}\n---\n# Intro");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(3));
+            assert_eq!(
+                err.message,
+                format!("unknown aspect_ratio '{value}'; use one of: 16:9, 4:3")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_frontmatter_aspect_ratio_with_line_and_message() {
+        let markdown = "---\naspect_ratio:\n---\n# Intro";
+        let err = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.message, "aspect_ratio has no value");
+        assert_eq!(err.help, "set aspect_ratio to 16:9 or 4:3");
     }
 
     #[test]
@@ -2885,7 +2988,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
         );
     }
 
@@ -3053,7 +3156,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
         );
     }
 
@@ -3109,7 +3212,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
         );
     }
 

@@ -17,6 +17,9 @@ const manifest: Manifest = {
   title: "Demo",
   slideCount: 1,
   plannedDurationMs: null,
+  aspectRatio: "16:9",
+  canvasWidth: 1280,
+  canvasHeight: 720,
   sections: [],
   slides: [{ index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false }],
   images: []

@@ -16,6 +16,9 @@ const manifest = {
   title: "Demo",
   slideCount: 2,
   plannedDurationMs: null,
+  aspectRatio: "16:9",
+  canvasWidth: 1280,
+  canvasHeight: 720,
   sections: [],
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
@@ -34,6 +37,9 @@ afterEach(() => {
   while (windowListenerCleanups.length > 0) {
     windowListenerCleanups.pop()?.();
   }
+  document.documentElement.style.removeProperty("--peitho-canvas-width");
+  document.documentElement.style.removeProperty("--peitho-canvas-height");
+  document.documentElement.style.removeProperty("--peitho-canvas-aspect");
 });
 
 async function mountForTest(options: Parameters<typeof mountPresentShell>[0]): Promise<PresentShell> {
@@ -47,9 +53,9 @@ function listenWindow(type: string, listener: EventListener): void {
   windowListenerCleanups.push(() => window.removeEventListener(type, listener));
 }
 
-function standardFetch(): typeof fetch {
+function standardFetch(responseManifest = manifest): typeof fetch {
   return vi.fn(async (url: string) => {
-    if (url === "manifest.json") return okJson(manifest);
+    if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
@@ -78,6 +84,60 @@ it("loads manifest and fragments into shadow roots", async () => {
   expect(hosts).toHaveLength(2);
   expect(hosts[0].shadowRoot?.innerHTML).toContain("<h1>Intro</h1>");
   expect(hosts[1].shadowRoot?.innerHTML).toContain("<pre>code</pre>");
+});
+
+it("uses manifest aspect ratio for host scaling and root canvas variables", async () => {
+  const root = document.createElement("main");
+  const fourByThree = { ...manifest, aspectRatio: "4:3", canvasWidth: 960, canvasHeight: 720 };
+
+  await mountForTest({
+    root,
+    fetcher: standardFetch(fourByThree),
+    window,
+    viewport: () => ({ width: 1200, height: 900 })
+  });
+
+  const host = root.querySelector<HTMLElement>(".peitho-slide");
+  expect(host?.style.width).toBe("960px");
+  expect(host?.style.height).toBe("720px");
+  expect(host?.style.transform).toBe("translate(0px, 0px) scale(1.25)");
+  expect(root.style.getPropertyValue("--peitho-canvas-width")).toBe("960px");
+  expect(root.style.getPropertyValue("--peitho-canvas-height")).toBe("720px");
+  expect(root.style.getPropertyValue("--peitho-canvas-aspect")).toBe("4 / 3");
+  expect(document.documentElement.style.getPropertyValue("--peitho-canvas-width")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--peitho-canvas-height")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--peitho-canvas-aspect")).toBe("");
+});
+
+it("keeps canvas variables scoped when sibling shells share a document", async () => {
+  const firstRoot = document.createElement("main");
+  const secondRoot = document.createElement("main");
+  const first = await mountForTest({
+    root: firstRoot,
+    fetcher: standardFetch(),
+    window
+  });
+  await mountForTest({
+    root: secondRoot,
+    fetcher: standardFetch({
+      ...manifest,
+      aspectRatio: "4:3",
+      canvasWidth: 960,
+      canvasHeight: 720
+    }),
+    window
+  });
+
+  first.destroy();
+  const firstIndex = mountedShells.indexOf(first);
+  if (firstIndex >= 0) mountedShells.splice(firstIndex, 1);
+
+  expect(firstRoot.style.getPropertyValue("--peitho-canvas-width")).toBe("");
+  expect(firstRoot.style.getPropertyValue("--peitho-canvas-height")).toBe("");
+  expect(firstRoot.style.getPropertyValue("--peitho-canvas-aspect")).toBe("");
+  expect(secondRoot.style.getPropertyValue("--peitho-canvas-width")).toBe("960px");
+  expect(secondRoot.style.getPropertyValue("--peitho-canvas-height")).toBe("720px");
+  expect(secondRoot.style.getPropertyValue("--peitho-canvas-aspect")).toBe("4 / 3");
 });
 
 it("injects peitho css into each shadow root before fragment html", async () => {

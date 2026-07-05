@@ -14,7 +14,7 @@ pub mod render;
 pub mod theme;
 
 pub use check::check_deck;
-pub use domain::{RawImagePath, ResolvedImageAsset, ResolvedImagePath};
+pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
 pub use error::{BuildError, Result};
 pub use layout::{parse_layout, Layout, Layouts};
 pub use manifest::{

@@ -7,7 +7,10 @@ use lol_html::{
 use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
-    domain::{FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName, SourceFragment},
+    domain::{
+        AspectRatio, FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName,
+        SourceFragment,
+    },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     layout::Layout,
@@ -227,8 +230,8 @@ fn render_error(err: RewritingError) -> BuildError {
     }
 }
 
-pub fn render_distribution_index() -> String {
-    r#"<!doctype html>
+pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
+    const TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -236,9 +239,10 @@ pub fn render_distribution_index() -> String {
   <link rel="stylesheet" href="peitho.css">
   <title>Peitho Deck</title>
   <style>
+    :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
     html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
     #peitho-slides { position: fixed; inset: 0; overflow: hidden; background: #000; }
-    #peitho-canvas { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: top left; }
+    #peitho-canvas { position: absolute; left: 0; top: 0; width: __PEITHO_CANVAS_WIDTH__px; height: __PEITHO_CANVAS_HEIGHT__px; transform-origin: top left; }
   </style>
 </head>
 <body>
@@ -246,8 +250,8 @@ pub fn render_distribution_index() -> String {
     <div id="peitho-canvas"></div>
   </main>
   <script>
-    const CANVAS_WIDTH = 1280;
-    const CANVAS_HEIGHT = 720;
+    const CANVAS_WIDTH = __PEITHO_CANVAS_WIDTH__;
+    const CANVAS_HEIGHT = __PEITHO_CANVAS_HEIGHT__;
     let slides = [];
     let currentIndex = 0;
 
@@ -374,18 +378,30 @@ pub fn render_distribution_index() -> String {
     loadDeck();
   </script>
 </body>
-</html>"#
-        .to_owned()
+</html>"#;
+
+    fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
-pub fn render_present_index() -> String {
-    r#"<!doctype html>
+fn fill_canvas_tokens(template: &str, aspect_ratio: AspectRatio) -> String {
+    template
+        .replace("__PEITHO_CANVAS_WIDTH__", &aspect_ratio.width().to_string())
+        .replace(
+            "__PEITHO_CANVAS_HEIGHT__",
+            &aspect_ratio.height().to_string(),
+        )
+        .replace("__PEITHO_CANVAS_ASPECT__", aspect_ratio.css_aspect_value())
+}
+
+pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
+    const TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Peitho Present</title>
   <style>
+    :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
     html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
     #peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
     .peitho-control-bar { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; gap: 8px; align-items: center; padding: 8px; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 6px; }
@@ -471,12 +487,13 @@ pub fn render_present_index() -> String {
     main();
   </script>
 </body>
-</html>"#
-        .to_owned()
+</html>"#;
+
+    fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
-pub fn render_presenter_index() -> String {
-    r#"<!doctype html>
+pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
+    const TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -504,6 +521,9 @@ pub fn render_presenter_index() -> String {
       --colhead-h: 18px;
       --kbdbar-h: 22px;
       --notes-h: 24vh;
+      --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px;
+      --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px;
+      --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__;
     }
     html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
     body { font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Hiragino Kaku Gothic ProN", sans-serif; font-size: 14px; letter-spacing: 0; }
@@ -512,14 +532,14 @@ pub fn render_presenter_index() -> String {
     #peitho-presenter-root { min-height: 100vh; height: 100vh; }
     .app { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(400px, 1fr); gap: 20px; padding: 20px; box-sizing: border-box; height: 100vh; max-height: 100vh; }
     .left { container-type: size; min-height: 0; min-width: 0; display: flex; justify-content: center; }
-    .stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * 16 / 9))); }
+    .stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * var(--peitho-canvas-aspect)))); }
     .right { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 16px; min-height: 0; min-width: 0; }
     .colhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; min-width: 0; height: var(--colhead-h); }
     .status-line { display: inline-flex; align-items: center; gap: 10px; color: var(--fg-dim); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; min-width: 0; }
     .status-line .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
     .deck-title { font-size: 12px; color: var(--fg-mute); letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .slide-frame { min-width: 0; }
-    .slide-pane { position: relative; width: 100%; box-sizing: border-box; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
+    .slide-pane { position: relative; width: 100%; box-sizing: border-box; aspect-ratio: var(--peitho-canvas-aspect); background: var(--bg-slide); border: 1px solid var(--line-soft); box-shadow: 0 20px 60px -30px rgba(0, 0, 0, 0.6); overflow: hidden; }
     .peitho-presenter-pane { position: relative; overflow: hidden; background: var(--bg-slide); min-height: 0; }
     .kbdbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 2px; color: var(--fg-dim); font-size: 12px; height: var(--kbdbar-h); flex: 0 0 auto; }
     .kbdbar .pos { color: var(--fg-mute); font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
@@ -535,7 +555,7 @@ pub fn render_presenter_index() -> String {
     .card-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
     .card-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
     .next-wrap { padding: 12px; }
-    .next-preview { position: relative; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); overflow: hidden; container-type: inline-size; }
+    .next-preview { position: relative; aspect-ratio: var(--peitho-canvas-aspect); background: var(--bg-slide); border: 1px solid var(--line-soft); overflow: hidden; container-type: inline-size; }
     .next-preview > [data-peitho-presenter="preview"] { position: absolute; inset: 0; }
     [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; box-sizing: border-box; padding: 9.6% 13.5%; display: flex; flex-direction: column; background: var(--bg-slide); color: var(--fg); }
     [data-peitho-presenter="preview-end"] .eod-top,
@@ -689,8 +709,9 @@ pub fn render_presenter_index() -> String {
     main();
   </script>
 </body>
-</html>"#
-        .to_owned()
+</html>"#;
+
+    fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
 #[cfg(test)]
@@ -698,6 +719,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
+        domain::AspectRatio,
         layout::parse_layout,
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
@@ -926,10 +948,13 @@ mod tests {
 
     #[test]
     fn distribution_index_uses_one_slide_canvas_without_shell_bundle() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
         assert!(html.contains(r#"id="peitho-canvas""#));
+        assert!(html.contains("--peitho-canvas-width: 1280px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("width: 1280px; height: 720px;"));
         assert!(html.contains("const CANVAS_WIDTH = 1280"));
         assert!(html.contains("const CANVAS_HEIGHT = 720"));
         assert!(html.contains("function resizeCanvas()"));
@@ -946,7 +971,7 @@ mod tests {
 
     #[test]
     fn distribution_index_reads_slide_query_on_load() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("URLSearchParams(location.search)"));
         assert!(html.contains(".get('slide')"));
@@ -955,7 +980,7 @@ mod tests {
 
     #[test]
     fn distribution_index_supports_hash_fallback() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("location.hash"));
         assert!(html.contains("hash.startsWith('#slide=')"));
@@ -965,7 +990,7 @@ mod tests {
 
     #[test]
     fn distribution_index_updates_url_on_slide_change() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("history.replaceState"));
         let show_slide_index = html.find("function showSlide(index)").unwrap();
@@ -985,21 +1010,21 @@ mod tests {
 
     #[test]
     fn distribution_index_never_uses_pushstate() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(!html.contains("history.pushState"));
     }
 
     #[test]
     fn distribution_index_handles_popstate() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("window.addEventListener('popstate'"));
     }
 
     #[test]
     fn distribution_index_preserves_query_and_hash_when_writing_slide() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("location.pathname"));
         assert!(html.contains("params.set('slide'"));
@@ -1009,8 +1034,8 @@ mod tests {
 
     #[test]
     fn distribution_index_url_deep_link_leaves_present_and_presenter_alone() {
-        let present_html = render_present_index();
-        let presenter_html = render_presenter_index();
+        let present_html = render_present_index(AspectRatio::Ratio16To9);
+        let presenter_html = render_presenter_index(AspectRatio::Ratio16To9);
 
         assert!(!present_html.contains("?slide="));
         assert!(!present_html.contains("URLSearchParams"));
@@ -1019,8 +1044,19 @@ mod tests {
     }
 
     #[test]
+    fn distribution_index_uses_deck_aspect_ratio_canvas_dimensions() {
+        let html = render_distribution_index(AspectRatio::Ratio4To3);
+
+        assert!(html.contains("--peitho-canvas-width: 960px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("width: 960px; height: 720px;"));
+        assert!(html.contains("const CANVAS_WIDTH = 960"));
+        assert!(html.contains("const CANVAS_HEIGHT = 720"));
+    }
+
+    #[test]
     fn present_index_mounts_shell_controls_keyboard_sync_and_notes() {
-        let html = render_present_index();
+        let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
         assert!(html.contains("installPresentationControls"));
@@ -1058,7 +1094,7 @@ mod tests {
 
     #[test]
     fn present_index_fetches_present_config_and_mounts_time_tracker_conditionally() {
-        let html = render_present_index();
+        let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("import * as peitho from './shell.js';"));
         assert!(html.contains("fetchOk('present.json')"));
@@ -1104,7 +1140,7 @@ mod tests {
 
     #[test]
     fn presenter_index_mounts_presenter_view_with_canvas_panes_and_notes() {
-        let html = render_presenter_index();
+        let html = render_presenter_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
         assert!(html.contains("import * as peitho from './shell.js';"));
@@ -1129,7 +1165,9 @@ mod tests {
         ));
         assert!(html.contains(".slide-pane"));
         assert!(html.contains(".next-preview"));
-        assert!(html.contains(".stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * 16 / 9))); }"));
+        assert!(html.contains("--peitho-canvas-aspect: 16 / 9;"));
+        assert!(html.contains(".stage { display: flex; flex-direction: column; gap: var(--stage-gap); height: 100%; min-width: 0; width: max(280px, min(100%, calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * var(--peitho-canvas-aspect)))); }"));
+        assert!(html.contains("aspect-ratio: var(--peitho-canvas-aspect);"));
         assert!(
             html.contains(".slide-pane { position: relative; width: 100%; box-sizing: border-box;")
         );
@@ -1158,8 +1196,29 @@ mod tests {
     }
 
     #[test]
+    fn presenter_index_uses_deck_aspect_ratio_css_variable() {
+        let html = render_presenter_index(AspectRatio::Ratio4To3);
+
+        assert!(html.contains("--peitho-canvas-aspect: 4 / 3;"));
+        assert!(html.contains("aspect-ratio: var(--peitho-canvas-aspect);"));
+        assert!(html.contains(
+            "calc((100cqh - var(--colhead-h) - var(--kbdbar-h) - var(--notes-h) - 3 * var(--stage-gap)) * var(--peitho-canvas-aspect))"
+        ));
+        assert!(!html.contains("aspect-ratio: 16 / 9"));
+    }
+
+    #[test]
+    fn present_index_emits_deck_aspect_ratio_css_variable() {
+        let html = render_present_index(AspectRatio::Ratio4To3);
+
+        assert!(html.contains("--peitho-canvas-width: 960px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("--peitho-canvas-aspect: 4 / 3;"));
+    }
+
+    #[test]
     fn presenter_index_includes_time_tracker_css() {
-        let html = render_presenter_index();
+        let html = render_presenter_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(".peitho-time-tracker"));
         assert!(html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
@@ -1190,7 +1249,7 @@ mod tests {
 
     #[test]
     fn presenter_index_includes_agenda_css_with_data_selectors() {
-        let html = render_presenter_index();
+        let html = render_presenter_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"[data-peitho-agenda] { overflow: hidden;"#));
         assert!(html.contains(r#"[data-peitho-agenda-head]"#));
@@ -1239,7 +1298,7 @@ mod tests {
 
     #[test]
     fn distribution_index_does_not_include_time_tracker() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(!html.contains("installTimeTracker"));
         assert!(!html.contains("peitho-time-tracker"));
@@ -1248,7 +1307,7 @@ mod tests {
 
     #[test]
     fn distribution_index_maps_escape_to_index_navigation() {
-        let html = render_distribution_index();
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("event.key === 'Escape'"));
         assert!(html.contains("function exitToIndex()"));
@@ -1259,7 +1318,7 @@ mod tests {
 
     #[test]
     fn present_index_uses_server_sync_factory() {
-        let html = render_present_index();
+        let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
@@ -1268,7 +1327,7 @@ mod tests {
 
     #[test]
     fn presenter_index_passes_server_sync_factory_to_presenter_view() {
-        let html = render_presenter_index();
+        let html = render_presenter_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
@@ -1276,7 +1335,7 @@ mod tests {
 
     #[test]
     fn present_index_has_no_static_presenter_link() {
-        let html = render_present_index();
+        let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
         assert!(!html.contains("peitho-presenter-link"));
@@ -1286,7 +1345,7 @@ mod tests {
 
     #[test]
     fn present_index_keeps_controls_default_display_management_before_mount() {
-        let html = render_present_index();
+        let html = render_present_index(AspectRatio::Ratio16To9);
 
         let controls_index = html
             .find("peitho.installPresentationControls({ root, window, document })")

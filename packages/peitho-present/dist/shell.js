@@ -1,7 +1,5 @@
 // src/canvas.ts
-var CANVAS_WIDTH = 1280;
-var CANVAS_HEIGHT = 720;
-function calculateCanvasFit(viewport, canvasWidth = CANVAS_WIDTH, canvasHeight = CANVAS_HEIGHT) {
+function calculateCanvasFit(viewport, canvasWidth, canvasHeight) {
   const scale = Math.min(viewport.width / canvasWidth, viewport.height / canvasHeight);
   const width = canvasWidth * scale;
   const height = canvasHeight * scale;
@@ -15,8 +13,8 @@ function calculateCanvasFit(viewport, canvasWidth = CANVAS_WIDTH, canvasHeight =
 }
 function installCanvasScaler(options) {
   const win = options.window ?? window;
-  const canvasWidth = options.canvasWidth ?? CANVAS_WIDTH;
-  const canvasHeight = options.canvasHeight ?? CANVAS_HEIGHT;
+  const canvasWidth = options.canvasWidth;
+  const canvasHeight = options.canvasHeight;
   const viewport = options.viewport ?? (() => ({
     width: win.innerWidth,
     height: win.innerHeight
@@ -543,11 +541,17 @@ var PresentShellController = class {
   async load() {
     try {
       const manifest = await this.fetchJson("manifest.json");
+      const dimensions = {
+        width: manifest.canvasWidth,
+        height: manifest.canvasHeight
+      };
+      const cssAspect = manifest.aspectRatio.replace(":", " / ");
+      this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       const pending = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);
-        const host = this.createSlideHost(slide, html, css);
+        const host = this.createSlideHost(slide, html, css, dimensions);
         pending.push({ meta: slide, host });
       }
       this.manifest = manifest;
@@ -557,6 +561,7 @@ var PresentShellController = class {
       }
       this.show(0);
     } catch (error) {
+      this.clearCanvasRootProperties();
       this.root.replaceChildren();
       this.root.textContent = error instanceof Error ? error.message : String(error);
     }
@@ -581,6 +586,7 @@ var PresentShellController = class {
   destroy() {
     this.endPresentation();
     while (this.canvasCleanups.length > 0) this.canvasCleanups.pop()?.();
+    this.clearCanvasRootProperties();
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:timercontrol", this.onTimerControl);
     this.win.removeEventListener("pagehide", this.onPageHide);
@@ -598,7 +604,17 @@ var PresentShellController = class {
     if (!response.ok) throw new Error(`Failed to load ${url}: ${response.status}`);
     return response;
   }
-  createSlideHost(slide, html, css) {
+  setCanvasRootProperties(dimensions, cssAspect) {
+    this.root.style.setProperty("--peitho-canvas-width", `${dimensions.width}px`);
+    this.root.style.setProperty("--peitho-canvas-height", `${dimensions.height}px`);
+    this.root.style.setProperty("--peitho-canvas-aspect", cssAspect);
+  }
+  clearCanvasRootProperties() {
+    this.root.style.removeProperty("--peitho-canvas-width");
+    this.root.style.removeProperty("--peitho-canvas-height");
+    this.root.style.removeProperty("--peitho-canvas-aspect");
+  }
+  createSlideHost(slide, html, css, dimensions) {
     const host = this.doc.createElement("section");
     host.classList.add("peitho-slide");
     host.dataset.slideKey = slide.key;
@@ -611,7 +627,9 @@ var PresentShellController = class {
       installCanvasScaler({
         window: this.win,
         target: host,
-        viewport: this.viewport
+        viewport: this.viewport,
+        canvasWidth: dimensions.width,
+        canvasHeight: dimensions.height
       })
     );
     const shadow = host.attachShadow({ mode: "open" });
@@ -1328,8 +1346,6 @@ async function mountPresenterView(options) {
   };
 }
 export {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
   PRESENTER_URL,
   calculateCanvasFit,
   fallbackFeatures,

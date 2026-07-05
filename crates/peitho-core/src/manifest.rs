@@ -1,19 +1,27 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    domain::{ResolvedImageAsset, SlideKey},
+    domain::{AspectRatio, ResolvedImageAsset, SlideKey},
     error::Result,
     json::pretty_json,
     phase::{Checked, CheckedSlide, Deck, PlannedTime},
 };
 
-#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
-#[cfg_attr(
-    any(test, feature = "ts-bindings"),
-    ts(export, export_to = "../../bindings/")
-)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
+    version: u8,
+    peitho_version: String,
+    title: String,
+    slide_count: usize,
+    planned_duration_ms: Option<u64>,
+    aspect_ratio: AspectRatio,
+    sections: Vec<ManifestSection>,
+    slides: Vec<ManifestSlide>,
+    images: Vec<ManifestImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManifestWire {
     version: u8,
     #[serde(rename = "peithoVersion")]
     peitho_version: String,
@@ -21,12 +29,41 @@ pub struct Manifest {
     #[serde(rename = "slideCount")]
     slide_count: usize,
     #[serde(rename = "plannedDurationMs")]
-    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "number | null"))]
     planned_duration_ms: Option<u64>,
+    #[serde(rename = "aspectRatio", default)]
+    aspect_ratio: AspectRatio,
+    #[serde(rename = "canvasWidth", skip_deserializing)]
+    canvas_width: u32,
+    #[serde(rename = "canvasHeight", skip_deserializing)]
+    canvas_height: u32,
     #[serde(default)]
     sections: Vec<ManifestSection>,
     slides: Vec<ManifestSlide>,
     #[serde(default)]
+    images: Vec<ManifestImage>,
+}
+
+#[cfg(any(test, feature = "ts-bindings"))]
+#[allow(dead_code)]
+#[derive(ts_rs::TS)]
+#[ts(rename = "Manifest", export, export_to = "../../bindings/Manifest.ts")]
+struct ManifestBinding {
+    version: u8,
+    #[ts(rename = "peithoVersion")]
+    peitho_version: String,
+    title: String,
+    #[ts(rename = "slideCount")]
+    slide_count: usize,
+    #[ts(rename = "plannedDurationMs", type = "number | null")]
+    planned_duration_ms: Option<u64>,
+    #[ts(rename = "aspectRatio")]
+    aspect_ratio: AspectRatio,
+    #[ts(rename = "canvasWidth")]
+    canvas_width: u32,
+    #[ts(rename = "canvasHeight")]
+    canvas_height: u32,
+    sections: Vec<ManifestSection>,
+    slides: Vec<ManifestSlide>,
     images: Vec<ManifestImage>,
 }
 
@@ -145,15 +182,24 @@ impl Manifest {
     pub fn new(
         title: impl Into<String>,
         planned_duration_ms: Option<u64>,
+        aspect_ratio: AspectRatio,
         sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
     ) -> Self {
-        Self::with_images(title, planned_duration_ms, sections, slides, Vec::new())
+        Self::with_images(
+            title,
+            planned_duration_ms,
+            aspect_ratio,
+            sections,
+            slides,
+            Vec::new(),
+        )
     }
 
     pub fn with_images(
         title: impl Into<String>,
         planned_duration_ms: Option<u64>,
+        aspect_ratio: AspectRatio,
         sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
         images: Vec<ManifestImage>,
@@ -165,6 +211,7 @@ impl Manifest {
             title: title.into(),
             slide_count,
             planned_duration_ms,
+            aspect_ratio,
             sections,
             slides,
             images,
@@ -179,6 +226,21 @@ impl Manifest {
         self.planned_duration_ms
     }
 
+    /// The deck's canvas aspect ratio, from frontmatter `aspect_ratio:` or default 16:9.
+    pub fn aspect_ratio(&self) -> AspectRatio {
+        self.aspect_ratio
+    }
+
+    /// Derived logical canvas width in pixels; equals `aspect_ratio().width()`.
+    pub fn canvas_width(&self) -> u32 {
+        self.aspect_ratio.width()
+    }
+
+    /// Derived logical canvas height in pixels; equals `aspect_ratio().height()`.
+    pub fn canvas_height(&self) -> u32 {
+        self.aspect_ratio.height()
+    }
+
     pub fn sections(&self) -> &[ManifestSection] {
         &self.sections
     }
@@ -189,6 +251,58 @@ impl Manifest {
 
     pub fn images(&self) -> &[ManifestImage] {
         &self.images
+    }
+}
+
+impl From<&Manifest> for ManifestWire {
+    fn from(manifest: &Manifest) -> Self {
+        Self {
+            version: manifest.version,
+            peitho_version: manifest.peitho_version.clone(),
+            title: manifest.title.clone(),
+            slide_count: manifest.slide_count,
+            planned_duration_ms: manifest.planned_duration_ms,
+            aspect_ratio: manifest.aspect_ratio,
+            canvas_width: manifest.canvas_width(),
+            canvas_height: manifest.canvas_height(),
+            sections: manifest.sections.clone(),
+            slides: manifest.slides.clone(),
+            images: manifest.images.clone(),
+        }
+    }
+}
+
+impl From<ManifestWire> for Manifest {
+    fn from(wire: ManifestWire) -> Self {
+        Self {
+            version: wire.version,
+            peitho_version: wire.peitho_version,
+            title: wire.title,
+            slide_count: wire.slide_count,
+            planned_duration_ms: wire.planned_duration_ms,
+            aspect_ratio: wire.aspect_ratio,
+            sections: wire.sections,
+            slides: wire.slides,
+            images: wire.images,
+        }
+    }
+}
+
+impl Serialize for Manifest {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ManifestWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Manifest {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ManifestWire::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -239,6 +353,7 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
     Manifest::with_images(
         title,
         deck.settings().planned_time().map(PlannedTime::as_millis),
+        deck.settings().aspect_ratio(),
         sections,
         slides,
         images,
@@ -254,7 +369,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{ResolvedImageAsset, ResolvedImagePath, SlideKey},
+        domain::{AspectRatio, ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown},
@@ -265,6 +380,7 @@ mod tests {
         let manifest = Manifest::new(
             "Peitho Architecture",
             None,
+            AspectRatio::Ratio16To9,
             Vec::new(),
             vec![
                 ManifestSlide::new(
@@ -295,6 +411,9 @@ mod tests {
                 "  \"title\": \"Peitho Architecture\",\n",
                 "  \"slideCount\": 2,\n",
                 "  \"plannedDurationMs\": null,\n",
+                "  \"aspectRatio\": \"16:9\",\n",
+                "  \"canvasWidth\": 1280,\n",
+                "  \"canvasHeight\": 720,\n",
                 "  \"sections\": [],\n",
                 "  \"slides\": [\n",
                 "    {\n",
@@ -352,10 +471,49 @@ mod tests {
     }
 
     #[test]
+    fn build_manifest_serializes_aspect_ratio_from_checked_deck() {
+        let checked = checked_deck("---\naspect_ratio: 4:3\n---\n# Intro", title_body_layout());
+
+        let manifest = build_manifest(&checked, &[]);
+        let json = manifest_json(&manifest).unwrap();
+
+        assert_eq!(manifest.aspect_ratio().width(), 960);
+        assert_eq!(manifest.aspect_ratio().height(), 720);
+        assert_eq!(manifest.canvas_width(), 960);
+        assert_eq!(manifest.canvas_height(), 720);
+        assert!(json.contains(r#""aspectRatio": "4:3""#));
+        assert!(json.contains(r#""canvasWidth": 960"#));
+        assert!(json.contains(r#""canvasHeight": 720"#));
+    }
+
+    #[test]
+    fn manifest_serializes_default_aspect_ratio() {
+        let manifest = Manifest::new(
+            "Deck",
+            None,
+            AspectRatio::Ratio16To9,
+            Vec::new(),
+            vec![ManifestSlide::new(
+                0,
+                SlideKey::new("intro").unwrap(),
+                "slides/000-intro.html",
+                false,
+            )],
+        );
+
+        let json = manifest_json(&manifest).unwrap();
+
+        assert!(json.contains(r#""aspectRatio": "16:9""#));
+        assert!(json.contains(r#""canvasWidth": 1280"#));
+        assert!(json.contains(r#""canvasHeight": 720"#));
+    }
+
+    #[test]
     fn manifest_serializes_planned_duration_ms() {
         let manifest = Manifest::new(
             "Deck",
             Some(900_000),
+            AspectRatio::Ratio16To9,
             Vec::new(),
             vec![ManifestSlide::new(
                 0,
@@ -426,12 +584,60 @@ mod tests {
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
             "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}]\n",
             "}\n"
         );
 
         let manifest: Manifest = serde_json::from_str(json).unwrap();
         assert!(manifest.sections().is_empty());
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_aspect_ratio_and_canvas_as_legacy_16_9() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.4.1\",\n",
+            "  \"title\": \"Legacy Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.aspect_ratio(), AspectRatio::default());
+        assert_eq!(manifest.canvas_width(), 1280);
+        assert_eq!(manifest.canvas_height(), 720);
+    }
+
+    #[test]
+    fn deserializes_manifest_canvas_dimensions_from_aspect_ratio_when_wire_conflicts() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.4.1\",\n",
+            "  \"title\": \"Contradictory Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"4:3\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
+            "  \"sections\": [],\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}],\n",
+            "  \"images\": []\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.aspect_ratio(), AspectRatio::Ratio4To3);
+        assert_eq!(manifest.canvas_width(), 960);
+        assert_eq!(manifest.canvas_height(), 720);
     }
 
     #[test]
@@ -443,6 +649,9 @@ mod tests {
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
             "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"sections\": [],\n",
             "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}]\n",
             "}\n"
@@ -462,6 +671,9 @@ mod tests {
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
             "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"4:3\",\n",
+            "  \"canvasWidth\": 960,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"slides\": [\n",
             "    {\n",
             "      \"index\": 0,\n",
@@ -477,6 +689,9 @@ mod tests {
 
         assert_eq!(manifest.slide_count(), 1);
         assert_eq!(manifest.planned_duration_ms(), None);
+        assert_eq!(manifest.aspect_ratio(), AspectRatio::Ratio4To3);
+        assert_eq!(manifest.canvas_width(), 960);
+        assert_eq!(manifest.canvas_height(), 720);
         assert_eq!(manifest.slides()[0].src(), "slides/000-arch-1.html");
         assert_eq!(manifest.slides()[0].key().as_str(), "arch-1");
     }
@@ -490,6 +705,9 @@ mod tests {
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
             "  \"plannedDurationMs\": 900000,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"slides\": [\n",
             "    {\n",
             "      \"index\": 0,\n",
@@ -514,6 +732,9 @@ mod tests {
             "  \"peithoVersion\": \"0.1.0\",\n",
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"slides\": [\n",
             "    {\n",
             "      \"index\": 0,\n",
@@ -538,6 +759,9 @@ mod tests {
             "  \"peithoVersion\": \"0.1.0\",\n",
             "  \"title\": \"Deck\",\n",
             "  \"slideCount\": 1,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
             "  \"slides\": [\n",
             "    {\n",
             "      \"index\": 0,\n",
@@ -591,27 +815,35 @@ mod ts_tests {
 
     use ts_rs::{Config, TS};
 
-    use super::{Manifest, ManifestImage, ManifestSection, ManifestSlide};
+    use crate::domain::AspectRatio;
+
+    use super::{ManifestBinding, ManifestImage, ManifestSection, ManifestSlide};
 
     #[test]
     fn exports_manifest_bindings_with_serde_field_names() {
         let cfg = Config::from_env();
-        Manifest::export_all(&cfg).unwrap();
+        AspectRatio::export_all(&cfg).unwrap();
+        ManifestBinding::export_all(&cfg).unwrap();
         ManifestImage::export_all(&cfg).unwrap();
         ManifestSection::export_all(&cfg).unwrap();
         ManifestSlide::export_all(&cfg).unwrap();
 
         let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
+        let aspect_ratio = fs::read_to_string(root_bindings.join("AspectRatio.ts")).unwrap();
         let manifest = fs::read_to_string(root_bindings.join("Manifest.ts")).unwrap();
         let image = fs::read_to_string(root_bindings.join("ManifestImage.ts")).unwrap();
         let section = fs::read_to_string(root_bindings.join("ManifestSection.ts")).unwrap();
         let slide = fs::read_to_string(root_bindings.join("ManifestSlide.ts")).unwrap();
 
+        assert!(manifest.contains(r#"import type { AspectRatio } from "./AspectRatio";"#));
         assert!(manifest.contains(r#"import type { ManifestImage } from "./ManifestImage";"#));
         assert!(manifest.contains(r#"import type { ManifestSection } from "./ManifestSection";"#));
         assert!(manifest.contains("peithoVersion: string"));
         assert!(manifest.contains("slideCount: number"));
         assert!(manifest.contains("plannedDurationMs: number | null"));
+        assert!(manifest.contains("aspectRatio: AspectRatio"));
+        assert!(manifest.contains("canvasWidth: number"));
+        assert!(manifest.contains("canvasHeight: number"));
         assert!(manifest.contains("sections: Array<ManifestSection>"));
         assert!(manifest.contains("slides: Array<ManifestSlide>"));
         assert!(manifest.contains("images: Array<ManifestImage>"));
@@ -621,5 +853,6 @@ mod ts_tests {
         assert!(section.contains("plannedDurationMs: number"));
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
+        assert!(aspect_ratio.contains(r#"export type AspectRatio = "16:9" | "4:3";"#));
     }
 }

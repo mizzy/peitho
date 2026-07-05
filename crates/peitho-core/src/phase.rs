@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     domain::{
-        RawImagePath, RenderedSlide, ResolvedImageAsset, ResolvedImagePath, SlideKey, SlotContract,
-        SlotName, SourceFragment,
+        AspectRatio, RawImagePath, RenderedSlide, ResolvedImageAsset, ResolvedImagePath, SlideKey,
+        SlotContract, SlotName, SourceFragment,
     },
     error::{BuildError, Result},
     layout::Layout,
@@ -86,6 +86,7 @@ impl DeckSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeckSettings {
     planned_time: Option<PlannedTime>,
+    aspect_ratio: AspectRatio,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -101,6 +102,7 @@ impl DeckSettings {
     /// themselves.
     pub fn new(
         planned_time: Option<PlannedTime>,
+        aspect_ratio: AspectRatio,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
@@ -108,6 +110,7 @@ impl DeckSettings {
     ) -> Self {
         Self {
             planned_time,
+            aspect_ratio,
             sections,
             layouts,
             css,
@@ -117,6 +120,10 @@ impl DeckSettings {
 
     pub fn planned_time(&self) -> Option<PlannedTime> {
         self.planned_time
+    }
+
+    pub fn aspect_ratio(&self) -> AspectRatio {
+        self.aspect_ratio
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -568,8 +575,14 @@ mod tests {
             0,
             1,
         );
-        let settings =
-            DeckSettings::new(Some(setup.planned()), vec![setup.clone()], None, None, None);
+        let settings = DeckSettings::new(
+            Some(setup.planned()),
+            AspectRatio::default(),
+            vec![setup.clone()],
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 60_000);
         assert_eq!(settings.sections(), &[setup]);
@@ -586,8 +599,15 @@ mod tests {
             0,
             1,
         );
-        let settings = DeckSettings::new(None, vec![setup.clone()], None, None, None)
-            .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
+        let settings = DeckSettings::new(
+            None,
+            AspectRatio::default(),
+            vec![setup.clone()],
+            None,
+            None,
+            None,
+        )
+        .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 120_000);
         assert_eq!(settings.sections(), &[setup]);

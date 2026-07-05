@@ -18,6 +18,9 @@ const manifest: Manifest = {
   title: "Demo",
   slideCount: 2,
   plannedDurationMs: null,
+  aspectRatio: "16:9",
+  canvasWidth: 1280,
+  canvasHeight: 720,
   sections: [],
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
@@ -46,6 +49,9 @@ function legacyManifestFetch(): typeof fetch {
     title: "Legacy",
     slideCount: 2,
     plannedDurationMs: null,
+    aspectRatio: "16:9",
+    canvasWidth: 1280,
+    canvasHeight: 720,
     sections: [],
     slides: [
       { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
@@ -446,6 +452,33 @@ it("scales current and next preview shells to their pane sizes", async () => {
   expect(previewPane.querySelector<HTMLElement>(".peitho-slide")?.style.transform).toBe(
     "translate(0px, 0px) scale(0.25)"
   );
+});
+
+it("scales presenter previews from a 4 by 3 manifest canvas", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({ aspectRatio: "4:3", canvasWidth: 960, canvasHeight: 720 }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  const currentPane = root.querySelector<HTMLElement>('[data-peitho-presenter="current"]')!;
+  const previewPane = root.querySelector<HTMLElement>('[data-peitho-presenter="preview"]')!;
+  sizeElement(currentPane, 320, 240);
+  sizeElement(previewPane, 240, 180);
+  window.dispatchEvent(new Event("resize"));
+
+  const currentSlide = currentPane.querySelector<HTMLElement>(".peitho-slide");
+  const previewSlide = previewPane.querySelector<HTMLElement>(".peitho-slide");
+  expect(currentSlide?.style.width).toBe("960px");
+  expect(currentSlide?.style.height).toBe("720px");
+  expect(currentSlide?.style.transform).toBe("translate(0px, 0px) scale(0.3333333333333333)");
+  expect(previewSlide?.style.transform).toBe("translate(0px, 0px) scale(0.25)");
 });
 
 it("buttons emit navigate timercontrol and close requests", async () => {
