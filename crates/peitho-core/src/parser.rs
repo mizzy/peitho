@@ -1420,6 +1420,17 @@ enum Phase { Parsed, Mapped, Checked }
     }
 
     #[test]
+    fn parses_supported_image_extension_case_insensitively() {
+        let deck = parse_markdown("# Title\n\n![Architecture diagram](images/Arch.PNG)").unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments[1].kind() {
+            FragmentKind::Image { src, .. } => assert_eq!(src.as_str(), "images/Arch.PNG"),
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_remote_image_url_with_line() {
         let err = parse_markdown("# Title\n\n![Remote](https://example.com/x.png)").unwrap_err();
 
@@ -1470,6 +1481,17 @@ enum Phase { Parsed, Mapped, Checked }
         assert!(err
             .to_string()
             .contains("unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"));
+    }
+
+    #[test]
+    fn rejects_image_without_supported_extension_preserves_extension_case() {
+        let err = parse_markdown("# Title\n\n![Binary](foo.EXE)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp"));
     }
 
     #[test]

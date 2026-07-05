@@ -537,6 +537,86 @@ fn build_deduplicates_images_by_content_hash() {
 }
 
 #[test]
+fn build_keeps_same_basename_images_distinct_when_content_differs() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "# Gallery\n\n![First](img/a/arch.png)\n\n![Second](img/b/arch.png)",
+    )
+    .unwrap();
+    let mut other_png = TEST_PNG.to_vec();
+    let last = other_png.last_mut().unwrap();
+    *last ^= 0x01;
+    write_test_png(&dir.path().join("img/a/arch.png"), TEST_PNG);
+    write_test_png(&dir.path().join("img/b/arch.png"), &other_png);
+    let layout = write_image_layout(dir.path(), "1..*");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 2);
+    let asset_names = assets
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_ne!(asset_names[0], asset_names[1]);
+    assert!(asset_names.iter().all(|name| name.ends_with("-arch.png")));
+    let slide = fs::read_to_string(out.join("slides/000-gallery.html")).unwrap();
+    for asset_name in asset_names {
+        assert!(slide.contains(&format!("assets/{asset_name}")));
+    }
+}
+
+#[test]
+fn build_rejects_two_image_paragraphs_when_image_slot_allows_one() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Gallery\n\n![First](a.png)\n\n![Second](b.png)").unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('gallery'), line 3"))
+        .stderr(predicate::str::contains("slot 'hero' got 2 item(s)"))
+        .stderr(predicate::str::contains("allows 1"))
+        .stderr(predicate::str::contains(
+            "help: use a layout with more hero capacity or remove one hero block",
+        ));
+}
+
+#[test]
 fn build_accepts_override_targeting_derived_second_slide_key() {
     let (_dir, out) = build_multi_slide_fixture_with_override(
         r#"[data-slide-key="convention-mapping"] .slot-body { color: red; }"#,

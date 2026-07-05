@@ -152,20 +152,37 @@ pub struct SlotContract {
     pub arity: Arity,
 }
 
+/// A deck-relative image path exactly as accepted from Markdown.
+///
+/// `RawImagePath` is intentionally distinct from [`ResolvedImagePath`]:
+/// raw paths may only be mapped and resolved, never rendered into HTML.
+/// Construction validates that the path is local to the deck text and uses
+/// one of Peitho's supported image extensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawImagePath(String);
 
+/// A distribution-relative image path that is safe to render as `<img src>`.
+///
+/// Values are produced by the image resolver after it has copied or otherwise
+/// reserved the asset under `assets/<hash>-<basename>`. Rendering APIs accept
+/// this type, not [`RawImagePath`], so callers cannot accidentally emit a raw
+/// author-written path into generated HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedImagePath(String);
 
 impl ResolvedImagePath {
     // Only the image resolver may construct this from an already-copied dist
-    // path.
+    // path. Do not make this public; it bypasses hashed asset validation and
+    // exists only for crate-internal tests and transforms.
     #[allow(dead_code)]
     pub(crate) fn from_string(value: String) -> Self {
         Self(value)
     }
 
+    /// Build a resolved `assets/<hash>-<basename>` path from resolver output.
+    ///
+    /// The hash must be the fixed 16-hex prefix chosen by the CLI resolver, and
+    /// the basename must not contain path separators.
     pub fn from_hashed_asset(hash: &str, basename: &str) -> Result<Self, String> {
         let valid_hash = hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit());
         if !valid_hash {
@@ -184,14 +201,21 @@ impl ResolvedImagePath {
         Ok(Self(format!("assets/{hash}-{basename}")))
     }
 
+    /// Return the distribution-relative path to use in generated HTML.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// A resolved image asset that the CLI must materialize into the distribution.
+///
+/// Core records the source file chosen by the resolver and the typed
+/// distribution-relative path used by rendered slides and `manifest.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedImageAsset {
+    /// Canonical source path used by the CLI copy phase.
     pub source_abs: PathBuf,
+    /// Typed `assets/...` path used in rendered HTML and the manifest.
     pub dist_rel: ResolvedImagePath,
 }
 
@@ -199,8 +223,13 @@ const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp
 const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
 
 impl RawImagePath {
+    /// Image extensions accepted by Markdown parsing.
     pub const SUPPORTED_EXTENSIONS: &'static [&'static str] = SUPPORTED_IMAGE_EXTENSIONS;
 
+    /// Validate a Markdown image path and keep it in raw deck-relative form.
+    ///
+    /// Remote URLs, absolute paths, parent-directory escapes, empty paths, and
+    /// unsupported extensions are rejected with a line-numbered parse error.
     pub fn new(raw: impl Into<String>, line: usize) -> crate::error::Result<Self> {
         let value = raw.into();
         if value.is_empty() {
@@ -238,9 +267,9 @@ impl RawImagePath {
         let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        if !Self::SUPPORTED_EXTENSIONS.contains(&extension.as_str()) {
+        let extension_lower = extension.to_ascii_lowercase();
+        if !Self::SUPPORTED_EXTENSIONS.contains(&extension_lower.as_str()) {
             return Err(image_path_error(
                 line,
                 format!(
@@ -252,13 +281,15 @@ impl RawImagePath {
         Ok(Self(value))
     }
 
-    // TDD-only escape hatch for tests/internal construction. Parser entry
-    // points must use `new()` so raw Markdown paths are validated.
+    // TDD-only escape hatch for tests/internal construction. Do not make this
+    // public; parser entry points must use `new()` so raw Markdown paths are
+    // validated before they can enter the pipeline.
     #[allow(dead_code)]
     pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
     }
 
+    /// Return the original deck-relative path.
     pub fn as_str(&self) -> &str {
         &self.0
     }

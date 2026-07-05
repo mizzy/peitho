@@ -225,10 +225,18 @@ pub struct CheckedSlide<S = RawImagePath> {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// Context passed to a caller-provided image resolver.
+///
+/// The resolver receives the validated raw Markdown path plus slide/line
+/// context so it can report asset I/O errors without losing source location.
 pub struct ImageRequest<'a> {
+    /// Validated deck-relative path from Markdown.
     pub raw: &'a RawImagePath,
+    /// Source line of the image fragment.
     pub line: usize,
+    /// Zero-based slide index containing the image.
     pub slide_index: usize,
+    /// Stable slide key containing the image.
     pub slide_key: &'a SlideKey,
 }
 
@@ -369,6 +377,12 @@ impl<S> Deck<Checked<S>> {
     }
 }
 
+/// Convert a checked deck from raw Markdown image paths to renderable assets.
+///
+/// This is the only transition from `Deck<Checked<RawImagePath>>` to
+/// `Deck<Checked<ResolvedImagePath>>`. Callers must provide a resolver that
+/// turns each raw deck-relative path into a typed distribution-relative asset;
+/// `render_deck` only accepts the resolved form.
 pub fn resolve_image_paths<R>(
     deck: Deck<Checked<RawImagePath>>,
     mut resolver: R,

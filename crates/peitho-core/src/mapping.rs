@@ -185,7 +185,9 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{domain::SlotName, layout::parse_layout, parser::parse_markdown};
+    use crate::{
+        check::check_deck, domain::SlotName, layout::parse_layout, parser::parse_markdown,
+    };
 
     fn cover_and_statement() -> Layouts {
         let cover = parse_layout(
@@ -439,6 +441,75 @@ mod tests {
         .unwrap();
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "visual");
+    }
+
+    #[test]
+    fn explicit_layout_without_image_slot_rejects_image_without_fallback() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let visual = parse_layout(
+            "visual",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, visual]).unwrap();
+
+        let err = dispatch_by_convention(
+            parse_markdown("<!-- {\"layout\":\"cover\"} -->\n# Title\n\n![A](x.png)").unwrap(),
+            &layouts,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.line, Some(4));
+        assert!(err
+            .to_string()
+            .contains("no slot accepts image in layout 'cover'"));
+    }
+
+    #[test]
+    fn explicit_image_layout_without_image_content_obeys_image_slot_arity() {
+        let optional = parse_layout(
+            "visual-optional",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let required = parse_layout(
+            "visual-required",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+
+        let optional_mapped = dispatch_by_convention(
+            parse_markdown("<!-- {\"layout\":\"visual-optional\"} -->\n# Title").unwrap(),
+            &Layouts::single(optional),
+        )
+        .unwrap();
+        check_deck(optional_mapped).unwrap();
+
+        let required_mapped = dispatch_by_convention(
+            parse_markdown("<!-- {\"layout\":\"visual-required\"} -->\n# Title").unwrap(),
+            &Layouts::single(required),
+        )
+        .unwrap();
+        let err = check_deck(required_mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert!(err
+            .to_string()
+            .contains("slot 'hero' got 0 item(s), but layout 'visual-required' allows 1"));
     }
 
     #[test]

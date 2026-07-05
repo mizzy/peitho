@@ -13,6 +13,11 @@ use crate::{
     phase::{Checked, Deck, Rendered},
 };
 
+/// Render a checked deck whose image paths have already been resolved.
+///
+/// The `ResolvedImagePath` type parameter is part of the safety boundary:
+/// callers cannot pass `Deck<Checked<RawImagePath>>`, so raw Markdown paths
+/// cannot reach `<img src>` generation by convention or accident.
 pub fn render_deck(deck: Deck<Checked<ResolvedImagePath>>) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let mut slides = Vec::new();

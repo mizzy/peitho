@@ -310,4 +310,5 @@ git diff --exit-code packages/peitho-present/dist/shell.js
 - 画像サイズhint (`![alt](x.png){width=...}` 等) をMarkdown側に置くか、CSSだけに寄せるか
 - 複数 `accepts="image"` slot があるlayoutで、Markdownからどのslotへ入れるかを指定する記法
 - alt内Markdown装飾をどこまで平文化するか
+- hash算出後からemit copyまでに画像ファイルが変わるTOCTOUを、asset bytes保持やopen file handle設計で潰すか
 - `--watch` で参照画像の変更を動的watchする実装方式。最低限、画像変更がsilent staleにならないテストを追加してから判断する

@@ -293,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_heading_in_image_slot_named_title() {
+        let layout = parse_layout(
+            "bad-title-image",
+            r#"<section><slot name="title" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(parse_markdown("# Title").unwrap(), &layout).unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert!(err.to_string().contains("line 1"));
+        assert!(err
+            .to_string()
+            .contains("slot 'title' accepts image, but got heading"));
+        assert!(err.help.contains("change the layout accepts to 'inline'"));
+    }
+
+    #[test]
     fn arity_error_in_second_slide_includes_slide_context() {
         let markdown = "# Intro\n\n---\n<!-- {\"key\":\"code-slide\"} -->\n# Code\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```";
         let layout = parse_layout(
