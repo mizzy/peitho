@@ -309,6 +309,19 @@ pub fn render_distribution_index() -> String {
       }
     }
 
+    function exitToIndex() {
+      const referrer = document.referrer;
+      if (referrer !== '') {
+        try {
+          if (new URL(referrer).origin === window.location.origin) {
+            window.history.back();
+            return;
+          }
+        } catch (_error) {}
+      }
+      window.location.assign('/');
+    }
+
     document.addEventListener('keydown', (event) => {
       if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
         event.preventDefault();
@@ -320,6 +333,10 @@ pub fn render_distribution_index() -> String {
       }
       if (event.key === 'Home') navigate('first');
       if (event.key === 'End') navigate('last');
+      if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        exitToIndex();
+      }
     });
     document.addEventListener('click', (event) => {
       navigate(event.clientX < window.innerWidth / 4 ? 'prev' : 'next');
@@ -1124,6 +1141,17 @@ mod tests {
         assert!(!html.contains("installTimeTracker"));
         assert!(!html.contains("peitho-time-tracker"));
         assert!(!html.contains("present.json"));
+    }
+
+    #[test]
+    fn distribution_index_maps_escape_to_index_navigation() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("event.key === 'Escape'"));
+        assert!(html.contains("function exitToIndex()"));
+        assert!(html.contains("window.history.back()"));
+        assert!(html.contains("window.location.assign('/')"));
+        assert!(html.contains("new URL(referrer).origin === window.location.origin"));
     }
 
     #[test]
