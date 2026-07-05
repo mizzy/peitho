@@ -18,7 +18,8 @@ const manifest: Manifest = {
   slideCount: 1,
   plannedDurationMs: null,
   sections: [],
-  slides: [{ index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false }]
+  slides: [{ index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false }],
+  images: []
 };
 
 const notes: Notes = { version: 1, notes: {} };

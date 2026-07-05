@@ -22,7 +22,8 @@ const manifest: Manifest = {
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
     { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
-  ]
+  ],
+  images: []
 };
 
 const notes: Notes = { version: 1, notes: { intro: "Opening note" } };

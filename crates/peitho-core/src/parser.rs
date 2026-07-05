@@ -6,7 +6,7 @@ use pulldown_cmark::{
 use serde::Deserialize;
 
 use crate::{
-    domain::{FragmentKind, SlideKey, SourceFragment},
+    domain::{FragmentKind, RawImagePath, SlideKey, SourceFragment},
     error::{BuildError, ErrorKind, Result},
     phase::{
         Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime,
@@ -66,11 +66,23 @@ enum OpenBlock {
     },
     Paragraph {
         start: usize,
+        inline: ParagraphInline,
     },
     Code {
         start: usize,
         language: Option<String>,
         text: String,
+    },
+}
+
+enum ParagraphInline {
+    Empty,
+    Text,
+    Image {
+        start: usize,
+        alt: String,
+        src: RawImagePath,
+        open: bool,
     },
 }
 
@@ -637,6 +649,58 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                     &fragments,
                 ));
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                if list_depth > 0 {
+                    let err = unsupported_construct(line, "image inside list");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
+                let Some(OpenBlock::Paragraph { inline, .. }) = block.as_mut() else {
+                    let err = unsupported_construct(line, "image outside paragraph");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                };
+                let src = RawImagePath::new(dest_url.to_string(), line).map_err(|err| {
+                    attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                })?;
+                if !start_paragraph_image(inline, global_start, src) {
+                    let err = unsupported_construct(line, "mixed image paragraph");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                let Some(OpenBlock::Paragraph { inline, .. }) = block.as_mut() else {
+                    let err = unsupported_construct(line, "image end without image start");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                };
+                if !finish_paragraph_image(inline) {
+                    let err = unsupported_construct(line, "image end without image start");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
+            }
             _ if list_depth > 0 => {}
             Event::Start(Tag::Heading { level, .. }) => {
                 block = Some(OpenBlock::Heading {
@@ -662,17 +726,38 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
             Event::Start(Tag::Paragraph) => {
                 block = Some(OpenBlock::Paragraph {
                     start: global_start,
+                    inline: ParagraphInline::Empty,
                 });
             }
             Event::End(TagEnd::Paragraph) => {
                 if matches!(block, Some(OpenBlock::Paragraph { .. })) {
-                    let Some(OpenBlock::Paragraph { start }) = block.take() else {
+                    let Some(OpenBlock::Paragraph { start, inline }) = block.take() else {
                         unreachable!();
                     };
-                    fragments.push(SourceFragment::paragraph(
-                        line_for_offset(source, start),
-                        source_slice(source, start, global_end),
-                    ));
+                    let fragment = match inline {
+                        ParagraphInline::Empty | ParagraphInline::Text => {
+                            SourceFragment::paragraph(
+                                line_for_offset(source, start),
+                                source_slice(source, start, global_end),
+                            )
+                        }
+                        ParagraphInline::Image {
+                            start,
+                            alt,
+                            src,
+                            open: false,
+                        } => SourceFragment::image(line_for_offset(source, start), alt, src),
+                        ParagraphInline::Image { open: true, .. } => {
+                            let err = unsupported_construct(line, "image without image end");
+                            return Err(attach_slide_context(
+                                err,
+                                index,
+                                explicit_key.as_ref(),
+                                &fragments,
+                            ));
+                        }
+                    };
+                    fragments.push(fragment);
                     seen_content = true;
                 }
             }
@@ -718,7 +803,17 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                 Some(OpenBlock::Code {
                     text: code_text, ..
                 }) => code_text.push_str(&text),
-                Some(OpenBlock::Paragraph { .. }) => {}
+                Some(OpenBlock::Paragraph { inline, .. }) => {
+                    if !push_paragraph_text(inline, &text) {
+                        let err = unsupported_construct(line, "mixed image paragraph");
+                        return Err(attach_slide_context(
+                            err,
+                            index,
+                            explicit_key.as_ref(),
+                            &fragments,
+                        ));
+                    }
+                }
                 None if text.trim().is_empty() => {}
                 None => {
                     let err = unsupported_construct(line, "text outside block");
@@ -730,11 +825,24 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                     ));
                 }
             },
-            Event::SoftBreak | Event::HardBreak => {
-                if let Some(OpenBlock::Code { text, .. }) = block.as_mut() {
-                    text.push('\n');
+            Event::SoftBreak | Event::HardBreak => match block.as_mut() {
+                Some(OpenBlock::Code { text, .. }) => text.push('\n'),
+                Some(OpenBlock::Paragraph { inline, .. }) => {
+                    match push_paragraph_text(inline, "\n") {
+                        true => {}
+                        false => {
+                            let err = unsupported_construct(line, "mixed image paragraph");
+                            return Err(attach_slide_context(
+                                err,
+                                index,
+                                explicit_key.as_ref(),
+                                &fragments,
+                            ));
+                        }
+                    }
                 }
-            }
+                _ => {}
+            },
             Event::Start(Tag::HtmlBlock) => {
                 html_buf = Some((String::new(), line));
             }
@@ -773,7 +881,23 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
             | Event::Start(Tag::Strong)
             | Event::End(TagEnd::Strong)
             | Event::Start(Tag::Link { .. })
-            | Event::End(TagEnd::Link) => {}
+            | Event::End(TagEnd::Link) => {
+                if matches!(
+                    block,
+                    Some(OpenBlock::Paragraph {
+                        inline: ParagraphInline::Image { open: true, .. },
+                        ..
+                    })
+                ) {
+                    let err = unsupported_construct(line, "formatted image alt text");
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
+            }
             other => {
                 let err = unsupported_construct(line, event_name(&other));
                 return Err(attach_slide_context(
@@ -811,6 +935,50 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
         },
         section: section_marker,
     })
+}
+
+fn start_paragraph_image(inline: &mut ParagraphInline, start: usize, src: RawImagePath) -> bool {
+    match inline {
+        ParagraphInline::Empty => {
+            *inline = ParagraphInline::Image {
+                start,
+                alt: String::new(),
+                src,
+                open: true,
+            };
+            true
+        }
+        ParagraphInline::Text | ParagraphInline::Image { .. } => false,
+    }
+}
+
+fn finish_paragraph_image(inline: &mut ParagraphInline) -> bool {
+    match inline {
+        ParagraphInline::Image { open, .. } if *open => {
+            *open = false;
+            true
+        }
+        ParagraphInline::Empty | ParagraphInline::Text | ParagraphInline::Image { .. } => false,
+    }
+}
+
+fn push_paragraph_text(inline: &mut ParagraphInline, text: &str) -> bool {
+    match inline {
+        ParagraphInline::Empty => {
+            if !text.trim().is_empty() {
+                *inline = ParagraphInline::Text;
+            }
+            true
+        }
+        ParagraphInline::Text => true,
+        ParagraphInline::Image {
+            alt, open: true, ..
+        } => {
+            alt.push_str(text);
+            true
+        }
+        ParagraphInline::Image { open: false, .. } => text.trim().is_empty(),
+    }
 }
 
 /// Handle one whole HTML chunk (a completed HtmlBlock's joined text, or one
@@ -1086,7 +1254,6 @@ fn unsupported_tag(tag: &Tag<'_>) -> bool {
             | Tag::TableHead
             | Tag::TableRow
             | Tag::TableCell
-            | Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
     )
 }
@@ -1095,7 +1262,6 @@ fn unsupported_tag_name(tag: &Tag<'_>) -> &'static str {
     match tag {
         Tag::BlockQuote(_) => "blockquote",
         Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => "table",
-        Tag::Image { .. } => "image",
         Tag::FootnoteDefinition(_) => "footnote",
         _ => "markdown",
     }
@@ -1219,22 +1385,143 @@ enum Phase { Parsed, Mapped, Checked }
         assert_eq!(slide.key.as_str(), "arch-1");
         assert_eq!(
             slide.fragments[0].kind(),
-            FragmentKind::Heading { level: 1 }
+            &FragmentKind::Heading { level: 1 }
         );
         assert_eq!(slide.fragments[0].line(), 2);
         assert_eq!(slide.fragments[0].markdown(), "# **Architecture** `Phase`");
-        assert_eq!(slide.fragments[1].kind(), FragmentKind::Paragraph);
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Paragraph);
         assert_eq!(
             slide.fragments[1].markdown(),
             "Markdown is the **source** of [truth](https://example.com)."
         );
-        assert_eq!(slide.fragments[2].kind(), FragmentKind::List);
+        assert_eq!(slide.fragments[2].kind(), &FragmentKind::List);
         assert_eq!(slide.fragments[2].line(), 6);
         assert!(slide.fragments[2]
             .markdown()
             .contains("- Markdown = source of truth"));
-        assert_eq!(slide.fragments[3].kind(), FragmentKind::Code);
+        assert_eq!(slide.fragments[3].kind(), &FragmentKind::Code);
         assert_eq!(slide.fragments[3].line(), 9);
+    }
+
+    #[test]
+    fn parses_standalone_image_paragraph_as_image_fragment() {
+        let deck = parse_markdown("# Title\n\n![Architecture diagram](images/arch.png)").unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 2);
+        assert_eq!(slide.fragments[1].line(), 3);
+        match slide.fragments[1].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "Architecture diagram");
+                assert_eq!(src.as_str(), "images/arch.png");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_remote_image_url_with_line() {
+        let err = parse_markdown("# Title\n\n![Remote](https://example.com/x.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("remote image URLs are not supported"));
+    }
+
+    #[test]
+    fn rejects_absolute_image_path_with_line() {
+        let err = parse_markdown("# Title\n\n![Absolute](/abs/x.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("absolute image paths are not supported"));
+    }
+
+    #[test]
+    fn rejects_parent_directory_escape_in_image_path() {
+        let err = parse_markdown("# Title\n\n![Escape](../foo.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("image path escapes deck directory"));
+    }
+
+    #[test]
+    fn rejects_empty_image_path() {
+        let err = parse_markdown("# Title\n\n![]()").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("empty image path"));
+    }
+
+    #[test]
+    fn rejects_image_without_supported_extension() {
+        let err = parse_markdown("# Title\n\n![Binary](foo.exe)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"));
+    }
+
+    #[test]
+    fn rejects_svg_until_policy_is_decided() {
+        let err = parse_markdown("# Title\n\n![Icon](icon.svg)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'svg'; supported: png, jpg, jpeg, gif, webp"));
+    }
+
+    #[test]
+    fn rejects_text_and_image_mixed_in_one_paragraph() {
+        let err = parse_markdown("# Title\n\nprefix ![Architecture](x.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'mixed image paragraph'"));
+
+        let err = parse_markdown("# Title\n\n![Architecture](x.png) suffix").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'mixed image paragraph'"));
+    }
+
+    #[test]
+    fn rejects_two_images_in_one_paragraph_until_inline_design_exists() {
+        let err = parse_markdown("# Title\n\n![A](x.png)![B](y.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'mixed image paragraph'"));
+    }
+
+    #[test]
+    fn rejects_image_inside_list_before_markdown_rerender() {
+        let err = parse_markdown("# Title\n\n- ![Architecture](x.png)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'image inside list'"));
     }
 
     #[test]
@@ -1256,11 +1543,11 @@ After list
         let deck = parse_markdown(markdown).unwrap();
         let slide = &deck.parsed_slides()[0];
 
-        assert_eq!(slide.fragments[1].kind(), FragmentKind::List);
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::List);
         assert!(slide.fragments[1].markdown().contains("- loose a"));
         assert!(slide.fragments[1].markdown().contains("  - nested"));
         assert!(slide.fragments[1].markdown().contains("fn inside_item()"));
-        assert_eq!(slide.fragments[2].kind(), FragmentKind::Paragraph);
+        assert_eq!(slide.fragments[2].kind(), &FragmentKind::Paragraph);
         assert_eq!(slide.fragments[2].markdown(), "After list");
     }
 
@@ -2064,13 +2351,19 @@ After list
     }
 
     #[test]
-    fn unsupported_image_after_delimiter_is_not_silently_dropped() {
-        let err = parse_markdown("# One\n\n---\n\n![alt](image.png)").unwrap_err();
+    fn image_after_delimiter_is_not_silently_dropped() {
+        let deck = parse_markdown("# One\n\n---\n\n![alt](image.png)").unwrap();
+        let slide = &deck.parsed_slides()[1];
 
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(5));
-        assert!(err.to_string().contains("slide 2 ('slide-2'), line 5"));
-        assert!(err.to_string().contains("unsupported construct 'image'"));
+        assert_eq!(slide.fragments.len(), 1);
+        assert_eq!(slide.fragments[0].line(), 5);
+        match slide.fragments[0].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "alt");
+                assert_eq!(src.as_str(), "image.png");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
     }
 
     #[test]

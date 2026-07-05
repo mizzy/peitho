@@ -171,6 +171,88 @@ fn publish_rejects_manifest_slide_reference_outside_dist() {
 }
 
 #[test]
+fn publish_rejects_missing_manifest_image_reference() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(
+        dist.join("manifest.json"),
+        concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"arch-1\",\n",
+            "      \"src\": \"slides/000-arch-1.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ],\n",
+            "  \"images\": [{\"src\":\"assets/nonexistent.png\"}]\n",
+            "}\n"
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "manifest references missing image asset: assets/nonexistent.png",
+        ))
+        .stderr(predicate::str::contains("help: run `peitho build` first"));
+}
+
+#[test]
+fn publish_rejects_manifest_image_reference_outside_dist() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(
+        dist.join("manifest.json"),
+        concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"slides\": [\n",
+            "    {\n",
+            "      \"index\": 0,\n",
+            "      \"key\": \"arch-1\",\n",
+            "      \"src\": \"slides/000-arch-1.html\",\n",
+            "      \"hasNotes\": false\n",
+            "    }\n",
+            "  ],\n",
+            "  \"images\": [{\"src\":\"../etc/passwd\"}]\n",
+            "}\n"
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "manifest contains invalid image src: ../etc/passwd",
+        ))
+        .stderr(predicate::str::contains(
+            "help: image src must be a relative path inside dist/",
+        ));
+}
+
+#[test]
 fn publish_rejects_manifest_slide_count_mismatch() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");

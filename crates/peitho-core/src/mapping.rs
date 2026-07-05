@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     check::check_slide,
-    domain::{FragmentKind, SlotName, SourceFragment},
+    domain::{Accepts, FragmentKind, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
     layout::{Layout, Layouts},
     phase::{Deck, Mapped, MappedSlide, MappedSlot, Parsed, ParsedSlide, UnassignedFragment},
@@ -46,18 +46,24 @@ fn dispatch_slide(slide: ParsedSlide, layouts: &Layouts) -> Result<MappedSlide> 
                 format!("use one of: {}", layouts.names().join(", ")),
             ));
         };
-        return Ok(map_slide(&slide, layout));
+        return map_slide(&slide, layout);
     }
 
     if layouts.len() == 1 {
         let layout = layouts.iter().next().expect("single layout exists");
-        return Ok(map_slide(&slide, layout));
+        return map_slide(&slide, layout);
     }
 
     let mut matches = Vec::new();
     let mut rejections = Vec::new();
     for layout in layouts.iter() {
-        let mapped = map_slide(&slide, layout);
+        let mapped = match map_slide(&slide, layout) {
+            Ok(mapped) => mapped,
+            Err(err) => {
+                rejections.push(format!("{}: {}", layout.name(), err.message));
+                continue;
+            }
+        };
         match check_slide(&mapped) {
             Ok(()) => matches.push(mapped),
             Err(err) => rejections.push(format!("{}: {}", layout.name(), err.message)),
@@ -89,39 +95,79 @@ fn dispatch_slide(slide: ParsedSlide, layouts: &Layouts) -> Result<MappedSlide> 
     }
 }
 
-fn map_slide(slide: &ParsedSlide, layout: &Layout) -> MappedSlide {
+fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
     let title_line = shallowest_heading_line(&slide.fragments);
     let mut slots: BTreeMap<SlotName, MappedSlot> = BTreeMap::new();
     let mut unassigned = Vec::new();
 
     for fragment in slide.fragments.iter().cloned() {
         let target = match fragment.kind() {
-            FragmentKind::Heading { .. } if Some(fragment.line()) == title_line => "title",
-            FragmentKind::Code => "code",
+            FragmentKind::Heading { .. } if Some(fragment.line()) == title_line => {
+                SlotName::new("title").expect("conventional slot names are valid")
+            }
+            FragmentKind::Code => SlotName::new("code").expect("conventional slot names are valid"),
+            FragmentKind::Image { .. } => {
+                // Images must be claimed by an explicit image slot; never fall
+                // through to body/block mapping.
+                image_slot_name(layout, fragment.line())?
+            }
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::List
-            | FragmentKind::Image
-            | FragmentKind::Text => "body",
+            | FragmentKind::Text => {
+                SlotName::new("body").expect("conventional slot names are valid")
+            }
         };
-        let slot = SlotName::new(target).expect("conventional slot names are valid");
-        if let Some(contract) = layout.slot_by_name(&slot).cloned() {
+        if let Some(contract) = layout.slot_by_name(&target).cloned() {
             slots
-                .entry(slot.clone())
+                .entry(target.clone())
                 .or_insert_with(|| MappedSlot::new(contract))
                 .push(fragment);
         } else {
-            unassigned.push(UnassignedFragment::new(slot, fragment));
+            unassigned.push(UnassignedFragment::new(target, fragment));
         }
     }
 
-    MappedSlide {
+    Ok(MappedSlide {
         index: slide.index,
         key: slide.key.clone(),
         layout: layout.clone(),
         slots,
         unassigned,
         notes: slide.notes.clone(),
+    })
+}
+
+fn image_slot_name(layout: &Layout, line: usize) -> Result<SlotName> {
+    let image_slots = layout
+        .slots()
+        .values()
+        .filter(|contract| contract.accepts == Accepts::Image)
+        .collect::<Vec<_>>();
+    match image_slots.as_slice() {
+        [] => Err(BuildError::new(
+            ErrorKind::Layout,
+            Some(line),
+            format!("no slot accepts image in layout '{}'", layout.name()),
+            "add exactly one slot with accepts=\"image\" or remove the image",
+        )),
+        [slot] => Ok(slot.name.clone()),
+        many => {
+            let names = many
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(BuildError::new(
+                ErrorKind::Layout,
+                Some(line),
+                format!(
+                    "layout '{}' has multiple slots accepting image: {names}",
+                    layout.name()
+                ),
+                "keep exactly one image slot in the layout",
+            ))
+        }
     }
 }
 
@@ -284,6 +330,115 @@ mod tests {
             1
         );
         assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn maps_image_to_unique_image_accepting_slot() {
+        let layout = parse_layout(
+            "hero",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+
+        let mapped = map_by_convention(
+            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let title = SlotName::new("title").unwrap();
+        let hero = SlotName::new("hero").unwrap();
+
+        assert_eq!(slide.slots[&title].fragments().len(), 1);
+        assert_eq!(
+            slide.slots[&title].fragments()[0].kind(),
+            &FragmentKind::Heading { level: 1 }
+        );
+        assert_eq!(slide.slots[&hero].fragments().len(), 1);
+        match slide.slots[&hero].fragments()[0].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "Architecture");
+                assert_eq!(src.as_str(), "x.png");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+        assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn rejects_image_when_layout_has_no_image_slot() {
+        let layout = parse_layout(
+            "title-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+
+        let err = map_by_convention(
+            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            &layout,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("no slot accepts image"));
+    }
+
+    #[test]
+    fn rejects_image_when_multiple_image_slots_are_ambiguous() {
+        let layout = parse_layout(
+            "double-image",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               <slot name="diagram" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+
+        let err = map_by_convention(
+            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            &layout,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("layout 'double-image' has multiple slots accepting image"));
+    }
+
+    #[test]
+    fn dispatch_selects_layout_with_image_slot_as_unique_structural_match() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let visual = parse_layout(
+            "visual",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, visual]).unwrap();
+
+        let mapped = dispatch_by_convention(
+            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            &layouts,
+        )
+        .unwrap();
+
+        assert_eq!(mapped.mapped_slides()[0].layout.name(), "visual");
     }
 
     #[test]

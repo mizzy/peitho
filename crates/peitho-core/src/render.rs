@@ -1,19 +1,19 @@
 use std::{collections::BTreeMap, error::Error};
 
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
     element, errors::RewritingError, html_content::ContentType, HtmlRewriter, Settings,
 };
 use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
-    domain::{FragmentKind, RenderedSlide, SlideKey, SlotName, SourceFragment},
+    domain::{FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
     layout::Layout,
     phase::{Checked, Deck, Rendered},
 };
 
-pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
+pub fn render_deck(deck: Deck<Checked<ResolvedImagePath>>) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let mut slides = Vec::new();
     for slide in checked_slides {
@@ -31,7 +31,7 @@ pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
 
 fn render_slide(
     key: &SlideKey,
-    slots: &BTreeMap<SlotName, Vec<SourceFragment>>,
+    slots: &BTreeMap<SlotName, Vec<SourceFragment<ResolvedImagePath>>>,
     layout: &Layout,
 ) -> Result<String> {
     let mut output = Vec::new();
@@ -97,7 +97,7 @@ fn render_slide(
     })
 }
 
-fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> Result<String> {
+fn render_slot(slot: &SlotName, fragments: &[SourceFragment<ResolvedImagePath>]) -> Result<String> {
     if fragments.is_empty() {
         return Ok(String::new());
     }
@@ -120,6 +120,14 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> Result<String> 
                 .join("\n");
             format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
         }
+        Some(FragmentKind::Image { .. }) => {
+            let body = fragments
+                .iter()
+                .map(render_image_fragment)
+                .collect::<Result<Vec<_>>>()?
+                .join("\n");
+            body
+        }
         _ => {
             let markdown = fragments
                 .iter()
@@ -136,13 +144,29 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment]) -> Result<String> 
 /// A tagged code block is highlighted at build time into `hl-*` classed
 /// spans (colors live in theme CSS); an untagged block stays escaped plain
 /// text.
-fn render_code_fragment(fragment: &SourceFragment) -> Result<String> {
+fn render_code_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
     match fragment.language() {
         Some(language) => {
             crate::highlight::highlight_html(fragment.code_text(), language, fragment.line())
                 .map(|html| html.trim_end().to_owned())
         }
         None => Ok(encode_text(fragment.code_text()).into_owned()),
+    }
+}
+
+fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+    match fragment.kind() {
+        FragmentKind::Image { alt, src } => Ok(format!(
+            r#"<img src="{}" alt="{}">"#,
+            encode_double_quoted_attribute(src.as_str()),
+            encode_double_quoted_attribute(alt),
+        )),
+        other => Err(BuildError::new(
+            ErrorKind::Layout,
+            Some(fragment.line()),
+            format!("expected image fragment, got {other}"),
+            "keep image slots mapped only to image fragments",
+        )),
     }
 }
 
@@ -595,8 +619,11 @@ pub fn render_presenter_index() -> String {
 mod tests {
     use super::*;
     use crate::{
-        check::check_deck, layout::parse_layout, mapping::map_by_convention,
-        parser::parse_markdown, phase::PlannedTime,
+        check::check_deck,
+        layout::parse_layout,
+        mapping::map_by_convention,
+        parser::parse_markdown,
+        phase::{CheckedSlide, DeckSettings, PlannedTime},
     };
 
     #[test]
@@ -615,7 +642,7 @@ mod tests {
             check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
                 .unwrap();
 
-        let rendered = render_deck(checked).unwrap();
+        let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(r#"data-slide-key="arch-1""#));
@@ -645,7 +672,7 @@ mod tests {
             check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
                 .unwrap();
 
-        let rendered = render_deck(checked).unwrap();
+        let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(r#"<figure class="code"></figure>"#));
@@ -664,13 +691,47 @@ mod tests {
             check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
                 .unwrap();
 
-        let rendered = render_deck(checked).unwrap();
+        let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
 
         assert!(html.contains("<strong>Architecture</strong>"));
         assert!(html.contains("<code>Phase</code>"));
         assert!(html.contains(r#"<a href="https://example.com">docs</a>"#));
         assert!(!html.contains("<p><strong>Architecture</strong>"));
+    }
+
+    #[test]
+    fn renders_image_with_resolved_src_and_escaped_alt() {
+        let layout = parse_layout(
+            "visual",
+            r#"<section><figure><slot name="hero" accepts="image" arity="1"></slot></figure></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            vec![SourceFragment::image(
+                3,
+                "<Diagram>&Notes",
+                ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
+            )],
+        );
+        let checked = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                SlideKey::new("visual").unwrap(),
+                layout,
+                slots,
+                None,
+            )],
+        );
+
+        let rendered = render_deck(checked).unwrap();
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"<img src="assets/xxx.png" alt="&lt;Diagram&gt;&amp;Notes">"#));
     }
 
     #[test]
@@ -689,7 +750,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let setext_html = render_deck(setext).unwrap().slides()[0].html().to_owned();
+        let setext_html = render_checked(setext).slides()[0].html().to_owned();
         assert!(setext_html.contains("<strong>Architecture</strong>"));
         assert!(setext_html.contains("<code>Phase</code>"));
         assert!(!setext_html.contains(r#"<span class="slot-title"><h1>"#));
@@ -698,7 +759,7 @@ mod tests {
             map_by_convention(parse_markdown("# Architecture #").unwrap(), &layout).unwrap(),
         )
         .unwrap();
-        let atx_html = render_deck(atx).unwrap().slides()[0].html().to_owned();
+        let atx_html = render_checked(atx).slides()[0].html().to_owned();
         assert!(atx_html.contains(r#"<span class="slot-title">Architecture</span>"#));
         assert!(!atx_html.contains("Architecture #"));
     }
@@ -721,7 +782,7 @@ mod tests {
         let parsed = parse_markdown("---\ntime: 15m\n---\n# Intro").unwrap();
         let mapped = map_by_convention(parsed, &layout).unwrap();
         let checked = check_deck(mapped).unwrap();
-        let rendered = render_deck(checked).unwrap();
+        let rendered = render_checked(checked);
 
         assert_eq!(
             rendered
@@ -1031,6 +1092,19 @@ mod tests {
         let checked =
             check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
                 .unwrap();
-        render_deck(checked).unwrap()
+        render_checked(checked)
+    }
+
+    fn render_checked(checked: Deck<Checked>) -> Deck<Rendered> {
+        let (resolved, assets) = crate::phase::resolve_image_paths(checked, |request| {
+            panic!(
+                "unexpected image resolver call for {} on slide {}",
+                request.raw.as_str(),
+                request.slide_key.as_str()
+            )
+        })
+        .unwrap();
+        assert!(assets.is_empty());
+        render_deck(resolved).unwrap()
     }
 }

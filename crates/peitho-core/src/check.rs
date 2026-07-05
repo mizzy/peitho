@@ -74,7 +74,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
-            | (Accepts::Image, FragmentKind::Image)
+            | (Accepts::Image, FragmentKind::Image { .. })
             | (Accepts::List, FragmentKind::List)
     )
 }
@@ -139,7 +139,11 @@ fn check_no_unassigned(unassigned: &[UnassignedFragment]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        error::ErrorKind, layout::parse_layout, mapping::map_by_convention, parser::parse_markdown,
+        domain::{RawImagePath, SlideKey},
+        error::ErrorKind,
+        layout::parse_layout,
+        mapping::map_by_convention,
+        parser::parse_markdown,
     };
 
     #[test]
@@ -252,6 +256,40 @@ mod tests {
             err.help,
             "add a 'body' slot to the layout or remove the heading"
         );
+    }
+
+    #[test]
+    fn check_accepts_image_fragment_in_image_slot() {
+        let layout = parse_layout(
+            "image",
+            r#"<section><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let image = SourceFragment::image(
+            7,
+            "Architecture",
+            RawImagePath::new_unchecked("x.png".into()),
+        );
+
+        assert!(accepts_fragment(Accepts::Image, &image));
+        assert!(!accepts_fragment(Accepts::Blocks, &image));
+
+        let contract = layout.slot_by_name(&hero).unwrap().clone();
+        let mut mapped_slot = MappedSlot::new(contract);
+        mapped_slot.push(image);
+        let mut slots = BTreeMap::new();
+        slots.insert(hero, mapped_slot);
+        let slide = MappedSlide {
+            index: 0,
+            key: SlideKey::new("image").unwrap(),
+            layout,
+            slots,
+            unassigned: Vec::new(),
+            notes: None,
+        };
+
+        check_slide(&slide).unwrap();
     }
 
     #[test]

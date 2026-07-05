@@ -4,6 +4,7 @@ use std::{error::Error, fmt};
 pub enum ErrorKind {
     Parse,
     Layout,
+    Asset,
     Accepts,
     Arity,
     ResidualContent,
