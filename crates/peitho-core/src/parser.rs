@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::{
     domain::{FragmentKind, RawImagePath, SlideKey, SourceFragment},
     error::{BuildError, ErrorKind, Result},
+    highlight::Highlighter,
     phase::{
         Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime,
     },
@@ -102,7 +103,7 @@ struct SplitSlides {
     ranges: Vec<SlideRange>,
 }
 
-pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
+pub fn parse_markdown(source: &str, highlighter: &Highlighter) -> Result<Deck<Parsed>> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let SplitSlides {
         frontmatter,
@@ -120,7 +121,7 @@ pub fn parse_markdown(source: &str) -> Result<Deck<Parsed>> {
 
     let mut drafts = Vec::new();
     for (index, range) in ranges.into_iter().enumerate() {
-        drafts.push(parse_slide(source, range, index)?);
+        drafts.push(parse_slide(source, range, index, highlighter)?);
     }
     let resolved_sections = resolve_deck_sections(&drafts)?;
     let settings = finalize_section_settings(settings, resolved_sections)?;
@@ -558,7 +559,12 @@ fn first_nonblank_source_line(source: &str) -> Option<(usize, &str)> {
     None
 }
 
-fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSlideDraft> {
+fn parse_slide(
+    source: &str,
+    range: SlideRange,
+    index: usize,
+    highlighter: &Highlighter,
+) -> Result<ParsedSlideDraft> {
     let slice = &source[range.start..range.end];
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
@@ -786,11 +792,11 @@ fn parse_slide(source: &str, range: SlideRange, index: usize) -> Result<ParsedSl
                     };
                     let code_line = line_for_offset(source, start);
                     if let Some(language) = &language {
-                        crate::highlight::validate_language(language, code_line).map_err(
-                            |err| {
+                        highlighter
+                            .validate_language(language, code_line)
+                            .map_err(|err| {
                                 attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
-                            },
-                        )?;
+                            })?;
                     }
                     fragments.push(SourceFragment::code(code_line, language, text));
                     seen_content = true;
@@ -1379,7 +1385,7 @@ enum Phase { Parsed, Mapped, Checked }
 ```
 "#;
 
-        let deck = parse_markdown(markdown).unwrap();
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
         let slide = &deck.parsed_slides()[0];
 
         assert_eq!(slide.key.as_str(), "arch-1");
@@ -1405,7 +1411,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn parses_standalone_image_paragraph_as_image_fragment() {
-        let deck = parse_markdown("# Title\n\n![Architecture diagram](images/arch.png)").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n![Architecture diagram](images/arch.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slide = &deck.parsed_slides()[0];
 
         assert_eq!(slide.fragments.len(), 2);
@@ -1421,7 +1431,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn parses_empty_alt_image_as_image_fragment() {
-        let deck = parse_markdown("# Title\n\n![](images/arch.png)").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n![](images/arch.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slide = &deck.parsed_slides()[0];
 
         match slide.fragments[1].kind() {
@@ -1435,7 +1449,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn parses_current_dir_and_nested_image_paths() {
-        let deck = parse_markdown("# Title\n\n![Nested](./img/deep/nested/path.png)").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n![Nested](./img/deep/nested/path.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slide = &deck.parsed_slides()[0];
 
         match slide.fragments[1].kind() {
@@ -1448,7 +1466,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn parses_supported_image_extension_case_insensitively() {
-        let deck = parse_markdown("# Title\n\n![Architecture diagram](images/Arch.PNG)").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n![Architecture diagram](images/Arch.PNG)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slide = &deck.parsed_slides()[0];
 
         match slide.fragments[1].kind() {
@@ -1459,7 +1481,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_remote_image_url_with_line() {
-        let err = parse_markdown("# Title\n\n![Remote](https://example.com/x.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Remote](https://example.com/x.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1470,7 +1496,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_absolute_image_path_with_line() {
-        let err = parse_markdown("# Title\n\n![Absolute](/abs/x.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Absolute](/abs/x.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1481,7 +1511,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_parent_directory_escape_in_image_path() {
-        let err = parse_markdown("# Title\n\n![Escape](../foo.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Escape](../foo.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1492,7 +1526,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_image_path_query_string() {
-        let err = parse_markdown("# Title\n\n![Query](img/x.png?v=1)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Query](img/x.png?v=1)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1503,7 +1541,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_image_path_fragment() {
-        let err = parse_markdown("# Title\n\n![Fragment](img/x.png#frag)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Fragment](img/x.png#frag)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1518,6 +1560,7 @@ enum Phase { Parsed, Mapped, Checked }
             r"# Title
 
 ![Backslash](img\arch.png)",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -1530,7 +1573,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_empty_image_path() {
-        let err = parse_markdown("# Title\n\n![]()").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![]()",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1539,7 +1586,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_image_without_supported_extension() {
-        let err = parse_markdown("# Title\n\n![Binary](foo.exe)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Binary](foo.exe)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1550,7 +1601,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_image_without_supported_extension_preserves_extension_case() {
-        let err = parse_markdown("# Title\n\n![Binary](foo.EXE)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Binary](foo.EXE)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1561,7 +1616,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_svg_until_policy_is_decided() {
-        let err = parse_markdown("# Title\n\n![Icon](icon.svg)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Icon](icon.svg)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1572,7 +1631,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_text_and_image_mixed_in_one_paragraph() {
-        let err = parse_markdown("# Title\n\nprefix ![Architecture](x.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\nprefix ![Architecture](x.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1580,7 +1643,11 @@ enum Phase { Parsed, Mapped, Checked }
             .to_string()
             .contains("unsupported construct 'mixed image paragraph'"));
 
-        let err = parse_markdown("# Title\n\n![Architecture](x.png) suffix").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![Architecture](x.png) suffix",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1591,7 +1658,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_two_images_in_one_paragraph_until_inline_design_exists() {
-        let err = parse_markdown("# Title\n\n![A](x.png)![B](y.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n![A](x.png)![B](y.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1602,7 +1673,11 @@ enum Phase { Parsed, Mapped, Checked }
 
     #[test]
     fn rejects_image_inside_list_before_markdown_rerender() {
-        let err = parse_markdown("# Title\n\n- ![Architecture](x.png)").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n- ![Architecture](x.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1627,7 +1702,7 @@ enum Phase { Parsed, Mapped, Checked }
 After list
 "#;
 
-        let deck = parse_markdown(markdown).unwrap();
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
         let slide = &deck.parsed_slides()[0];
 
         assert_eq!(slide.fragments[1].kind(), &FragmentKind::List);
@@ -1640,7 +1715,11 @@ After list
 
     #[test]
     fn rejects_unsupported_construct_with_line_and_help() {
-        let err = parse_markdown("# Title\n\n> quoted").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n> quoted",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1655,7 +1734,11 @@ After list
 
     #[test]
     fn rejects_inline_html_inside_list_items() {
-        let err = parse_markdown("# Title\n\n- item <b>raw</b>").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n- item <b>raw</b>",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1664,7 +1747,11 @@ After list
 
     #[test]
     fn collects_speaker_note_from_html_comment() {
-        let deck = parse_markdown("# Title\n\n<!-- speaker note body -->").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n<!-- speaker note body -->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "title");
@@ -1674,8 +1761,11 @@ After list
 
     #[test]
     fn joins_multiple_html_comments_with_blank_line() {
-        let deck = parse_markdown("# Title\n\n<!-- first note -->\n\nbody\n\n<!-- second note -->")
-            .unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n<!-- first note -->\n\nbody\n\n<!-- second note -->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.notes.as_deref(), Some("first note\n\nsecond note"));
@@ -1683,7 +1773,11 @@ After list
 
     #[test]
     fn empty_html_comment_is_ignored_as_note() {
-        let deck = parse_markdown("# Title\n\n<!-- -->\n\n<!--\n\n-->").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n<!-- -->\n\n<!--\n\n-->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert!(slide.notes.is_none());
@@ -1691,7 +1785,11 @@ After list
 
     #[test]
     fn html_comment_before_content_is_still_a_note() {
-        let deck = parse_markdown("<!-- pre-title note -->\n# Title").unwrap();
+        let deck = parse_markdown(
+            "<!-- pre-title note -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "title");
@@ -1700,9 +1798,11 @@ After list
 
     #[test]
     fn page_settings_comment_and_note_coexist() {
-        let deck =
-            parse_markdown("<!-- {\"key\":\"cover\"} -->\n# Title\n\n<!-- this is a note -->")
-                .unwrap();
+        let deck = parse_markdown(
+            "<!-- {\"key\":\"cover\"} -->\n# Title\n\n<!-- this is a note -->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "cover");
@@ -1711,7 +1811,11 @@ After list
 
     #[test]
     fn multiline_html_comment_preserves_internal_newlines() {
-        let deck = parse_markdown("# Title\n\n<!--\nline one\nline two\n-->").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n<!--\nline one\nline two\n-->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.notes.as_deref(), Some("line one\nline two"));
@@ -1719,8 +1823,11 @@ After list
 
     #[test]
     fn parses_layout_request_from_page_settings_comment() {
-        let deck =
-            parse_markdown("<!-- {\"key\":\"cover\",\"layout\":\"cover\"} -->\n# Title").unwrap();
+        let deck = parse_markdown(
+            "<!-- {\"key\":\"cover\",\"layout\":\"cover\"} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "cover");
@@ -1735,7 +1842,11 @@ After list
 
     #[test]
     fn layout_only_comment_keeps_derived_key() {
-        let deck = parse_markdown("<!-- {\"layout\":\"cover\"} -->\n# My Title").unwrap();
+        let deck = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n# My Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "my-title");
@@ -1794,6 +1905,7 @@ After list
             "<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n\
              <!-- {\"section\":\"Demo\",\"time\":\"1m\"} -->\n\
              # Title",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -1812,6 +1924,7 @@ After list
             "<!-- {\"layout\":\"cover\"} -->\n\
              <!-- {\"key\":\"cover\"} -->\n\
              # Title",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -1830,6 +1943,7 @@ After list
             "<!-- {\"layout\":\"cover\"} -->\n\
              # Title\n\
              <!-- {\"key\":\"late\"} -->",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -1846,7 +1960,11 @@ After list
 
     #[test]
     fn rejects_unknown_page_settings_fields() {
-        let err = parse_markdown("<!-- {\"key\":\"a\",\"freeze\":true} -->\n# Title").unwrap_err();
+        let err = parse_markdown(
+            "<!-- {\"key\":\"a\",\"freeze\":true} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
@@ -1859,7 +1977,11 @@ After list
 
     #[test]
     fn rejects_empty_page_settings_comment() {
-        let err = parse_markdown("<!-- {} -->\n# Title").unwrap_err();
+        let err = parse_markdown(
+            "<!-- {} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err
@@ -1869,7 +1991,11 @@ After list
 
     #[test]
     fn rejects_unknown_code_language_tag_with_line() {
-        let err = parse_markdown("# Title\n\n```notalang\nx\n```").unwrap_err();
+        let err = parse_markdown(
+            "# Title\n\n```notalang\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -1878,14 +2004,22 @@ After list
 
     #[test]
     fn untagged_code_block_needs_no_language() {
-        let deck = parse_markdown("# Title\n\n```\nplain\n```").unwrap();
+        let deck = parse_markdown(
+            "# Title\n\n```\nplain\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(deck.parsed_slides()[0].fragments[1].language(), None);
     }
 
     #[test]
     fn rejects_broken_json_key_comments() {
-        let err = parse_markdown("<!-- {\"kye\":\"arch-1\"} -->\n# Title").unwrap_err();
+        let err = parse_markdown(
+            "<!-- {\"kye\":\"arch-1\"} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
@@ -1894,7 +2028,11 @@ After list
 
     #[test]
     fn rejects_explicit_keys_with_invalid_characters_and_line() {
-        let err = parse_markdown("<!-- {\"key\":\"bad key]\"} -->\n# Title").unwrap_err();
+        let err = parse_markdown(
+            "<!-- {\"key\":\"bad key]\"} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
@@ -1909,7 +2047,11 @@ After list
 
     #[test]
     fn derives_key_from_first_heading_when_comment_is_absent() {
-        let deck = parse_markdown("# Architecture Overview\n\nBody").unwrap();
+        let deck = parse_markdown(
+            "# Architecture Overview\n\nBody",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         assert_eq!(
             deck.parsed_slides()[0].key.as_str(),
             "architecture-overview"
@@ -1918,15 +2060,21 @@ After list
 
     #[test]
     fn explicit_key_wins_over_derived_key() {
-        let deck = parse_markdown("<!-- {\"key\":\"arch-1\"} -->\n# Renamed Title").unwrap();
+        let deck = parse_markdown(
+            "<!-- {\"key\":\"arch-1\"} -->\n# Renamed Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         assert_eq!(deck.parsed_slides()[0].key.as_str(), "arch-1");
     }
 
     #[test]
     fn parsed_slide_records_explicit_and_derived_key_sources() {
-        let deck =
-            parse_markdown("<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\n---\n# Derived Title")
-                .unwrap();
+        let deck = parse_markdown(
+            "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\n---\n# Derived Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides[0].key.as_str(), "arch-1");
@@ -1937,7 +2085,11 @@ After list
 
     #[test]
     fn derives_slide_number_key_when_slide_has_no_heading() {
-        let deck = parse_markdown("Body only\n\n---\nSecond body").unwrap();
+        let deck = parse_markdown(
+            "Body only\n\n---\nSecond body",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(deck.parsed_slides()[0].key.as_str(), "slide-1");
         assert_eq!(
@@ -1953,7 +2105,11 @@ After list
 
     #[test]
     fn splits_slides_on_thematic_break() {
-        let deck = parse_markdown("# One\n\n---\n\n# Two\n\nBody").unwrap();
+        let deck = parse_markdown(
+            "# One\n\n---\n\n# Two\n\nBody",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides.len(), 2);
@@ -1970,6 +2126,7 @@ After list
             "---\ntime: 3m\n---\n\
              <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n# B\n\n---\n\
              <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# C",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -1990,6 +2147,7 @@ After list
         let deck = parse_markdown(
             "<!-- {\"section\":\"Repeat\",\"time\":\"1m\"} -->\n# A\n\n---\n# B\n\n---\n\
              <!-- {\"section\":\"Repeat\",\"time\":\"2m\"} -->\n# C\n\n---\n# D",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -2019,6 +2177,7 @@ After list
     fn single_section_marker_covers_the_whole_deck_and_derives_planned_time() {
         let deck = parse_markdown(
             "<!-- {\"section\":\"Full\",\"time\":\"2m\"} -->\n# A\n\n---\n# B\n\n---\n# C",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -2038,7 +2197,11 @@ After list
 
     #[test]
     fn decks_without_section_markers_keep_settings_unchanged() {
-        let deck = parse_markdown("# A\n\n---\n# B").unwrap();
+        let deck = parse_markdown(
+            "# A\n\n---\n# B",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(deck.settings().planned_time(), None);
         assert!(deck.settings().sections().is_empty());
@@ -2046,9 +2209,11 @@ After list
 
     #[test]
     fn rejects_section_markers_when_first_slide_has_no_marker() {
-        let err =
-            parse_markdown("# A\n\n---\n<!-- {\"section\":\"Late\",\"time\":\"1m\"} -->\n# B")
-                .unwrap_err();
+        let err = parse_markdown(
+            "# A\n\n---\n<!-- {\"section\":\"Late\",\"time\":\"1m\"} -->\n# B",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(4));
@@ -2066,6 +2231,7 @@ After list
         let deck = parse_markdown(
             "<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n\
              <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# B",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -2081,6 +2247,7 @@ After list
             "---\ntime: 5m\n---\n\
              <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n\
              <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# B",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -2100,6 +2267,7 @@ After list
         let err = parse_markdown(
             "<!-- {\"section\":\"A\",\"time\":\"9007199254740s\"} -->\n# A\n\n---\n\
              <!-- {\"section\":\"B\",\"time\":\"9007199254740s\"} -->\n# B",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -2138,7 +2306,7 @@ After list
         assert_eq!(frontmatter.line, 1);
         assert_eq!(frontmatter.yaml, "time: 15m\n");
 
-        let deck = parse_markdown(markdown).unwrap();
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
         assert_eq!(deck.parsed_slides().len(), 2);
         assert_eq!(deck.parsed_slides()[0].fragments[0].line(), 5);
         assert_eq!(deck.parsed_slides()[1].fragments[0].line(), 8);
@@ -2146,7 +2314,11 @@ After list
 
     #[test]
     fn rejects_leading_dense_rule_pair_as_invalid_frontmatter_not_dropped_slide() {
-        let err = parse_markdown("---\n# Title\n---\n# Next").unwrap_err();
+        let err = parse_markdown(
+            "---\n# Title\n---\n# Next",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(2));
@@ -2161,7 +2333,11 @@ After list
 
     #[test]
     fn blank_prefixed_frontmatter_is_accepted_without_dropping_content() {
-        let deck = parse_markdown("\n---\ntime: 15m\n---\n\n# A").unwrap();
+        let deck = parse_markdown(
+            "\n---\ntime: 15m\n---\n\n# A",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides.len(), 1);
@@ -2171,7 +2347,11 @@ After list
 
     #[test]
     fn nonblank_prefix_before_rule_pair_keeps_existing_markdown_semantics() {
-        let deck = parse_markdown("# Z\n\n---\ntitle: x\n---\n\n# A").unwrap();
+        let deck = parse_markdown(
+            "# Z\n\n---\ntitle: x\n---\n\n# A",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides.len(), 2);
@@ -2183,7 +2363,11 @@ After list
 
     #[test]
     fn rejects_unknown_frontmatter_key_with_line_and_help() {
-        let err = parse_markdown("---\ntime: 15m\nunknown: true\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 15m\nunknown: true\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -2198,7 +2382,8 @@ After list
     fn rejects_invalid_frontmatter_time_with_line_and_help() {
         for value in ["0", "0s", "-1", "abc", ""] {
             let markdown = format!("---\ntime: {value}\n---\n# Intro");
-            let err = parse_markdown(&markdown).unwrap_err();
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Parse);
             assert_eq!(err.line, Some(2));
             assert!(err.to_string().contains("invalid deck frontmatter"));
@@ -2228,7 +2413,11 @@ After list
 
     #[test]
     fn rejects_planned_time_above_javascript_safe_integer_with_line_and_help() {
-        let err = parse_markdown("---\ntime: 9007199254740993s\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 9007199254740993s\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(2));
@@ -2242,7 +2431,11 @@ After list
 
     #[test]
     fn huge_integer_time_uses_time_format_help() {
-        let err = parse_markdown("---\ntime: 999999999999999999999\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 999999999999999999999\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(2));
@@ -2255,7 +2448,11 @@ After list
 
     #[test]
     fn duplicate_frontmatter_time_reports_frontmatter_line() {
-        let err = parse_markdown("---\ntime: 15m\ntime: 20m\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 15m\ntime: 20m\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(2));
@@ -2268,7 +2465,11 @@ After list
 
     #[test]
     fn rejects_broken_frontmatter_yaml_with_line_and_help() {
-        let err = parse_markdown("---\ntime: [\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: [\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -2290,6 +2491,7 @@ After list
                 end: source.len(),
             },
             1,
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -2302,7 +2504,11 @@ After list
 
     #[test]
     fn frontmatter_keeps_raw_yaml_for_error_line_mapping() {
-        let err = parse_markdown("\n---\nunknown: true\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "\n---\nunknown: true\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -2315,7 +2521,11 @@ After list
 
     #[test]
     fn rejects_frontmatter_heading_line_as_missing_closing_delimiter() {
-        let err = parse_markdown("---\ntime: 15m\n# Intro\n---\n# Details").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 15m\n# Intro\n---\n# Details",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -2336,7 +2546,11 @@ After list
         };
 
         let settings = parse_deck_frontmatter(Some(&raw)).unwrap();
-        let deck = parse_markdown("---\ntime: 15m\n\n---\n\n# A").unwrap();
+        let deck = parse_markdown(
+            "---\ntime: 15m\n\n---\n\n# A",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(
             settings.planned_time().map(PlannedTime::as_millis),
@@ -2348,7 +2562,11 @@ After list
 
     #[test]
     fn rejects_frontmatter_blank_line_as_missing_closing_delimiter() {
-        let err = parse_markdown("---\ntime: 15m\n\n# A\n\n---\n\n# B").unwrap_err();
+        let err = parse_markdown(
+            "---\ntime: 15m\n\n# A\n\n---\n\n# B",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
@@ -2363,7 +2581,11 @@ After list
 
     #[test]
     fn bom_prefixed_frontmatter_is_parsed_normally() {
-        let deck = parse_markdown("\u{feff}---\ntime: 15m\n---\n\n# A").unwrap();
+        let deck = parse_markdown(
+            "\u{feff}---\ntime: 15m\n---\n\n# A",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides.len(), 1);
@@ -2373,7 +2595,8 @@ After list
     #[test]
     fn rejects_leading_rule_when_no_valid_frontmatter_was_found() {
         for markdown in ["---\n\ntime: 15m\n---\n\n# A", "---\n---\n\n# A"] {
-            let err = parse_markdown(markdown).unwrap_err();
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
 
             assert_eq!(err.kind, ErrorKind::Parse);
             assert_eq!(err.line, Some(1));
@@ -2389,7 +2612,11 @@ After list
 
     #[test]
     fn indented_leading_rule_does_not_hang_and_reports_invalid_frontmatter_start() {
-        let err = parse_markdown("  ---\ntime: 15m\n---\n\n# A").unwrap_err();
+        let err = parse_markdown(
+            "  ---\ntime: 15m\n---\n\n# A",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(1));
@@ -2401,7 +2628,7 @@ After list
     #[test]
     fn yaml_like_slide_content_between_rules_still_splits_as_slides() {
         let markdown = "# A\n\n---\n# Cfg\nport: 8080\n\n---\n\n# C";
-        let deck = parse_markdown(markdown).unwrap();
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
         let slides = deck.parsed_slides();
 
         assert_eq!(slides.len(), 3);
@@ -2414,7 +2641,11 @@ After list
 
     #[test]
     fn rejects_empty_deck_after_splitting_delimiters() {
-        let err = parse_markdown("  \n\n***\n\n***\n").unwrap_err();
+        let err = parse_markdown(
+            "  \n\n***\n\n***\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, None);
@@ -2427,7 +2658,11 @@ After list
 
     #[test]
     fn unsupported_construct_after_delimiter_reports_global_line_and_slide() {
-        let err = parse_markdown("# One\n\n---\n\n# Two\n\n> quote").unwrap_err();
+        let err = parse_markdown(
+            "# One\n\n---\n\n# Two\n\n> quote",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(7));
@@ -2439,7 +2674,11 @@ After list
 
     #[test]
     fn image_after_delimiter_is_not_silently_dropped() {
-        let deck = parse_markdown("# One\n\n---\n\n![alt](image.png)").unwrap();
+        let deck = parse_markdown(
+            "# One\n\n---\n\n![alt](image.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let slide = &deck.parsed_slides()[1];
 
         assert_eq!(slide.fragments.len(), 1);
@@ -2455,7 +2694,11 @@ After list
 
     #[test]
     fn unsupported_table_after_delimiter_is_not_silently_dropped() {
-        let err = parse_markdown("# One\n\n---\n\n| a |\n| - |").unwrap_err();
+        let err = parse_markdown(
+            "# One\n\n---\n\n| a |\n| - |",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(5));
@@ -2466,7 +2709,7 @@ After list
     #[test]
     fn key_comment_after_delimiter_belongs_to_next_slide() {
         let markdown = "# Intro\n\n---\n<!-- {\"key\":\"arch-1\"} -->\n# Architecture";
-        let deck = parse_markdown(markdown).unwrap();
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
 
         assert_eq!(deck.parsed_slides()[0].key.as_str(), "intro");
         assert_eq!(deck.parsed_slides()[1].key.as_str(), "arch-1");
@@ -2480,6 +2723,7 @@ After list
     fn rejects_duplicate_explicit_slide_keys() {
         let err = parse_markdown(
             "<!-- {\"key\":\"same\"} -->\n# One\n\n---\n<!-- {\"key\":\"same\"} -->\n# Two",
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
 
@@ -2492,8 +2736,11 @@ After list
 
     #[test]
     fn rejects_derived_slide_key_collision_with_explicit_key() {
-        let err =
-            parse_markdown("<!-- {\"key\":\"intro\"} -->\n# One\n\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "<!-- {\"key\":\"intro\"} -->\n# One\n\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.line, Some(5));
         assert!(err.to_string().contains("duplicate slide key 'intro'"));
@@ -2505,7 +2752,11 @@ After list
 
     #[test]
     fn rejects_derived_slide_key_collision_with_derived_key() {
-        let err = parse_markdown("# Intro\n\n---\n# Intro").unwrap_err();
+        let err = parse_markdown(
+            "# Intro\n\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.line, Some(4));
         assert!(err.to_string().contains("duplicate slide key 'intro'"));
