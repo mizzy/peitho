@@ -537,6 +537,101 @@ fn build_deduplicates_images_by_content_hash() {
 }
 
 #[test]
+fn build_deduplicates_same_image_across_slides_by_content_hash() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "# First\n\n![Diagram](img/arch.png)\n\n---\n# Second\n\n![Diagram](img/arch.png)",
+    )
+    .unwrap();
+    write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    for slide in ["slides/000-first.html", "slides/001-second.html"] {
+        let html = fs::read_to_string(out.join(slide)).unwrap();
+        assert!(html.contains(&format!("assets/{asset_name}")));
+    }
+}
+
+#[test]
+fn build_replaces_stale_image_assets_when_image_content_changes() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let image = dir.path().join("img/arch.png");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Diagram](img/arch.png)").unwrap();
+    write_test_png(&image, TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let old_asset = asset_files(&out)[0].file_name().unwrap().to_owned();
+
+    let mut changed_png = TEST_PNG.to_vec();
+    let last = changed_png.last_mut().unwrap();
+    *last ^= 0x01;
+    write_test_png(&image, &changed_png);
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let new_asset = assets[0].file_name().unwrap();
+    assert_ne!(new_asset, old_asset.as_os_str());
+    assert!(!out.join("assets").join(&old_asset).exists());
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!("assets/{}", new_asset.to_string_lossy())));
+}
+
+#[test]
 fn build_keeps_same_basename_images_distinct_when_content_differs() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
