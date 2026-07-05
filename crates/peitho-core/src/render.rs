@@ -274,6 +274,24 @@ pub fn render_distribution_index() -> String {
       canvas.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
     }
 
+    function parsePositiveInt(raw) {
+      const match = raw.trim().match(/^\d+$/);
+      return match === null ? 1 : Number(match[0]);
+    }
+
+    function readSlideIndexFromUrl() {
+      const searchSlide = new URLSearchParams(location.search).get('slide');
+      if (searchSlide !== null) return parsePositiveInt(searchSlide);
+      const hash = location.hash;
+      if (hash.startsWith('#slide=')) {
+        return parsePositiveInt(hash.slice('#slide='.length).split('&')[0]);
+      }
+      if (hash.startsWith('#') && hash.length > 1) {
+        return parsePositiveInt(hash.slice(1).split('&')[0]);
+      }
+      return 1;
+    }
+
     function showSlide(index) {
       if (slides.length === 0) {
         document.getElementById('peitho-canvas').replaceChildren();
@@ -281,8 +299,15 @@ pub fn render_distribution_index() -> String {
       }
       const next = Math.max(0, Math.min(index, slides.length - 1));
       currentIndex = next;
+      writeSlideIndexToUrl(currentIndex + 1);
       const canvas = document.getElementById('peitho-canvas');
       canvas.innerHTML = slides[next].html;
+    }
+
+    function writeSlideIndexToUrl(oneBased) {
+      const params = new URLSearchParams(location.search);
+      params.set('slide', String(oneBased));
+      history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash);
     }
 
     function navigate(to) {
@@ -302,7 +327,7 @@ pub fn render_distribution_index() -> String {
             html: await fetchOk(slide.src).then((response) => response.text())
           }))
         );
-        showSlide(0);
+        showSlide(readSlideIndexFromUrl() - 1);
         resizeCanvas();
       } catch (error) {
         showError(error.message);
@@ -340,6 +365,10 @@ pub fn render_distribution_index() -> String {
     });
     document.addEventListener('click', (event) => {
       navigate(event.clientX < window.innerWidth / 4 ? 'prev' : 'next');
+    });
+    // `#slide=N` / `#N` are load-time fallbacks only; after load, query is canonical.
+    window.addEventListener('popstate', () => {
+      showSlide(readSlideIndexFromUrl() - 1);
     });
     window.addEventListener('resize', resizeCanvas);
     loadDeck();
@@ -913,6 +942,80 @@ mod tests {
         assert!(!html.contains("shell.js"));
         assert!(!html.contains("installPresentationControls"));
         assert!(!html.contains("data-slide-key="));
+    }
+
+    #[test]
+    fn distribution_index_reads_slide_query_on_load() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("URLSearchParams(location.search)"));
+        assert!(html.contains(".get('slide')"));
+        assert!(html.contains("showSlide(readSlideIndexFromUrl() - 1)"));
+    }
+
+    #[test]
+    fn distribution_index_supports_hash_fallback() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("location.hash"));
+        assert!(html.contains("hash.startsWith('#slide=')"));
+        assert!(html.contains("hash.startsWith('#')"));
+        assert!(html.contains(".split('&')[0]"));
+    }
+
+    #[test]
+    fn distribution_index_updates_url_on_slide_change() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("history.replaceState"));
+        let show_slide_index = html.find("function showSlide(index)").unwrap();
+        let current_index = html.find("currentIndex = next;").unwrap();
+        let write_call_index = html
+            .find("writeSlideIndexToUrl(currentIndex + 1);")
+            .unwrap();
+        let replace_state_index = html[current_index..]
+            .find("history.replaceState")
+            .map(|index| current_index + index)
+            .unwrap();
+
+        assert!(show_slide_index < current_index);
+        assert!(current_index < write_call_index);
+        assert!(current_index < replace_state_index);
+    }
+
+    #[test]
+    fn distribution_index_never_uses_pushstate() {
+        let html = render_distribution_index();
+
+        assert!(!html.contains("history.pushState"));
+    }
+
+    #[test]
+    fn distribution_index_handles_popstate() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("window.addEventListener('popstate'"));
+    }
+
+    #[test]
+    fn distribution_index_preserves_query_and_hash_when_writing_slide() {
+        let html = render_distribution_index();
+
+        assert!(html.contains("location.pathname"));
+        assert!(html.contains("params.set('slide'"));
+        assert!(html.contains("location.hash"));
+        assert!(html.contains("location.pathname + '?' + params.toString() + location.hash"));
+    }
+
+    #[test]
+    fn distribution_index_url_deep_link_leaves_present_and_presenter_alone() {
+        let present_html = render_present_index();
+        let presenter_html = render_presenter_index();
+
+        assert!(!present_html.contains("?slide="));
+        assert!(!present_html.contains("URLSearchParams"));
+        assert!(!presenter_html.contains("?slide="));
+        assert!(!presenter_html.contains("URLSearchParams"));
     }
 
     #[test]
