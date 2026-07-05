@@ -350,14 +350,45 @@ fn has_windows_drive_prefix(value: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
+/// A slot name that was produced by the explicit `::: {slot=name}` syntax.
+///
+/// The type is public so it can appear in `FragmentKind::SlotGroup`, but the
+/// constructor is deliberately `pub(crate)`: outside callers cannot fabricate
+/// one, so any future consumer that needs to route by explicit intent must go
+/// through the parser. This preserves the invariant that convention-derived
+/// and author-declared slot names cannot be silently interchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitSlot(SlotName);
+
+impl ExplicitSlot {
+    pub(crate) fn new(name: SlotName) -> Self {
+        Self(name)
+    }
+
+    pub fn as_slot_name(&self) -> &SlotName {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FragmentKind<S = RawImagePath> {
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     Paragraph,
     Text,
     Code,
-    Image { alt: String, src: S },
+    Image {
+        alt: String,
+        src: S,
+    },
     List,
+    /// A `::: {slot=name}` fenced block. Mapping expands the children into
+    /// the named slot; SlotGroup itself never leaves the Mapped phase.
+    SlotGroup {
+        name: ExplicitSlot,
+        children: Vec<SourceFragment<S>>,
+    },
 }
 
 impl<S> FragmentKind<S> {
@@ -369,6 +400,10 @@ impl<S> FragmentKind<S> {
             Self::Code => Accepts::Code,
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
+            // SlotGroup is expanded in mapping, so its own accepts value never
+            // reaches contract checks. Report a conservative blocks default so
+            // any accidental reader gets a stable answer instead of unreachable!.
+            Self::SlotGroup { .. } => Accepts::Blocks,
         }
     }
 
@@ -380,6 +415,7 @@ impl<S> FragmentKind<S> {
             Self::Code => "code block",
             Self::Image { .. } => "image",
             Self::List => "list",
+            Self::SlotGroup { .. } => "slot group",
         }
     }
 }
@@ -393,6 +429,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Code => "code",
             Self::Image { .. } => "image",
             Self::List => "list",
+            Self::SlotGroup { .. } => "slot group",
         })
     }
 }
@@ -457,6 +494,21 @@ impl SourceFragment<RawImagePath> {
             language,
         }
     }
+
+    pub(crate) fn slot_group(
+        line: usize,
+        name: ExplicitSlot,
+        children: Vec<SourceFragment<RawImagePath>>,
+    ) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::SlotGroup { name, children },
+            markdown: String::new(),
+            text: String::new(),
+            code: String::new(),
+            language: None,
+        }
+    }
 }
 
 impl<S> SourceFragment<S> {
@@ -476,11 +528,18 @@ impl<S> SourceFragment<S> {
 
     pub(crate) fn try_map_image_src<T, E, F>(
         self,
-        f: F,
+        mut f: F,
     ) -> std::result::Result<SourceFragment<T>, E>
     where
-        F: FnOnce(S) -> std::result::Result<T, E>,
+        F: FnMut(S) -> std::result::Result<T, E>,
     {
+        self.try_map_image_src_inner(&mut f)
+    }
+
+    fn try_map_image_src_inner<T, E>(
+        self,
+        f: &mut dyn FnMut(S) -> std::result::Result<T, E>,
+    ) -> std::result::Result<SourceFragment<T>, E> {
         let kind = match self.kind {
             FragmentKind::Heading { level } => FragmentKind::Heading { level },
             FragmentKind::Paragraph => FragmentKind::Paragraph,
@@ -488,6 +547,16 @@ impl<S> SourceFragment<S> {
             FragmentKind::Code => FragmentKind::Code,
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
+            FragmentKind::SlotGroup { name, children } => {
+                let mut mapped_children = Vec::with_capacity(children.len());
+                for child in children {
+                    mapped_children.push(child.try_map_image_src_inner(f)?);
+                }
+                FragmentKind::SlotGroup {
+                    name,
+                    children: mapped_children,
+                }
+            }
         };
         Ok(SourceFragment {
             line: self.line,

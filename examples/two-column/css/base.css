@@ -1,0 +1,107 @@
+:root {
+  --bg: #fbfbfd;
+  --fg: #1c1c1e;
+  --muted: #6b6b70;
+  --accent: #0055ff;
+  --rule: rgba(0, 0, 0, 0.08);
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 500 22px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI",
+    sans-serif;
+}
+
+.two-column {
+  height: 100%;
+  padding: 3vw 4vw;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2vw;
+}
+
+.two-column h1 {
+  margin: 0;
+  font-size: 3.6vw;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.two-column .columns {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2.5vw;
+  align-items: start;
+}
+
+.two-column .col {
+  padding: 1.5vw 1.8vw;
+  border: 1px solid var(--rule);
+  border-radius: 0.8vw;
+  background: white;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.two-column .col-left {
+  --accent: #0055ff;
+}
+
+.two-column .col-right {
+  --accent: #ff3b30;
+}
+
+.two-column .col::before {
+  content: "";
+  display: block;
+  width: 2.4vw;
+  height: 0.35vw;
+  background: var(--accent);
+  border-radius: 0.2vw;
+  margin-bottom: 1vw;
+}
+
+.two-column p {
+  margin: 0 0 0.9em;
+  font-size: 1.6vw;
+  line-height: 1.5;
+}
+
+.two-column ul,
+.two-column ol {
+  margin: 0 0 0.9em;
+  padding-left: 1.4em;
+  font-size: 1.5vw;
+  line-height: 1.55;
+}
+
+.two-column li + li {
+  margin-top: 0.35em;
+}
+
+.two-column code {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 0.92em;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.1em 0.35em;
+  border-radius: 0.2em;
+}
+
+.two-column pre {
+  margin: 0 0 0.9em;
+  padding: 0.9em 1em;
+  background: #f2f2f4;
+  border-radius: 0.4vw;
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 1.15vw;
+  line-height: 1.5;
+  overflow-x: auto;
+}
