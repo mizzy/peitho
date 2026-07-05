@@ -100,6 +100,14 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
 ````
 
+Markdown images are local files written as an image-only paragraph:
+
+```markdown
+![Architecture diagram](img/arch.png)
+```
+
+Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
+
 ## Multiple layouts
 
 Passing a directory to `--layouts` turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):
@@ -119,6 +127,7 @@ Passing a directory to `--layouts` turns every `*.html` inside it into a layout 
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
 | `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
 | `examples/feature-tour/` | Peitho's own feature tour | Light product-tour style, indigo accents | Four layouts. One slide is deliberately ambiguous between two of them and resolves it with an explicit `{"layout":"agenda"}`; also exercises the `list` slot type, multi-language highlighting, sections, and multi-comment speaker notes |
+| `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
 
 Same tool, same Markdown conventions — entirely different decks:
 

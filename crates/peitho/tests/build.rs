@@ -350,6 +350,402 @@ fn build_writes_fetching_index_without_embedded_slide_html() {
 }
 
 #[test]
+fn build_copies_markdown_image_to_dist_assets() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Architecture](img/arch.png)").unwrap();
+    write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-arch.png"));
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}""#)));
+}
+
+#[test]
+fn build_copies_nested_unicode_markdown_image_path() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Diagram](./img/deep/画像.png)").unwrap();
+    write_test_png(&dir.path().join("img/deep/画像.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-画像.png"));
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}" alt="Diagram">"#)));
+}
+
+#[test]
+fn build_fails_for_missing_markdown_image_with_line_and_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Missing](missing.png)").unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains("image file not found:"))
+        .stderr(predicate::str::contains("missing.png"))
+        .stderr(predicate::str::contains(
+            "help: place the image at the deck-relative path or fix the path",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn build_fails_for_unreadable_markdown_image_with_line_and_help() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    let image = dir.path().join("img/locked.png");
+    fs::write(&deck, "# Visual\n\n![Locked](img/locked.png)").unwrap();
+    write_test_png(&image, TEST_PNG);
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o000)).unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains("image file unreadable:"))
+        .stderr(predicate::str::contains("img/locked.png"))
+        .stderr(predicate::str::contains(
+            "help: make the image file readable",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn build_fails_for_symlinked_markdown_image_outside_deck_dir() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    let outside = outside_dir.path().join("arch.png");
+    let link = dir.path().join("img/link.png");
+    fs::write(&deck, "# Visual\n\n![Leaked](img/link.png)").unwrap();
+    write_test_png(&outside, TEST_PNG);
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&outside, &link).unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains(
+            "image path escapes deck directory",
+        ))
+        .stderr(predicate::str::contains("img/"))
+        .stderr(predicate::str::contains("link.png"))
+        .stderr(predicate::str::contains(
+            "help: keep image files inside the deck directory",
+        ));
+}
+
+#[test]
+fn build_deduplicates_images_by_content_hash() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "# Gallery\n\n![First](img/arch.png)\n\n![Second](img/copy.png)",
+    )
+    .unwrap();
+    write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
+    write_test_png(&dir.path().join("img/copy.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1..*");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-arch.png"));
+    let slide = fs::read_to_string(out.join("slides/000-gallery.html")).unwrap();
+    assert_eq!(slide.matches(&format!("assets/{asset_name}")).count(), 2);
+}
+
+#[test]
+fn build_deduplicates_same_image_across_slides_by_content_hash() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "# First\n\n![Diagram](img/arch.png)\n\n---\n# Second\n\n![Diagram](img/arch.png)",
+    )
+    .unwrap();
+    write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    for slide in ["slides/000-first.html", "slides/001-second.html"] {
+        let html = fs::read_to_string(out.join(slide)).unwrap();
+        assert!(html.contains(&format!("assets/{asset_name}")));
+    }
+}
+
+#[test]
+fn build_replaces_stale_image_assets_when_image_content_changes() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let image = dir.path().join("img/arch.png");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Diagram](img/arch.png)").unwrap();
+    write_test_png(&image, TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let old_asset = asset_files(&out)[0].file_name().unwrap().to_owned();
+
+    let mut changed_png = TEST_PNG.to_vec();
+    let last = changed_png.last_mut().unwrap();
+    *last ^= 0x01;
+    write_test_png(&image, &changed_png);
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let new_asset = assets[0].file_name().unwrap();
+    assert_ne!(new_asset, old_asset.as_os_str());
+    assert!(!out.join("assets").join(&old_asset).exists());
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!("assets/{}", new_asset.to_string_lossy())));
+}
+
+#[test]
+fn build_keeps_same_basename_images_distinct_when_content_differs() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "# Gallery\n\n![First](img/a/arch.png)\n\n![Second](img/b/arch.png)",
+    )
+    .unwrap();
+    let mut other_png = TEST_PNG.to_vec();
+    let last = other_png.last_mut().unwrap();
+    *last ^= 0x01;
+    write_test_png(&dir.path().join("img/a/arch.png"), TEST_PNG);
+    write_test_png(&dir.path().join("img/b/arch.png"), &other_png);
+    let layout = write_image_layout(dir.path(), "1..*");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 2);
+    let asset_names = assets
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_ne!(asset_names[0], asset_names[1]);
+    assert!(asset_names.iter().all(|name| name.ends_with("-arch.png")));
+    let slide = fs::read_to_string(out.join("slides/000-gallery.html")).unwrap();
+    for asset_name in asset_names {
+        assert!(slide.contains(&format!("assets/{asset_name}")));
+    }
+}
+
+#[test]
+fn build_rejects_two_image_paragraphs_when_image_slot_allows_one() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Gallery\n\n![First](a.png)\n\n![Second](b.png)").unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('gallery'), line 3"))
+        .stderr(predicate::str::contains("slot 'hero' got 2 item(s)"))
+        .stderr(predicate::str::contains("allows 1"))
+        .stderr(predicate::str::contains(
+            "help: use a layout with more hero capacity or remove one hero block",
+        ));
+}
+
+#[test]
 fn build_accepts_override_targeting_derived_second_slide_key() {
     let (_dir, out) = build_multi_slide_fixture_with_override(
         r#"[data-slide-key="convention-mapping"] .slot-body { color: red; }"#,
@@ -523,6 +919,41 @@ fn feature_tour_example_exercises_dispatch_sections_and_list_slot() {
 }
 
 #[test]
+fn feature_tour_or_new_image_example_builds() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/image-showcase/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide(s)"));
+
+    let assets = asset_files(out.path());
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-arch.png"));
+    let slide = fs::read_to_string(out.path().join("slides/000-image-showcase.html")).unwrap();
+    assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}""#)));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["images"].as_array().unwrap().len(), 1);
+    let expected_src = format!("assets/{asset_name}");
+    assert_eq!(
+        manifest["images"][0]["src"].as_str(),
+        Some(expected_src.as_str())
+    );
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
@@ -636,6 +1067,40 @@ fn write_layout(dir: &Path) -> PathBuf {
     .unwrap();
     path
 }
+
+fn write_image_layout(dir: &Path, image_arity: &str) -> PathBuf {
+    let path = dir.join("title-image.html");
+    fs::write(
+        &path,
+        format!(
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><figure><slot name="hero" accepts="image" arity="{image_arity}"></slot></figure></section>"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn write_test_png(path: &Path, bytes: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+fn asset_files(out: &Path) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(out.join("assets"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+const TEST_PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D', b'R',
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, b'I', b'D', b'A', b'T', 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xae,
+    0x42, 0x60, 0x82,
+];
 
 /// Accepts either a css file (manual fixtures) or the css dir itself
 /// (helper fixtures) and returns the directory to pass to --css.

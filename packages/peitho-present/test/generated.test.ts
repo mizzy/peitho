@@ -42,12 +42,35 @@ describe("generated manifest contract", () => {
           src: "slides/000-intro.html",
           hasNotes: false
         }
-      ]
+      ],
+      images: []
     };
     const options: ShellOptions = { root: document.createElement("main") };
 
     expect(manifest.slides[0].key).toBe("intro");
     expect(options.root.tagName).toBe("MAIN");
+  });
+
+  it("reads Rust-generated Manifest image entries", () => {
+    const manifest: Manifest = {
+      version: 1,
+      peithoVersion: "0.1.0",
+      title: "Demo",
+      slideCount: 1,
+      plannedDurationMs: null,
+      sections: [],
+      slides: [
+        {
+          index: 0,
+          key: "intro",
+          src: "slides/000-intro.html",
+          hasNotes: false
+        }
+      ],
+      images: [{ src: "assets/abcdef1234567890-arch.png" }]
+    };
+
+    expect(manifest.images[0]?.src).toBe("assets/abcdef1234567890-arch.png");
   });
 
   it("uses the Rust-generated PresentConfig type shape", () => {

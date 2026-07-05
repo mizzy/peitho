@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     io::Write,
@@ -11,6 +12,7 @@ use clap::{Parser, Subcommand};
 use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
+use sha2::{Digest, Sha256};
 
 use peitho::{browser, server};
 
@@ -19,6 +21,7 @@ struct BuildArtifacts {
     rendered: peitho_core::Deck<peitho_core::Rendered>,
     manifest_json: String,
     css: String,
+    image_assets: Vec<peitho_core::ResolvedImageAsset>,
 }
 
 #[derive(Debug, Clone)]
@@ -447,20 +450,25 @@ fn build_artifacts(
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
-    let manifest = peitho_core::build_manifest(&checked);
-    let manifest_json = core(peitho_core::manifest_json(&manifest))?;
     let css = core(peitho_core::build_theme_css(
         &css_files,
         &checked.slide_slot_classes(),
         &layouts.slot_classes(),
     ))?;
-    let rendered = core(peitho_core::render_deck(checked))?;
+    let mut image_resolver = ImageResolver::new(input);
+    let (resolved, image_assets) = core(peitho_core::resolve_image_paths(checked, |request| {
+        image_resolver.resolve(request)
+    }))?;
+    let manifest = peitho_core::build_manifest(&resolved, &image_assets);
+    let manifest_json = core(peitho_core::manifest_json(&manifest))?;
+    let rendered = core(peitho_core::render_deck(resolved))?;
 
     Ok(BuildArtifacts {
         slide_count,
         rendered,
         manifest_json,
         css,
+        image_assets,
     })
 }
 
@@ -468,6 +476,7 @@ fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<(
     fs::create_dir_all(out).into_diagnostic()?;
     fs::write(out.join("peitho.css"), &artifacts.css).into_diagnostic()?;
     write_slide_fragments(out, &artifacts.rendered)?;
+    write_image_assets(out, &artifacts.image_assets)?;
     fs::write(out.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         out.join("index.html"),
@@ -551,14 +560,11 @@ fn read_publish_manifest(dist: &Path) -> miette::Result<peitho_core::Manifest> {
         )
     })?;
 
-    validate_manifest_slide_refs(dist, &manifest)?;
+    validate_manifest_refs(dist, &manifest)?;
     Ok(manifest)
 }
 
-fn validate_manifest_slide_refs(
-    dist: &Path,
-    manifest: &peitho_core::Manifest,
-) -> miette::Result<()> {
+fn validate_manifest_refs(dist: &Path, manifest: &peitho_core::Manifest) -> miette::Result<()> {
     if manifest.slide_count() != manifest.slides().len() {
         return Err(miette::miette!(
             "manifest slideCount does not match slides length\nhelp: run `peitho build` first"
@@ -572,25 +578,89 @@ fn validate_manifest_slide_refs(
     }
 
     for slide in manifest.slides() {
-        let src = slide.src();
-        let path = Path::new(src);
-        let invalid_component = path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        });
-        if src.is_empty() || path.is_absolute() || invalid_component {
-            return Err(miette::miette!(
-                "manifest contains invalid slide src: {src}\nhelp: slide src must be a relative path inside dist/"
-            ));
-        }
+        validate_manifest_dist_ref(dist, slide.src(), ManifestRefKind::Slide)?;
+    }
 
-        if !dist.join(path).is_file() {
+    for image in manifest.images() {
+        validate_manifest_dist_ref(dist, image.src(), ManifestRefKind::Image)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ManifestRefKind {
+    Slide,
+    Image,
+}
+
+impl ManifestRefKind {
+    fn invalid_message(self, src: &str) -> String {
+        match self {
+            Self::Slide => format!("manifest contains invalid slide src: {src}"),
+            Self::Image => format!("manifest contains invalid image src: {src}"),
+        }
+    }
+
+    fn invalid_help(self) -> &'static str {
+        match self {
+            Self::Slide => "slide src must be a relative path inside dist/",
+            Self::Image => "image src must be a relative path inside dist/",
+        }
+    }
+
+    fn missing_message(self, src: &str) -> String {
+        match self {
+            Self::Slide => format!("manifest references missing slide fragment: {src}"),
+            Self::Image => format!("manifest references missing image asset: {src}"),
+        }
+    }
+}
+
+fn validate_manifest_dist_ref(dist: &Path, src: &str, kind: ManifestRefKind) -> miette::Result<()> {
+    let path = Path::new(src);
+    let invalid_component = path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    });
+    if src.is_empty() || path.is_absolute() || invalid_component {
+        return Err(miette::miette!(
+            "{}\nhelp: {}",
+            kind.invalid_message(src),
+            kind.invalid_help()
+        ));
+    }
+
+    let canonical_dist = fs::canonicalize(dist).map_err(|err| {
+        miette::miette!(
+            "distribution is incomplete: failed to resolve dist directory\nhelp: run `peitho build` first\ncaused by: {err}"
+        )
+    })?;
+    let target = dist.join(path);
+    let canonical_target = match fs::canonicalize(&target) {
+        Ok(path) => path,
+        Err(_) => {
             return Err(miette::miette!(
-                "manifest references missing slide fragment: {src}\nhelp: run `peitho build` first"
+                "{}\nhelp: run `peitho build` first",
+                kind.missing_message(src)
             ));
         }
+    };
+    if !canonical_target.starts_with(&canonical_dist) {
+        return Err(miette::miette!(
+            "{}\nhelp: {}",
+            kind.invalid_message(src),
+            kind.invalid_help()
+        ));
+    }
+
+    if !canonical_target.is_file() {
+        return Err(miette::miette!(
+            "{}\nhelp: run `peitho build` first",
+            kind.missing_message(src)
+        ));
     }
 
     Ok(())
@@ -696,6 +766,7 @@ fn emit_present_cache(
     }
     fs::write(cache.join("peitho.css"), &artifacts.css).into_diagnostic()?;
     write_slide_fragments(cache, &artifacts.rendered)?;
+    write_image_assets(cache, &artifacts.image_assets)?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         cache.join("notes.json"),
@@ -755,6 +826,148 @@ fn write_slide_fragments(
         fs::write(out.join(slide.src()), slide.html()).into_diagnostic()?;
     }
     Ok(())
+}
+
+fn write_image_assets(
+    out: &Path,
+    image_assets: &[peitho_core::ResolvedImageAsset],
+) -> miette::Result<()> {
+    let assets_dir = out.join("assets");
+    if assets_dir.exists() {
+        fs::remove_dir_all(&assets_dir).into_diagnostic()?;
+    }
+    fs::create_dir_all(&assets_dir).into_diagnostic()?;
+    for asset in image_assets {
+        fs::copy(&asset.source_abs, out.join(asset.dist_rel.as_str())).into_diagnostic()?;
+    }
+    Ok(())
+}
+
+struct ImageResolver {
+    deck_dir: PathBuf,
+    by_hash: BTreeMap<String, peitho_core::ResolvedImageAsset>,
+}
+
+impl ImageResolver {
+    fn new(input: &Path) -> Self {
+        let deck_dir = input
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Self {
+            deck_dir,
+            by_hash: BTreeMap::new(),
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        request: peitho_core::ImageRequest<'_>,
+    ) -> peitho_core::Result<peitho_core::ResolvedImageAsset> {
+        let source = self.deck_dir.join(request.raw.as_str());
+        let display_path = request.raw.as_str();
+        let deck_abs =
+            fs::canonicalize(&self.deck_dir).map_err(|err| image_read_error(display_path, err))?;
+        let source_abs =
+            fs::canonicalize(&source).map_err(|err| image_metadata_error(display_path, err))?;
+        if !source_abs.starts_with(&deck_abs) {
+            return Err(peitho_core::BuildError::new(
+                peitho_core::error::ErrorKind::Asset,
+                None,
+                format!("image path escapes deck directory: {display_path}"),
+                "keep image files inside the deck directory",
+            ));
+        }
+        let metadata =
+            fs::metadata(&source_abs).map_err(|err| image_metadata_error(display_path, err))?;
+        if !metadata.is_file() {
+            return Err(peitho_core::BuildError::new(
+                peitho_core::error::ErrorKind::Asset,
+                None,
+                format!("image file not found: {display_path}"),
+                "place the image at the deck-relative path or fix the path",
+            ));
+        }
+        let bytes = fs::read(&source_abs).map_err(|err| image_read_error(display_path, err))?;
+        let hash = short_sha256_hex(&bytes);
+        if let Some(asset) = self.by_hash.get(&hash) {
+            return Ok(asset.clone());
+        }
+        let basename = Path::new(request.raw.as_str())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                peitho_core::BuildError::new(
+                    peitho_core::error::ErrorKind::Asset,
+                    None,
+                    format!("image path has no file name: {}", request.raw.as_str()),
+                    "write a deck-relative image path with a file name",
+                )
+            })?;
+        let dist_rel = peitho_core::ResolvedImagePath::from_hashed_asset(&hash, basename).map_err(
+            |message| {
+                peitho_core::BuildError::new(
+                    peitho_core::error::ErrorKind::Asset,
+                    None,
+                    message,
+                    "keep generated image asset paths under assets/",
+                )
+            },
+        )?;
+        let asset = peitho_core::ResolvedImageAsset {
+            source_abs,
+            dist_rel,
+        };
+        self.by_hash.insert(hash, asset.clone());
+        Ok(asset)
+    }
+}
+
+fn image_metadata_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Asset,
+            None,
+            format!("image file not found: {path}"),
+            "place the image at the deck-relative path or fix the path",
+        ),
+        _ => peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Asset,
+            None,
+            format!("image file unreadable: {path}"),
+            "make the image file readable",
+        ),
+    }
+}
+
+fn image_read_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Asset,
+            None,
+            format!("image file unreadable: {path}"),
+            "make the image file readable",
+        ),
+        _ => peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Asset,
+            None,
+            format!("failed to read image: {err}"),
+            "make sure the image exists and can be read",
+        ),
+    }
+}
+
+fn short_sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let hash: [u8; 32] = hasher.finalize().into();
+    let mut hex = String::with_capacity(16);
+    for byte in &hash[..8] {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hex
 }
 
 fn core<T>(result: peitho_core::Result<T>) -> miette::Result<T> {
@@ -1087,6 +1300,46 @@ mod tests {
 
         let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
         assert!(json.contains(r#""presenterOpen": true"#));
+    }
+
+    #[test]
+    fn present_cache_copies_markdown_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        let cache = dir.path().join("present-cache");
+
+        fs::write(&deck, "# Visual\n\n![Architecture](img/arch.png)").unwrap();
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(dir.path().join("img")).unwrap();
+        fs::write(
+            layouts.join("visual.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            css.join("base.css"),
+            ".slot-hero img { max-width: 100%; }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("img/arch.png"), b"test png bytes").unwrap();
+
+        let artifacts = build_artifacts(&deck, Some(&layouts), Some(&css)).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+
+        let mut assets = fs::read_dir(cache.join("assets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assets.sort();
+        assert_eq!(assets.len(), 1);
+        let asset_name = assets[0].to_string_lossy();
+        assert!(asset_name.ends_with("-arch.png"));
+        let slide = fs::read_to_string(cache.join("slides/000-visual.html")).unwrap();
+        assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}""#)));
     }
 
     #[test]

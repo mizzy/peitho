@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::SlideKey,
+    domain::{ResolvedImageAsset, SlideKey},
     error::Result,
     json::pretty_json,
     phase::{Checked, CheckedSlide, Deck, PlannedTime},
@@ -26,6 +26,8 @@ pub struct Manifest {
     #[serde(default)]
     sections: Vec<ManifestSection>,
     slides: Vec<ManifestSlide>,
+    #[serde(default)]
+    images: Vec<ManifestImage>,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -58,6 +60,16 @@ pub struct ManifestSlide {
     src: String,
     #[serde(rename = "hasNotes")]
     has_notes: bool,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestImage {
+    src: String,
 }
 
 impl ManifestSection {
@@ -119,12 +131,32 @@ impl ManifestSlide {
     }
 }
 
+impl ManifestImage {
+    pub fn new(src: impl Into<String>) -> Self {
+        Self { src: src.into() }
+    }
+
+    pub fn src(&self) -> &str {
+        &self.src
+    }
+}
+
 impl Manifest {
     pub fn new(
         title: impl Into<String>,
         planned_duration_ms: Option<u64>,
         sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
+    ) -> Self {
+        Self::with_images(title, planned_duration_ms, sections, slides, Vec::new())
+    }
+
+    pub fn with_images(
+        title: impl Into<String>,
+        planned_duration_ms: Option<u64>,
+        sections: Vec<ManifestSection>,
+        slides: Vec<ManifestSlide>,
+        images: Vec<ManifestImage>,
     ) -> Self {
         let slide_count = slides.len();
         Self {
@@ -135,6 +167,7 @@ impl Manifest {
             planned_duration_ms,
             sections,
             slides,
+            images,
         }
     }
 
@@ -153,13 +186,17 @@ impl Manifest {
     pub fn slides(&self) -> &[ManifestSlide] {
         &self.slides
     }
+
+    pub fn images(&self) -> &[ManifestImage] {
+        &self.images
+    }
 }
 
 pub fn manifest_json(manifest: &Manifest) -> Result<String> {
     pretty_json(manifest, "manifest", "keep manifest fields serializable")
 }
 
-pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
+pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageAsset]) -> Manifest {
     let title = deck
         .checked_slides()
         .first()
@@ -194,11 +231,17 @@ pub fn build_manifest(deck: &Deck<Checked>) -> Manifest {
         })
         .collect();
 
-    Manifest::new(
+    let images = image_assets
+        .iter()
+        .map(|asset| ManifestImage::new(asset.dist_rel.as_str()))
+        .collect();
+
+    Manifest::with_images(
         title,
         deck.settings().planned_time().map(PlannedTime::as_millis),
         sections,
         slides,
+        images,
     )
 }
 
@@ -211,7 +254,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::SlideKey,
+        domain::{ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::parse_markdown,
@@ -266,7 +309,8 @@ mod tests {
                 "      \"src\": \"slides/001-details.html\",\n",
                 "      \"hasNotes\": false\n",
                 "    }\n",
-                "  ]\n",
+                "  ],\n",
+                "  \"images\": []\n",
                 "}\n"
             )
         );
@@ -279,7 +323,7 @@ mod tests {
             title_body_layout(),
         );
 
-        let manifest = build_manifest(&checked);
+        let manifest = build_manifest(&checked, &[]);
         let json = manifest_json(&manifest).unwrap();
 
         assert!(json.contains(r#""title": "Peitho Architecture""#));
@@ -298,7 +342,7 @@ mod tests {
             title_body_layout(),
         );
 
-        let manifest = build_manifest(&checked);
+        let manifest = build_manifest(&checked, &[]);
 
         assert_eq!(manifest.sections()[0].name(), "Setup");
         assert_eq!(manifest.sections()[0].start_index(), 0);
@@ -330,7 +374,7 @@ mod tests {
     fn build_manifest_marks_has_notes_from_slide_notes() {
         let markdown = "# Intro\n\n<!-- pre-show reminder -->\n\n---\n\n# Plain";
         let checked = checked_deck(markdown, title_body_layout());
-        let manifest = build_manifest(&checked);
+        let manifest = build_manifest(&checked, &[]);
 
         assert!(manifest.slides()[0].has_notes());
         assert!(!manifest.slides()[1].has_notes());
@@ -339,7 +383,7 @@ mod tests {
     #[test]
     fn build_manifest_reads_planned_duration_from_checked_deck() {
         let checked = checked_deck("---\ntime: 15m\n---\n# Intro", title_body_layout());
-        let manifest = build_manifest(&checked);
+        let manifest = build_manifest(&checked, &[]);
 
         assert_eq!(manifest.planned_duration_ms(), Some(900_000));
     }
@@ -347,11 +391,30 @@ mod tests {
     #[test]
     fn build_manifest_serializes_null_planned_duration_without_frontmatter() {
         let checked = checked_deck("# Intro", title_body_layout());
-        let manifest = build_manifest(&checked);
+        let manifest = build_manifest(&checked, &[]);
         let json = manifest_json(&manifest).unwrap();
 
         assert_eq!(manifest.planned_duration_ms(), None);
         assert!(json.contains(r#""plannedDurationMs": null"#));
+    }
+
+    #[test]
+    fn manifest_serializes_images_array() {
+        let checked = checked_deck("# Intro", title_body_layout());
+        let assets = vec![ResolvedImageAsset {
+            source_abs: std::path::PathBuf::from("/tmp/arch.png"),
+            dist_rel: ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png").unwrap(),
+        }];
+
+        let manifest = build_manifest(&checked, &assets);
+        let json = manifest_json(&manifest).unwrap();
+
+        assert_eq!(
+            manifest.images()[0].src(),
+            "assets/0123456789abcdef-arch.png"
+        );
+        assert!(json.contains(r#""images": ["#));
+        assert!(json.contains(r#""src": "assets/0123456789abcdef-arch.png""#));
     }
 
     #[test]
@@ -369,6 +432,25 @@ mod tests {
 
         let manifest: Manifest = serde_json::from_str(json).unwrap();
         assert!(manifest.sections().is_empty());
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_images_as_empty() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"sections\": [],\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}]\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert!(manifest.images().is_empty());
     }
 
     #[test]
@@ -496,26 +578,31 @@ mod ts_tests {
 
     use ts_rs::{Config, TS};
 
-    use super::{Manifest, ManifestSection, ManifestSlide};
+    use super::{Manifest, ManifestImage, ManifestSection, ManifestSlide};
 
     #[test]
     fn exports_manifest_bindings_with_serde_field_names() {
         let cfg = Config::from_env();
         Manifest::export_all(&cfg).unwrap();
+        ManifestImage::export_all(&cfg).unwrap();
         ManifestSection::export_all(&cfg).unwrap();
         ManifestSlide::export_all(&cfg).unwrap();
 
         let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
         let manifest = fs::read_to_string(root_bindings.join("Manifest.ts")).unwrap();
+        let image = fs::read_to_string(root_bindings.join("ManifestImage.ts")).unwrap();
         let section = fs::read_to_string(root_bindings.join("ManifestSection.ts")).unwrap();
         let slide = fs::read_to_string(root_bindings.join("ManifestSlide.ts")).unwrap();
 
+        assert!(manifest.contains(r#"import type { ManifestImage } from "./ManifestImage";"#));
         assert!(manifest.contains(r#"import type { ManifestSection } from "./ManifestSection";"#));
         assert!(manifest.contains("peithoVersion: string"));
         assert!(manifest.contains("slideCount: number"));
         assert!(manifest.contains("plannedDurationMs: number | null"));
         assert!(manifest.contains("sections: Array<ManifestSection>"));
         assert!(manifest.contains("slides: Array<ManifestSlide>"));
+        assert!(manifest.contains("images: Array<ManifestImage>"));
+        assert!(image.contains("src: string"));
         assert!(section.contains("startIndex: number"));
         assert!(section.contains("endIndex: number"));
         assert!(section.contains("plannedDurationMs: number"));

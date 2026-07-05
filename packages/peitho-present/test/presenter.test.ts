@@ -22,7 +22,8 @@ const manifest: Manifest = {
   slides: [
     { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
     { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
-  ]
+  ],
+  images: []
 };
 
 const notes: Notes = { version: 1, notes: { intro: "Opening note" } };
@@ -30,6 +31,30 @@ const notes: Notes = { version: 1, notes: { intro: "Opening note" } };
 function standardFetch(overrides: Partial<typeof manifest> = {}): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(Object.assign({}, manifest, overrides));
+    if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
+    if (url === "slides/001-details.html")
+      return okText("<section><h1>Details</h1></section>");
+    return { ok: false, status: 404, text: async () => "" } as Response;
+  }) as typeof fetch;
+}
+
+function legacyManifestFetch(): typeof fetch {
+  const legacyManifest: Omit<Manifest, "images"> = {
+    version: 1,
+    peithoVersion: "0.1.0",
+    title: "Legacy",
+    slideCount: 2,
+    plannedDurationMs: null,
+    sections: [],
+    slides: [
+      { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
+      { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
+    ]
+  };
+
+  return vi.fn(async (url: string) => {
+    if (url === "manifest.json") return okJson(legacyManifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
@@ -125,6 +150,22 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(pill.textContent).toContain("Running");
   expect(play.textContent).toContain("Pause");
   expect(play.textContent).toContain("Space");
+});
+
+it("loads legacy manifests without images at runtime", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: legacyManifestFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  expect(root.querySelector('[data-peitho-presenter="current"] .peitho-slide')).not.toBeNull();
 });
 
 it("shows planned duration in presenter timer when manifest has time", async () => {

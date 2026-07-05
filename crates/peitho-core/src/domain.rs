@@ -1,4 +1,8 @@
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    path::{Component, Path, PathBuf},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -148,64 +152,262 @@ pub struct SlotContract {
     pub arity: Arity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FragmentKind {
+/// A deck-relative image path exactly as accepted from Markdown.
+///
+/// `RawImagePath` is intentionally distinct from [`ResolvedImagePath`]:
+/// raw paths may only be mapped and resolved, never rendered into HTML.
+/// Construction validates that the path is local to the deck text and uses
+/// one of Peitho's supported image extensions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawImagePath(String);
+
+/// A distribution-relative image path that is safe to render as `<img src>`.
+///
+/// Values are produced by the image resolver after it has copied or otherwise
+/// reserved the asset under `assets/<hash>-<basename>`. Rendering APIs accept
+/// this type, not [`RawImagePath`], so callers cannot accidentally emit a raw
+/// author-written path into generated HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedImagePath(String);
+
+impl ResolvedImagePath {
+    // Test-only escape hatch. Do not make this public; it bypasses hashed
+    // asset validation and the resolver boundary.
+    #[cfg(test)]
+    pub(crate) fn from_string(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Build a resolved `assets/<hash>-<basename>` path from resolver output.
+    ///
+    /// The hash must be the fixed 16-hex prefix chosen by the CLI resolver, and
+    /// the basename must not contain path separators or URL delimiters.
+    pub fn from_hashed_asset(hash: &str, basename: &str) -> Result<Self, String> {
+        let valid_hash = hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit());
+        if !valid_hash {
+            return Err("image asset hash must be 16 hex characters".to_owned());
+        }
+        let valid_basename = !basename.is_empty()
+            && !basename.contains('/')
+            && !basename.contains('\\')
+            && !basename.contains('?')
+            && !basename.contains('#')
+            && Path::new(basename)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(basename);
+        if !valid_basename {
+            return Err(
+                "image asset basename must not contain path separators, queries, or fragments"
+                    .to_owned(),
+            );
+        }
+        Ok(Self(format!("assets/{hash}-{basename}")))
+    }
+
+    /// Return the distribution-relative path to use in generated HTML.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A resolved image asset that the CLI must materialize into the distribution.
+///
+/// Core records the source file chosen by the resolver and the typed
+/// distribution-relative path used by rendered slides and `manifest.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedImageAsset {
+    /// Canonical source path used by the CLI copy phase.
+    pub source_abs: PathBuf,
+    /// Typed `assets/...` path used in rendered HTML and the manifest.
+    pub dist_rel: ResolvedImagePath,
+}
+
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
+
+impl RawImagePath {
+    /// Image extensions accepted by Markdown parsing.
+    pub const SUPPORTED_EXTENSIONS: &'static [&'static str] = SUPPORTED_IMAGE_EXTENSIONS;
+
+    /// Validate a Markdown image path and keep it in raw deck-relative form.
+    ///
+    /// Remote URLs, absolute paths, parent-directory escapes, empty paths, and
+    /// unsupported extensions are rejected with a line-numbered parse error.
+    pub fn new(raw: impl Into<String>, line: usize) -> crate::error::Result<Self> {
+        let value = raw.into();
+        if value.is_empty() {
+            return Err(image_path_error(
+                line,
+                "empty image path",
+                "write a local deck-relative image path",
+            ));
+        }
+        if is_remote_image_url(&value) {
+            return Err(image_path_error(
+                line,
+                "remote image URLs are not supported",
+                "store the image next to the deck and reference it with a relative path",
+            ));
+        }
+        if is_absolute_image_path(&value) {
+            return Err(image_path_error(
+                line,
+                "absolute image paths are not supported",
+                "reference the image with a path relative to the deck file",
+            ));
+        }
+        if value.contains('\\') {
+            return Err(image_path_error(
+                line,
+                "image paths must use forward slashes",
+                "write deck-relative paths like img/diagram.png",
+            ));
+        }
+        if value.contains('?') {
+            return Err(image_path_error(
+                line,
+                "image path query strings are not supported",
+                "reference the local image file without URL query parameters",
+            ));
+        }
+        if value.contains('#') {
+            return Err(image_path_error(
+                line,
+                "image path fragments are not supported",
+                "reference the local image file without URL fragments",
+            ));
+        }
+        let path = Path::new(&value);
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(image_path_error(
+                line,
+                "image path escapes deck directory",
+                "keep image paths inside the deck directory",
+            ));
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default();
+        let extension_lower = extension.to_ascii_lowercase();
+        if !Self::SUPPORTED_EXTENSIONS.contains(&extension_lower.as_str()) {
+            return Err(image_path_error(
+                line,
+                format!(
+                    "unsupported image extension '{extension}'; supported: {SUPPORTED_IMAGE_EXTENSIONS_TEXT}"
+                ),
+                "use a supported local image file",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    // Test-only escape hatch. Do not make this public; parser entry points
+    // must use `new()` so raw Markdown paths are validated before they enter
+    // the pipeline.
+    #[cfg(test)]
+    pub(crate) fn new_unchecked(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Return the original deck-relative path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn image_path_error(
+    line: usize,
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> crate::error::BuildError {
+    crate::error::BuildError::new(crate::error::ErrorKind::Parse, Some(line), message, help)
+}
+
+fn is_remote_image_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("//")
+        || lower.starts_with("http:")
+        || lower.starts_with("https:")
+        || lower.starts_with("file:")
+        || lower.starts_with("data:")
+        || lower.starts_with("javascript:")
+}
+
+fn is_absolute_image_path(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with('~') || has_windows_drive_prefix(value)
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentKind<S = RawImagePath> {
     Heading { level: u8 },
     Paragraph,
     Text,
     Code,
-    Image,
+    Image { alt: String, src: S },
     List,
 }
 
-impl FragmentKind {
-    pub fn default_accepts(self) -> Accepts {
+impl<S> FragmentKind<S> {
+    pub fn default_accepts(&self) -> Accepts {
         match self {
             Self::Heading { .. } => Accepts::Inline,
             Self::Paragraph => Accepts::Blocks,
             Self::Text => Accepts::Text,
             Self::Code => Accepts::Code,
-            Self::Image => Accepts::Image,
+            Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
         }
     }
 
-    pub fn removal_noun(self) -> &'static str {
+    pub fn removal_noun(&self) -> &'static str {
         match self {
             Self::Heading { .. } => "heading",
             Self::Paragraph => "paragraph",
             Self::Text => "text block",
             Self::Code => "code block",
-            Self::Image => "image",
+            Self::Image { .. } => "image",
             Self::List => "list",
         }
     }
 }
 
-impl fmt::Display for FragmentKind {
+impl<S> fmt::Display for FragmentKind<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Heading { .. } => "heading",
             Self::Paragraph => "paragraph",
             Self::Text => "text",
             Self::Code => "code",
-            Self::Image => "image",
+            Self::Image { .. } => "image",
             Self::List => "list",
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFragment {
+pub struct SourceFragment<S = RawImagePath> {
     line: usize,
-    kind: FragmentKind,
+    kind: FragmentKind<S>,
     markdown: String,
     text: String,
     code: String,
     language: Option<String>,
 }
 
-impl SourceFragment {
+impl SourceFragment<RawImagePath> {
     pub fn heading(
         line: usize,
         level: u8,
@@ -255,13 +457,54 @@ impl SourceFragment {
             language,
         }
     }
+}
+
+impl<S> SourceFragment<S> {
+    pub fn image(line: usize, alt: impl Into<String>, src: S) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::Image {
+                alt: alt.into(),
+                src,
+            },
+            markdown: String::new(),
+            text: String::new(),
+            code: String::new(),
+            language: None,
+        }
+    }
+
+    pub(crate) fn try_map_image_src<T, E, F>(
+        self,
+        f: F,
+    ) -> std::result::Result<SourceFragment<T>, E>
+    where
+        F: FnOnce(S) -> std::result::Result<T, E>,
+    {
+        let kind = match self.kind {
+            FragmentKind::Heading { level } => FragmentKind::Heading { level },
+            FragmentKind::Paragraph => FragmentKind::Paragraph,
+            FragmentKind::Text => FragmentKind::Text,
+            FragmentKind::Code => FragmentKind::Code,
+            FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
+            FragmentKind::List => FragmentKind::List,
+        };
+        Ok(SourceFragment {
+            line: self.line,
+            kind,
+            markdown: self.markdown,
+            text: self.text,
+            code: self.code,
+            language: self.language,
+        })
+    }
 
     pub fn line(&self) -> usize {
         self.line
     }
 
-    pub fn kind(&self) -> FragmentKind {
-        self.kind
+    pub fn kind(&self) -> &FragmentKind<S> {
+        &self.kind
     }
 
     pub fn markdown(&self) -> &str {
@@ -281,7 +524,7 @@ impl SourceFragment {
     }
 
     pub fn heading_text(&self) -> Option<String> {
-        matches!(self.kind, FragmentKind::Heading { .. }).then(|| self.text.clone())
+        matches!(&self.kind, FragmentKind::Heading { .. }).then(|| self.text.clone())
     }
 }
 
@@ -353,5 +596,22 @@ mod tests {
         assert!(SlideKey::new("arch-1").is_ok());
         let err = SlideKey::new("Arch 1]").unwrap_err();
         assert_eq!(err, "slide key must use lowercase ascii, digits, or '-'");
+    }
+
+    #[test]
+    fn resolved_image_path_rejects_url_delimiters_in_basename() {
+        let err =
+            ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png#frag").unwrap_err();
+        assert_eq!(
+            err,
+            "image asset basename must not contain path separators, queries, or fragments"
+        );
+
+        let err =
+            ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png?v=1").unwrap_err();
+        assert_eq!(
+            err,
+            "image asset basename must not contain path separators, queries, or fragments"
+        );
     }
 }

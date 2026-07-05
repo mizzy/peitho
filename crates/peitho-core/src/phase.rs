@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    domain::{RenderedSlide, SlideKey, SlotContract, SlotName, SourceFragment},
+    domain::{
+        RawImagePath, RenderedSlide, ResolvedImageAsset, ResolvedImagePath, SlideKey, SlotContract,
+        SlotName, SourceFragment,
+    },
+    error::{BuildError, Result},
     layout::Layout,
 };
 
@@ -207,17 +211,33 @@ impl UnassignedFragment {
 }
 
 #[derive(Debug, Clone)]
-pub struct Checked {
-    slides: Vec<CheckedSlide>,
+pub struct Checked<S = RawImagePath> {
+    slides: Vec<CheckedSlide<S>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct CheckedSlide {
+pub struct CheckedSlide<S = RawImagePath> {
     index: usize,
     key: SlideKey,
     layout: Layout,
-    slots: BTreeMap<SlotName, Vec<SourceFragment>>,
+    slots: BTreeMap<SlotName, Vec<SourceFragment<S>>>,
     notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Context passed to a caller-provided image resolver.
+///
+/// The resolver receives the validated raw Markdown path plus slide/line
+/// context so it can report asset I/O errors without losing source location.
+pub struct ImageRequest<'a> {
+    /// Validated deck-relative path from Markdown.
+    pub raw: &'a RawImagePath,
+    /// Source line of the image fragment.
+    pub line: usize,
+    /// Zero-based slide index containing the image.
+    pub slide_index: usize,
+    /// Stable slide key containing the image.
+    pub slide_key: &'a SlideKey,
 }
 
 #[derive(Debug, Clone)]
@@ -266,12 +286,12 @@ impl Deck<Mapped> {
     }
 }
 
-impl CheckedSlide {
+impl<S> CheckedSlide<S> {
     pub(crate) fn new(
         index: usize,
         key: SlideKey,
         layout: Layout,
-        slots: BTreeMap<SlotName, Vec<SourceFragment>>,
+        slots: BTreeMap<SlotName, Vec<SourceFragment<S>>>,
         notes: Option<String>,
     ) -> Self {
         Self {
@@ -295,7 +315,7 @@ impl CheckedSlide {
         &self.key
     }
 
-    pub(crate) fn slots(&self) -> &BTreeMap<SlotName, Vec<SourceFragment>> {
+    pub(crate) fn slots(&self) -> &BTreeMap<SlotName, Vec<SourceFragment<S>>> {
         &self.slots
     }
 
@@ -312,8 +332,8 @@ impl CheckedSlide {
     }
 }
 
-impl Deck<Checked> {
-    pub(crate) fn checked(settings: DeckSettings, slides: Vec<CheckedSlide>) -> Self {
+impl<S> Deck<Checked<S>> {
+    pub(crate) fn checked(settings: DeckSettings, slides: Vec<CheckedSlide<S>>) -> Self {
         Self {
             settings,
             phase: Checked { slides },
@@ -348,13 +368,94 @@ impl Deck<Checked> {
             .collect()
     }
 
-    pub(crate) fn checked_slides(&self) -> &[CheckedSlide] {
+    pub(crate) fn checked_slides(&self) -> &[CheckedSlide<S>] {
         &self.phase.slides
     }
 
-    pub(crate) fn into_checked_parts(self) -> (DeckSettings, Vec<CheckedSlide>) {
+    pub(crate) fn into_checked_parts(self) -> (DeckSettings, Vec<CheckedSlide<S>>) {
         (self.settings, self.phase.slides)
     }
+}
+
+/// Convert a checked deck from raw Markdown image paths to renderable assets.
+///
+/// This is the only transition from `Deck<Checked<RawImagePath>>` to
+/// `Deck<Checked<ResolvedImagePath>>`. Callers must provide a resolver that
+/// turns each raw deck-relative path into a typed distribution-relative asset;
+/// `render_deck` only accepts the resolved form.
+pub fn resolve_image_paths<R>(
+    deck: Deck<Checked<RawImagePath>>,
+    mut resolver: R,
+) -> Result<(Deck<Checked<ResolvedImagePath>>, Vec<ResolvedImageAsset>)>
+where
+    R: FnMut(ImageRequest<'_>) -> Result<ResolvedImageAsset>,
+{
+    let (settings, checked_slides) = deck.into_checked_parts();
+    let mut slides = Vec::with_capacity(checked_slides.len());
+    let mut assets = Vec::new();
+    let mut asset_paths = BTreeSet::new();
+
+    for slide in checked_slides {
+        let CheckedSlide {
+            index,
+            key,
+            layout,
+            slots,
+            notes,
+        } = slide;
+        let slide_number = index + 1;
+        let slide_key_for_error = key.as_str().to_owned();
+        let mut resolved_slots = BTreeMap::new();
+
+        for (slot, fragments) in slots {
+            let mut resolved_fragments = Vec::with_capacity(fragments.len());
+            for fragment in fragments {
+                let line = fragment.line();
+                let resolved = fragment.try_map_image_src(|raw| -> Result<ResolvedImagePath> {
+                    let request = ImageRequest {
+                        raw: &raw,
+                        line,
+                        slide_index: index,
+                        slide_key: &key,
+                    };
+                    let asset = resolver(request).map_err(|err| {
+                        attach_image_resolve_context(
+                            err,
+                            line,
+                            slide_number,
+                            Some(&slide_key_for_error),
+                        )
+                    })?;
+                    let dist_rel = asset.dist_rel.clone();
+                    if asset_paths.insert(dist_rel.as_str().to_owned()) {
+                        assets.push(asset);
+                    }
+                    Ok(dist_rel)
+                })?;
+                resolved_fragments.push(resolved);
+            }
+            resolved_slots.insert(slot, resolved_fragments);
+        }
+
+        slides.push(CheckedSlide::new(index, key, layout, resolved_slots, notes));
+    }
+
+    Ok((Deck::checked(settings, slides), assets))
+}
+
+fn attach_image_resolve_context(
+    mut err: BuildError,
+    line: usize,
+    slide_number: usize,
+    slide_key: Option<&str>,
+) -> BuildError {
+    if err.line.is_none() {
+        err.line = Some(line);
+    }
+    if err.slide.is_none() {
+        err = err.with_slide(slide_number, slide_key);
+    }
+    err
 }
 
 impl Deck<Rendered> {
@@ -389,12 +490,16 @@ impl Deck<Rendered> {
 ///     require_checked_for_render(deck);
 /// }
 /// ```
-pub fn require_checked_for_render(_: &Deck<Checked>) {}
+pub fn require_checked_for_render(_: &Deck<Checked<ResolvedImagePath>>) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{SlideKey, SourceFragment};
+    use crate::{
+        domain::{RawImagePath, ResolvedImageAsset, ResolvedImagePath, SlideKey, SourceFragment},
+        layout::parse_layout,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn planned_time_accepts_javascript_safe_integer_boundary() {
@@ -462,5 +567,48 @@ mod tests {
         );
 
         assert_eq!(deck.parsed_slides()[0].fragments[0].line(), 3);
+    }
+
+    #[test]
+    fn resolve_image_paths_deduplicates_assets_by_dist_path() {
+        let layout = parse_layout(
+            "images",
+            r#"<section><slot name="hero" accepts="image" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            vec![
+                SourceFragment::image(3, "A", RawImagePath::new_unchecked("a.png".into())),
+                SourceFragment::image(5, "B", RawImagePath::new_unchecked("b.png".into())),
+            ],
+        );
+        let deck = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                SlideKey::new("gallery").unwrap(),
+                layout,
+                slots,
+                None,
+            )],
+        );
+        let dist_rel = ResolvedImagePath::from_string("assets/same-a.png".to_owned());
+        let mut calls = 0;
+
+        let (_resolved, assets) = resolve_image_paths(deck, |_request| {
+            calls += 1;
+            Ok(ResolvedImageAsset {
+                source_abs: PathBuf::from("/tmp/a.png"),
+                dist_rel: dist_rel.clone(),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(calls, 2);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].dist_rel.as_str(), "assets/same-a.png");
     }
 }
