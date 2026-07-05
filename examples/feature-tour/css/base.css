@@ -155,6 +155,8 @@
   background: #17142a;
   border-radius: 12px;
   overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .slot-code code {

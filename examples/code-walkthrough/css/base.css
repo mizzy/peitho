@@ -43,6 +43,8 @@
   font-size: 22px;
   line-height: 1.6;
   color: #d7e0ea;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .notes-pane {

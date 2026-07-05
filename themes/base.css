@@ -53,6 +53,8 @@
   margin: 0;
   font-size: 22px;
   line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .slot-code .hl-comment {
