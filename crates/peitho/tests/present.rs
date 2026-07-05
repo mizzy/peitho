@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -119,6 +119,33 @@ fn present_without_shell_flag_writes_builtin_shell() {
         fs::read_to_string(workspace_root().join("packages/peitho-present/dist/shell.js")).unwrap();
     assert_eq!(written, committed);
     assert!(written.contains("mountPresentShell"));
+}
+
+#[test]
+fn present_reads_layouts_from_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    fs::write(
+        &deck,
+        "---\nlayouts: ./custom-layouts\n---\n# Frontmatter Layout\n\nBody",
+    )
+    .unwrap();
+    write_layout_dir(dir.path(), "custom-layouts", "frontmatter-layout");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["present", deck.to_str().unwrap(), "--no-open", "--no-serve"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("generated present cache"));
+
+    let html = fs::read_to_string(
+        dir.path()
+            .join(".peitho/present-cache/slides/000-frontmatter-layout.html"),
+    )
+    .unwrap();
+    assert!(html.contains(r#"class="frontmatter-layout peitho-slide""#));
 }
 
 #[test]
@@ -585,20 +612,13 @@ fn present_process_exits_after_close_sync_post() {
 fn repository_example_present_no_serve_smoke() {
     let shell = workspace_root().join("packages/peitho-present/dist/shell.js");
     assert!(shell.exists(), "shell bundle not built; run npm run build");
+    let dir = tempdir().unwrap();
+    let deck = write_repository_example_deck_with_assets(dir.path());
 
     Command::cargo_bin("peitho")
         .unwrap()
         .current_dir(workspace_root())
-        .args([
-            "present",
-            "examples/deck.md",
-            "--layouts",
-            "layouts/title-body-code.html",
-            "--css",
-            "themes/base.css",
-            "--no-serve",
-            "--no-open",
-        ])
+        .args(["present", deck.to_str().unwrap(), "--no-serve", "--no-open"])
         .assert()
         .success()
         .stdout(predicate::str::contains("generated present cache"));
@@ -640,8 +660,6 @@ fn repository_example_present_no_serve_smoke() {
 
 struct Fixture {
     deck: std::path::PathBuf,
-    layout: std::path::PathBuf,
-    css_dir: std::path::PathBuf,
 }
 
 impl Fixture {
@@ -652,7 +670,10 @@ impl Fixture {
         fs::create_dir_all(&css_dir).unwrap();
         fs::write(
             &deck,
-            "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody",
+            deck_with_assets(
+                "./layout.html",
+                "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody",
+            ),
         )
         .unwrap();
         fs::write(
@@ -666,11 +687,7 @@ impl Fixture {
             r#"[data-slide-key="arch-1"] .slot-title { color: blue; }"#,
         )
         .unwrap();
-        Self {
-            deck,
-            layout,
-            css_dir,
-        }
+        Self { deck }
     }
 
     fn present_args(&self, shell: &std::path::Path) -> Vec<OsString> {
@@ -681,15 +698,41 @@ impl Fixture {
     }
 
     fn present_args_builtin_shell(&self) -> Vec<OsString> {
-        vec![
-            OsString::from("present"),
-            self.deck.as_os_str().to_owned(),
-            OsString::from("--layouts"),
-            self.layout.as_os_str().to_owned(),
-            OsString::from("--css"),
-            self.css_dir.as_os_str().to_owned(),
-        ]
+        vec![OsString::from("present"), self.deck.as_os_str().to_owned()]
     }
+}
+
+fn deck_with_assets(layouts: &str, body: &str) -> String {
+    format!("---\nlayouts: {layouts}\ncss: ./css\n---\n{body}")
+}
+
+fn write_repository_example_deck_with_assets(dir: &Path) -> PathBuf {
+    let root = workspace_root();
+    let deck = dir.join("deck.md");
+    let body = fs::read_to_string(root.join("examples/deck.md")).unwrap();
+    fs::write(
+        &deck,
+        format!(
+            "---\nlayouts: {}\ncss: {}\n---\n{body}",
+            root.join("layouts/title-body-code.html").display(),
+            root.join("themes/base.css").display()
+        ),
+    )
+    .unwrap();
+    deck
+}
+
+fn write_layout_dir(root: &Path, name: &str, class: &str) -> PathBuf {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("statement.html"),
+        format!(
+            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#
+        ),
+    )
+    .unwrap();
+    dir
 }
 
 fn workspace_root() -> PathBuf {

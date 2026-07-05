@@ -67,7 +67,7 @@ peitho present deck.md --presenter-windowed
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
 
-Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Pass `--layout`/`--base-css`/`--overrides-css`/`--shell` only when you want to swap them out.
+Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
 When developing the presentation shell (TS), rebuild `dist/shell.js` with `cd packages/peitho-present && npm ci && npm run build` (it's committed; CI checks for drift).
 
@@ -108,13 +108,26 @@ Markdown images are local files written as an image-only paragraph:
 
 Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
 
+## Deck frontmatter
+
+All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Supported keys:
+
+| Key | Purpose | Value |
+|---|---|---|
+| `time` | Planned presentation time | `15m` / `90s` / `1h30m` / bare integer (minutes) |
+| `layouts` | Layout HTML file or directory | Deck-relative path, e.g. `./layouts` |
+| `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
+| `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
+
+Absent keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default. A key that points at a non-existent path is a build error with the frontmatter line number.
+
 ## Custom syntaxes
 
-Put `*.sublime-syntax` files in a `syntaxes/` directory next to the deck to add languages beyond syntect's built-in set. They augment the defaults, so built-in tags like `rust` and `js` still work. Unknown language tags remain build errors with line numbers.
+Point `syntaxes:` in the deck's frontmatter at a `.sublime-syntax` file or a directory of `*.sublime-syntax` files, or drop a `syntaxes/` directory next to the deck for zero-config pickup. Both augment the built-in set, so built-in tags like `rust` and `js` still work. Unknown language tags remain build errors with line numbers.
 
 ## Multiple layouts
 
-Passing a directory to `--layouts` turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):
+Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.html` files; a directory turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Zero-config: a `layouts/` directory next to the deck is picked up automatically. Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):
 
 1. **Explicit** — if a page-settings comment `<!-- {"layout":"cover"} -->` is present, use that layout (an unknown name is a build error with a candidate list)
 2. **Single layout, unconditional** — if there is only one layout, always use it (contract violations still error with line numbers, as usual)
@@ -126,7 +139,7 @@ Passing a directory to `--layouts` turns every `*.html` inside it into a layout 
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
-| `examples/deck.md` | Minimal demo | Default theme | Works as-is with default flags |
+| `examples/deck.md` | Minimal demo | Default theme | Works as-is with built-in defaults |
 | `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
 | `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |

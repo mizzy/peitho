@@ -257,7 +257,7 @@ mod tests {
         domain::{ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
-        parser::parse_markdown,
+        parser::{parse_frontmatter, parse_markdown},
     };
 
     #[test]
@@ -557,9 +557,15 @@ mod tests {
     }
 
     fn checked_deck(markdown: &str, layout: Layout) -> crate::phase::Deck<crate::phase::Checked> {
+        let frontmatter = parse_frontmatter(markdown).unwrap();
         check_deck(
             map_by_convention(
-                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                parse_markdown(
+                    markdown,
+                    frontmatter,
+                    &crate::highlight::Highlighter::defaults(),
+                )
+                .unwrap(),
                 &layout,
             )
             .unwrap(),

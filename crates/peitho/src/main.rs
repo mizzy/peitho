@@ -14,6 +14,9 @@ use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
 use sha2::{Digest, Sha256};
 
+mod asset_resolution;
+
+use asset_resolution::{resolve_assets, ResolvedAssets};
 use peitho::{browser, server};
 
 struct BuildArtifacts {
@@ -27,75 +30,70 @@ struct BuildArtifacts {
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
-    layouts: Option<PathBuf>,
-    css: Option<PathBuf>,
     out: PathBuf,
 }
 
-/// Convention over configuration: with no flag, a `layouts/` or `css/`
-/// directory sitting next to the deck file is used automatically (an
-/// explicit flag always wins). The lookup is deck-relative, not cwd-relative,
-/// so a deck repository behaves the same from anywhere.
-fn effective_asset_path(
-    flag: &Option<PathBuf>,
-    input: &Path,
-    conventional: &str,
-) -> Option<PathBuf> {
-    flag.clone().or_else(|| {
-        let dir = input.parent()?.join(conventional);
-        dir.is_dir().then_some(dir)
-    })
+#[derive(Debug, Clone)]
+struct WatchRoot {
+    path: PathBuf,
+    ext: &'static str,
 }
 
-impl BuildOptions {
-    fn effective_layouts(&self) -> Option<PathBuf> {
-        effective_asset_path(&self.layouts, &self.input, "layouts")
-    }
+#[derive(Debug, Clone)]
+struct WatchTargets {
+    roots: Vec<WatchRoot>,
+    assets: ResolvedAssets,
+}
 
-    fn effective_css(&self) -> Option<PathBuf> {
-        effective_asset_path(&self.css, &self.input, "css")
-    }
-
-    fn effective_syntaxes(&self) -> Option<PathBuf> {
-        effective_asset_path(&None, &self.input, "syntaxes")
-    }
-
+impl WatchTargets {
     /// The deck file plus the resolved asset paths. Each asset path may be a
     /// single file or a directory whose matching extension files are watched.
-    fn watch_roots(&self) -> Vec<(PathBuf, &'static str)> {
-        let mut roots = vec![(self.input.clone(), "md")];
-        if let Some(path) = self.effective_layouts() {
-            roots.push((path, "html"));
+    fn new(input: PathBuf, assets: ResolvedAssets) -> Self {
+        let mut roots = vec![WatchRoot {
+            path: input,
+            ext: "md",
+        }];
+        if let Some(path) = &assets.layouts {
+            roots.push(WatchRoot {
+                path: path.clone(),
+                ext: "html",
+            });
         }
-        if let Some(path) = self.effective_css() {
-            roots.push((path, "css"));
+        if let Some(path) = &assets.css {
+            roots.push(WatchRoot {
+                path: path.clone(),
+                ext: "css",
+            });
         }
-        if let Some(path) = self.effective_syntaxes() {
-            roots.push((path, "sublime-syntax"));
+        if let Some(path) = &assets.syntaxes {
+            roots.push(WatchRoot {
+                path: path.clone(),
+                ext: "sublime-syntax",
+            });
         }
-        roots
+        Self { roots, assets }
     }
 
     fn is_relevant_change(&self, changed: &Path) -> bool {
-        self.watch_roots().iter().any(|(root, ext)| {
-            if same_watch_path(root, changed) {
+        self.roots.iter().any(|root| {
+            if same_watch_path(&root.path, changed) {
                 return true;
             }
-            root.is_dir()
-                && changed.extension().and_then(|e| e.to_str()) == Some(ext)
+            root.path.is_dir()
+                && changed.extension().and_then(|e| e.to_str()) == Some(root.ext)
                 && changed
                     .parent()
-                    .is_some_and(|parent| same_watch_path(root, parent))
+                    .is_some_and(|parent| same_watch_path(&root.path, parent))
         })
     }
 
     fn watch_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
-        for (root, _ext) in self.watch_roots() {
-            let dir = if root.is_dir() {
-                root
+        for root in &self.roots {
+            let dir = if root.path.is_dir() {
+                root.path.clone()
             } else {
-                parent_dir_for_watch(&root)
+                parent_dir_for_watch(&root.path)
             };
             if !dirs.iter().any(|existing| same_watch_path(existing, &dir)) {
                 dirs.push(dir);
@@ -105,10 +103,45 @@ impl BuildOptions {
     }
 }
 
+trait WatchController {
+    fn watch_dir(&mut self, dir: &Path) -> miette::Result<()>;
+    fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()>;
+}
+
+struct NotifyWatchController<'a> {
+    watcher: &'a mut dyn notify::Watcher,
+}
+
+impl<'a> NotifyWatchController<'a> {
+    fn new(watcher: &'a mut dyn notify::Watcher) -> Self {
+        Self { watcher }
+    }
+}
+
+impl WatchController for NotifyWatchController<'_> {
+    fn watch_dir(&mut self, dir: &Path) -> miette::Result<()> {
+        self.watcher
+            .watch(dir, RecursiveMode::NonRecursive)
+            .map_err(|err| {
+                miette::miette!(
+                    "failed to watch {}\nhelp: verify the parent directory exists before starting --watch\ncaused by: {err}",
+                    dir.display()
+                )
+            })
+    }
+
+    fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()> {
+        self.watcher.unwatch(dir).map_err(|err| {
+            miette::miette!(
+                "failed to stop watching {}\nhelp: restart --watch if the watcher state is stale\ncaused by: {err}",
+                dir.display()
+            )
+        })
+    }
+}
+
 struct PresentOptions {
     input: PathBuf,
-    layouts: Option<PathBuf>,
-    css: Option<PathBuf>,
     shell: Option<PathBuf>,
     port: u16,
     no_open: bool,
@@ -130,16 +163,6 @@ struct Cli {
 enum Command {
     Build {
         input: PathBuf,
-        #[arg(
-            long,
-            help = "layout HTML file or directory of *.html (default: layouts/ next to the deck, else built-in)"
-        )]
-        layouts: Option<PathBuf>,
-        #[arg(
-            long,
-            help = "CSS file or directory of *.css, concatenated in filename order (default: css/ next to the deck, else built-in)"
-        )]
-        css: Option<PathBuf>,
         #[arg(long, default_value = "dist")]
         out: PathBuf,
         #[arg(long)]
@@ -147,16 +170,6 @@ enum Command {
     },
     Present {
         input: PathBuf,
-        #[arg(
-            long,
-            help = "layout HTML file or directory of *.html (default: layouts/ next to the deck, else built-in)"
-        )]
-        layouts: Option<PathBuf>,
-        #[arg(
-            long,
-            help = "CSS file or directory of *.css, concatenated in filename order (default: css/ next to the deck, else built-in)"
-        )]
-        css: Option<PathBuf>,
         #[arg(long, help = "shell bundle path (default: built-in present shell)")]
         shell: Option<PathBuf>,
         #[arg(long, default_value_t = 0)]
@@ -196,19 +209,8 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] =
 fn main() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Build {
-            input,
-            layouts,
-            css,
-            out,
-            watch,
-        } => {
-            let options = BuildOptions {
-                input,
-                layouts,
-                css,
-                out,
-            };
+        Command::Build { input, out, watch } => {
+            let options = BuildOptions { input, out };
             if watch {
                 watch_build(options)
             } else {
@@ -217,8 +219,6 @@ fn main() -> miette::Result<()> {
         }
         Command::Present {
             input,
-            layouts,
-            css,
             shell,
             port,
             no_open,
@@ -227,8 +227,6 @@ fn main() -> miette::Result<()> {
             presenter_windowed,
         } => present(PresentOptions {
             input,
-            layouts,
-            css,
             shell,
             port,
             no_open,
@@ -247,12 +245,7 @@ fn main() -> miette::Result<()> {
 }
 
 fn build(options: &BuildOptions) -> miette::Result<()> {
-    let artifacts = build_artifacts(
-        &options.input,
-        options.effective_layouts().as_deref(),
-        options.effective_css().as_deref(),
-        options.effective_syntaxes().as_deref(),
-    )?;
+    let artifacts = build_artifacts(&options.input)?;
     emit_distribution(&options.out, &artifacts)?;
     println!(
         "built {} slide(s) into {}",
@@ -267,12 +260,7 @@ fn rebuild_once_for_watch(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> miette::Result<()> {
-    match build_artifacts(
-        &options.input,
-        options.effective_layouts().as_deref(),
-        options.effective_css().as_deref(),
-        options.effective_syntaxes().as_deref(),
-    ) {
+    match build_artifacts(&options.input) {
         Ok(artifacts) => match emit_distribution(&options.out, &artifacts) {
             Ok(()) => {
                 writeln!(
@@ -300,15 +288,23 @@ fn rebuild_once_for_watch(
 
 fn handle_watch_paths(
     options: &BuildOptions,
+    targets: &mut WatchTargets,
+    watcher: &mut dyn WatchController,
     changed_paths: &[PathBuf],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> miette::Result<()> {
     let relevant = changed_paths
         .iter()
-        .any(|changed| options.is_relevant_change(changed));
+        .any(|changed| targets.is_relevant_change(changed));
 
     if relevant {
+        if changed_paths
+            .iter()
+            .any(|changed| same_watch_path(&options.input, changed))
+        {
+            refresh_watch_targets_after_deck_change(&options.input, targets, watcher, stderr)?;
+        }
         rebuild_once_for_watch(options, stdout, stderr)?;
     }
 
@@ -316,6 +312,7 @@ fn handle_watch_paths(
 }
 
 fn watch_build(options: BuildOptions) -> miette::Result<()> {
+    let mut targets = resolve_watch_targets(&options.input)?;
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
     let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(200));
     let debounce_config = DebounceConfig::default()
@@ -328,19 +325,12 @@ fn watch_build(options: BuildOptions) -> miette::Result<()> {
             )
         })?;
 
-    for dir in options.watch_dirs() {
-        debouncer
-            .watcher()
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .map_err(|err| {
-                miette::miette!(
-                    "failed to watch {}\nhelp: verify the parent directory exists before starting --watch\ncaused by: {err}",
-                    dir.display()
-                )
-            })?;
+    {
+        let mut watcher = NotifyWatchController::new(debouncer.watcher());
+        watch_all_dirs(&mut watcher, &targets.watch_dirs())?;
     }
 
-    println!("watching parent directories for markdown, layout, base css, and overrides css");
+    println!("watching deck and resolved asset paths");
     rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())?;
 
     for result in rx {
@@ -350,8 +340,11 @@ fn watch_build(options: BuildOptions) -> miette::Result<()> {
                     .into_iter()
                     .map(|event| event.path)
                     .collect::<Vec<_>>();
+                let mut watcher = NotifyWatchController::new(debouncer.watcher());
                 handle_watch_paths(
                     &options,
+                    &mut targets,
+                    &mut watcher,
                     &paths,
                     &mut std::io::stdout(),
                     &mut std::io::stderr(),
@@ -364,6 +357,89 @@ fn watch_build(options: BuildOptions) -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
+    let assets = resolve_deck_assets(input)?;
+    Ok(WatchTargets::new(input.to_path_buf(), assets))
+}
+
+fn resolve_deck_assets(input: &Path) -> miette::Result<ResolvedAssets> {
+    let markdown = fs::read_to_string(input).into_diagnostic()?;
+    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
+    resolve_assets(input, &frontmatter)
+}
+
+fn refresh_watch_targets_after_deck_change(
+    input: &Path,
+    targets: &mut WatchTargets,
+    watcher: &mut dyn WatchController,
+    stderr: &mut dyn Write,
+) -> miette::Result<()> {
+    let current_assets = match resolve_deck_assets(input) {
+        Ok(assets) => assets,
+        Err(_) => {
+            return Ok(());
+        }
+    };
+    if targets.assets == current_assets {
+        return Ok(());
+    }
+
+    let next_targets = WatchTargets::new(input.to_path_buf(), current_assets);
+    update_watched_dirs(watcher, &targets.watch_dirs(), &next_targets.watch_dirs())?;
+    *targets = next_targets;
+    writeln!(
+        stderr,
+        "note: watching new asset paths from frontmatter: {}",
+        describe_resolved_assets(&targets.assets)
+    )
+    .into_diagnostic()?;
+    stderr.flush().into_diagnostic()?;
+    Ok(())
+}
+
+fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette::Result<()> {
+    for dir in dirs {
+        watcher.watch_dir(dir)?;
+    }
+    Ok(())
+}
+
+fn update_watched_dirs(
+    watcher: &mut dyn WatchController,
+    old_dirs: &[PathBuf],
+    new_dirs: &[PathBuf],
+) -> miette::Result<()> {
+    for old in old_dirs {
+        if !new_dirs.iter().any(|new| same_watch_path(old, new)) {
+            watcher.unwatch_dir(old)?;
+        }
+    }
+    for new in new_dirs {
+        if !old_dirs.iter().any(|old| same_watch_path(old, new)) {
+            watcher.watch_dir(new)?;
+        }
+    }
+    Ok(())
+}
+
+fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
+    let mut parts = Vec::new();
+    if let Some(path) = &assets.layouts {
+        parts.push(format!("layouts={}", path.display()));
+    }
+    if let Some(path) = &assets.css {
+        parts.push(format!("css={}", path.display()));
+    }
+    if let Some(path) = &assets.syntaxes {
+        parts.push(format!("syntaxes={}", path.display()));
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn parent_dir_for_watch(path: &Path) -> PathBuf {
@@ -381,10 +457,9 @@ fn same_watch_path(left: &Path, right: &Path) -> bool {
         }
 }
 
-/// Resolve a --layouts/--css argument to concrete files: a file stands for
-/// itself, a directory contributes its `*.{ext}` files in filename order
-/// (deterministic — this is also the dispatch probe order and the CSS
-/// cascade order).
+/// Resolve an asset path to concrete files: a file stands for itself, a
+/// directory contributes its `*.{ext}` files in filename order (deterministic
+/// — this is also the dispatch probe order and the CSS cascade order).
 fn collect_asset_files(path: &Path, ext: &str) -> miette::Result<Vec<PathBuf>> {
     let metadata = fs::metadata(path).map_err(|err| {
         miette::miette!(
@@ -447,20 +522,24 @@ fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>
     Ok(files)
 }
 
-fn build_artifacts(
-    input: &Path,
-    layouts_path: Option<&Path>,
-    css_path: Option<&Path>,
-    syntaxes_path: Option<&Path>,
-) -> miette::Result<BuildArtifacts> {
+fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     let markdown = fs::read_to_string(input).into_diagnostic()?;
-    let layouts = load_layouts(layouts_path)?;
-    let css_files = load_css(css_path)?;
-    let highlighter = match syntaxes_path {
-        Some(dir) => core(peitho_core::highlight::Highlighter::with_user_dir(dir))?,
+    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
+    let assets = resolve_assets(input, &frontmatter)?;
+    let highlighter = match assets.syntaxes.as_deref() {
+        Some(path) => {
+            let files = collect_asset_files(path, "sublime-syntax")?;
+            core(peitho_core::highlight::Highlighter::with_user_files(&files))?
+        }
         None => peitho_core::highlight::Highlighter::defaults(),
     };
-    let parsed = core(peitho_core::parse_markdown(&markdown, &highlighter))?;
+    let layouts = load_layouts(assets.layouts.as_deref())?;
+    let css_files = load_css(assets.css.as_deref())?;
+    let parsed = core(peitho_core::parse_markdown(
+        &markdown,
+        frontmatter,
+        &highlighter,
+    ))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
@@ -727,12 +806,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     }
     fs::create_dir_all(&cache).into_diagnostic()?;
 
-    let artifacts = build_artifacts(
-        &options.input,
-        effective_asset_path(&options.layouts, &options.input, "layouts").as_deref(),
-        effective_asset_path(&options.css, &options.input, "css").as_deref(),
-        effective_asset_path(&None, &options.input, "syntaxes").as_deref(),
-    )?;
+    let artifacts = build_artifacts(&options.input)?;
     if options.no_serve {
         emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false)?;
         println!("generated present cache at {}", cache.display());
@@ -865,10 +939,7 @@ struct ImageResolver {
 
 impl ImageResolver {
     fn new(input: &Path) -> Self {
-        let deck_dir = input
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let deck_dir = asset_resolution::deck_parent(input).to_path_buf();
         Self {
             deck_dir,
             by_hash: BTreeMap::new(),
@@ -1010,6 +1081,7 @@ contexts:
     - match: '\b(resource|provider|module)\b'
       scope: keyword.control.carina
 "#;
+    const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
 
     #[test]
     fn watch_dependency_types_are_available() {
@@ -1030,21 +1102,23 @@ contexts:
         fs::create_dir_all(&layouts).unwrap();
         fs::create_dir_all(&css).unwrap();
         fs::create_dir_all(&syntaxes).unwrap();
-        let options = BuildOptions {
-            input: dir.path().join("deck.md"),
-            layouts: Some(layouts.clone()),
-            css: Some(css.clone()),
-            out: dir.path().join("dist"),
-        };
+        let targets = WatchTargets::new(
+            dir.path().join("deck.md"),
+            ResolvedAssets {
+                layouts: Some(layouts.clone()),
+                css: Some(css.clone()),
+                syntaxes: Some(syntaxes.clone()),
+            },
+        );
 
-        assert!(options.is_relevant_change(&dir.path().join("deck.md")));
-        assert!(options.is_relevant_change(&layouts.join("cover.html")));
-        assert!(options.is_relevant_change(&css.join("base.css")));
-        assert!(options.is_relevant_change(&syntaxes.join("foo.sublime-syntax")));
-        assert!(!options.is_relevant_change(&layouts.join("notes.txt")));
-        assert!(!options.is_relevant_change(&dir.path().join("other.md")));
+        assert!(targets.is_relevant_change(&dir.path().join("deck.md")));
+        assert!(targets.is_relevant_change(&layouts.join("cover.html")));
+        assert!(targets.is_relevant_change(&css.join("base.css")));
+        assert!(targets.is_relevant_change(&syntaxes.join("foo.sublime-syntax")));
+        assert!(!targets.is_relevant_change(&layouts.join("notes.txt")));
+        assert!(!targets.is_relevant_change(&dir.path().join("other.md")));
 
-        let dirs = options.watch_dirs();
+        let dirs = targets.watch_dirs();
         assert!(dirs.iter().any(|d| d == &layouts));
         assert!(dirs.iter().any(|d| d == &css));
         assert!(dirs.iter().any(|d| d == &syntaxes));
@@ -1053,15 +1127,10 @@ contexts:
 
     #[test]
     fn build_options_with_builtin_assets_watch_only_the_deck() {
-        let options = BuildOptions {
-            input: PathBuf::from("deck.md"),
-            layouts: None,
-            css: None,
-            out: PathBuf::from("dist"),
-        };
+        let targets = WatchTargets::new(PathBuf::from("deck.md"), empty_assets());
 
-        assert!(options.is_relevant_change(Path::new("deck.md")));
-        assert!(!options.is_relevant_change(Path::new("layout.html")));
+        assert!(targets.is_relevant_change(Path::new("deck.md")));
+        assert!(!targets.is_relevant_change(Path::new("layout.html")));
     }
 
     #[test]
@@ -1070,7 +1139,7 @@ contexts:
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n\nBody\n\n```rust\nfn main() {}\n```\n").unwrap();
 
-        let artifacts = build_artifacts(&deck, None, None, None).unwrap();
+        let artifacts = build_artifacts(&deck).unwrap();
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts.css.contains("width: 1280px;"));
@@ -1092,20 +1161,7 @@ contexts:
             CARINA_SUBLIME_SYNTAX,
         )
         .unwrap();
-        let options = BuildOptions {
-            input: deck.clone(),
-            layouts: None,
-            css: None,
-            out: dir.path().join("dist"),
-        };
-
-        let artifacts = build_artifacts(
-            &deck,
-            options.effective_layouts().as_deref(),
-            options.effective_css().as_deref(),
-            options.effective_syntaxes().as_deref(),
-        )
-        .unwrap();
+        let artifacts = build_artifacts(&deck).unwrap();
 
         assert!(artifacts.rendered.slides()[0].html().contains("hl-"));
     }
@@ -1117,39 +1173,39 @@ contexts:
         fs::write(&deck, "# Intro\n").unwrap();
         fs::create_dir_all(dir.path().join("layouts")).unwrap();
         fs::create_dir_all(dir.path().join("css")).unwrap();
+        let frontmatter = peitho_core::parse_frontmatter("# Intro\n").unwrap();
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(
-            effective_asset_path(&None, &deck, "layouts"),
-            Some(dir.path().join("layouts"))
-        );
-        assert_eq!(
-            effective_asset_path(&None, &deck, "css"),
-            Some(dir.path().join("css"))
-        );
+        assert_eq!(assets.layouts, Some(dir.path().join("layouts")));
+        assert_eq!(assets.css, Some(dir.path().join("css")));
     }
 
     #[test]
-    fn explicit_flag_wins_over_conventional_dir() {
+    fn frontmatter_key_wins_over_conventional_dir() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n").unwrap();
         fs::create_dir_all(dir.path().join("layouts")).unwrap();
         let explicit = dir.path().join("other-layouts");
+        fs::create_dir_all(&explicit).unwrap();
+        let frontmatter =
+            peitho_core::parse_frontmatter("---\nlayouts: ./other-layouts\n---\n# Intro\n")
+                .unwrap();
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(
-            effective_asset_path(&Some(explicit.clone()), &deck, "layouts"),
-            Some(explicit)
-        );
+        assert_eq!(assets.layouts, Some(explicit));
     }
 
     #[test]
-    fn no_flag_and_no_conventional_dir_resolves_to_builtin() {
+    fn no_frontmatter_key_and_no_conventional_dir_resolves_to_builtin() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n").unwrap();
+        let frontmatter = peitho_core::parse_frontmatter("# Intro\n").unwrap();
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(effective_asset_path(&None, &deck, "layouts"), None);
-        assert_eq!(effective_asset_path(&None, &deck, "css"), None);
+        assert_eq!(assets.layouts, None);
+        assert_eq!(assets.css, None);
     }
 
     #[test]
@@ -1180,14 +1236,16 @@ contexts:
     #[test]
     fn build_options_deduplicates_watch_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let options = BuildOptions {
-            input: dir.path().join("deck.md"),
-            layouts: Some(dir.path().join("title-body-code.html")),
-            css: Some(dir.path().join("base.css")),
-            out: dir.path().join("dist"),
-        };
+        let targets = WatchTargets::new(
+            dir.path().join("deck.md"),
+            ResolvedAssets {
+                layouts: Some(dir.path().join("title-body-code.html")),
+                css: Some(dir.path().join("base.css")),
+                syntaxes: None,
+            },
+        );
 
-        assert_eq!(options.watch_dirs(), vec![dir.path().to_path_buf()]);
+        assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
     }
 
     #[test]
@@ -1240,7 +1298,8 @@ contexts:
 
     #[test]
     fn watch_path_handler_rebuilds_after_markdown_change() {
-        let fixture = WatchFixture::new("# Intro\n");
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
@@ -1249,6 +1308,8 @@ contexts:
 
         handle_watch_paths(
             &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
@@ -1265,12 +1326,21 @@ contexts:
 
     #[test]
     fn watch_path_handler_ignores_unwatched_file() {
-        let fixture = WatchFixture::new("# Intro\n");
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let unrelated = fixture._dir.path().join("outside").join("ignored.txt");
 
-        handle_watch_paths(&fixture.options, &[unrelated], &mut stdout, &mut stderr).unwrap();
+        handle_watch_paths(
+            &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
+            &[unrelated],
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
 
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
@@ -1279,7 +1349,8 @@ contexts:
 
     #[test]
     fn watch_path_handler_ignores_output_directory_event_in_watched_parent() {
-        let fixture = WatchFixture::new("# Intro\n");
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
@@ -1289,6 +1360,8 @@ contexts:
 
         handle_watch_paths(
             &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
             std::slice::from_ref(&fixture.options.out),
             &mut stdout,
             &mut stderr,
@@ -1301,7 +1374,8 @@ contexts:
 
     #[test]
     fn watch_path_handler_rebuilds_after_atomic_save_final_path() {
-        let fixture = WatchFixture::new("# Intro\n");
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let temp = fixture._dir.path().join("deck-new.md");
@@ -1311,6 +1385,8 @@ contexts:
 
         handle_watch_paths(
             &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
@@ -1323,6 +1399,91 @@ contexts:
             .unwrap()
             .contains("built 2 slide(s)"));
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_path_handler_rewatches_when_frontmatter_asset_paths_change() {
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
+        let alternate_layouts = fixture._dir.path().join("other-layouts");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        fs::create_dir_all(&alternate_layouts).unwrap();
+        fs::write(
+            alternate_layouts.join("title-body-code.html"),
+            TEST_LAYOUT_HTML,
+        )
+        .unwrap();
+        fs::write(
+            &fixture.options.input,
+            "---\nlayouts: ./other-layouts\n---\n# Intro\n",
+        )
+        .unwrap();
+
+        handle_watch_paths(
+            &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fixture.targets.assets.layouts,
+            Some(alternate_layouts.clone())
+        );
+        assert!(watcher
+            .watched
+            .iter()
+            .any(|path| path == &alternate_layouts));
+        assert!(watcher
+            .unwatched
+            .iter()
+            .any(|path| path == &fixture._dir.path().join("layouts")));
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 1 slide(s)"));
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("note: watching new asset paths from frontmatter:"));
+        assert!(!stderr.contains("restart --watch"));
+    }
+
+    #[test]
+    fn watch_path_handler_reports_rebuild_error_when_asset_resolution_fails() {
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
+        let original_assets = fixture.targets.assets.clone();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        fs::write(
+            &fixture.options.input,
+            "---\nlayouts: ./missing-layouts\n---\n# Intro\n",
+        )
+        .unwrap();
+
+        handle_watch_paths(
+            &fixture.options,
+            &mut fixture.targets,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(fixture.targets.assets, original_assets);
+        assert!(watcher.watched.is_empty());
+        assert!(watcher.unwatched.is_empty());
+        assert!(stdout.is_empty());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("build failed:"));
+        assert!(stderr.contains("layouts path does not exist"));
+        assert!(!stderr.contains("restart --watch"));
+        assert!(!stderr.contains("watching new asset paths"));
     }
 
     #[test]
@@ -1352,13 +1513,7 @@ contexts:
     #[test]
     fn emit_present_cache_writes_present_json() {
         let fixture = WatchFixture::new("# Intro\n");
-        let artifacts = build_artifacts(
-            &fixture.options.input,
-            fixture.options.effective_layouts().as_deref(),
-            fixture.options.effective_css().as_deref(),
-            fixture.options.effective_syntaxes().as_deref(),
-        )
-        .unwrap();
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
 
         fs::create_dir_all(&fixture.options.out).unwrap();
         emit_present_cache(&fixture.options.out, &artifacts, None, true).unwrap();
@@ -1391,7 +1546,7 @@ contexts:
         .unwrap();
         fs::write(dir.path().join("img/arch.png"), b"test png bytes").unwrap();
 
-        let artifacts = build_artifacts(&deck, Some(&layouts), Some(&css), None).unwrap();
+        let artifacts = build_artifacts(&deck).unwrap();
         fs::create_dir_all(&cache).unwrap();
         emit_present_cache(&cache, &artifacts, None, false).unwrap();
 
@@ -1405,6 +1560,13 @@ contexts:
         assert!(asset_name.ends_with("-arch.png"));
         let slide = fs::read_to_string(cache.join("slides/000-visual.html")).unwrap();
         assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}""#)));
+    }
+
+    #[test]
+    fn image_resolver_handles_bare_deck_filename() {
+        let resolver = ImageResolver::new(Path::new("deck.md"));
+
+        assert_eq!(resolver.deck_dir, PathBuf::from("."));
     }
 
     #[test]
@@ -1427,9 +1589,10 @@ contexts:
         let cli = Cli::parse_from(["peitho", "build", "deck.md"]);
 
         match cli.command {
-            Command::Build { layouts, css, .. } => {
-                assert_eq!(layouts, None);
-                assert_eq!(css, None);
+            Command::Build { input, out, watch } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(out, PathBuf::from("dist"));
+                assert!(!watch);
             }
             Command::Present { .. } | Command::Publish { .. } => {
                 panic!("expected build command");
@@ -1437,9 +1600,42 @@ contexts:
         }
     }
 
+    #[test]
+    fn build_command_rejects_removed_asset_flags() {
+        for args in [
+            ["peitho", "build", "deck.md", "--layouts", "layouts"],
+            ["peitho", "build", "deck.md", "--css", "layouts"],
+            ["peitho", "present", "deck.md", "--layouts", "layouts"],
+            ["peitho", "present", "deck.md", "--css", "css"],
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWatchController {
+        watched: Vec<PathBuf>,
+        unwatched: Vec<PathBuf>,
+    }
+
+    impl WatchController for RecordingWatchController {
+        fn watch_dir(&mut self, dir: &Path) -> miette::Result<()> {
+            self.watched.push(dir.to_path_buf());
+            Ok(())
+        }
+
+        fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()> {
+            self.unwatched.push(dir.to_path_buf());
+            Ok(())
+        }
+    }
+
     struct WatchFixture {
         _dir: tempfile::TempDir,
         options: BuildOptions,
+        targets: WatchTargets,
     }
 
     impl WatchFixture {
@@ -1453,22 +1649,23 @@ contexts:
             fs::write(&deck, markdown).unwrap();
             fs::create_dir_all(&layouts).unwrap();
             fs::create_dir_all(&css).unwrap();
-            fs::write(
-                layouts.join("title-body-code.html"),
-                r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#,
-            )
-            .unwrap();
+            fs::write(layouts.join("title-body-code.html"), TEST_LAYOUT_HTML).unwrap();
             fs::write(css.join("base.css"), ".slot-title { font-weight: 700; }\n").unwrap();
+            let targets = resolve_watch_targets(&deck).unwrap();
 
             Self {
                 _dir: dir,
-                options: BuildOptions {
-                    input: deck,
-                    layouts: Some(layouts),
-                    css: Some(css),
-                    out,
-                },
+                options: BuildOptions { input: deck, out },
+                targets,
             }
+        }
+    }
+
+    fn empty_assets() -> ResolvedAssets {
+        ResolvedAssets {
+            layouts: None,
+            css: None,
+            syntaxes: None,
         }
     }
 }

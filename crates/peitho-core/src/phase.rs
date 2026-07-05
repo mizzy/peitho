@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use crate::{
     domain::{
@@ -29,6 +32,19 @@ impl PlannedTime {
 
     pub fn as_millis(self) -> u64 {
         self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetPath(PathBuf);
+
+impl AssetPath {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -71,6 +87,9 @@ impl DeckSection {
 pub struct DeckSettings {
     planned_time: Option<PlannedTime>,
     sections: Vec<DeckSection>,
+    layouts: Option<AssetPath>,
+    css: Option<AssetPath>,
+    syntaxes: Option<AssetPath>,
 }
 
 impl DeckSettings {
@@ -80,10 +99,19 @@ impl DeckSettings {
     /// invariant is enforced only by `finalize_section_settings` at the end of
     /// parsing. Direct callers of this constructor must uphold that invariant
     /// themselves.
-    pub fn new(planned_time: Option<PlannedTime>, sections: Vec<DeckSection>) -> Self {
+    pub fn new(
+        planned_time: Option<PlannedTime>,
+        sections: Vec<DeckSection>,
+        layouts: Option<AssetPath>,
+        css: Option<AssetPath>,
+        syntaxes: Option<AssetPath>,
+    ) -> Self {
         Self {
             planned_time,
             sections,
+            layouts,
+            css,
+            syntaxes,
         }
     }
 
@@ -93,6 +121,18 @@ impl DeckSettings {
 
     pub fn sections(&self) -> &[DeckSection] {
         &self.sections
+    }
+
+    pub fn layouts(&self) -> Option<&AssetPath> {
+        self.layouts.as_ref()
+    }
+
+    pub fn css(&self) -> Option<&AssetPath> {
+        self.css.as_ref()
+    }
+
+    pub fn syntaxes(&self) -> Option<&AssetPath> {
+        self.syntaxes.as_ref()
     }
 
     pub(crate) fn with_sections(mut self, sections: Vec<DeckSection>) -> Self {
@@ -528,7 +568,8 @@ mod tests {
             0,
             1,
         );
-        let settings = DeckSettings::new(Some(setup.planned()), vec![setup.clone()]);
+        let settings =
+            DeckSettings::new(Some(setup.planned()), vec![setup.clone()], None, None, None);
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 60_000);
         assert_eq!(settings.sections(), &[setup]);
@@ -545,7 +586,7 @@ mod tests {
             0,
             1,
         );
-        let settings = DeckSettings::new(None, vec![setup.clone()])
+        let settings = DeckSettings::new(None, vec![setup.clone()], None, None, None)
             .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 120_000);

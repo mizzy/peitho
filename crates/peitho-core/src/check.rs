@@ -143,8 +143,16 @@ mod tests {
         error::ErrorKind,
         layout::parse_layout,
         mapping::map_by_convention,
-        parser::parse_markdown,
+        parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
     };
+
+    fn parse_markdown(
+        source: &str,
+        highlighter: &crate::highlight::Highlighter,
+    ) -> crate::error::Result<crate::phase::Deck<crate::phase::Parsed>> {
+        let frontmatter = parse_frontmatter(source)?;
+        parse_markdown_impl(source, frontmatter, highlighter)
+    }
 
     #[test]
     fn rejects_paragraph_in_inline_slot_with_line_and_help() {

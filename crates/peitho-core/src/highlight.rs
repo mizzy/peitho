@@ -1,8 +1,11 @@
-use std::path::Path;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use syntect::{
     html::{ClassStyle, ClassedHTMLGenerator},
-    parsing::SyntaxSet,
+    parsing::{SyntaxDefinition, SyntaxSet},
     util::LinesWithEndings,
 };
 
@@ -34,6 +37,16 @@ impl Highlighter {
                 "check the sublime-syntax file",
             )
         })?;
+        Ok(Self {
+            syntax_set: builder.build(),
+        })
+    }
+
+    pub fn with_user_files(files: &[PathBuf]) -> Result<Self> {
+        let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+        for file in files {
+            builder.add(load_user_syntax_file(file)?);
+        }
         Ok(Self {
             syntax_set: builder.build(),
         })
@@ -78,6 +91,36 @@ impl Highlighter {
     }
 }
 
+fn load_user_syntax_file(file: &Path) -> Result<SyntaxDefinition> {
+    let source = fs::read_to_string(file).map_err(|err| {
+        BuildError::new(
+            ErrorKind::Parse,
+            None,
+            format!(
+                "failed to load sublime-syntax file {}: {err}",
+                file.display()
+            ),
+            "check the sublime-syntax file",
+        )
+    })?;
+    SyntaxDefinition::load_from_str(
+        &source,
+        true,
+        file.file_stem().and_then(|name| name.to_str()),
+    )
+    .map_err(|err| {
+        BuildError::new(
+            ErrorKind::Parse,
+            None,
+            format!(
+                "failed to load sublime-syntax file {}: {err}",
+                file.display()
+            ),
+            "check the sublime-syntax file",
+        )
+    })
+}
+
 impl Default for Highlighter {
     fn default() -> Self {
         Self::defaults()
@@ -98,6 +141,17 @@ contexts:
   main:
     - match: '\b(resource|provider|module)\b'
       scope: keyword.control.carina
+"#;
+
+    const DRIFT_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: Drift
+file_extensions: [drift]
+scope: source.drift
+contexts:
+  main:
+    - match: '\b(move|wait)\b'
+      scope: keyword.control.drift
 "#;
 
     #[test]
@@ -146,6 +200,48 @@ contexts:
         assert!(Highlighter::defaults()
             .validate_language("carina", 1)
             .is_err());
+    }
+
+    #[test]
+    fn user_files_validates_single_syntax_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("carina.sublime-syntax");
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+
+        let highlighter = Highlighter::with_user_files(&[syntax]).unwrap();
+
+        assert!(highlighter.validate_language("carina", 1).is_ok());
+        assert!(highlighter.validate_language("crn", 1).is_ok());
+    }
+
+    #[test]
+    fn user_files_validates_multiple_syntax_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let carina = dir.path().join("carina.sublime-syntax");
+        let drift = dir.path().join("drift.sublime-syntax");
+        fs::write(&carina, CARINA_SUBLIME_SYNTAX).unwrap();
+        fs::write(&drift, DRIFT_SUBLIME_SYNTAX).unwrap();
+
+        let highlighter = Highlighter::with_user_files(&[carina, drift]).unwrap();
+
+        assert!(highlighter.validate_language("carina", 1).is_ok());
+        assert!(highlighter.validate_language("drift", 1).is_ok());
+    }
+
+    #[test]
+    fn malformed_user_syntax_file_returns_parse_error_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let syntax_path = dir.path().join("broken.sublime-syntax");
+        fs::write(&syntax_path, ":::: not a syntax ::::").unwrap();
+
+        let err = match Highlighter::with_user_files(std::slice::from_ref(&syntax_path)) {
+            Ok(_) => panic!("malformed syntax unexpectedly loaded"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, None);
+        assert!(err.to_string().contains(&syntax_path.display().to_string()));
     }
 
     #[test]
