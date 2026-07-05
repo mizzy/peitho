@@ -453,6 +453,50 @@ fn build_fails_for_unreadable_markdown_image_with_line_and_help() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn build_fails_for_symlinked_markdown_image_outside_deck_dir() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    let outside = outside_dir.path().join("arch.png");
+    let link = dir.path().join("img/link.png");
+    fs::write(&deck, "# Visual\n\n![Leaked](img/link.png)").unwrap();
+    write_test_png(&outside, TEST_PNG);
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&outside, &link).unwrap();
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains(
+            "image path escapes deck directory",
+        ))
+        .stderr(predicate::str::contains("img/"))
+        .stderr(predicate::str::contains("link.png"))
+        .stderr(predicate::str::contains(
+            "help: keep image files inside the deck directory",
+        ));
+}
+
 #[test]
 fn build_deduplicates_images_by_content_hash() {
     let dir = tempdir().unwrap();

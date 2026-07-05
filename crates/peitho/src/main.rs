@@ -633,7 +633,30 @@ fn validate_manifest_dist_ref(dist: &Path, src: &str, kind: ManifestRefKind) -> 
         ));
     }
 
-    if !dist.join(path).is_file() {
+    let canonical_dist = fs::canonicalize(dist).map_err(|err| {
+        miette::miette!(
+            "distribution is incomplete: failed to resolve dist directory\nhelp: run `peitho build` first\ncaused by: {err}"
+        )
+    })?;
+    let target = dist.join(path);
+    let canonical_target = match fs::canonicalize(&target) {
+        Ok(path) => path,
+        Err(_) => {
+            return Err(miette::miette!(
+                "{}\nhelp: run `peitho build` first",
+                kind.missing_message(src)
+            ));
+        }
+    };
+    if !canonical_target.starts_with(&canonical_dist) {
+        return Err(miette::miette!(
+            "{}\nhelp: {}",
+            kind.invalid_message(src),
+            kind.invalid_help()
+        ));
+    }
+
+    if !canonical_target.is_file() {
         return Err(miette::miette!(
             "{}\nhelp: run `peitho build` first",
             kind.missing_message(src)
@@ -843,8 +866,20 @@ impl ImageResolver {
     ) -> peitho_core::Result<peitho_core::ResolvedImageAsset> {
         let source = self.deck_dir.join(request.raw.as_str());
         let display_path = request.raw.as_str();
+        let deck_abs =
+            fs::canonicalize(&self.deck_dir).map_err(|err| image_read_error(display_path, err))?;
+        let source_abs =
+            fs::canonicalize(&source).map_err(|err| image_metadata_error(display_path, err))?;
+        if !source_abs.starts_with(&deck_abs) {
+            return Err(peitho_core::BuildError::new(
+                peitho_core::error::ErrorKind::Asset,
+                None,
+                format!("image path escapes deck directory: {display_path}"),
+                "keep image files inside the deck directory",
+            ));
+        }
         let metadata =
-            fs::metadata(&source).map_err(|err| image_metadata_error(display_path, err))?;
+            fs::metadata(&source_abs).map_err(|err| image_metadata_error(display_path, err))?;
         if !metadata.is_file() {
             return Err(peitho_core::BuildError::new(
                 peitho_core::error::ErrorKind::Asset,
@@ -853,7 +888,7 @@ impl ImageResolver {
                 "place the image at the deck-relative path or fix the path",
             ));
         }
-        let bytes = fs::read(&source).map_err(|err| image_read_error(display_path, err))?;
+        let bytes = fs::read(&source_abs).map_err(|err| image_read_error(display_path, err))?;
         let hash = short_sha256_hex(&bytes);
         if let Some(asset) = self.by_hash.get(&hash) {
             return Ok(asset.clone());
@@ -879,8 +914,6 @@ impl ImageResolver {
                 )
             },
         )?;
-        let source_abs =
-            fs::canonicalize(&source).map_err(|err| image_read_error(display_path, err))?;
         let asset = peitho_core::ResolvedImageAsset {
             source_abs,
             dist_rel,
