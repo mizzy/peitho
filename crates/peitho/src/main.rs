@@ -119,6 +119,7 @@ struct PresentOptions {
 
 #[derive(Debug, Parser)]
 #[command(name = "peitho")]
+#[command(version)]
 #[command(about = "Build HTML-native presentations from Markdown")]
 struct Cli {
     #[command(subcommand)]
