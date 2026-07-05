@@ -92,6 +92,7 @@ fn present_no_serve_writes_presenter_html() {
     let presenter = fs::read_to_string(cache.join("presenter.html")).unwrap();
     assert!(presenter.contains("mountPresenterView"));
     assert!(presenter.contains(".peitho-presenter-pane"));
+    assert!(presenter.contains(r#"[data-peitho-urgency="urgent"]"#));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
         .contains("installPresentationControls"));

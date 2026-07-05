@@ -146,6 +146,83 @@ it("renders agenda header and rows with mock-compatible structure", () => {
   expect(rows[1].hasAttribute("data-peitho-agenda-outcome")).toBe(false);
 });
 
+it("marks the current agenda row over only after exceeding planned duration", () => {
+  let elapsed = 0;
+  const root = document.createElement("div");
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ elapsedMs: () => elapsed }),
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus: new EventTarget(),
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  const row = root.querySelector<HTMLElement>("[data-peitho-agenda-row]")!;
+  elapsed = 30_000;
+  vi.advanceTimersByTime(250);
+  expect(row.dataset.peithoAgendaState).toBe("current");
+  expect(row.dataset.peithoAgendaOutcome).toBeUndefined();
+
+  elapsed = 70_000;
+  vi.advanceTimersByTime(250);
+  expect(row.dataset.peithoAgendaState).toBe("current");
+  expect(row.dataset.peithoAgendaOutcome).toBe("over");
+});
+
+it("keeps done agenda row outcomes for under and over durations", () => {
+  let elapsed = 0;
+  let currentIndex = 0;
+  const root = document.createElement("div");
+  const bus = new EventTarget();
+  const cleanup = installAgenda({
+    root,
+    shell: {
+      get currentIndex() {
+        return currentIndex;
+      },
+      elapsedMs: () => elapsed,
+      startedAt: () => 100
+    },
+    sections: [
+      { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
+      { name: "Demo", startIndex: 1, endIndex: 1, plannedDurationMs: 60_000 },
+      { name: "Close", startIndex: 2, endIndex: 2, plannedDurationMs: 60_000 }
+    ],
+    bus,
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  elapsed = 30_000;
+  vi.advanceTimersByTime(250);
+  currentIndex = 1;
+  bus.dispatchEvent(
+    new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
+      detail: { key: "demo", index: 1, total: 3, previousIndex: 0 }
+    })
+  );
+  elapsed = 100_000;
+  vi.advanceTimersByTime(250);
+  currentIndex = 2;
+  bus.dispatchEvent(
+    new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
+      detail: { key: "close", index: 2, total: 3, previousIndex: 1 }
+    })
+  );
+
+  const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
+  expect(rows.map((row) => row.dataset.peithoAgendaState)).toEqual([
+    "done",
+    "done",
+    "current"
+  ]);
+  expect(rows[0].dataset.peithoAgendaOutcome).toBe("under");
+  expect(rows[1].dataset.peithoAgendaOutcome).toBe("over");
+});
+
 it("accumulates elapsed deltas into the current section and resumes when returning", () => {
   let elapsed = 0;
   let currentIndex = 0;
@@ -206,7 +283,7 @@ it("accumulates elapsed deltas into the current section and resumes when returni
 
   rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
   expect(rows[0].dataset.peithoAgendaState).toBe("current");
-  expect(rows[0].hasAttribute("data-peitho-agenda-outcome")).toBe(false);
+  expect(rows[0].dataset.peithoAgendaOutcome).toBe("over");
   expect(rows[1].dataset.peithoAgendaState).toBe("upcoming");
   expect(rows[1].hasAttribute("data-peitho-agenda-outcome")).toBe(false);
 

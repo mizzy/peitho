@@ -454,11 +454,16 @@ pub fn render_presenter_index() -> String {
     .clock { display: flex; flex-direction: column; min-height: 0; }
     .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
     .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }
-    .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
+    .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; transition: color 200ms ease; }
     .timer .overrun { color: var(--warn); font-weight: 500; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
-    .clock[data-peitho-state="paused"] .timer { color: var(--pause); }
+    .clock[data-peitho-state="paused"] .timer { color: var(--fg-dim); }
     .clock[data-peitho-state="stopped"] .timer { color: var(--fg-dim); }
-    [data-peitho-presenter="timer"][data-peitho-overrun] { color: var(--warn); }
+    .clock[data-peitho-state="running"][data-peitho-urgency="warning"] .timer,
+    .clock[data-peitho-state="running"][data-peitho-urgency="warning"] .timer .planned { color: var(--pause); }
+    .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer,
+    .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer .planned { color: var(--warn); }
+    .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer,
+    .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
     .state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }
     .state-dot { width: 6px; height: 6px; background: var(--fg-dim); border-radius: 50%; transition: background 150ms ease, box-shadow 150ms ease; }
     .state-pill[data-peitho-state="running"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
@@ -505,8 +510,8 @@ pub fn render_presenter_index() -> String {
     [data-peitho-agenda-state="current"] [data-peitho-agenda-time] { color: var(--accent); }
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-time],
     [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"] [data-peitho-agenda-delta] { color: color-mix(in oklch, var(--accent) 72%, var(--fg-mute)); }
-    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-time],
-    [data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"] [data-peitho-agenda-delta] { color: var(--warn); }
+    [data-peitho-agenda-state][data-peitho-agenda-outcome="over"] [data-peitho-agenda-time],
+    [data-peitho-agenda-state][data-peitho-agenda-outcome="over"] [data-peitho-agenda-delta] { color: var(--warn); }
     .controls { display: grid; grid-template-columns: minmax(max-content, 1fr) auto auto auto auto auto; align-items: center; gap: 6px; padding: 10px 8px; border-top: 1px solid var(--line-soft); background: color-mix(in oklch, var(--bg-elev) 92%, transparent); margin-top: auto; }
     .btn { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--fg-mute); padding: 4px 8px; font: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; transition: background 90ms ease, color 90ms ease, border-color 90ms ease, transform 60ms ease, box-shadow 90ms ease; min-width: 0; position: relative; overflow: hidden; -webkit-tap-highlight-color: transparent; }
     .btn .k { color: var(--fg-dim); font-family: "Geist Mono", ui-monospace, monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: none; }
@@ -911,7 +916,8 @@ mod tests {
         assert!(html.contains(r#".tracker [data-peitho-marker="rabbit"] { top: -6px; }"#));
         assert!(html.contains(r#".tracker [data-peitho-marker="turtle"] { bottom: -6px; }"#));
         assert!(!html.contains(".mark"));
-        assert!(html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
+        assert!(html.contains(r#"[data-peitho-urgency="urgent"]"#));
+        assert!(!html.contains(r#"[data-peitho-presenter="timer"][data-peitho-overrun]"#));
         assert!(!html.contains(".peitho-time-tracker { position: absolute"));
         assert!(!html.contains("bottom: 0; height: 6px"));
     }
@@ -950,9 +956,16 @@ mod tests {
         assert!(html.contains("min-width: 6ch"));
         assert!(html
             .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="under"]"#));
-        assert!(html
-            .contains(r#"[data-peitho-agenda-state="done"][data-peitho-agenda-outcome="over"]"#));
+        assert!(html.contains(
+            r#"[data-peitho-agenda-state][data-peitho-agenda-outcome="over"] [data-peitho-agenda-time]"#
+        ));
         assert!(html.contains(".clock { display: flex; flex-direction: column;"));
+        assert!(
+            html.contains(r#".clock[data-peitho-state="paused"] .timer { color: var(--fg-dim); }"#)
+        );
+        assert!(
+            !html.contains(r#".clock[data-peitho-state="paused"] .timer { color: var(--pause); }"#)
+        );
         assert!(html.contains(".controls {"));
         assert!(html.contains("margin-top: auto"));
         assert!(!html.contains(".agenda"));
