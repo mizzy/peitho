@@ -444,6 +444,39 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_rejects_two_image_layout_matches() {
+        let visual = parse_layout(
+            "visual",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let diagram = parse_layout(
+            "diagram",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="hero" accepts="image" arity="1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![visual, diagram]).unwrap();
+
+        let err = dispatch_by_convention(
+            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            &layouts,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert!(err
+            .to_string()
+            .contains("slide matches multiple layouts: visual, diagram"));
+        assert!(err.help.contains(r#"{"layout":"…"}"#));
+    }
+
+    #[test]
     fn explicit_layout_without_image_slot_rejects_image_without_fallback() {
         let cover = parse_layout(
             "cover",

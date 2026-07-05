@@ -1303,6 +1303,46 @@ mod tests {
     }
 
     #[test]
+    fn present_cache_copies_markdown_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        let cache = dir.path().join("present-cache");
+
+        fs::write(&deck, "# Visual\n\n![Architecture](img/arch.png)").unwrap();
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(dir.path().join("img")).unwrap();
+        fs::write(
+            layouts.join("visual.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            css.join("base.css"),
+            ".slot-hero img { max-width: 100%; }\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("img/arch.png"), b"test png bytes").unwrap();
+
+        let artifacts = build_artifacts(&deck, Some(&layouts), Some(&css)).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+
+        let mut assets = fs::read_dir(cache.join("assets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assets.sort();
+        assert_eq!(assets.len(), 1);
+        let asset_name = assets[0].to_string_lossy();
+        assert!(asset_name.ends_with("-arch.png"));
+        let slide = fs::read_to_string(cache.join("slides/000-visual.html")).unwrap();
+        assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}""#)));
+    }
+
+    #[test]
     fn build_command_accepts_watch_flag() {
         let cli = Cli::parse_from(["peitho", "build", "deck.md", "--watch"]);
 

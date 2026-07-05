@@ -171,10 +171,9 @@ pub struct RawImagePath(String);
 pub struct ResolvedImagePath(String);
 
 impl ResolvedImagePath {
-    // Only the image resolver may construct this from an already-copied dist
-    // path. Do not make this public; it bypasses hashed asset validation and
-    // exists only for crate-internal tests and transforms.
-    #[allow(dead_code)]
+    // Test-only escape hatch. Do not make this public; it bypasses hashed
+    // asset validation and the resolver boundary.
+    #[cfg(test)]
     pub(crate) fn from_string(value: String) -> Self {
         Self(value)
     }
@@ -307,10 +306,10 @@ impl RawImagePath {
         Ok(Self(value))
     }
 
-    // TDD-only escape hatch for tests/internal construction. Do not make this
-    // public; parser entry points must use `new()` so raw Markdown paths are
-    // validated before they can enter the pipeline.
-    #[allow(dead_code)]
+    // Test-only escape hatch. Do not make this public; parser entry points
+    // must use `new()` so raw Markdown paths are validated before they enter
+    // the pipeline.
+    #[cfg(test)]
     pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
     }
