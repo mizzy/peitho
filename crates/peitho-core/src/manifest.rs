@@ -557,7 +557,14 @@ mod tests {
     }
 
     fn checked_deck(markdown: &str, layout: Layout) -> crate::phase::Deck<crate::phase::Checked> {
-        check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap()).unwrap()
+        check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     fn title_body_layout() -> Layout {

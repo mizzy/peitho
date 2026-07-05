@@ -37,7 +37,7 @@ pub use theme::{build_theme_css, CssFile};
 /// use peitho_core::*;
 ///
 /// fn raw_checked_deck_cannot_render(deck: Deck<Checked<RawImagePath>>) {
-///     let _ = render_deck(deck);
+///     let _ = render_deck(deck, &highlight::Highlighter::defaults());
 /// }
 /// ```
 pub fn render_deck_requires_resolved_image_paths() {}

@@ -157,7 +157,11 @@ mod tests {
         )
         .unwrap();
         let mapped = map_by_convention(
-            parse_markdown("# Title\n\nBody paragraph").unwrap(),
+            parse_markdown(
+                "# Title\n\nBody paragraph",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layout,
         )
         .unwrap();
@@ -185,7 +189,11 @@ mod tests {
                </section>"#,
         )
         .unwrap();
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 
@@ -205,7 +213,11 @@ mod tests {
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
-        let mapped = map_by_convention(parse_markdown("Body only").unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown("Body only", &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 
@@ -225,7 +237,11 @@ mod tests {
         )
         .unwrap();
         let markdown = "# Title\n\n```rust\nfn lost() {}\n```";
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 
@@ -246,7 +262,11 @@ mod tests {
         )
         .unwrap();
         let markdown = "# Title\n\n## Detail";
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 
@@ -299,7 +319,11 @@ mod tests {
             r#"<section><slot name="title" accepts="image" arity="1"></slot></section>"#,
         )
         .unwrap();
-        let mapped = map_by_convention(parse_markdown("# Title").unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown("# Title", &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 
@@ -322,7 +346,11 @@ mod tests {
                </section>"#,
         )
         .unwrap();
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         let err = check_deck(mapped).unwrap_err();
 

@@ -9,6 +9,7 @@ use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 use crate::{
     domain::{FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
+    highlight::Highlighter,
     layout::Layout,
     phase::{Checked, Deck, Rendered},
 };
@@ -18,11 +19,14 @@ use crate::{
 /// The `ResolvedImagePath` type parameter is part of the safety boundary:
 /// callers cannot pass `Deck<Checked<RawImagePath>>`, so raw Markdown paths
 /// cannot reach `<img src>` generation by convention or accident.
-pub fn render_deck(deck: Deck<Checked<ResolvedImagePath>>) -> Result<Deck<Rendered>> {
+pub fn render_deck(
+    deck: Deck<Checked<ResolvedImagePath>>,
+    highlighter: &Highlighter,
+) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let mut slides = Vec::new();
     for slide in checked_slides {
-        let html = render_slide(slide.key(), slide.slots(), slide.layout())?;
+        let html = render_slide(slide.key(), slide.slots(), slide.layout(), highlighter)?;
         let notes = slide.notes().map(|s| s.to_owned());
         slides.push(RenderedSlide::new(
             slide.index(),
@@ -38,6 +42,7 @@ fn render_slide(
     key: &SlideKey,
     slots: &BTreeMap<SlotName, Vec<SourceFragment<ResolvedImagePath>>>,
     layout: &Layout,
+    highlighter: &Highlighter,
 ) -> Result<String> {
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
@@ -79,7 +84,8 @@ fn render_slide(
                         ))
                     })?;
                     let fragments = slot_values.get(&slot).cloned().unwrap_or_default();
-                    let html = render_slot(&slot, &fragments).map_err(box_build_error)?;
+                    let html =
+                        render_slot(&slot, &fragments, highlighter).map_err(box_build_error)?;
                     el.replace(&html, ContentType::Html);
                     Ok(())
                 }),
@@ -102,7 +108,11 @@ fn render_slide(
     })
 }
 
-fn render_slot(slot: &SlotName, fragments: &[SourceFragment<ResolvedImagePath>]) -> Result<String> {
+fn render_slot(
+    slot: &SlotName,
+    fragments: &[SourceFragment<ResolvedImagePath>],
+    highlighter: &Highlighter,
+) -> Result<String> {
     if fragments.is_empty() {
         return Ok(String::new());
     }
@@ -120,7 +130,7 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment<ResolvedImagePath>])
         Some(FragmentKind::Code) => {
             let body = fragments
                 .iter()
-                .map(render_code_fragment)
+                .map(|fragment| render_code_fragment(fragment, highlighter))
                 .collect::<Result<Vec<_>>>()?
                 .join("\n");
             format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
@@ -149,12 +159,14 @@ fn render_slot(slot: &SlotName, fragments: &[SourceFragment<ResolvedImagePath>])
 /// A tagged code block is highlighted at build time into `hl-*` classed
 /// spans (colors live in theme CSS); an untagged block stays escaped plain
 /// text.
-fn render_code_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+fn render_code_fragment(
+    fragment: &SourceFragment<ResolvedImagePath>,
+    highlighter: &Highlighter,
+) -> Result<String> {
     match fragment.language() {
-        Some(language) => {
-            crate::highlight::highlight_html(fragment.code_text(), language, fragment.line())
-                .map(|html| html.trim_end().to_owned())
-        }
+        Some(language) => highlighter
+            .highlight_html(fragment.code_text(), language, fragment.line())
+            .map(|html| html.trim_end().to_owned()),
         None => Ok(encode_text(fragment.code_text()).into_owned()),
     }
 }
@@ -658,9 +670,14 @@ mod tests {
 </section>"#,
         )
         .unwrap();
-        let checked =
-            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
-                .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
         let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
@@ -688,9 +705,14 @@ mod tests {
 </section>"#,
         )
         .unwrap();
-        let checked =
-            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
-                .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
         let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
@@ -707,9 +729,14 @@ mod tests {
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
-        let checked =
-            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
-                .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
         let rendered = render_checked(checked);
         let html = rendered.slides()[0].html();
@@ -748,7 +775,7 @@ mod tests {
             )],
         );
 
-        let rendered = render_deck(checked).unwrap();
+        let rendered = render_deck(checked, &crate::highlight::Highlighter::defaults()).unwrap();
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(
@@ -766,7 +793,11 @@ mod tests {
 
         let setext = check_deck(
             map_by_convention(
-                parse_markdown("**Architecture** `Phase`\n====").unwrap(),
+                parse_markdown(
+                    "**Architecture** `Phase`\n====",
+                    &crate::highlight::Highlighter::defaults(),
+                )
+                .unwrap(),
                 &layout,
             )
             .unwrap(),
@@ -778,7 +809,15 @@ mod tests {
         assert!(!setext_html.contains(r#"<span class="slot-title"><h1>"#));
 
         let atx = check_deck(
-            map_by_convention(parse_markdown("# Architecture #").unwrap(), &layout).unwrap(),
+            map_by_convention(
+                parse_markdown(
+                    "# Architecture #",
+                    &crate::highlight::Highlighter::defaults(),
+                )
+                .unwrap(),
+                &layout,
+            )
+            .unwrap(),
         )
         .unwrap();
         let atx_html = render_checked(atx).slides()[0].html().to_owned();
@@ -801,7 +840,11 @@ mod tests {
             r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
         )
         .unwrap();
-        let parsed = parse_markdown("---\ntime: 15m\n---\n# Intro").unwrap();
+        let parsed = parse_markdown(
+            "---\ntime: 15m\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
         let mapped = map_by_convention(parsed, &layout).unwrap();
         let checked = check_deck(mapped).unwrap();
         let rendered = render_checked(checked);
@@ -1111,9 +1154,14 @@ mod tests {
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
-        let checked =
-            check_deck(map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap())
-                .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         render_checked(checked)
     }
 
@@ -1127,6 +1175,6 @@ mod tests {
         })
         .unwrap();
         assert!(assets.is_empty());
-        render_deck(resolved).unwrap()
+        render_deck(resolved, &crate::highlight::Highlighter::defaults()).unwrap()
     }
 }

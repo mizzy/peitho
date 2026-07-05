@@ -18,4 +18,5 @@ syntect.workspace = true
 ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile.workspace = true
 ts-rs.workspace = true

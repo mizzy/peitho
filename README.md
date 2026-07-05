@@ -108,6 +108,10 @@ Markdown images are local files written as an image-only paragraph:
 
 Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
 
+## Custom syntaxes
+
+Put `*.sublime-syntax` files in a `syntaxes/` directory next to the deck to add languages beyond syntect's built-in set. They augment the defaults, so built-in tags like `rust` and `js` still work. Unknown language tags remain build errors with line numbers.
+
 ## Multiple layouts
 
 Passing a directory to `--layouts` turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):

@@ -56,9 +56,12 @@ impl BuildOptions {
         effective_asset_path(&self.css, &self.input, "css")
     }
 
-    /// The deck file plus the resolved --layouts/--css paths. Each asset
-    /// path may be a single file or a directory whose *.html / *.css files
-    /// are watched.
+    fn effective_syntaxes(&self) -> Option<PathBuf> {
+        effective_asset_path(&None, &self.input, "syntaxes")
+    }
+
+    /// The deck file plus the resolved asset paths. Each asset path may be a
+    /// single file or a directory whose matching extension files are watched.
     fn watch_roots(&self) -> Vec<(PathBuf, &'static str)> {
         let mut roots = vec![(self.input.clone(), "md")];
         if let Some(path) = self.effective_layouts() {
@@ -66,6 +69,9 @@ impl BuildOptions {
         }
         if let Some(path) = self.effective_css() {
             roots.push((path, "css"));
+        }
+        if let Some(path) = self.effective_syntaxes() {
+            roots.push((path, "sublime-syntax"));
         }
         roots
     }
@@ -244,6 +250,7 @@ fn build(options: &BuildOptions) -> miette::Result<()> {
         &options.input,
         options.effective_layouts().as_deref(),
         options.effective_css().as_deref(),
+        options.effective_syntaxes().as_deref(),
     )?;
     emit_distribution(&options.out, &artifacts)?;
     println!(
@@ -263,6 +270,7 @@ fn rebuild_once_for_watch(
         &options.input,
         options.effective_layouts().as_deref(),
         options.effective_css().as_deref(),
+        options.effective_syntaxes().as_deref(),
     ) {
         Ok(artifacts) => match emit_distribution(&options.out, &artifacts) {
             Ok(()) => {
@@ -442,11 +450,16 @@ fn build_artifacts(
     input: &Path,
     layouts_path: Option<&Path>,
     css_path: Option<&Path>,
+    syntaxes_path: Option<&Path>,
 ) -> miette::Result<BuildArtifacts> {
     let markdown = fs::read_to_string(input).into_diagnostic()?;
     let layouts = load_layouts(layouts_path)?;
     let css_files = load_css(css_path)?;
-    let parsed = core(peitho_core::parse_markdown(&markdown))?;
+    let highlighter = match syntaxes_path {
+        Some(dir) => core(peitho_core::highlight::Highlighter::with_user_dir(dir))?,
+        None => peitho_core::highlight::Highlighter::defaults(),
+    };
+    let parsed = core(peitho_core::parse_markdown(&markdown, &highlighter))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
@@ -461,7 +474,7 @@ fn build_artifacts(
     }))?;
     let manifest = peitho_core::build_manifest(&resolved, &image_assets);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
-    let rendered = core(peitho_core::render_deck(resolved))?;
+    let rendered = core(peitho_core::render_deck(resolved, &highlighter))?;
 
     Ok(BuildArtifacts {
         slide_count,
@@ -717,6 +730,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         &options.input,
         effective_asset_path(&options.layouts, &options.input, "layouts").as_deref(),
         effective_asset_path(&options.css, &options.input, "css").as_deref(),
+        effective_asset_path(&None, &options.input, "syntaxes").as_deref(),
     )?;
     if options.no_serve {
         emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false)?;
@@ -985,6 +999,17 @@ fn layout_name(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: Carina
+file_extensions: [crn]
+scope: source.carina
+contexts:
+  main:
+    - match: '\b(resource|provider|module)\b'
+      scope: keyword.control.carina
+"#;
+
     #[test]
     fn watch_dependency_types_are_available() {
         fn accepts_recursive_mode(_mode: notify::RecursiveMode) {}
@@ -1000,8 +1025,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layouts = dir.path().join("layouts");
         let css = dir.path().join("css");
+        let syntaxes = dir.path().join("syntaxes");
         fs::create_dir_all(&layouts).unwrap();
         fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(&syntaxes).unwrap();
         let options = BuildOptions {
             input: dir.path().join("deck.md"),
             layouts: Some(layouts.clone()),
@@ -1012,12 +1039,14 @@ mod tests {
         assert!(options.is_relevant_change(&dir.path().join("deck.md")));
         assert!(options.is_relevant_change(&layouts.join("cover.html")));
         assert!(options.is_relevant_change(&css.join("base.css")));
+        assert!(options.is_relevant_change(&syntaxes.join("foo.sublime-syntax")));
         assert!(!options.is_relevant_change(&layouts.join("notes.txt")));
         assert!(!options.is_relevant_change(&dir.path().join("other.md")));
 
         let dirs = options.watch_dirs();
         assert!(dirs.iter().any(|d| d == &layouts));
         assert!(dirs.iter().any(|d| d == &css));
+        assert!(dirs.iter().any(|d| d == &syntaxes));
         assert!(dirs.iter().any(|d| d == dir.path()));
     }
 
@@ -1040,10 +1069,44 @@ mod tests {
         let deck = dir.path().join("deck.md");
         fs::write(&deck, "# Intro\n\nBody\n\n```rust\nfn main() {}\n```\n").unwrap();
 
-        let artifacts = build_artifacts(&deck, None, None).unwrap();
+        let artifacts = build_artifacts(&deck, None, None, None).unwrap();
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts.css.contains("width: 1280px;"));
+    }
+
+    #[test]
+    fn build_artifacts_uses_syntaxes_dir_next_to_the_deck() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let syntaxes = dir.path().join("syntaxes");
+        fs::write(
+            &deck,
+            "# Infra\n\n```carina\nresource \"aws_s3_bucket\" \"site\" {}\n```\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&syntaxes).unwrap();
+        fs::write(
+            syntaxes.join("carina.sublime-syntax"),
+            CARINA_SUBLIME_SYNTAX,
+        )
+        .unwrap();
+        let options = BuildOptions {
+            input: deck.clone(),
+            layouts: None,
+            css: None,
+            out: dir.path().join("dist"),
+        };
+
+        let artifacts = build_artifacts(
+            &deck,
+            options.effective_layouts().as_deref(),
+            options.effective_css().as_deref(),
+            options.effective_syntaxes().as_deref(),
+        )
+        .unwrap();
+
+        assert!(artifacts.rendered.slides()[0].html().contains("hl-"));
     }
 
     #[test]
@@ -1292,6 +1355,7 @@ mod tests {
             &fixture.options.input,
             fixture.options.effective_layouts().as_deref(),
             fixture.options.effective_css().as_deref(),
+            fixture.options.effective_syntaxes().as_deref(),
         )
         .unwrap();
 
@@ -1326,7 +1390,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("img/arch.png"), b"test png bytes").unwrap();
 
-        let artifacts = build_artifacts(&deck, Some(&layouts), Some(&css)).unwrap();
+        let artifacts = build_artifacts(&deck, Some(&layouts), Some(&css), None).unwrap();
         fs::create_dir_all(&cache).unwrap();
         emit_present_cache(&cache, &artifacts, None, false).unwrap();
 

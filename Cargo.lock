@@ -808,6 +808,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "syntect",
+ "tempfile",
  "ts-rs",
 ]
 

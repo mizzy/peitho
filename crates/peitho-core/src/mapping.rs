@@ -210,9 +210,11 @@ mod tests {
     fn dispatches_each_slide_to_the_unique_structural_match() {
         let markdown = "# Cover Only\n\n---\n# Statement\n\nBody paragraph";
 
-        let mapped =
-            dispatch_by_convention(parse_markdown(markdown).unwrap(), &cover_and_statement())
-                .unwrap();
+        let mapped = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &cover_and_statement(),
+        )
+        .unwrap();
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "cover");
         assert_eq!(mapped.mapped_slides()[1].layout.name(), "statement");
@@ -222,9 +224,11 @@ mod tests {
     fn explicit_layout_request_wins_over_dispatch() {
         let markdown = "<!-- {\"layout\":\"statement\"} -->\n# Title\n\nBody";
 
-        let mapped =
-            dispatch_by_convention(parse_markdown(markdown).unwrap(), &cover_and_statement())
-                .unwrap();
+        let mapped = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &cover_and_statement(),
+        )
+        .unwrap();
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "statement");
     }
@@ -233,8 +237,11 @@ mod tests {
     fn unknown_explicit_layout_is_an_error_listing_known_names() {
         let markdown = "<!-- {\"layout\":\"missing\"} -->\n# Title";
 
-        let err = dispatch_by_convention(parse_markdown(markdown).unwrap(), &cover_and_statement())
-            .unwrap_err();
+        let err = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &cover_and_statement(),
+        )
+        .unwrap_err();
 
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown layout 'missing'"));
@@ -255,8 +262,11 @@ mod tests {
         .unwrap();
         let layouts = Layouts::new(vec![cover, closing]).unwrap();
 
-        let err =
-            dispatch_by_convention(parse_markdown("# Title Only").unwrap(), &layouts).unwrap_err();
+        let err = dispatch_by_convention(
+            parse_markdown("# Title Only", &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layouts,
+        )
+        .unwrap_err();
 
         assert!(err
             .to_string()
@@ -268,8 +278,11 @@ mod tests {
     fn unmatched_slide_error_lists_each_layouts_reason() {
         let markdown = "# Title\n\n```rust\nfn main() {}\n```";
 
-        let err = dispatch_by_convention(parse_markdown(markdown).unwrap(), &cover_and_statement())
-            .unwrap_err();
+        let err = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &cover_and_statement(),
+        )
+        .unwrap_err();
 
         let message = err.to_string();
         assert!(message.contains("no layout matches this slide"));
@@ -289,8 +302,15 @@ mod tests {
 
         // Body would not fit `cover`, but with a single layout dispatch does
         // not reject the slide; the check phase reports the residual error.
-        let mapped =
-            dispatch_by_convention(parse_markdown("# Title\n\nBody").unwrap(), &layouts).unwrap();
+        let mapped = dispatch_by_convention(
+            parse_markdown(
+                "# Title\n\nBody",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layouts,
+        )
+        .unwrap();
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "cover");
         assert_eq!(mapped.mapped_slides()[0].unassigned.len(), 1);
@@ -310,7 +330,11 @@ mod tests {
         )
         .unwrap();
 
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
         let slide = &mapped.mapped_slides()[0];
 
         assert_eq!(
@@ -346,7 +370,11 @@ mod tests {
         .unwrap();
 
         let mapped = map_by_convention(
-            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            parse_markdown(
+                "# Title\n\n![Architecture](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layout,
         )
         .unwrap();
@@ -382,7 +410,11 @@ mod tests {
         .unwrap();
 
         let err = map_by_convention(
-            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            parse_markdown(
+                "# Title\n\n![Architecture](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layout,
         )
         .unwrap_err();
@@ -405,7 +437,11 @@ mod tests {
         .unwrap();
 
         let err = map_by_convention(
-            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            parse_markdown(
+                "# Title\n\n![Architecture](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layout,
         )
         .unwrap_err();
@@ -435,7 +471,11 @@ mod tests {
         let layouts = Layouts::new(vec![cover, visual]).unwrap();
 
         let mapped = dispatch_by_convention(
-            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            parse_markdown(
+                "# Title\n\n![Architecture](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layouts,
         )
         .unwrap();
@@ -464,7 +504,11 @@ mod tests {
         let layouts = Layouts::new(vec![visual, diagram]).unwrap();
 
         let err = dispatch_by_convention(
-            parse_markdown("# Title\n\n![Architecture](x.png)").unwrap(),
+            parse_markdown(
+                "# Title\n\n![Architecture](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layouts,
         )
         .unwrap_err();
@@ -494,7 +538,11 @@ mod tests {
         let layouts = Layouts::new(vec![cover, visual]).unwrap();
 
         let err = dispatch_by_convention(
-            parse_markdown("<!-- {\"layout\":\"cover\"} -->\n# Title\n\n![A](x.png)").unwrap(),
+            parse_markdown(
+                "<!-- {\"layout\":\"cover\"} -->\n# Title\n\n![A](x.png)",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &layouts,
         )
         .unwrap_err();
@@ -526,14 +574,22 @@ mod tests {
         .unwrap();
 
         let optional_mapped = dispatch_by_convention(
-            parse_markdown("<!-- {\"layout\":\"visual-optional\"} -->\n# Title").unwrap(),
+            parse_markdown(
+                "<!-- {\"layout\":\"visual-optional\"} -->\n# Title",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &Layouts::single(optional),
         )
         .unwrap();
         check_deck(optional_mapped).unwrap();
 
         let required_mapped = dispatch_by_convention(
-            parse_markdown("<!-- {\"layout\":\"visual-required\"} -->\n# Title").unwrap(),
+            parse_markdown(
+                "<!-- {\"layout\":\"visual-required\"} -->\n# Title",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
             &Layouts::single(required),
         )
         .unwrap();
@@ -558,7 +614,11 @@ mod tests {
         )
         .unwrap();
 
-        let mapped = map_by_convention(parse_markdown(markdown).unwrap(), &layout).unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
 
         assert_eq!(mapped.mapped_slides().len(), 2);
         assert_eq!(
