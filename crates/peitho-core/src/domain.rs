@@ -182,7 +182,7 @@ impl ResolvedImagePath {
     /// Build a resolved `assets/<hash>-<basename>` path from resolver output.
     ///
     /// The hash must be the fixed 16-hex prefix chosen by the CLI resolver, and
-    /// the basename must not contain path separators.
+    /// the basename must not contain path separators or URL delimiters.
     pub fn from_hashed_asset(hash: &str, basename: &str) -> Result<Self, String> {
         let valid_hash = hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit());
         if !valid_hash {
@@ -191,12 +191,17 @@ impl ResolvedImagePath {
         let valid_basename = !basename.is_empty()
             && !basename.contains('/')
             && !basename.contains('\\')
+            && !basename.contains('?')
+            && !basename.contains('#')
             && Path::new(basename)
                 .file_name()
                 .and_then(|name| name.to_str())
                 == Some(basename);
         if !valid_basename {
-            return Err("image asset basename must not contain path separators".to_owned());
+            return Err(
+                "image asset basename must not contain path separators, queries, or fragments"
+                    .to_owned(),
+            );
         }
         Ok(Self(format!("assets/{hash}-{basename}")))
     }
@@ -251,6 +256,27 @@ impl RawImagePath {
                 line,
                 "absolute image paths are not supported",
                 "reference the image with a path relative to the deck file",
+            ));
+        }
+        if value.contains('\\') {
+            return Err(image_path_error(
+                line,
+                "image paths must use forward slashes",
+                "write deck-relative paths like img/diagram.png",
+            ));
+        }
+        if value.contains('?') {
+            return Err(image_path_error(
+                line,
+                "image path query strings are not supported",
+                "reference the local image file without URL query parameters",
+            ));
+        }
+        if value.contains('#') {
+            return Err(image_path_error(
+                line,
+                "image path fragments are not supported",
+                "reference the local image file without URL fragments",
             ));
         }
         let path = Path::new(&value);
@@ -571,5 +597,22 @@ mod tests {
         assert!(SlideKey::new("arch-1").is_ok());
         let err = SlideKey::new("Arch 1]").unwrap_err();
         assert_eq!(err, "slide key must use lowercase ascii, digits, or '-'");
+    }
+
+    #[test]
+    fn resolved_image_path_rejects_url_delimiters_in_basename() {
+        let err =
+            ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png#frag").unwrap_err();
+        assert_eq!(
+            err,
+            "image asset basename must not contain path separators, queries, or fragments"
+        );
+
+        let err =
+            ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png?v=1").unwrap_err();
+        assert_eq!(
+            err,
+            "image asset basename must not contain path separators, queries, or fragments"
+        );
     }
 }

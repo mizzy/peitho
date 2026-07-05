@@ -718,7 +718,7 @@ mod tests {
             hero,
             vec![SourceFragment::image(
                 3,
-                "<Diagram>&Notes",
+                "<Diagram>, \"Notes\" & emoji 🎉",
                 ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
             )],
         );
@@ -736,7 +736,9 @@ mod tests {
         let rendered = render_deck(checked).unwrap();
         let html = rendered.slides()[0].html();
 
-        assert!(html.contains(r#"<img src="assets/xxx.png" alt="&lt;Diagram&gt;&amp;Notes">"#));
+        assert!(html.contains(
+            r#"<img src="assets/xxx.png" alt="&lt;Diagram&gt;, &quot;Notes&quot; &amp; emoji 🎉">"#
+        ));
     }
 
     #[test]

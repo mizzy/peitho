@@ -384,6 +384,40 @@ fn build_copies_markdown_image_to_dist_assets() {
 }
 
 #[test]
+fn build_copies_nested_unicode_markdown_image_path() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Visual\n\n![Diagram](./img/deep/画像.png)").unwrap();
+    write_test_png(&dir.path().join("img/deep/画像.png"), TEST_PNG);
+    let layout = write_image_layout(dir.path(), "1");
+    let base = write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--layouts",
+            layout.to_str().unwrap(),
+            "--css",
+            css_dir_for(&base).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-画像.png"));
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}" alt="Diagram">"#)));
+}
+
+#[test]
 fn build_fails_for_missing_markdown_image_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

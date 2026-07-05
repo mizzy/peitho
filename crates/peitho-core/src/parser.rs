@@ -1420,6 +1420,33 @@ enum Phase { Parsed, Mapped, Checked }
     }
 
     #[test]
+    fn parses_empty_alt_image_as_image_fragment() {
+        let deck = parse_markdown("# Title\n\n![](images/arch.png)").unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments[1].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "");
+                assert_eq!(src.as_str(), "images/arch.png");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_current_dir_and_nested_image_paths() {
+        let deck = parse_markdown("# Title\n\n![Nested](./img/deep/nested/path.png)").unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments[1].kind() {
+            FragmentKind::Image { src, .. } => {
+                assert_eq!(src.as_str(), "./img/deep/nested/path.png");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_supported_image_extension_case_insensitively() {
         let deck = parse_markdown("# Title\n\n![Architecture diagram](images/Arch.PNG)").unwrap();
         let slide = &deck.parsed_slides()[0];
@@ -1461,6 +1488,44 @@ enum Phase { Parsed, Mapped, Checked }
         assert!(err
             .to_string()
             .contains("image path escapes deck directory"));
+    }
+
+    #[test]
+    fn rejects_image_path_query_string() {
+        let err = parse_markdown("# Title\n\n![Query](img/x.png?v=1)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("image path query strings are not supported"));
+    }
+
+    #[test]
+    fn rejects_image_path_fragment() {
+        let err = parse_markdown("# Title\n\n![Fragment](img/x.png#frag)").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("image path fragments are not supported"));
+    }
+
+    #[test]
+    fn rejects_backslash_image_path() {
+        let err = parse_markdown(
+            r"# Title
+
+![Backslash](img\arch.png)",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("image paths must use forward slashes"));
     }
 
     #[test]
