@@ -1,14 +1,27 @@
-# Presenter timer urgency colors (Issue #107)
+# Presenter view color signals (Issue #107 +)
 
 ## 意図
 
-プレゼンター画面のタイマーは、残り時間に応じて色を変え、発表者が一目で残り時間の逼迫を認識できるようにする。
+プレゼンター画面のタイマー系表示で「色シグナル = 残り時間」の意味を一貫させる。当初は Issue #107（timer 色変化）だけを扱う予定だったが、実装レビュー中に pause/urgency の色被り、および agenda セクションの current 経過超過が色に反映されない問題が浮上したため、同じPRで整理する。
 
-- 残り3分〜1分: warning（黄/アンバー）
-- 残り1分〜0分: urgent（赤、overrunと同色。区別は state="running" ゲートで表現）
-- 経過 ≥ 計画時間: overrun（赤、既存の `--warn`）
+### タイマーの残り時間
+
+- 残り3分〜1分: warning（アンバー = `--pause` を再利用）
+- 残り1分〜0分: urgent（赤 = `--warn`）
+- 経過 ≥ 計画時間: overrun（赤 = `--warn`、state問わず）
 - `plannedDurationMs` 未設定: 中立色（現状維持）
 - 計画時間が短い場合、閾値をスキップし最も強い該当状態から開始（例:2分デックはwarning開始、40秒デックはurgent開始）
+
+### pause 時のタイマー色
+
+pause 時の timer は `--fg-dim`（stopped と同色）にする。以前はアンバー（`--pause`）だったが、これは warning urgency と色が衝突し、「amberが灯った時に一時停止か残り3分か区別できない」問題があった。色チャネルを「残り時間」に一本化し、pause は「進行が止まっている」を dim で表現する。pause と stopped の識別は state pill のドット色（pause=amber, stopped=dim）が担う。
+
+### agenda セクションタイマー
+
+- current かつ actual > planned → 行に `outcome="over"` を付け、time/delta を赤（`--warn`）表示
+- done は従来通り under/over 両方の outcome を付ける
+- upcoming は outcome なし
+- CSS の over ルールは `[data-peitho-agenda-state][data-peitho-agenda-outcome="over"]` の compound selector にして、current の青ルール (0,2,0) を specificity (0,3,0) で明示的に上回る
 
 ## 設計
 

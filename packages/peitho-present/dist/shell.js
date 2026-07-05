@@ -280,8 +280,9 @@ function createRow(doc, section) {
 function updateRow(view, index, currentSection, actual) {
   const state = agendaState(index, currentSection);
   view.row.dataset.peithoAgendaState = state;
-  if (state === "done") {
-    view.row.dataset.peithoAgendaOutcome = outcomeFor(actual, view.section.plannedDurationMs);
+  const outcome = state === "upcoming" ? null : outcomeFor(actual, view.section.plannedDurationMs);
+  if (outcome === "over" || state === "done" && outcome === "under") {
+    view.row.dataset.peithoAgendaOutcome = outcome;
   } else {
     delete view.row.dataset.peithoAgendaOutcome;
   }
