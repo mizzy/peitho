@@ -101,6 +101,23 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
     let mut unassigned = Vec::new();
 
     for fragment in slide.fragments.iter().cloned() {
+        if let FragmentKind::SlotGroup { name, children } = fragment.kind() {
+            let target = name.as_slot_name().clone();
+            let Some(contract) = layout.slot_by_name(&target).cloned() else {
+                return Err(unknown_explicit_slot_error(
+                    &target,
+                    fragment.line(),
+                    layout,
+                ));
+            };
+            for child in children.iter().cloned() {
+                slots
+                    .entry(target.clone())
+                    .or_insert_with(|| MappedSlot::new(contract.clone()))
+                    .push(child);
+            }
+            continue;
+        }
         let target = match fragment.kind() {
             FragmentKind::Heading { .. } if Some(fragment.line()) == title_line => {
                 SlotName::new("title").expect("conventional slot names are valid")
@@ -117,6 +134,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             | FragmentKind::Text => {
                 SlotName::new("body").expect("conventional slot names are valid")
             }
+            FragmentKind::SlotGroup { .. } => unreachable!("handled above"),
         };
         if let Some(contract) = layout.slot_by_name(&target).cloned() {
             slots
@@ -136,6 +154,25 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
         unassigned,
         notes: slide.notes.clone(),
     })
+}
+
+fn unknown_explicit_slot_error(target: &SlotName, line: usize, layout: &Layout) -> BuildError {
+    let known = layout
+        .slots()
+        .keys()
+        .map(SlotName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    BuildError::new(
+        ErrorKind::Layout,
+        Some(line),
+        format!(
+            "unknown slot '{}' in explicit `::: {{slot=...}}` for layout '{}'",
+            target.as_str(),
+            layout.name(),
+        ),
+        format!("use one of: {known}"),
+    )
 }
 
 fn image_slot_name(layout: &Layout, line: usize) -> Result<SlotName> {
@@ -644,5 +681,190 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    // ----- Explicit slot syntax (::: {slot=name}) mapping tests -----
+
+    fn two_column_layout() -> Layout {
+        parse_layout(
+            "two-column",
+            r#"<section>
+                <slot name="title" accepts="inline" arity="1"></slot>
+                <slot name="left" accepts="blocks" arity="1..*"></slot>
+                <slot name="right" accepts="blocks" arity="1..*"></slot>
+            </section>"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn explicit_slot_routes_fragment_to_named_slot() {
+        let markdown = "# Title\n\n::: {slot=left}\n\nleft body\n\n:::\n\n::: {slot=right}\n\nright body\n\n:::\n";
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &two_column_layout(),
+        )
+        .unwrap();
+        let slots = &mapped.mapped_slides()[0].slots;
+        assert_eq!(
+            slots[&SlotName::new("left").unwrap()].fragments().len(),
+            1,
+            "left slot receives its explicit content"
+        );
+        assert_eq!(
+            slots[&SlotName::new("right").unwrap()].fragments().len(),
+            1,
+            "right slot receives its explicit content"
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_slot_is_error() {
+        let markdown = "# Title\n\n::: {slot=middle}\n\nmiddle body\n\n:::\n";
+        let err = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &two_column_layout(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown slot 'middle'"));
+        assert!(err.help.contains("left") && err.help.contains("right"));
+    }
+
+    #[test]
+    fn explicit_slot_body_is_allowed() {
+        // Author decision (2026-07-05): using a conventional slot name
+        // explicitly is fine — intent-marking is not harmful.
+        let layout = parse_layout(
+            "statement",
+            r#"<section>
+                <slot name="title" accepts="inline" arity="1"></slot>
+                <slot name="body" accepts="blocks" arity="1..*"></slot>
+            </section>"#,
+        )
+        .unwrap();
+        let markdown = "# Title\n\n::: {slot=body}\n\nexplicit body\n\n:::\n";
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped.mapped_slides()[0].slots[&SlotName::new("body").unwrap()]
+                .fragments()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn title_inferred_from_outside_slot_group() {
+        // A heading inside an explicit slot group must not become the title:
+        // the SlotGroup fragment is not a Heading, and its children are only
+        // expanded during mapping into their target slot.
+        let markdown = "::: {slot=left}\n\n# Not the title\n\n:::\n\n# Real title\n\nbody";
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &two_column_layout(),
+        )
+        .unwrap_or_else(|e| panic!("mapping failed: {}", e.message));
+        let slots = &mapped.mapped_slides()[0].slots;
+        // The outer '# Real title' lands in `title`; the inner heading lands in `left`.
+        let title = &slots[&SlotName::new("title").unwrap()];
+        assert_eq!(
+            title.fragments()[0].plain_text(),
+            "Real title",
+            "outer heading remains the title candidate"
+        );
+    }
+
+    #[test]
+    fn explicit_and_conventional_share_slot_check_arity() {
+        // Explicit slot=body plus a conventional body fragment: with an
+        // ExactlyOne arity, the check phase must catch the overflow — no
+        // silent drop.
+        let layout = parse_layout(
+            "one-body",
+            r#"<section>
+                <slot name="title" accepts="inline" arity="1"></slot>
+                <slot name="body" accepts="blocks" arity="1"></slot>
+            </section>"#,
+        )
+        .unwrap();
+        let markdown = "# Title\n\n::: {slot=body}\n\nexplicit\n\n:::\n\nconventional\n";
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let err = check_deck(mapped).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Arity);
+    }
+
+    #[test]
+    fn accepts_violation_via_explicit_slot() {
+        // A paragraph explicitly routed to a code slot must be caught by
+        // check_accepts — validation rule #11.
+        let layout = parse_layout(
+            "code-only",
+            r#"<section>
+                <slot name="title" accepts="inline" arity="1"></slot>
+                <slot name="snippet" accepts="code" arity="1"></slot>
+            </section>"#,
+        )
+        .unwrap();
+        let markdown = "# Title\n\n::: {slot=snippet}\n\nthis is a paragraph\n\n:::\n";
+        let mapped = map_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let err = check_deck(mapped).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Accepts);
+    }
+
+    #[test]
+    fn dispatch_prefers_layout_with_explicit_slot_name() {
+        // With a title-only cover layout and a two-column layout co-present,
+        // a slide with ::: {slot=left} can only match two-column: the cover
+        // layout has no 'left' slot so unknown-explicit-slot fails during
+        // probing and the two-column layout wins uniquely.
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, two_column_layout()]).unwrap();
+        let markdown = "# Title\n\n::: {slot=left}\n\nL\n\n:::\n\n::: {slot=right}\n\nR\n\n:::\n";
+        let mapped = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layouts,
+        )
+        .unwrap();
+        assert_eq!(mapped.mapped_slides()[0].layout.name(), "two-column");
+    }
+
+    #[test]
+    fn dispatch_rejects_when_no_layout_has_explicit_slot() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let statement = parse_layout(
+            "statement",
+            r#"<section>
+                <slot name="title" accepts="inline" arity="1"></slot>
+                <slot name="body" accepts="blocks" arity="1..*"></slot>
+            </section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, statement]).unwrap();
+        let markdown = "# Title\n\n::: {slot=left}\n\nx\n\n:::\n";
+        let err = dispatch_by_convention(
+            parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+            &layouts,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no layout matches"));
     }
 }
