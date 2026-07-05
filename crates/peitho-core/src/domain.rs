@@ -6,6 +6,63 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Slide canvas aspect ratio.
+///
+/// One of `16:9` (default) or `4:3`. Drives the logical width/height of
+/// every slide and the presenter view's proportions. Wire form on
+/// `manifest.json` is the label string; internal pixel dimensions are looked
+/// up via [`AspectRatio::width`] / [`AspectRatio::height`].
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AspectRatio {
+    #[serde(rename = "16:9")]
+    #[default]
+    Ratio16To9,
+    #[serde(rename = "4:3")]
+    Ratio4To3,
+}
+
+impl AspectRatio {
+    /// Logical canvas width in pixels for this ratio.
+    pub fn width(self) -> u32 {
+        match self {
+            Self::Ratio16To9 => 1280,
+            Self::Ratio4To3 => 960,
+        }
+    }
+
+    /// Logical canvas height in pixels for this ratio.
+    pub fn height(self) -> u32 {
+        match self {
+            Self::Ratio16To9 | Self::Ratio4To3 => 720,
+        }
+    }
+
+    /// CSS `aspect-ratio` value string for this ratio (e.g. `"16 / 9"`).
+    pub(crate) fn css_aspect_value(self) -> &'static str {
+        match self {
+            Self::Ratio16To9 => "16 / 9",
+            Self::Ratio4To3 => "4 / 3",
+        }
+    }
+}
+
+impl FromStr for AspectRatio {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "16:9" => Ok(Self::Ratio16To9),
+            "4:3" => Ok(Self::Ratio4To3),
+            _ => Err(format!("unknown aspect_ratio '{value}'")),
+        }
+    }
+}
+
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -639,6 +696,64 @@ impl RenderedSlide {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aspect_ratio_constants_define_canvas_dimensions() {
+        assert_eq!(AspectRatio::Ratio16To9.width(), 1280);
+        assert_eq!(AspectRatio::Ratio16To9.height(), 720);
+        assert_eq!(AspectRatio::Ratio4To3.width(), 960);
+        assert_eq!(AspectRatio::Ratio4To3.height(), 720);
+        assert_eq!(AspectRatio::default(), AspectRatio::Ratio16To9);
+    }
+
+    #[test]
+    fn aspect_ratio_serializes_as_semantic_string() {
+        assert_eq!(
+            serde_json::to_string(&AspectRatio::Ratio16To9).unwrap(),
+            r#""16:9""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AspectRatio::Ratio4To3).unwrap(),
+            r#""4:3""#
+        );
+    }
+
+    #[test]
+    fn aspect_ratio_deserializes_semantic_string() {
+        assert_eq!(
+            serde_json::from_str::<AspectRatio>(r#""16:9""#).unwrap(),
+            AspectRatio::Ratio16To9
+        );
+        assert_eq!(
+            serde_json::from_str::<AspectRatio>(r#""4:3""#).unwrap(),
+            AspectRatio::Ratio4To3
+        );
+    }
+
+    #[test]
+    fn aspect_ratio_parses_labels_from_str() {
+        assert_eq!(
+            "16:9".parse::<AspectRatio>().unwrap(),
+            AspectRatio::Ratio16To9
+        );
+        assert_eq!(
+            "4:3".parse::<AspectRatio>().unwrap(),
+            AspectRatio::Ratio4To3
+        );
+        assert!("16:10".parse::<AspectRatio>().is_err());
+    }
+
+    #[test]
+    fn aspect_ratio_rejects_unknown_wire_string() {
+        let err = serde_json::from_str::<AspectRatio>(r#""16:10""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn aspect_ratio_rejects_pixel_dimension_object() {
+        assert!(serde_json::from_str::<AspectRatio>(r#"{"width":1280,"height":720}"#).is_err());
+    }
 
     #[test]
     fn parses_all_slot_accepts_values() {

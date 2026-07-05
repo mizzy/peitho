@@ -1,6 +1,3 @@
-export const CANVAS_WIDTH = 1280;
-export const CANVAS_HEIGHT = 720;
-
 export type CanvasViewport = {
   width: number;
   height: number;
@@ -18,14 +15,14 @@ export type CanvasScalerOptions = {
   target: HTMLElement;
   window?: Window;
   viewport?: () => CanvasViewport;
-  canvasWidth?: number;
-  canvasHeight?: number;
+  canvasWidth: number;
+  canvasHeight: number;
 };
 
 export function calculateCanvasFit(
   viewport: CanvasViewport,
-  canvasWidth = CANVAS_WIDTH,
-  canvasHeight = CANVAS_HEIGHT
+  canvasWidth: number,
+  canvasHeight: number
 ): CanvasFit {
   const scale = Math.min(viewport.width / canvasWidth, viewport.height / canvasHeight);
   const width = canvasWidth * scale;
@@ -41,8 +38,8 @@ export function calculateCanvasFit(
 
 export function installCanvasScaler(options: CanvasScalerOptions): () => void {
   const win = options.window ?? window;
-  const canvasWidth = options.canvasWidth ?? CANVAS_WIDTH;
-  const canvasHeight = options.canvasHeight ?? CANVAS_HEIGHT;
+  const canvasWidth = options.canvasWidth;
+  const canvasHeight = options.canvasHeight;
   const viewport =
     options.viewport ??
     (() => ({

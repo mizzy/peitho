@@ -302,6 +302,9 @@ fn build_writes_manifest_json_with_refs_not_html() {
     )));
     assert!(manifest.contains(r#""title": "Peitho Architecture""#));
     assert!(manifest.contains(r#""slideCount": 3"#));
+    assert!(manifest.contains(r#""aspectRatio": "16:9""#));
+    assert!(manifest.contains(r#""canvasWidth": 1280"#));
+    assert!(manifest.contains(r#""canvasHeight": 720"#));
     assert!(manifest.contains(r#""src": "slides/000-arch-1.html""#));
     assert!(manifest.contains(r#""hasNotes": false"#));
     assert!(!manifest.contains("<section"));
@@ -328,7 +331,11 @@ fn build_writes_fetching_index_without_embedded_slide_html() {
     assert!(index.contains("fetchOk(slide.src)"));
     assert!(index.contains(r#"<main id="peitho-slides">"#));
     assert!(index.contains(r#"<div id="peitho-canvas"></div>"#));
+    assert!(index.contains("--peitho-canvas-width: 1280px;"));
+    assert!(index.contains("--peitho-canvas-height: 720px;"));
+    assert!(index.contains("width: 1280px; height: 720px;"));
     assert!(index.contains("const CANVAS_WIDTH = 1280"));
+    assert!(index.contains("const CANVAS_HEIGHT = 720"));
     assert!(!index.contains("shell.js"));
     assert!(!index.contains("Peitho Architecture"));
     assert!(!index.contains("data-slide-key=\"arch-1\""));
@@ -939,6 +946,38 @@ fn feature_tour_or_new_image_example_builds() {
 }
 
 #[test]
+fn aspect_ratio_4_3_example_builds_with_960_canvas() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/aspect-ratio-4-3/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 2 slide(s)"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["aspectRatio"].as_str(), Some("4:3"));
+    assert_eq!(manifest["canvasWidth"].as_u64(), Some(960));
+    assert_eq!(manifest["canvasHeight"].as_u64(), Some(720));
+
+    let index = fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(index.contains("--peitho-canvas-width: 960px;"));
+    assert!(index.contains("--peitho-canvas-height: 720px;"));
+    assert!(index.contains("width: 960px; height: 720px;"));
+    assert!(index.contains("const CANVAS_WIDTH = 960"));
+    assert!(index.contains("const CANVAS_HEIGHT = 720"));
+}
+
+#[test]
 fn build_keeps_slide_html_only_in_fragment_files() {
     let (_dir, out) = build_multi_slide_fixture();
     let index = fs::read_to_string(out.join("index.html")).unwrap();
@@ -987,11 +1026,11 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
 }
 
 #[test]
-fn base_theme_targets_fixed_canvas_size() {
+fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
     let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
 
-    assert!(css.contains("width: 1280px;"));
-    assert!(css.contains("height: 720px;"));
+    assert!(css.contains("width: var(--peitho-canvas-width, 1280px);"));
+    assert!(css.contains("height: var(--peitho-canvas-height, 720px);"));
     assert!(css.contains("font-size: 56px;"));
     assert!(!css.contains("min-height: 100vh"));
     assert!(!css.contains("font-size: 1.4rem"));

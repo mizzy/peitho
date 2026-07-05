@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
 import type { PresentConfig } from "../../../bindings/PresentConfig";
 import {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
   calculateCanvasFit,
   fallbackFeatures,
   installCanvasClickNavigation,
@@ -34,6 +32,9 @@ describe("generated manifest contract", () => {
       title: "Demo",
       slideCount: 1,
       plannedDurationMs: null,
+      aspectRatio: "16:9",
+      canvasWidth: 1280,
+      canvasHeight: 720,
       sections: [],
       slides: [
         {
@@ -48,6 +49,9 @@ describe("generated manifest contract", () => {
     const options: ShellOptions = { root: document.createElement("main") };
 
     expect(manifest.slides[0].key).toBe("intro");
+    expect(manifest.aspectRatio).toBe("16:9");
+    expect(manifest.canvasWidth).toBe(1280);
+    expect(manifest.canvasHeight).toBe(720);
     expect(options.root.tagName).toBe("MAIN");
   });
 
@@ -58,6 +62,9 @@ describe("generated manifest contract", () => {
       title: "Demo",
       slideCount: 1,
       plannedDurationMs: null,
+      aspectRatio: "16:9",
+      canvasWidth: 1280,
+      canvasHeight: 720,
       sections: [],
       slides: [
         {
@@ -96,9 +103,7 @@ describe("generated manifest contract", () => {
   });
 
   it("exports the presentation canvas public API", () => {
-    expect(CANVAS_WIDTH).toBe(1280);
-    expect(CANVAS_HEIGHT).toBe(720);
-    expect(calculateCanvasFit({ width: 1280, height: 720 }).scale).toBe(1);
+    expect(calculateCanvasFit({ width: 1280, height: 720 }, 1280, 720).scale).toBe(1);
     expect(typeof installCanvasScaler).toBe("function");
     expect(typeof installPresentationControls).toBe("function");
     expect(typeof installCanvasClickNavigation).toBe("function");

@@ -573,7 +573,7 @@ fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<(
     fs::write(out.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         out.join("index.html"),
-        peitho_core::render_distribution_index(),
+        peitho_core::render_distribution_index(artifacts.rendered.settings().aspect_ratio()),
     )
     .into_diagnostic()?;
     Ok(())
@@ -873,12 +873,12 @@ fn emit_present_cache(
     .into_diagnostic()?;
     fs::write(
         cache.join("present.html"),
-        peitho_core::render_present_index(),
+        peitho_core::render_present_index(artifacts.rendered.settings().aspect_ratio()),
     )
     .into_diagnostic()?;
     fs::write(
         cache.join("presenter.html"),
-        peitho_core::render_presenter_index(),
+        peitho_core::render_presenter_index(artifacts.rendered.settings().aspect_ratio()),
     )
     .into_diagnostic()?;
     match shell {
@@ -1142,7 +1142,9 @@ contexts:
         let artifacts = build_artifacts(&deck).unwrap();
 
         assert_eq!(artifacts.slide_count, 1);
-        assert!(artifacts.css.contains("width: 1280px;"));
+        assert!(artifacts
+            .css
+            .contains("width: var(--peitho-canvas-width, 1280px);"));
     }
 
     #[test]

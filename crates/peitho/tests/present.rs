@@ -646,7 +646,7 @@ fn repository_example_present_no_serve_smoke() {
     assert!(presenter_html.contains(".peitho-presenter-pane"));
     assert!(presenter_html.contains("installCloseOnEscape(window)"));
     assert!(presenter_html.contains("serverSyncChannelFactory"));
-    assert!(shell_js.contains("CANVAS_WIDTH"));
+    assert!(shell_js.contains("installCanvasScaler"));
     assert!(shell_js.contains("installPresentationControls"));
     assert!(shell_js.contains("installCloseOnEscape"));
     assert!(shell_js.contains("openPresenterPopup"));

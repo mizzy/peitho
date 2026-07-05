@@ -1,6 +1,6 @@
 .peitho-slide {
-  width: 1280px;
-  height: 720px;
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
   display: flex;
   flex-direction: column;
   gap: 32px;

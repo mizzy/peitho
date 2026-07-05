@@ -44,6 +44,11 @@ export type ShellOptions = {
   viewport?: () => CanvasViewport;
 };
 
+type CanvasDimensions = {
+  width: number;
+  height: number;
+};
+
 export type SlideView = {
   meta: ManifestSlide;
   host: HTMLElement;
@@ -114,11 +119,17 @@ class PresentShellController implements PresentShell {
   async load(): Promise<void> {
     try {
       const manifest = await this.fetchJson<Manifest>("manifest.json");
+      const dimensions = {
+        width: manifest.canvasWidth,
+        height: manifest.canvasHeight
+      };
+      const cssAspect = manifest.aspectRatio.replace(":", " / ");
+      this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       const pending: SlideView[] = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);
-        const host = this.createSlideHost(slide, html, css);
+        const host = this.createSlideHost(slide, html, css, dimensions);
         pending.push({ meta: slide, host });
       }
       this.manifest = manifest;
@@ -128,6 +139,7 @@ class PresentShellController implements PresentShell {
       }
       this.show(0);
     } catch (error) {
+      this.clearCanvasRootProperties();
       this.root.replaceChildren();
       this.root.textContent = error instanceof Error ? error.message : String(error);
     }
@@ -157,6 +169,7 @@ class PresentShellController implements PresentShell {
   destroy(): void {
     this.endPresentation();
     while (this.canvasCleanups.length > 0) this.canvasCleanups.pop()?.();
+    this.clearCanvasRootProperties();
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:timercontrol", this.onTimerControl);
     this.win.removeEventListener("pagehide", this.onPageHide);
@@ -178,7 +191,24 @@ class PresentShellController implements PresentShell {
     return response;
   }
 
-  private createSlideHost(slide: ManifestSlide, html: string, css: string): HTMLElement {
+  private setCanvasRootProperties(dimensions: CanvasDimensions, cssAspect: string): void {
+    this.root.style.setProperty("--peitho-canvas-width", `${dimensions.width}px`);
+    this.root.style.setProperty("--peitho-canvas-height", `${dimensions.height}px`);
+    this.root.style.setProperty("--peitho-canvas-aspect", cssAspect);
+  }
+
+  private clearCanvasRootProperties(): void {
+    this.root.style.removeProperty("--peitho-canvas-width");
+    this.root.style.removeProperty("--peitho-canvas-height");
+    this.root.style.removeProperty("--peitho-canvas-aspect");
+  }
+
+  private createSlideHost(
+    slide: ManifestSlide,
+    html: string,
+    css: string,
+    dimensions: CanvasDimensions
+  ): HTMLElement {
     const host = this.doc.createElement("section");
     host.classList.add("peitho-slide");
     host.dataset.slideKey = slide.key;
@@ -191,7 +221,9 @@ class PresentShellController implements PresentShell {
       installCanvasScaler({
         window: this.win,
         target: host,
-        viewport: this.viewport
+        viewport: this.viewport,
+        canvasWidth: dimensions.width,
+        canvasHeight: dimensions.height
       })
     );
     const shadow = host.attachShadow({ mode: "open" });

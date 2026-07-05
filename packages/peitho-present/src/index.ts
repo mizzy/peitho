@@ -1,9 +1,4 @@
-export {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
-  calculateCanvasFit,
-  installCanvasScaler
-} from "./canvas";
+export { calculateCanvasFit, installCanvasScaler } from "./canvas";
 export { installAgenda } from "./agenda";
 export type { AgendaOptions } from "./agenda";
 export type { CanvasFit, CanvasScalerOptions, CanvasViewport } from "./canvas";
