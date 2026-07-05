@@ -23,9 +23,10 @@ pub use manifest::{
 };
 pub use mapping::{dispatch_by_convention, map_by_convention};
 pub use notes::{notes_json, Notes};
-pub use parser::parse_markdown;
+pub use parser::{parse_frontmatter, parse_markdown, ParsedFrontmatter};
 pub use phase::{
-    require_checked_for_render, resolve_image_paths, Checked, Deck, ImageRequest, Mapped, Rendered,
+    require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, ImageRequest,
+    Mapped, Rendered,
 };
 pub use present_config::{present_config_json, PresentConfig};
 pub use render::{

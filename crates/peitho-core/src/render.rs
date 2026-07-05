@@ -654,9 +654,17 @@ mod tests {
         check::check_deck,
         layout::parse_layout,
         mapping::map_by_convention,
-        parser::parse_markdown,
+        parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{CheckedSlide, DeckSettings, PlannedTime},
     };
+
+    fn parse_markdown(
+        source: &str,
+        highlighter: &crate::highlight::Highlighter,
+    ) -> crate::error::Result<Deck<crate::phase::Parsed>> {
+        let frontmatter = parse_frontmatter(source)?;
+        parse_markdown_impl(source, frontmatter, highlighter)
+    }
 
     #[test]
     fn renders_checked_slide_with_key_and_slot_classes() {
@@ -841,7 +849,7 @@ mod tests {
         )
         .unwrap();
         let parsed = parse_markdown(
-            "---\ntime: 15m\n---\n# Intro",
+            "---\ntime: 15m\nlayouts: ./layouts\ncss: ./css\nsyntaxes: ./syntaxes\n---\n# Intro",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
@@ -855,6 +863,18 @@ mod tests {
                 .planned_time()
                 .map(PlannedTime::as_millis),
             Some(900_000)
+        );
+        assert_eq!(
+            rendered.settings().layouts().map(|path| path.as_path()),
+            Some(std::path::Path::new("./layouts"))
+        );
+        assert_eq!(
+            rendered.settings().css().map(|path| path.as_path()),
+            Some(std::path::Path::new("./css"))
+        );
+        assert_eq!(
+            rendered.settings().syntaxes().map(|path| path.as_path()),
+            Some(std::path::Path::new("./syntaxes"))
         );
     }
 

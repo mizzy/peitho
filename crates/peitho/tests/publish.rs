@@ -406,21 +406,14 @@ fn publish_propagates_command_exit_code() {
 #[test]
 fn repository_example_can_be_published_to_external_command() {
     let dir = tempdir().unwrap();
+    let deck = write_repository_example_deck_with_assets(dir.path());
     let out = dir.path().join("dist");
     let probe = dir.path().join("published.txt");
 
     Command::cargo_bin("peitho")
         .unwrap()
         .current_dir(workspace_root())
-        .args([
-            "build",
-            "examples/deck.md",
-            "--layouts",
-            "layouts/title-body-code.html",
-            "--css",
-            "themes/base.css",
-            "--out",
-        ])
+        .args(["build", deck.to_str().unwrap(), "--out"])
         .arg(&out)
         .assert()
         .success();
@@ -449,4 +442,20 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .unwrap()
         .to_path_buf()
+}
+
+fn write_repository_example_deck_with_assets(dir: &Path) -> PathBuf {
+    let root = workspace_root();
+    let deck = dir.join("deck.md");
+    let body = fs::read_to_string(root.join("examples/deck.md")).unwrap();
+    fs::write(
+        &deck,
+        format!(
+            "---\nlayouts: {}\ncss: {}\n---\n{body}",
+            root.join("layouts/title-body-code.html").display(),
+            root.join("themes/base.css").display()
+        ),
+    )
+    .unwrap();
+    deck
 }

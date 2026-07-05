@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 use pulldown_cmark::{
     CodeBlockKind, Event, HeadingLevel, MetadataBlockKind, Options, Parser, Tag, TagEnd,
@@ -10,7 +13,8 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     phase::{
-        Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide, PlannedTime,
+        AssetPath, Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide,
+        PlannedTime,
     },
 };
 
@@ -38,6 +42,12 @@ struct PageSectionMarker {
 struct DeckFrontmatter {
     #[serde(default, deserialize_with = "deserialize_optional_planned_time")]
     time: Option<PlannedTime>,
+    #[serde(default)]
+    layouts: Option<AssetPath>,
+    #[serde(default)]
+    css: Option<AssetPath>,
+    #[serde(default)]
+    syntaxes: Option<AssetPath>,
 }
 
 #[derive(Debug)]
@@ -98,18 +108,50 @@ struct RawFrontmatter {
     yaml: String,
 }
 
-struct SplitSlides {
-    frontmatter: Option<RawFrontmatter>,
-    ranges: Vec<SlideRange>,
+pub struct ParsedFrontmatter {
+    settings: DeckSettings,
+    pub(crate) body_start: usize,
+    key_lines: HashMap<&'static str, usize>,
 }
 
-pub fn parse_markdown(source: &str, highlighter: &Highlighter) -> Result<Deck<Parsed>> {
+impl ParsedFrontmatter {
+    pub fn settings(&self) -> &DeckSettings {
+        &self.settings
+    }
+
+    pub fn key_line(&self, key: &str) -> Option<usize> {
+        self.key_lines.get(key).copied()
+    }
+}
+
+pub fn parse_frontmatter(source: &str) -> Result<ParsedFrontmatter> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let SplitSlides {
-        frontmatter,
-        ranges,
-    } = split_slide_ranges(source)?;
-    let settings = parse_deck_frontmatter(frontmatter.as_ref())?;
+    let (raw, body_start) = leading_frontmatter(source)?;
+    if raw.is_none() {
+        reject_invalid_leading_frontmatter_start(source)?;
+    }
+    let settings = parse_deck_frontmatter(raw.as_ref())?;
+    let key_lines = frontmatter_key_lines(raw.as_ref());
+
+    Ok(ParsedFrontmatter {
+        settings,
+        body_start,
+        key_lines,
+    })
+}
+
+pub fn parse_markdown(
+    source: &str,
+    frontmatter: ParsedFrontmatter,
+    highlighter: &Highlighter,
+) -> Result<Deck<Parsed>> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let ParsedFrontmatter {
+        settings,
+        body_start,
+        ..
+    } = frontmatter;
+    let ranges = split_slide_ranges(source, body_start)?;
     if ranges.is_empty() {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -133,12 +175,7 @@ pub fn parse_markdown(source: &str, highlighter: &Highlighter) -> Result<Deck<Pa
     Ok(Deck::parsed(settings, slides))
 }
 
-fn split_slide_ranges(source: &str) -> Result<SplitSlides> {
-    let (frontmatter, content_start) = leading_frontmatter(source)?;
-    if frontmatter.is_none() {
-        reject_invalid_leading_frontmatter_start(source)?;
-    }
-
+fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRange>> {
     let mut ranges = Vec::new();
     let mut start = content_start;
     let mut list_depth = 0usize;
@@ -170,10 +207,7 @@ fn split_slide_ranges(source: &str) -> Result<SplitSlides> {
         .into_iter()
         .filter(|range| !source[range.start..range.end].trim().is_empty())
         .collect();
-    Ok(SplitSlides {
-        frontmatter,
-        ranges,
-    })
+    Ok(ranges)
 }
 
 fn resolve_deck_sections(drafts: &[ParsedSlideDraft]) -> Result<Vec<ResolvedSection>> {
@@ -288,6 +322,8 @@ where
     PlannedTime::deserialize(deserializer).map(Some)
 }
 
+const ASSET_PATH_EMPTY_MESSAGE: &str = "value is empty";
+
 fn parse_planned_time_text(input: &str) -> std::result::Result<u64, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -393,6 +429,35 @@ impl<'de> Deserialize<'de> for PlannedTime {
     }
 }
 
+impl<'de> Deserialize<'de> for AssetPath {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AssetPathVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AssetPathVisitor {
+            type Value = AssetPath;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a non-empty asset path string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value.trim().is_empty() {
+                    return Err(E::custom(ASSET_PATH_EMPTY_MESSAGE));
+                }
+                Ok(AssetPath::new(PathBuf::from(value)))
+            }
+        }
+
+        deserializer.deserialize_str(AssetPathVisitor)
+    }
+}
+
 fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> {
     let Some(raw) = raw else {
         return Ok(DeckSettings::default());
@@ -416,7 +481,30 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
     let parsed: DeckFrontmatter =
         serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
 
-    Ok(DeckSettings::new(parsed.time, Vec::new()))
+    Ok(DeckSettings::new(
+        parsed.time,
+        Vec::new(),
+        parsed.layouts,
+        parsed.css,
+        parsed.syntaxes,
+    ))
+}
+
+fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, usize> {
+    let mut key_lines = HashMap::new();
+    let Some(raw) = raw else {
+        return key_lines;
+    };
+
+    for (index, line) in raw.yaml.lines().enumerate() {
+        for key in ["time", "layouts", "css", "syntaxes"] {
+            if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
+                key_lines.entry(key).or_insert(raw.line + index + 1);
+            }
+        }
+    }
+
+    key_lines
 }
 
 fn first_nonblank_yaml_line(yaml: &str) -> usize {
@@ -475,8 +563,14 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter key: time"
-    } else if message.contains("time")
+        "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+    } else if frontmatter_message_mentions_key(message, "layouts") {
+        "provide a path (relative to the deck file), or remove the layouts: key"
+    } else if frontmatter_message_mentions_key(message, "css") {
+        "provide a path (relative to the deck file), or remove the css: key"
+    } else if frontmatter_message_mentions_key(message, "syntaxes") {
+        "provide a path (relative to the deck file), or remove the syntaxes: key"
+    } else if frontmatter_message_mentions_key(message, "time")
         || message.contains("duration")
         || message.contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE)
         || message.contains("unit")
@@ -488,6 +582,10 @@ fn frontmatter_help(message: &str) -> &'static str {
     } else {
         "write valid YAML frontmatter before the first slide"
     }
+}
+
+fn frontmatter_message_mentions_key(message: &str, key: &str) -> bool {
+    message.contains(&format!("`{key}`")) || message.contains(&format!("{key}:"))
 }
 
 fn leading_frontmatter(source: &str) -> Result<(Option<RawFrontmatter>, usize)> {
@@ -1324,6 +1422,15 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{domain::FragmentKind, error::ErrorKind, phase::KeySource};
+    use std::path::Path;
+
+    fn parse_markdown(
+        source: &str,
+        highlighter: &crate::highlight::Highlighter,
+    ) -> Result<Deck<Parsed>> {
+        let frontmatter = parse_frontmatter(source)?;
+        super::parse_markdown(source, frontmatter, highlighter)
+    }
 
     #[test]
     fn deck_frontmatter_yaml_dependency_is_available() {
@@ -1367,6 +1474,136 @@ mod tests {
         assert_eq!(
             settings.planned_time().map(PlannedTime::as_millis),
             Some(900_000)
+        );
+    }
+
+    #[test]
+    fn parse_frontmatter_returns_default_settings_when_no_frontmatter() {
+        let frontmatter = parse_frontmatter("# Intro").unwrap();
+
+        assert!(frontmatter.settings().planned_time().is_none());
+        assert!(frontmatter.settings().layouts().is_none());
+        assert!(frontmatter.settings().css().is_none());
+        assert!(frontmatter.settings().syntaxes().is_none());
+        assert_eq!(frontmatter.body_start, 0);
+    }
+
+    #[test]
+    fn parse_frontmatter_rejects_empty_pair_as_invalid_leading_frontmatter() {
+        let err = match parse_frontmatter("---\n---\n# Intro") {
+            Ok(_) => panic!("expected empty frontmatter pair to be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err
+            .to_string()
+            .contains("deck starts with --- but no valid YAML frontmatter was found"));
+        assert_eq!(
+            err.help,
+            "put --- on the first line, settings on the following lines, and close with --- without blank lines"
+        );
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_layouts() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\nlayouts: ./layouts\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("layouts"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_css() {
+        let frontmatter = parse_frontmatter("---\ntime: 15m\ncss: ./css\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("css"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_syntaxes() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\nsyntaxes: ./syntaxes\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("syntaxes"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_time() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\nlayouts: ./layouts\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("time"), Some(2));
+    }
+
+    #[test]
+    fn parse_frontmatter_key_line_returns_none_for_absent_key() {
+        let frontmatter = parse_frontmatter("---\nlayouts: ./layouts\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("css"), None);
+    }
+
+    #[test]
+    fn parse_markdown_slices_body_from_parsed_frontmatter_offset() {
+        let markdown = "---\ntime: 15m\nlayouts: ./layouts\ncss: ./css\n---\n# Intro";
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let deck = super::parse_markdown(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 1);
+        assert_eq!(slide.fragments[0].markdown(), "# Intro");
+        assert_eq!(
+            slide.fragments[0].kind(),
+            &FragmentKind::Heading { level: 1 }
+        );
+        assert_eq!(slide.fragments[0].line(), 6);
+    }
+
+    #[test]
+    fn parses_frontmatter_layouts_key_carries_to_settings() {
+        let deck = parse_markdown(
+            "---\nlayouts: ./layouts\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings().layouts().map(|path| path.as_path()),
+            Some(Path::new("./layouts"))
+        );
+    }
+
+    #[test]
+    fn parses_frontmatter_css_key_carries_to_settings() {
+        let deck = parse_markdown(
+            "---\ncss: ./css\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings().css().map(|path| path.as_path()),
+            Some(Path::new("./css"))
+        );
+    }
+
+    #[test]
+    fn parses_frontmatter_syntaxes_key_carries_to_settings() {
+        let deck = parse_markdown(
+            "---\nsyntaxes: ./syntaxes\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings().syntaxes().map(|path| path.as_path()),
+            Some(Path::new("./syntaxes"))
         );
     }
 
@@ -2300,11 +2537,17 @@ After list
     #[test]
     fn frontmatter_is_not_a_slide_and_later_rules_still_split_slides() {
         let markdown = "---\ntime: 15m\n---\n\n# Intro\n\n---\n# Details";
-        let split = split_slide_ranges(markdown).unwrap();
-        let frontmatter = split.frontmatter.as_ref().unwrap();
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let ranges = split_slide_ranges(markdown, frontmatter.body_start).unwrap();
 
-        assert_eq!(frontmatter.line, 1);
-        assert_eq!(frontmatter.yaml, "time: 15m\n");
+        assert_eq!(
+            frontmatter
+                .settings()
+                .planned_time()
+                .map(PlannedTime::as_millis),
+            Some(900_000)
+        );
+        assert_eq!(ranges.len(), 2);
 
         let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
         assert_eq!(deck.parsed_slides().len(), 2);
@@ -2362,7 +2605,7 @@ After list
     }
 
     #[test]
-    fn rejects_unknown_frontmatter_key_with_line_and_help() {
+    fn unknown_key_help_mentions_all_supported_keys() {
         let err = parse_markdown(
             "---\ntime: 15m\nunknown: true\n---\n# Intro",
             &crate::highlight::Highlighter::defaults(),
@@ -2374,7 +2617,61 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter key: time"
+            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_layouts_string_with_line_and_help() {
+        let err = parse_markdown(
+            "---\nlayouts: \"\"\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("layouts: value is empty"), "{err}");
+        assert_eq!(
+            err.help,
+            "provide a path (relative to the deck file), or remove the layouts: key"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_css_string_with_line_and_help() {
+        let err = parse_markdown(
+            "---\ncss: \"\"\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("css: value is empty"), "{err}");
+        assert_eq!(
+            err.help,
+            "provide a path (relative to the deck file), or remove the css: key"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_syntaxes_string_with_line_and_help() {
+        let err = parse_markdown(
+            "---\nsyntaxes: \"\"\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(
+            err.to_string().contains("syntaxes: value is empty"),
+            "{err}"
+        );
+        assert_eq!(
+            err.help,
+            "provide a path (relative to the deck file), or remove the syntaxes: key"
         );
     }
 
@@ -2391,6 +2688,35 @@ After list
                 err.help,
                 "set time to 15m, 90s, 1h, 1h30m, or an integer minute count"
             );
+        }
+    }
+
+    #[test]
+    fn frontmatter_help_routes_invalid_values_by_key() {
+        let cases = [
+            (
+                "---\nlayouts: \"\"\n---\n# Intro",
+                "provide a path (relative to the deck file), or remove the layouts: key",
+            ),
+            (
+                "---\ncss: \"\"\n---\n# Intro",
+                "provide a path (relative to the deck file), or remove the css: key",
+            ),
+            (
+                "---\nsyntaxes: \"\"\n---\n# Intro",
+                "provide a path (relative to the deck file), or remove the syntaxes: key",
+            ),
+            (
+                "---\ntime: bad-value\n---\n# Intro",
+                "set time to 15m, 90s, 1h, 1h30m, or an integer minute count",
+            ),
+        ];
+
+        for (markdown, help) in cases {
+            let err = parse_markdown(markdown, &crate::highlight::Highlighter::defaults())
+                .expect_err("invalid frontmatter value should fail");
+
+            assert_eq!(err.help, help);
         }
     }
 
@@ -2459,7 +2785,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter key: time"
+            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
         );
     }
 
@@ -2515,7 +2841,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter key: time"
+            "use only the supported deck frontmatter keys: time, layouts, css, syntaxes"
         );
     }
 

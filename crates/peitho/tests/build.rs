@@ -20,7 +20,10 @@ fn build_writes_index_html_and_css() {
 
     fs::write(
         &deck,
-        "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody\n\n```rust\nfn main() {}\n```",
+        deck_with_assets(
+            "./title-body-code.html",
+            "<!-- {\"key\":\"arch-1\"} -->\n# Architecture\n\nBody\n\n```rust\nfn main() {}\n```",
+        ),
     )
     .unwrap();
     fs::write(
@@ -40,10 +43,6 @@ fn build_writes_index_html_and_css() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -74,7 +73,10 @@ fn build_fails_with_line_and_help_for_contract_violation() {
 
     fs::write(
         &deck,
-        "# Architecture\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```",
+        deck_with_assets(
+            "./title-body-code.html",
+            "# Architecture\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```",
+        ),
     )
     .unwrap();
     fs::write(
@@ -90,16 +92,12 @@ fn build_fails_with_line_and_help_for_contract_violation() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("line 3"))
+        .stderr(predicate::str::contains("line 7"))
         .stderr(predicate::str::contains("slot 'code' got 2 item(s)"))
         .stderr(predicate::str::contains(
             "help: use a layout with more code capacity or remove one code block",
@@ -119,7 +117,10 @@ fn contract_error_uses_layout_file_stem_as_layout_name() {
 
     fs::write(
         &deck,
-        "# Architecture\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```",
+        deck_with_assets(
+            "./custom-layout.html",
+            "# Architecture\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```",
+        ),
     )
     .unwrap();
     fs::write(
@@ -135,10 +136,6 @@ fn contract_error_uses_layout_file_stem_as_layout_name() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -171,7 +168,7 @@ fn build_dispatches_slides_across_multiple_layouts() {
         r#"<section class="statement"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
     )
     .unwrap();
-    let base = write_base_css(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -179,10 +176,6 @@ fn build_dispatches_slides_across_multiple_layouts() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layouts_dir.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -246,7 +239,7 @@ fn build_rejects_ambiguous_slide_with_disambiguation_help() {
         )
         .unwrap();
     }
-    let base = write_base_css(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -254,10 +247,6 @@ fn build_rejects_ambiguous_slide_with_disambiguation_help() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layouts_dir.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             dir.path().join("dist").to_str().unwrap(),
         ])
@@ -275,8 +264,8 @@ fn build_writes_slide_fragments_in_slides_directory() {
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
     write_multi_slide_fixture(&deck);
-    let layout = write_layout(dir.path());
-    let base = write_base_css(dir.path());
+    write_layout(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(
         dir.path(),
         r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#,
@@ -287,10 +276,6 @@ fn build_writes_slide_fragments_in_slides_directory() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -354,10 +339,17 @@ fn build_copies_markdown_image_to_dist_assets() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
-    fs::write(&deck, "# Visual\n\n![Architecture](img/arch.png)").unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-image.html",
+            "# Visual\n\n![Architecture](img/arch.png)",
+        ),
+    )
+    .unwrap();
     write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -365,10 +357,6 @@ fn build_copies_markdown_image_to_dist_assets() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -388,10 +376,17 @@ fn build_copies_nested_unicode_markdown_image_path() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
-    fs::write(&deck, "# Visual\n\n![Diagram](./img/deep/画像.png)").unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-image.html",
+            "# Visual\n\n![Diagram](./img/deep/画像.png)",
+        ),
+    )
+    .unwrap();
     write_test_png(&dir.path().join("img/deep/画像.png"), TEST_PNG);
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -399,10 +394,6 @@ fn build_copies_nested_unicode_markdown_image_path() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -422,9 +413,13 @@ fn build_fails_for_missing_markdown_image_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
-    fs::write(&deck, "# Visual\n\n![Missing](missing.png)").unwrap();
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    fs::write(
+        &deck,
+        deck_with_assets("./title-image.html", "# Visual\n\n![Missing](missing.png)"),
+    )
+    .unwrap();
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -432,16 +427,12 @@ fn build_fails_for_missing_markdown_image_with_line_and_help() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
         .stderr(predicate::str::contains("image file not found:"))
         .stderr(predicate::str::contains("missing.png"))
         .stderr(predicate::str::contains(
@@ -458,11 +449,18 @@ fn build_fails_for_unreadable_markdown_image_with_line_and_help() {
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
     let image = dir.path().join("img/locked.png");
-    fs::write(&deck, "# Visual\n\n![Locked](img/locked.png)").unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-image.html",
+            "# Visual\n\n![Locked](img/locked.png)",
+        ),
+    )
+    .unwrap();
     write_test_png(&image, TEST_PNG);
     fs::set_permissions(&image, fs::Permissions::from_mode(0o000)).unwrap();
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -470,16 +468,12 @@ fn build_fails_for_unreadable_markdown_image_with_line_and_help() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
         .stderr(predicate::str::contains("image file unreadable:"))
         .stderr(predicate::str::contains("img/locked.png"))
         .stderr(predicate::str::contains(
@@ -498,12 +492,16 @@ fn build_fails_for_symlinked_markdown_image_outside_deck_dir() {
     let out = dir.path().join("dist");
     let outside = outside_dir.path().join("arch.png");
     let link = dir.path().join("img/link.png");
-    fs::write(&deck, "# Visual\n\n![Leaked](img/link.png)").unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets("./title-image.html", "# Visual\n\n![Leaked](img/link.png)"),
+    )
+    .unwrap();
     write_test_png(&outside, TEST_PNG);
     fs::create_dir_all(link.parent().unwrap()).unwrap();
     symlink(&outside, &link).unwrap();
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -511,16 +509,12 @@ fn build_fails_for_symlinked_markdown_image_outside_deck_dir() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("slide 1 ('visual'), line 3"))
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
         .stderr(predicate::str::contains(
             "image path escapes deck directory",
         ))
@@ -538,13 +532,16 @@ fn build_deduplicates_images_by_content_hash() {
     let out = dir.path().join("dist");
     fs::write(
         &deck,
-        "# Gallery\n\n![First](img/arch.png)\n\n![Second](img/copy.png)",
+        deck_with_assets(
+            "./title-image.html",
+            "# Gallery\n\n![First](img/arch.png)\n\n![Second](img/copy.png)",
+        ),
     )
     .unwrap();
     write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
     write_test_png(&dir.path().join("img/copy.png"), TEST_PNG);
-    let layout = write_image_layout(dir.path(), "1..*");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1..*");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -552,10 +549,6 @@ fn build_deduplicates_images_by_content_hash() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -577,12 +570,15 @@ fn build_deduplicates_same_image_across_slides_by_content_hash() {
     let out = dir.path().join("dist");
     fs::write(
         &deck,
-        "# First\n\n![Diagram](img/arch.png)\n\n---\n# Second\n\n![Diagram](img/arch.png)",
+        deck_with_assets(
+            "./title-image.html",
+            "# First\n\n![Diagram](img/arch.png)\n\n---\n# Second\n\n![Diagram](img/arch.png)",
+        ),
     )
     .unwrap();
     write_test_png(&dir.path().join("img/arch.png"), TEST_PNG);
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -590,10 +586,6 @@ fn build_deduplicates_same_image_across_slides_by_content_hash() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -615,10 +607,14 @@ fn build_replaces_stale_image_assets_when_image_content_changes() {
     let deck = dir.path().join("deck.md");
     let image = dir.path().join("img/arch.png");
     let out = dir.path().join("dist");
-    fs::write(&deck, "# Visual\n\n![Diagram](img/arch.png)").unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets("./title-image.html", "# Visual\n\n![Diagram](img/arch.png)"),
+    )
+    .unwrap();
     write_test_png(&image, TEST_PNG);
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -626,10 +622,6 @@ fn build_replaces_stale_image_assets_when_image_content_changes() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -646,10 +638,6 @@ fn build_replaces_stale_image_assets_when_image_content_changes() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -672,7 +660,10 @@ fn build_keeps_same_basename_images_distinct_when_content_differs() {
     let out = dir.path().join("dist");
     fs::write(
         &deck,
-        "# Gallery\n\n![First](img/a/arch.png)\n\n![Second](img/b/arch.png)",
+        deck_with_assets(
+            "./title-image.html",
+            "# Gallery\n\n![First](img/a/arch.png)\n\n![Second](img/b/arch.png)",
+        ),
     )
     .unwrap();
     let mut other_png = TEST_PNG.to_vec();
@@ -680,8 +671,8 @@ fn build_keeps_same_basename_images_distinct_when_content_differs() {
     *last ^= 0x01;
     write_test_png(&dir.path().join("img/a/arch.png"), TEST_PNG);
     write_test_png(&dir.path().join("img/b/arch.png"), &other_png);
-    let layout = write_image_layout(dir.path(), "1..*");
-    let base = write_base_css(dir.path());
+    write_image_layout(dir.path(), "1..*");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -689,10 +680,6 @@ fn build_keeps_same_basename_images_distinct_when_content_differs() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -718,9 +705,16 @@ fn build_rejects_two_image_paragraphs_when_image_slot_allows_one() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
-    fs::write(&deck, "# Gallery\n\n![First](a.png)\n\n![Second](b.png)").unwrap();
-    let layout = write_image_layout(dir.path(), "1");
-    let base = write_base_css(dir.path());
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-image.html",
+            "# Gallery\n\n![First](a.png)\n\n![Second](b.png)",
+        ),
+    )
+    .unwrap();
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
 
     Command::cargo_bin("peitho")
@@ -728,16 +722,12 @@ fn build_rejects_two_image_paragraphs_when_image_slot_allows_one() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("slide 1 ('gallery'), line 3"))
+        .stderr(predicate::str::contains("slide 1 ('gallery'), line 7"))
         .stderr(predicate::str::contains("slot 'hero' got 2 item(s)"))
         .stderr(predicate::str::contains("allows 1"))
         .stderr(predicate::str::contains(
@@ -759,9 +749,13 @@ fn build_accepts_override_targeting_derived_second_slide_key() {
 fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    fs::write(&deck, "# Intro\n\n---\n# Intro").unwrap();
-    let layout = write_layout(dir.path());
-    let base = write_base_css(dir.path());
+    fs::write(
+        &deck,
+        deck_with_assets("./title-body-code.html", "# Intro\n\n---\n# Intro"),
+    )
+    .unwrap();
+    write_layout(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
 
@@ -770,16 +764,12 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("slide 2 ('intro'), line 4"))
+        .stderr(predicate::str::contains("slide 2 ('intro'), line 8"))
         .stderr(predicate::str::contains("duplicate slide key 'intro'"))
         .stderr(predicate::str::contains(
             "help: add an explicit unique key comment before this slide",
@@ -788,32 +778,27 @@ fn build_fails_on_duplicate_slide_keys_with_line_help_and_slide_context() {
 
 #[test]
 fn repository_example_builds_three_slide_distribution() {
-    let out = tempdir().unwrap();
+    let dir = tempdir().unwrap();
+    let deck = write_repository_example_deck_with_assets(dir.path());
+    let out = dir.path().join("dist");
 
     Command::cargo_bin("peitho")
         .unwrap()
         .current_dir(workspace_root())
         .args([
             "build",
-            "examples/deck.md",
-            "--layouts",
-            "layouts/title-body-code.html",
-            "--css",
-            "themes/base.css",
+            deck.to_str().unwrap(),
             "--out",
-            out.path().to_str().unwrap(),
+            out.to_str().unwrap(),
         ])
         .assert()
         .success()
         .stdout(predicate::str::contains("built 3 slide(s)"));
 
-    assert!(out.path().join("slides/000-arch-1.html").exists());
-    assert!(out
-        .path()
-        .join("slides/001-convention-mapping.html")
-        .exists());
-    assert!(out.path().join("slides/002-dist-1.html").exists());
-    assert!(fs::read_to_string(out.path().join("manifest.json"))
+    assert!(out.join("slides/000-arch-1.html").exists());
+    assert!(out.join("slides/001-convention-mapping.html").exists());
+    assert!(out.join("slides/002-dist-1.html").exists());
+    assert!(fs::read_to_string(out.join("manifest.json"))
         .unwrap()
         .contains(r#""slideCount": 3"#));
 }
@@ -967,8 +952,8 @@ fn build_keeps_slide_html_only_in_fragment_files() {
 fn build_clears_stale_slide_fragments_before_writing_new_ones() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
-    let layout = write_layout(dir.path());
-    let base = write_base_css(dir.path());
+    write_layout(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), "");
     let out = dir.path().join("dist");
 
@@ -978,10 +963,6 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -989,16 +970,12 @@ fn build_clears_stale_slide_fragments_before_writing_new_ones() {
         .success();
     assert_eq!(slide_fragment_count(&out), 3);
 
-    fs::write(&deck, "# Solo").unwrap();
+    fs::write(&deck, deck_with_assets("./title-body-code.html", "# Solo")).unwrap();
     Command::cargo_bin("peitho")
         .unwrap()
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])
@@ -1020,6 +997,220 @@ fn base_theme_targets_fixed_canvas_size() {
     assert!(!css.contains("font-size: 1.4rem"));
 }
 
+#[test]
+fn build_reads_layouts_from_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nlayouts: ./custom-layouts\n---\n# Frontmatter Layout\n\nBody",
+    )
+    .unwrap();
+    write_layout_dir(dir.path(), "custom-layouts", "frontmatter-layout");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let html = fs::read_to_string(out.join("slides/000-frontmatter-layout.html")).unwrap();
+    assert!(html.contains(r#"class="frontmatter-layout peitho-slide""#));
+}
+
+#[test]
+fn build_reads_layouts_from_absolute_path_in_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    let layouts = write_layout_dir(dir.path(), "absolute-layouts", "absolute-layout");
+    fs::write(
+        &deck,
+        format!("---\nlayouts: {}\n---\n# Intro\n", layouts.display()),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let html = fs::read_to_string(out.join("slides/000-intro.html")).unwrap();
+    assert!(html.contains(r#"class="absolute-layout peitho-slide""#));
+}
+
+#[test]
+fn build_reads_css_from_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\ncss: ./custom-css\n---\n# Frontmatter CSS\n\nBody",
+    )
+    .unwrap();
+    let css_dir = dir.path().join("custom-css");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(
+        css_dir.join("theme.css"),
+        ".slot-title { color: rebeccapurple; }",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    assert!(fs::read_to_string(out.join("peitho.css"))
+        .unwrap()
+        .contains(".slot-title { color: rebeccapurple; }"));
+}
+
+#[test]
+fn build_reads_syntaxes_from_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nsyntaxes: ./custom-syntaxes\n---\n# Custom Syntax\n\n```crn\nresource \"site\" {}\n```",
+    )
+    .unwrap();
+    let syntaxes_dir = dir.path().join("custom-syntaxes");
+    fs::create_dir_all(&syntaxes_dir).unwrap();
+    fs::write(
+        syntaxes_dir.join("carina.sublime-syntax"),
+        CARINA_SUBLIME_SYNTAX,
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let html = fs::read_to_string(out.join("slides/000-custom-syntax.html")).unwrap();
+    assert!(html.contains("hl-keyword"));
+}
+
+#[test]
+fn build_reads_syntaxes_file_from_frontmatter() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nsyntaxes: ./carina.sublime-syntax\n---\n# Custom Syntax\n\n```crn\nresource \"site\" {}\n```",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("carina.sublime-syntax"),
+        CARINA_SUBLIME_SYNTAX,
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let html = fs::read_to_string(out.join("slides/000-custom-syntax.html")).unwrap();
+    assert!(html.contains("hl-keyword"));
+}
+
+#[test]
+fn build_frontmatter_layouts_overrides_deck_adjacent() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nlayouts: ./other-layouts\n---\n# Override Layout\n\nBody",
+    )
+    .unwrap();
+    write_layout_dir(dir.path(), "layouts", "deck-adjacent-layout");
+    write_layout_dir(dir.path(), "other-layouts", "frontmatter-layout");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let html = fs::read_to_string(out.join("slides/000-override-layout.html")).unwrap();
+    assert!(html.contains(r#"class="frontmatter-layout peitho-slide""#));
+    assert!(!html.contains("deck-adjacent-layout"));
+}
+
+#[test]
+fn build_frontmatter_non_existent_path_errors_with_line_and_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nlayouts: ./nope-does-not-exist\n---\n# Missing Layouts",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("layouts path does not exist"))
+        .stderr(predicate::str::contains("line 2"))
+        .stderr(predicate::str::contains(
+            "check the layouts: value in the frontmatter",
+        ));
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1029,10 +1220,32 @@ fn workspace_root() -> PathBuf {
         .to_owned()
 }
 
+fn deck_with_assets(layouts: &str, body: &str) -> String {
+    format!("---\nlayouts: {layouts}\ncss: ./css\n---\n{body}")
+}
+
+fn write_repository_example_deck_with_assets(dir: &Path) -> PathBuf {
+    let root = workspace_root();
+    let deck = dir.join("deck.md");
+    let body = fs::read_to_string(root.join("examples/deck.md")).unwrap();
+    fs::write(
+        &deck,
+        format!(
+            "---\nlayouts: {}\ncss: {}\n---\n{body}",
+            root.join("layouts/title-body-code.html").display(),
+            root.join("themes/base.css").display()
+        ),
+    )
+    .unwrap();
+    deck
+}
+
 fn write_multi_slide_fixture(path: &Path) {
     fs::write(
         path,
-        r#"<!-- {"key":"arch-1"} -->
+        deck_with_assets(
+            "./title-body-code.html",
+            r#"<!-- {"key":"arch-1"} -->
 # Peitho Architecture
 
 Body
@@ -1054,6 +1267,7 @@ fn main() {}
 
 Fragments and manifest.
 "#,
+        ),
     )
     .unwrap();
 }
@@ -1080,6 +1294,19 @@ fn write_image_layout(dir: &Path, image_arity: &str) -> PathBuf {
     path
 }
 
+fn write_layout_dir(root: &Path, name: &str, class: &str) -> PathBuf {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("statement.html"),
+        format!(
+            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
 fn write_test_png(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
@@ -1102,15 +1329,16 @@ const TEST_PNG: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
-/// Accepts either a css file (manual fixtures) or the css dir itself
-/// (helper fixtures) and returns the directory to pass to --css.
-fn css_dir_for(path: &Path) -> PathBuf {
-    if path.extension().is_some() {
-        path.parent().unwrap().to_path_buf()
-    } else {
-        path.to_path_buf()
-    }
-}
+const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: Carina
+file_extensions: [crn]
+scope: source.carina
+contexts:
+  main:
+    - match: '\b(resource|provider|module)\b'
+      scope: keyword.control.carina
+"#;
 
 fn write_base_css(dir: &Path) -> PathBuf {
     let css_dir = dir.join("css");
@@ -1144,8 +1372,8 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     write_multi_slide_fixture(&deck);
-    let layout = write_layout(dir.path());
-    let base = write_base_css(dir.path());
+    write_layout(dir.path());
+    write_base_css(dir.path());
     write_overrides_css(dir.path(), override_css);
     let out = dir.path().join("dist");
 
@@ -1154,10 +1382,6 @@ fn build_multi_slide_fixture_with_override(override_css: &str) -> (TempDir, Path
         .args([
             "build",
             deck.to_str().unwrap(),
-            "--layouts",
-            layout.to_str().unwrap(),
-            "--css",
-            css_dir_for(&base).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
         ])

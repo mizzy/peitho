@@ -186,8 +186,19 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::{
-        check::check_deck, domain::SlotName, layout::parse_layout, parser::parse_markdown,
+        check::check_deck,
+        domain::SlotName,
+        layout::parse_layout,
+        parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
     };
+
+    fn parse_markdown(
+        source: &str,
+        highlighter: &crate::highlight::Highlighter,
+    ) -> crate::error::Result<crate::phase::Deck<crate::phase::Parsed>> {
+        let frontmatter = parse_frontmatter(source)?;
+        parse_markdown_impl(source, frontmatter, highlighter)
+    }
 
     fn cover_and_statement() -> Layouts {
         let cover = parse_layout(
