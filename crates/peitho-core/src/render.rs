@@ -448,9 +448,24 @@ pub fn render_presenter_index() -> String {
     .card-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-dim); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
     .card-head .badge { color: var(--fg-mute); letter-spacing: 0; text-transform: none; font-size: 11px; }
     .next-wrap { padding: 12px; }
-    .next-preview { position: relative; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); overflow: hidden; }
+    .next-preview { position: relative; aspect-ratio: 16 / 9; background: var(--bg-slide); border: 1px solid var(--line-soft); overflow: hidden; container-type: inline-size; }
     .next-preview > [data-peitho-presenter="preview"] { position: absolute; inset: 0; }
-    [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-slide); color: var(--fg-dim); font-size: 18px; }
+    [data-peitho-presenter="preview-end"] { position: absolute; inset: 0; margin: 0; box-sizing: border-box; padding: 9.6% 13.5%; display: flex; flex-direction: column; background: var(--bg-slide); color: var(--fg); }
+    [data-peitho-presenter="preview-end"] .eod-top,
+    [data-peitho-presenter="preview-end"] .eod-bottom { display: flex; justify-content: space-between; font-size: 10px; line-height: 1; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-dim); }
+    [data-peitho-presenter="preview-end"] .eod-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4.5%; }
+    [data-peitho-presenter="preview-end"] .eod-fin { display: flex; align-items: center; gap: 16px; font-size: 10px; line-height: 1; letter-spacing: 0.24em; text-transform: uppercase; color: var(--fg-dim); }
+    [data-peitho-presenter="preview-end"] .eod-rule { display: block; width: 42px; height: 1px; background: var(--line); }
+    [data-peitho-presenter="preview-end"] .eod-title { font-size: 8.3cqi; font-weight: 600; line-height: 1; letter-spacing: -0.015em; color: var(--fg); }
+    @media (prefers-reduced-motion: no-preference) {
+      [data-peitho-presenter="preview-end"]:not([hidden]) { animation: eod-fade-in 500ms ease-out both; }
+      [data-peitho-presenter="preview-end"]:not([hidden]) .eod-rule:first-child { transform-origin: right center; animation: eod-rule-in 500ms cubic-bezier(0.6, 0, 0.2, 1) 150ms both; }
+      [data-peitho-presenter="preview-end"]:not([hidden]) .eod-rule:last-child { transform-origin: left center; animation: eod-rule-in 500ms cubic-bezier(0.6, 0, 0.2, 1) 150ms both; }
+      [data-peitho-presenter="preview-end"]:not([hidden]) .eod-title { animation: eod-title-in 550ms cubic-bezier(0.2, 0, 0.2, 1) 350ms both; }
+    }
+    @keyframes eod-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes eod-rule-in { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @keyframes eod-title-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
     .clock { display: flex; flex-direction: column; min-height: 0; }
     .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
     .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }

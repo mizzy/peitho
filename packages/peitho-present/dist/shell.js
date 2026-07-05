@@ -1060,7 +1060,14 @@ async function mountPresenterView(options) {
           <div class="next-wrap">
             <div class="next-preview">
               <div class="peitho-presenter-pane" data-peitho-presenter="preview"></div>
-              <p data-peitho-presenter="preview-end" hidden>End of deck</p>
+              <div data-peitho-presenter="preview-end" hidden>
+                <div class="eod-top mono"><span>Peitho</span></div>
+                <div class="eod-center">
+                  <div class="eod-fin mono"><span class="eod-rule"></span><span>Fin</span><span class="eod-rule"></span></div>
+                  <div class="eod-title">End of deck</div>
+                </div>
+                <div class="eod-bottom mono"><span>&mdash;</span><span>&mdash;</span></div>
+              </div>
             </div>
           </div>
         </section>
