@@ -64,8 +64,23 @@ impl Highlighter {
             ErrorKind::Parse,
             Some(line),
             format!("unknown code language '{token}'"),
-            "use a language name syntect recognizes (e.g. rust, js, ts, py, sh, toml, json) or remove the tag",
+            format!(
+                "use a language name syntect recognizes (e.g. {}) or remove the tag",
+                self.example_tokens().join(", "),
+            ),
         ))
+    }
+
+    fn example_tokens(&self) -> Vec<&'static str> {
+        const PREFERRED: &[&str] = &[
+            "rust", "js", "py", "sh", "toml", "json", "yaml", "html", "css", "md", "go", "c",
+            "cpp", "java", "rb",
+        ];
+        PREFERRED
+            .iter()
+            .copied()
+            .filter(|t| self.syntax_set.find_syntax_by_token(t).is_some())
+            .collect()
     }
 
     pub(crate) fn highlight_html(&self, code: &str, token: &str, line: usize) -> Result<String> {
@@ -171,6 +186,34 @@ contexts:
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(7));
         assert!(err.to_string().contains("unknown code language 'notalang'"));
+    }
+
+    #[test]
+    fn help_text_only_suggests_tokens_the_default_set_recognizes() {
+        let highlighter = Highlighter::defaults();
+        let err = highlighter.validate_language("notalang", 1).unwrap_err();
+        let msg = err.to_string();
+
+        let list_start = msg.find("e.g. ").expect("help preamble present") + 5;
+        let list_end = msg[list_start..].find(')').expect("help suffix present") + list_start;
+        for raw in msg[list_start..list_end].split(',') {
+            let token = raw.trim();
+            assert!(
+                highlighter.validate_language(token, 1).is_ok(),
+                "help suggests '{token}' but the default set rejects it"
+            );
+        }
+    }
+
+    #[test]
+    fn ts_stays_unrecognized_by_default_set_reminder() {
+        // If this test fires, syntect's default set now includes TypeScript.
+        // Add "ts" to PREFERRED in `example_tokens` so the help suggests it.
+        let highlighter = Highlighter::defaults();
+        assert!(
+            highlighter.validate_language("ts", 1).is_err(),
+            "syntect defaults now recognize 'ts' - add \"ts\" to PREFERRED in example_tokens"
+        );
     }
 
     #[test]
