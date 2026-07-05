@@ -9,6 +9,7 @@ pub mod mapping;
 pub mod notes;
 pub mod parser;
 pub mod phase;
+mod plain;
 pub mod present_config;
 pub mod render;
 pub mod theme;
@@ -19,7 +20,7 @@ pub use error::{BuildError, Result};
 pub use layout::{parse_layout, Layout, Layouts};
 pub use manifest::{
     build_manifest, fragment_src, manifest_json, Manifest, ManifestImage, ManifestSection,
-    ManifestSlide,
+    ManifestSlide, ManifestSlideText,
 };
 pub use mapping::{dispatch_by_convention, map_by_convention};
 pub use notes::{notes_json, Notes};

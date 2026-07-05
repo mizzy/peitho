@@ -97,6 +97,20 @@ pub struct ManifestSlide {
     src: String,
     #[serde(rename = "hasNotes")]
     has_notes: bool,
+    #[serde(default)]
+    text: ManifestSlideText,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ManifestSlideText {
+    title: String,
+    body: String,
+    code: String,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -142,12 +156,19 @@ impl ManifestSection {
 }
 
 impl ManifestSlide {
-    pub fn new(index: usize, key: SlideKey, src: impl Into<String>, has_notes: bool) -> Self {
+    pub fn new(
+        index: usize,
+        key: SlideKey,
+        src: impl Into<String>,
+        has_notes: bool,
+        text: ManifestSlideText,
+    ) -> Self {
         Self {
             index,
             key,
             src: src.into(),
             has_notes,
+            text,
         }
     }
 
@@ -165,6 +186,32 @@ impl ManifestSlide {
 
     pub fn has_notes(&self) -> bool {
         self.has_notes
+    }
+
+    pub fn text(&self) -> &ManifestSlideText {
+        &self.text
+    }
+}
+
+impl ManifestSlideText {
+    pub fn new(title: impl Into<String>, body: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+            code: code.into(),
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
     }
 }
 
@@ -336,11 +383,13 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
         .checked_slides()
         .iter()
         .map(|slide| {
+            let text = crate::plain::slide_text(slide);
             ManifestSlide::new(
                 slide.index(),
                 slide.key().clone(),
                 fragment_src(slide.index(), slide.key()),
                 slide.notes().is_some(),
+                text,
             )
         })
         .collect();
@@ -376,6 +425,23 @@ mod tests {
     };
 
     #[test]
+    fn manifest_slide_text_constructor_and_accessors() {
+        let text = ManifestSlideText::new("Title", "Body", "Code");
+        let slide = ManifestSlide::new(
+            0,
+            SlideKey::new("intro").unwrap(),
+            "slides/000-intro.html",
+            true,
+            text.clone(),
+        );
+
+        assert_eq!(text.title(), "Title");
+        assert_eq!(text.body(), "Body");
+        assert_eq!(text.code(), "Code");
+        assert_eq!(slide.text(), &text);
+    }
+
+    #[test]
     fn serializes_manifest_schema_exactly() {
         let manifest = Manifest::new(
             "Peitho Architecture",
@@ -388,12 +454,14 @@ mod tests {
                     SlideKey::new("arch-1").unwrap(),
                     "slides/000-arch-1.html",
                     false,
+                    ManifestSlideText::default(),
                 ),
                 ManifestSlide::new(
                     1,
                     SlideKey::new("details").unwrap(),
                     "slides/001-details.html",
                     false,
+                    ManifestSlideText::default(),
                 ),
             ],
         );
@@ -420,13 +488,23 @@ mod tests {
                 "      \"index\": 0,\n",
                 "      \"key\": \"arch-1\",\n",
                 "      \"src\": \"slides/000-arch-1.html\",\n",
-                "      \"hasNotes\": false\n",
+                "      \"hasNotes\": false,\n",
+                "      \"text\": {\n",
+                "        \"title\": \"\",\n",
+                "        \"body\": \"\",\n",
+                "        \"code\": \"\"\n",
+                "      }\n",
                 "    },\n",
                 "    {\n",
                 "      \"index\": 1,\n",
                 "      \"key\": \"details\",\n",
                 "      \"src\": \"slides/001-details.html\",\n",
-                "      \"hasNotes\": false\n",
+                "      \"hasNotes\": false,\n",
+                "      \"text\": {\n",
+                "        \"title\": \"\",\n",
+                "        \"body\": \"\",\n",
+                "        \"code\": \"\"\n",
+                "      }\n",
                 "    }\n",
                 "  ],\n",
                 "  \"images\": []\n",
@@ -450,6 +528,45 @@ mod tests {
         assert!(json.contains(r#""src": "slides/000-arch-1.html""#));
         assert!(json.contains(r#""src": "slides/001-details.html""#));
         assert!(json.contains(r#""hasNotes": false"#));
+    }
+
+    #[test]
+    fn build_manifest_populates_text_on_slides() {
+        let checked = checked_deck(
+            "# Peitho\n\nBody text\n\n```rust\nfn main() {}\n```",
+            title_body_code_layout(),
+        );
+
+        let manifest = build_manifest(&checked, &[]);
+        let text = manifest.slides()[0].text();
+
+        assert_eq!(text.title(), "Peitho");
+        assert_eq!(text.body(), "Body text");
+        assert_eq!(text.code(), "fn main() {}\n");
+    }
+
+    #[test]
+    fn manifest_json_includes_slide_text() {
+        let manifest = Manifest::new(
+            "Deck",
+            None,
+            AspectRatio::Ratio16To9,
+            Vec::new(),
+            vec![ManifestSlide::new(
+                0,
+                SlideKey::new("intro").unwrap(),
+                "slides/000-intro.html",
+                false,
+                ManifestSlideText::new("Intro", "Body text", "fn main() {}\n"),
+            )],
+        );
+
+        let json = manifest_json(&manifest).unwrap();
+
+        assert!(json.contains(r#""text": {"#));
+        assert!(json.contains(r#""title": "Intro""#));
+        assert!(json.contains(r#""body": "Body text""#));
+        assert!(json.contains(r#""code": "fn main() {}\n""#));
     }
 
     #[test]
@@ -498,6 +615,7 @@ mod tests {
                 SlideKey::new("intro").unwrap(),
                 "slides/000-intro.html",
                 false,
+                ManifestSlideText::default(),
             )],
         );
 
@@ -520,6 +638,7 @@ mod tests {
                 SlideKey::new("intro").unwrap(),
                 "slides/000-intro.html",
                 false,
+                ManifestSlideText::default(),
             )],
         );
 
@@ -660,6 +779,29 @@ mod tests {
         let manifest: Manifest = serde_json::from_str(json).unwrap();
 
         assert!(manifest.images().is_empty());
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_text_as_empty() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
+            "  \"sections\": [],\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}],\n",
+            "  \"images\": []\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.slides()[0].text(), &ManifestSlideText::default());
     }
 
     #[test]
@@ -807,6 +949,18 @@ mod tests {
         )
         .unwrap()
     }
+
+    fn title_body_code_layout() -> Layout {
+        parse_layout(
+            "title-body-code",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="code" accepts="code" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -817,7 +971,9 @@ mod ts_tests {
 
     use crate::domain::AspectRatio;
 
-    use super::{ManifestBinding, ManifestImage, ManifestSection, ManifestSlide};
+    use super::{
+        ManifestBinding, ManifestImage, ManifestSection, ManifestSlide, ManifestSlideText,
+    };
 
     #[test]
     fn exports_manifest_bindings_with_serde_field_names() {
@@ -827,6 +983,7 @@ mod ts_tests {
         ManifestImage::export_all(&cfg).unwrap();
         ManifestSection::export_all(&cfg).unwrap();
         ManifestSlide::export_all(&cfg).unwrap();
+        ManifestSlideText::export_all(&cfg).unwrap();
 
         let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
         let aspect_ratio = fs::read_to_string(root_bindings.join("AspectRatio.ts")).unwrap();
@@ -834,6 +991,7 @@ mod ts_tests {
         let image = fs::read_to_string(root_bindings.join("ManifestImage.ts")).unwrap();
         let section = fs::read_to_string(root_bindings.join("ManifestSection.ts")).unwrap();
         let slide = fs::read_to_string(root_bindings.join("ManifestSlide.ts")).unwrap();
+        let slide_text = fs::read_to_string(root_bindings.join("ManifestSlideText.ts")).unwrap();
 
         assert!(manifest.contains(r#"import type { AspectRatio } from "./AspectRatio";"#));
         assert!(manifest.contains(r#"import type { ManifestImage } from "./ManifestImage";"#));
@@ -853,6 +1011,11 @@ mod ts_tests {
         assert!(section.contains("plannedDurationMs: number"));
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
+        assert!(slide.contains(r#"import type { ManifestSlideText } from "./ManifestSlideText";"#));
+        assert!(slide.contains("text: ManifestSlideText"));
+        assert!(slide_text.contains("title: string"));
+        assert!(slide_text.contains("body: string"));
+        assert!(slide_text.contains("code: string"));
         assert!(aspect_ratio.contains(r#"export type AspectRatio = "16:9" | "4:3";"#));
     }
 }
