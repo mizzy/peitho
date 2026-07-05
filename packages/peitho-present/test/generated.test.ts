@@ -41,7 +41,8 @@ describe("generated manifest contract", () => {
           index: 0,
           key: "intro",
           src: "slides/000-intro.html",
-          hasNotes: false
+          hasNotes: false,
+          text: { title: "", body: "", code: "" }
         }
       ],
       images: []
@@ -71,7 +72,8 @@ describe("generated manifest contract", () => {
           index: 0,
           key: "intro",
           src: "slides/000-intro.html",
-          hasNotes: false
+          hasNotes: false,
+          text: { title: "", body: "", code: "" }
         }
       ],
       images: [{ src: "assets/abcdef1234567890-arch.png" }]

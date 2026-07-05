@@ -21,7 +21,15 @@ const manifest: Manifest = {
   canvasWidth: 1280,
   canvasHeight: 720,
   sections: [],
-  slides: [{ index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false }],
+  slides: [
+    {
+      index: 0,
+      key: "intro",
+      src: "slides/000-intro.html",
+      hasNotes: false,
+      text: { title: "", body: "", code: "" }
+    }
+  ],
   images: []
 };
 

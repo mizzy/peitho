@@ -23,8 +23,20 @@ const manifest: Manifest = {
   canvasHeight: 720,
   sections: [],
   slides: [
-    { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
-    { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
+    {
+      index: 0,
+      key: "intro",
+      src: "slides/000-intro.html",
+      hasNotes: false,
+      text: { title: "", body: "", code: "" }
+    },
+    {
+      index: 1,
+      key: "details",
+      src: "slides/001-details.html",
+      hasNotes: false,
+      text: { title: "", body: "", code: "" }
+    }
   ],
   images: []
 };
@@ -54,8 +66,20 @@ function legacyManifestFetch(): typeof fetch {
     canvasHeight: 720,
     sections: [],
     slides: [
-      { index: 0, key: "intro", src: "slides/000-intro.html", hasNotes: false },
-      { index: 1, key: "details", src: "slides/001-details.html", hasNotes: false }
+      {
+        index: 0,
+        key: "intro",
+        src: "slides/000-intro.html",
+        hasNotes: false,
+        text: { title: "", body: "", code: "" }
+      },
+      {
+        index: 1,
+        key: "details",
+        src: "slides/001-details.html",
+        hasNotes: false,
+        text: { title: "", body: "", code: "" }
+      }
     ]
   };
 
