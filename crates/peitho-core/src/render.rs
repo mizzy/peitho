@@ -17,6 +17,8 @@ use crate::{
     phase::{Checked, Deck, Rendered},
 };
 
+const BUILTIN_MEASURE_JS: &str = include_str!("../../../packages/peitho-present/dist/measure.js");
+
 /// Render a checked deck whose image paths have already been resolved.
 ///
 /// The `ResolvedImagePath` type parameter is part of the safety boundary:
@@ -420,6 +422,42 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
         canvas_width = aspect_ratio.width(),
         canvas_height = aspect_ratio.height(),
         canvas_aspect = aspect_ratio.css_aspect_value(),
+    )
+}
+
+pub fn render_measure_document(deck: &Deck<Rendered>) -> String {
+    let aspect_ratio = deck.settings().aspect_ratio();
+    let mut slides = String::new();
+    for slide in deck.slides() {
+        slides.push_str("  ");
+        slides.push_str(slide.html());
+        slides.push('\n');
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="peitho.css">
+  <title>Peitho Measurement Export</title>
+  <style>
+    :root {{ --peitho-canvas-width: {canvas_width}px; --peitho-canvas-height: {canvas_height}px; --peitho-canvas-aspect: {canvas_aspect}; }}
+    html, body {{ margin: 0; padding: 0; background: #fff; }}
+    body {{ width: {canvas_width}px; }}
+    .peitho-slide {{ width: {canvas_width}px; height: {canvas_height}px; overflow: hidden; position: relative; }}
+  </style>
+</head>
+<body>
+{slides}  <script type="module">
+{measure_js}
+  </script>
+</body>
+</html>"#,
+        canvas_width = aspect_ratio.width(),
+        canvas_height = aspect_ratio.height(),
+        canvas_aspect = aspect_ratio.css_aspect_value(),
+        measure_js = BUILTIN_MEASURE_JS,
     )
 }
 
@@ -1450,6 +1488,38 @@ mod tests {
         let html = render_pdf_document(&rendered);
 
         assert!(!html.contains("speaker secret"));
+    }
+
+    #[test]
+    fn measure_document_inlines_all_slides_at_logical_canvas_size() {
+        let rendered = render_checked_deck("# Intro\n\n---\n# Details");
+
+        let html = render_measure_document(&rendered);
+
+        assert!(html.contains(r#"<!doctype html>"#));
+        assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
+        assert!(html.contains("--peitho-canvas-width: 1280px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains(r#"data-slide-key="intro""#));
+        assert!(html.contains(r#"data-slide-key="details""#));
+        assert!(html.contains(r#"<script type="module">"#));
+        assert!(html.contains("peitho-measure"));
+        assert!(!html.contains("@page"));
+        assert!(!html.contains("page-break-after"));
+        assert!(!html.contains("transform: scale("));
+    }
+
+    #[test]
+    fn measure_document_uses_four_by_three_logical_canvas_without_resolution_scaling() {
+        let rendered =
+            render_checked_deck("---\naspect_ratio: 4:3\nresolution: 1440x1080\n---\n# Intro");
+
+        let html = render_measure_document(&rendered);
+
+        assert!(html.contains("--peitho-canvas-width: 960px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains(".peitho-slide { width: 960px; height: 720px;"));
+        assert!(!html.contains("1440px 1080px"));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
