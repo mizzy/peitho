@@ -51,6 +51,7 @@
 .slot-code {
   display: block;
   margin: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 22px;
   line-height: 1.35;
   white-space: pre-wrap;
