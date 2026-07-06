@@ -68,6 +68,33 @@ describe("measurement DOM walker", () => {
     });
   });
 
+  it("measures the effective slide background from body when the section is transparent", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="background" style="background-color: rgba(0, 0, 0, 0);">
+        <div class="slot-body"><p>Body</p></div>
+      </section>
+    `);
+    document.body.style.backgroundColor = "rgb(12, 34, 56)";
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.backgroundColor).toBe("rgb(12, 34, 56)");
+  });
+
+  it("falls back to a white slide background when all ancestors are transparent", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="background" style="background-color: rgba(0, 0, 0, 0);">
+        <div class="slot-body"><p>Body</p></div>
+      </section>
+    `);
+    document.body.style.backgroundColor = "rgba(0, 0, 0, 0)";
+    document.documentElement.style.backgroundColor = "rgba(0, 0, 0, 0)";
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.backgroundColor).toBe("rgb(255, 255, 255)");
+  });
+
   it("splits preformatted code into paragraphs while preserving hl span colors", () => {
     const { document } = createDocument(`
       <section data-slide-key="code">
@@ -115,6 +142,28 @@ describe("measurement DOM walker", () => {
           }
         ]
       }
+    ]);
+  });
+
+  it("resolves CSS font-family stacks to concrete office-safe typefaces", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="fonts">
+        <div class="slot-body">
+          <p style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">Code stack</p>
+          <p style="font-family: -apple-system, BlinkMacSystemFont, sans-serif;">System stack</p>
+          <p style="font-family: monospace;">Generic mono</p>
+          <p style="font-family: Inter, sans-serif;">Concrete stack</p>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => paragraph.runs[0]?.fontFamily)).toEqual([
+      "SFMono-Regular",
+      "Arial",
+      "Courier New",
+      "Inter"
     ]);
   });
 

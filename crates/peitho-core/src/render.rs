@@ -443,7 +443,7 @@ pub fn render_measure_document(deck: &Deck<Rendered>) -> String {
   <title>Peitho Measurement Export</title>
   <style>
     :root {{ --peitho-canvas-width: {canvas_width}px; --peitho-canvas-height: {canvas_height}px; --peitho-canvas-aspect: {canvas_aspect}; }}
-    html, body {{ margin: 0; padding: 0; background: #fff; }}
+    html, body {{ margin: 0; padding: 0; }}
     body {{ width: {canvas_width}px; }}
     .peitho-slide {{ width: {canvas_width}px; height: {canvas_height}px; overflow: hidden; position: relative; }}
   </style>
@@ -1500,6 +1500,8 @@ mod tests {
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
         assert!(html.contains("--peitho-canvas-width: 1280px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("html, body { margin: 0; padding: 0; }"));
+        assert!(!html.contains("html, body { margin: 0; padding: 0; background: #fff; }"));
         assert!(html.contains(r#"data-slide-key="intro""#));
         assert!(html.contains(r#"data-slide-key="details""#));
         assert!(html.contains(r#"<script type="module">"#));

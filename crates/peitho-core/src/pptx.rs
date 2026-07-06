@@ -313,14 +313,9 @@ fn presentation_xml(pptx: &PreparedPptx) -> String {
         .collect::<String>();
     let cx = px_to_emu(pptx.canvas_width);
     let cy = px_to_emu(pptx.canvas_height);
-    let slide_type = if (pptx.canvas_width - 960.0).abs() < f64::EPSILON {
-        "screen4x3"
-    } else {
-        "wide"
-    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}" type="{slide_type}"/><p:notesSz cx="6858000" cy="9144000"/><p:defaultTextStyle/></p:presentation>"#
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}"/><p:notesSz cx="6858000" cy="9144000"/><p:defaultTextStyle/></p:presentation>"#
     )
 }
 
@@ -757,7 +752,9 @@ mod tests {
         assert_eq!(read_zip(&mut zip, "ppt/media/image1.png"), "png bytes");
 
         let presentation = read_zip(&mut zip, "ppt/presentation.xml");
-        assert!(presentation.contains(r#"<p:sldSz cx="12192000" cy="6858000" type="wide"/>"#));
+        assert!(presentation.contains(r#"<p:sldSz cx="12192000" cy="6858000"/>"#));
+        assert!(!presentation.contains("type=\"wide\""));
+        assert!(!presentation.contains("type=\"screen4x3\""));
         assert!(presentation.contains(r#"r:id="rId2""#));
 
         let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");

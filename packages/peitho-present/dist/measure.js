@@ -3,6 +3,23 @@ var MARKER_ID = "peitho-measure";
 var SLOT_CLASS = /(^|\s)slot-/;
 var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
 var LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
+var SPECIAL_FONT_FAMILIES = /* @__PURE__ */ new Set([
+  "monospace",
+  "ui-monospace",
+  "sans-serif",
+  "serif",
+  "system-ui",
+  "-apple-system",
+  "blinkmacsystemfont",
+  "ui-sans-serif",
+  "ui-serif",
+  "ui-rounded",
+  "cursive",
+  "fantasy",
+  "emoji",
+  "math",
+  "fangsong"
+]);
 function measureDeck(document2 = globalThis.document) {
   const sections = Array.from(document2.querySelectorAll("section[data-slide-key]"));
   return {
@@ -49,13 +66,46 @@ async function waitForImage(image) {
   });
 }
 function measureSlide(section) {
-  const style = viewFor(section.ownerDocument).getComputedStyle(section);
   return {
     key: section.getAttribute("data-slide-key") ?? "",
-    backgroundColor: style.backgroundColor,
+    backgroundColor: effectiveBackgroundColor(section),
     boxes: Array.from(section.querySelectorAll("[class]")).filter((element) => SLOT_CLASS.test(element.className)).map((box) => measureBox(section, box)),
     images: Array.from(section.querySelectorAll("img")).map((image) => measureImage(section, image))
   };
+}
+function effectiveBackgroundColor(section) {
+  let current = section;
+  while (current) {
+    const color = viewFor(current.ownerDocument).getComputedStyle(current).backgroundColor;
+    if (!isTransparentColor(color)) {
+      return color;
+    }
+    if (current === current.ownerDocument.documentElement) {
+      break;
+    }
+    current = current.parentElement;
+  }
+  return "rgb(255, 255, 255)";
+}
+function isTransparentColor(color) {
+  const normalized = color.trim().toLowerCase();
+  if (normalized === "" || normalized === "transparent") {
+    return true;
+  }
+  const functional = normalized.match(/^rgba?\((.*)\)$/);
+  if (!functional) {
+    return false;
+  }
+  const args = functional[1] ?? "";
+  if (args.includes("/")) {
+    return alphaIsZero(args.split("/").pop() ?? "");
+  }
+  const parts = args.split(",").map((part) => part.trim());
+  return parts.length >= 4 && alphaIsZero(parts[3] ?? "");
+}
+function alphaIsZero(raw) {
+  const alpha = Number.parseFloat(raw.trim());
+  return Number.isFinite(alpha) && alpha <= 0;
 }
 function measureBox(section, box) {
   return {
@@ -258,7 +308,22 @@ function textAlign(element) {
   return viewFor(element.ownerDocument).getComputedStyle(element).textAlign || "left";
 }
 function firstFontFamily(raw) {
-  return (raw.split(",")[0] ?? "").trim().replace(/^["']|["']$/g, "");
+  const families = raw.split(",").map(normalizeFontFamily).filter((family) => family.length > 0);
+  const concrete = families.find((family) => !SPECIAL_FONT_FAMILIES.has(family.toLowerCase()));
+  if (concrete) {
+    return concrete;
+  }
+  const fallbackFamilies = families.map((family) => family.toLowerCase());
+  if (fallbackFamilies.some((family) => family.includes("monospace"))) {
+    return "Courier New";
+  }
+  if (fallbackFamilies.some((family) => family === "serif" || family === "ui-serif")) {
+    return "Times New Roman";
+  }
+  return "Arial";
+}
+function normalizeFontFamily(raw) {
+  return raw.trim().replace(/^["']|["']$/g, "");
 }
 function fontWeightIsBold(raw) {
   if (raw === "bold" || raw === "bolder") {
