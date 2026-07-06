@@ -17,6 +17,8 @@ use crate::{
     phase::{Checked, Deck, Rendered},
 };
 
+const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
+
 /// Render a checked deck whose image paths have already been resolved.
 ///
 /// The `ResolvedImagePath` type parameter is part of the safety boundary:
@@ -413,13 +415,17 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
   </style>
 </head>
 <body>
-{slides}</body>
+{slides}  <script>
+{pdf_flatten_js}
+  </script>
+</body>
 </html>"#,
         page_width = resolution.width(),
         page_height = resolution.height(),
         canvas_width = aspect_ratio.width(),
         canvas_height = aspect_ratio.height(),
         canvas_aspect = aspect_ratio.css_aspect_value(),
+        pdf_flatten_js = PDF_FLATTEN_JS,
     )
 }
 
@@ -1426,6 +1432,23 @@ mod tests {
         assert!(!html.contains("fetch("));
         assert!(!html.contains("manifest.json"));
         assert!(!html.contains("notes.json"));
+    }
+
+    #[test]
+    fn pdf_document_embeds_gradient_flattening_script_after_slides() {
+        let rendered = render_checked_deck("# Intro");
+
+        let html = render_pdf_document(&rendered);
+
+        let slide_index = html.find(r#"data-slide-key="intro""#).unwrap();
+        let script_index = html.find("<script>").unwrap();
+        assert!(script_index > slide_index);
+        assert!(html.contains("flattenGradients"));
+    }
+
+    #[test]
+    fn pdf_flatten_script_cannot_close_its_embedding_script_tag() {
+        assert!(!PDF_FLATTEN_JS.to_ascii_lowercase().contains("</script"));
     }
 
     #[test]

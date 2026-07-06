@@ -678,6 +678,19 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     })
 }
 
+fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from("--no-pdf-header-footer"),
+        OsString::from("--virtual-time-budget=10000"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from(format!("--print-to-pdf={}", out.display())),
+        OsString::from(url),
+    ]
+}
+
 fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Result<()> {
     let abs_out = absolute_path_for_output(out)?;
     let profile = workspace.join("chrome-profile");
@@ -685,13 +698,7 @@ fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Resu
     let pdf_html = workspace.join("pdf.html");
     let url = file_url(&pdf_html)?;
     let output = std::process::Command::new(chrome)
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--no-pdf-header-footer")
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!("--print-to-pdf={}", abs_out.display()))
-        .arg(url)
+        .args(chrome_print_args(&profile, &abs_out, &url))
         .output()
         .map_err(|err| {
             miette::miette!(
@@ -1682,6 +1689,27 @@ contexts:
                 panic!("expected export pdf command");
             }
         }
+    }
+
+    #[test]
+    fn chrome_print_args_include_virtual_time_budget_and_url_last() {
+        let profile = Path::new("/tmp/peitho-profile");
+        let out = Path::new("/tmp/out.pdf");
+        let url = "file:///tmp/pdf.html";
+
+        let args = chrome_print_args(profile, out, url);
+
+        let expected = vec![
+            OsString::from("--headless=new"),
+            OsString::from("--disable-gpu"),
+            OsString::from("--no-sandbox"),
+            OsString::from("--no-pdf-header-footer"),
+            OsString::from("--virtual-time-budget=10000"),
+            OsString::from(format!("--user-data-dir={}", profile.display())),
+            OsString::from(format!("--print-to-pdf={}", out.display())),
+            OsString::from(url),
+        ];
+        assert_eq!(args, expected);
     }
 
     #[test]
