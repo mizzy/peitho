@@ -439,7 +439,7 @@ function isListElement(element: HTMLElement): boolean {
 
 function orderedListStart(list: Element | null): number {
   const parsed = Number.parseInt(list?.getAttribute("start") ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 65535) : 1;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 32767) : 1;
 }
 
 function appendTrailingSpace(runs: MeasuredRun[]): void {

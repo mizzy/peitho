@@ -386,6 +386,7 @@ line two</p>
           <ol><li>One</li><li>Two</li></ol>
           <ol><li>Again</li></ol>
           <ol start="3"><li>Three</li></ol>
+          <ol start="40000"><li>Capped</li></ol>
         </div>
       </section>
     `);
@@ -400,7 +401,8 @@ line two</p>
       { numbered: true, numberingStartAt: 1, text: "One" },
       { numbered: true, numberingStartAt: null, text: "Two" },
       { numbered: true, numberingStartAt: 1, text: "Again" },
-      { numbered: true, numberingStartAt: 3, text: "Three" }
+      { numbered: true, numberingStartAt: 3, text: "Three" },
+      { numbered: true, numberingStartAt: 32767, text: "Capped" }
     ]);
   });
 

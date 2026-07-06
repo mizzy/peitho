@@ -476,9 +476,12 @@ fn bullet_xml(
     let indent = -171_450;
     let bullet = if numbered {
         match numbering_start_at {
-            Some(start_at) => format!(
-                r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod" startAt="{start_at}"/>"#
-            ),
+            Some(start_at) => {
+                let start_at = start_at.min(32_767);
+                format!(
+                    r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod" startAt="{start_at}"/>"#
+                )
+            }
             None => r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/>"#.to_owned(),
         }
     } else {
@@ -912,7 +915,10 @@ mod tests {
         let mut restarted = first.clone();
         restarted.numbering_start_at = Some(3);
         restarted.runs[0].text = "Three".to_owned();
-        measured.slides[0].boxes[0].paragraphs = vec![first, second, restarted];
+        let mut capped = first.clone();
+        capped.numbering_start_at = Some(40_000);
+        capped.runs[0].text = "Capped".to_owned();
+        measured.slides[0].boxes[0].paragraphs = vec![first, second, restarted, capped];
         let deck = rendered_deck(vec![("intro", None)]);
 
         let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
@@ -921,6 +927,8 @@ mod tests {
         let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
         assert!(slide.contains(r#"<a:buAutoNum type="arabicPeriod" startAt="1"/>"#));
         assert!(slide.contains(r#"<a:buAutoNum type="arabicPeriod" startAt="3"/>"#));
+        assert!(slide.contains(r#"<a:buAutoNum type="arabicPeriod" startAt="32767"/>"#));
+        assert!(!slide.contains(r#"startAt="40000""#));
         assert_eq!(
             slide
                 .matches(r#"<a:buAutoNum type="arabicPeriod"/>"#)
