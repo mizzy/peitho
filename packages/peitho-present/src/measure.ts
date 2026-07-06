@@ -1,39 +1,53 @@
-// src/measure.ts
-var MARKER_ID = "peitho-measure";
-var SLOT_CLASS = /(^|\s)slot-/;
-var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
-function measureDeck(document2 = globalThis.document) {
-  const sections = Array.from(document2.querySelectorAll("section[data-slide-key]"));
+import type { MeasuredBox } from "../../../bindings/MeasuredBox";
+import type { MeasuredBoxStyle } from "../../../bindings/MeasuredBoxStyle";
+import type { MeasuredDeck } from "../../../bindings/MeasuredDeck";
+import type { MeasuredImage } from "../../../bindings/MeasuredImage";
+import type { MeasuredParagraph } from "../../../bindings/MeasuredParagraph";
+import type { MeasuredRect } from "../../../bindings/MeasuredRect";
+import type { MeasuredRun } from "../../../bindings/MeasuredRun";
+import type { MeasuredSlide } from "../../../bindings/MeasuredSlide";
+
+const MARKER_ID = "peitho-measure";
+const SLOT_CLASS = /(^|\s)slot-/;
+const PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
+
+export function measureDeck(document: Document = globalThis.document): MeasuredDeck {
+  const sections = Array.from(document.querySelectorAll<HTMLElement>("section[data-slide-key]"));
   return {
-    canvasWidth: readCanvasDimension(document2, "--peitho-canvas-width", sections[0]?.getBoundingClientRect().width ?? 0),
-    canvasHeight: readCanvasDimension(document2, "--peitho-canvas-height", sections[0]?.getBoundingClientRect().height ?? 0),
+    canvasWidth: readCanvasDimension(document, "--peitho-canvas-width", sections[0]?.getBoundingClientRect().width ?? 0),
+    canvasHeight: readCanvasDimension(document, "--peitho-canvas-height", sections[0]?.getBoundingClientRect().height ?? 0),
     slides: sections.map((section) => measureSlide(section))
   };
 }
-async function appendMeasurement(document2 = globalThis.document) {
-  const fonts = document2.fonts;
+
+export async function appendMeasurement(document: Document = globalThis.document): Promise<MeasuredDeck> {
+  const fonts = (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts;
   if (fonts?.ready) {
     await fonts.ready;
   }
-  const measured = measureDeck(document2);
-  document2.getElementById(MARKER_ID)?.remove();
-  const script = document2.createElement("script");
+  const measured = measureDeck(document);
+  document.getElementById(MARKER_ID)?.remove();
+  const script = document.createElement("script");
   script.type = "application/json";
   script.id = MARKER_ID;
   script.textContent = JSON.stringify(measured).replace(/</g, "\\u003c");
-  document2.body.appendChild(script);
+  document.body.appendChild(script);
   return measured;
 }
-function measureSlide(section) {
+
+function measureSlide(section: HTMLElement): MeasuredSlide {
   const style = viewFor(section.ownerDocument).getComputedStyle(section);
   return {
     key: section.getAttribute("data-slide-key") ?? "",
     backgroundColor: style.backgroundColor,
-    boxes: Array.from(section.querySelectorAll("[class]")).filter((element) => SLOT_CLASS.test(element.className)).map((box) => measureBox(section, box)),
-    images: Array.from(section.querySelectorAll("img")).map((image) => measureImage(section, image))
+    boxes: Array.from(section.querySelectorAll<HTMLElement>("[class]"))
+      .filter((element) => SLOT_CLASS.test(element.className))
+      .map((box) => measureBox(section, box)),
+    images: Array.from(section.querySelectorAll<HTMLImageElement>("img")).map((image) => measureImage(section, image))
   };
 }
-function measureBox(section, box) {
+
+function measureBox(section: HTMLElement, box: HTMLElement): MeasuredBox {
   return {
     slot: slotName(box),
     rect: relativeRect(section, box),
@@ -41,14 +55,16 @@ function measureBox(section, box) {
     paragraphs: collectParagraphs(box)
   };
 }
-function measureImage(section, image) {
+
+function measureImage(section: HTMLElement, image: HTMLImageElement): MeasuredImage {
   return {
     src: image.getAttribute("src") ?? "",
     alt: image.getAttribute("alt") ?? "",
     rect: relativeRect(section, image)
   };
 }
-function measureBoxStyle(box) {
+
+function measureBoxStyle(box: HTMLElement): MeasuredBoxStyle {
   const style = viewFor(box.ownerDocument).getComputedStyle(box);
   return {
     backgroundColor: style.backgroundColor,
@@ -63,20 +79,25 @@ function measureBoxStyle(box) {
     )
   };
 }
-function collectParagraphs(box) {
+
+function collectParagraphs(box: HTMLElement): MeasuredParagraph[] {
   if (box.matches("pre")) {
     return collectPreParagraphs(box);
   }
-  const candidates = box.matches(PARAGRAPH_SELECTOR) ? [box] : Array.from(box.querySelectorAll(PARAGRAPH_SELECTOR));
+  const candidates = box.matches(PARAGRAPH_SELECTOR)
+    ? [box]
+    : Array.from(box.querySelectorAll<HTMLElement>(PARAGRAPH_SELECTOR));
   const paragraphElements = candidates.filter((candidate) => {
     if (candidate.matches("li")) {
       return true;
     }
     return !hasParagraphAncestor(candidate, box);
   });
+
   if (paragraphElements.length === 0) {
     return [measureParagraph(box, null)];
   }
+
   return paragraphElements.flatMap((element) => {
     if (element.matches("pre")) {
       return collectPreParagraphs(element);
@@ -84,9 +105,10 @@ function collectParagraphs(box) {
     return [measureParagraph(element, bulletLevel(element))];
   });
 }
-function collectPreParagraphs(pre) {
+
+function collectPreParagraphs(pre: HTMLElement): MeasuredParagraph[] {
   const align = textAlign(pre);
-  const paragraphs = [{ align, bulletLevel: null, runs: [] }];
+  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: null, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -100,18 +122,20 @@ function collectPreParagraphs(pre) {
   }
   return paragraphs;
 }
-function measureParagraph(element, level) {
+
+function measureParagraph(element: HTMLElement, level: number | null): MeasuredParagraph {
   return {
     align: textAlign(element),
     bulletLevel: level,
     runs: collectRuns(element, false)
   };
 }
-function collectRuns(root, preserveWhitespace) {
+
+function collectRuns(root: HTMLElement, preserveWhitespace: boolean): MeasuredRun[] {
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const runs = [];
+  const runs: MeasuredRun[] = [];
   while (walker.nextNode()) {
-    const node = walker.currentNode;
+    const node = walker.currentNode as Text;
     const text = node.nodeValue ?? "";
     if (preserveWhitespace ? text.length === 0 : text.trim().length === 0) {
       continue;
@@ -124,7 +148,8 @@ function collectRuns(root, preserveWhitespace) {
   }
   return runs;
 }
-function measureRun(text, element, root) {
+
+function measureRun(text: string, element: HTMLElement, root: HTMLElement): MeasuredRun {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
@@ -138,7 +163,8 @@ function measureRun(text, element, root) {
     monospace: fontFamily.toLowerCase().includes("mono") || element.closest("pre,code") !== null
   };
 }
-function relativeRect(section, element) {
+
+function relativeRect(section: HTMLElement, element: Element): MeasuredRect {
   const sectionRect = section.getBoundingClientRect();
   const rect = element.getBoundingClientRect();
   return {
@@ -148,15 +174,20 @@ function relativeRect(section, element) {
     h: rect.height
   };
 }
-function readCanvasDimension(document2, property, fallback) {
-  const value = viewFor(document2).getComputedStyle(document2.documentElement).getPropertyValue(property);
+
+function readCanvasDimension(document: Document, property: string, fallback: number): number {
+  const value = viewFor(document).getComputedStyle(document.documentElement).getPropertyValue(property);
   const parsed = parsePx(value);
   return parsed > 0 ? parsed : fallback;
 }
-function slotName(element) {
-  return Array.from(element.classList).find((className) => className.startsWith("slot-"))?.slice("slot-".length) ?? "";
+
+function slotName(element: HTMLElement): string {
+  return Array.from(element.classList)
+    .find((className) => className.startsWith("slot-"))
+    ?.slice("slot-".length) ?? "";
 }
-function bulletLevel(element) {
+
+function bulletLevel(element: HTMLElement): number | null {
   if (!element.matches("li")) {
     return null;
   }
@@ -168,7 +199,8 @@ function bulletLevel(element) {
   }
   return level;
 }
-function hasParagraphAncestor(element, root) {
+
+function hasParagraphAncestor(element: HTMLElement, root: HTMLElement): boolean {
   let parent = element.parentElement;
   while (parent && parent !== root) {
     if (parent.matches(PARAGRAPH_SELECTOR)) {
@@ -178,7 +210,8 @@ function hasParagraphAncestor(element, root) {
   }
   return false;
 }
-function hasNestedParagraphAncestor(node, root) {
+
+function hasNestedParagraphAncestor(node: Text, root: HTMLElement): boolean {
   let parent = node.parentElement;
   while (parent && parent !== root) {
     if (parent.matches(PARAGRAPH_SELECTOR)) {
@@ -188,8 +221,9 @@ function hasNestedParagraphAncestor(node, root) {
   }
   return false;
 }
-function hasUnderline(element, root) {
-  let current = element;
+
+function hasUnderline(element: HTMLElement, root: HTMLElement): boolean {
+  let current: HTMLElement | null = element;
   while (current) {
     const style = viewFor(current.ownerDocument).getComputedStyle(current);
     const authoredDecoration = `${inlineStyleValue(current, "text-decoration")} ${inlineStyleValue(current, "text-decoration-line")}`;
@@ -203,8 +237,9 @@ function hasUnderline(element, root) {
   }
   return false;
 }
-function textAlign(element) {
-  let current = element;
+
+function textAlign(element: HTMLElement): string {
+  let current: HTMLElement | null = element;
   while (current) {
     const style = viewFor(current.ownerDocument).getComputedStyle(current);
     if (current.style.textAlign || inlineStyleValue(current, "text-align")) {
@@ -217,21 +252,25 @@ function textAlign(element) {
   }
   return viewFor(element.ownerDocument).getComputedStyle(element).textAlign || "left";
 }
-function firstFontFamily(raw) {
+
+function firstFontFamily(raw: string): string {
   return (raw.split(",")[0] ?? "").trim().replace(/^["']|["']$/g, "");
 }
-function fontWeightIsBold(raw) {
+
+function fontWeightIsBold(raw: string): boolean {
   if (raw === "bold" || raw === "bolder") {
     return true;
   }
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value >= 600;
 }
-function parsePx(raw) {
+
+function parsePx(raw: string): number {
   const value = Number.parseFloat(raw);
   return Number.isFinite(value) ? value : 0;
 }
-function firstPositivePx(...values) {
+
+function firstPositivePx(...values: string[]): number {
   for (const value of values) {
     const parsed = parsePx(value);
     if (parsed > 0) {
@@ -240,22 +279,21 @@ function firstPositivePx(...values) {
   }
   return 0;
 }
-function inlineStyleValue(element, property) {
+
+function inlineStyleValue(element: HTMLElement, property: string): string {
   const style = element.getAttribute("style") ?? "";
   const match = style.match(new RegExp(`${property}\\s*:\\s*([^;]+)`, "i"));
   return match?.[1]?.trim() ?? "";
 }
-function viewFor(document2) {
-  const view = document2.defaultView;
+
+function viewFor(document: Document): Window {
+  const view = document.defaultView;
   if (!view) {
     throw new Error("measurement requires a document with a defaultView");
   }
   return view;
 }
+
 if (typeof document !== "undefined" && document.querySelector("section[data-slide-key]")) {
   void appendMeasurement(document);
 }
-export {
-  appendMeasurement,
-  measureDeck
-};

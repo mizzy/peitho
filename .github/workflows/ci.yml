@@ -49,5 +49,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: git diff --exit-code dist/shell.js
+      - run: git diff --exit-code dist/measure.js
       - run: npm test
       - run: npm run typecheck
