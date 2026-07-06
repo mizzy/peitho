@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn pdf_document_embeds_gradient_flattening_script_after_slides() {
+    fn pdf_document_embeds_pdf_flattening_script_after_slides() {
         let rendered = render_checked_deck("# Intro");
 
         let html = render_pdf_document(&rendered);
@@ -1505,6 +1505,7 @@ mod tests {
         let script_index = html.find("<script>").unwrap();
         assert!(script_index > slide_index);
         assert!(html.contains("flattenGradients"));
+        assert!(html.contains("flattenBoxShadows"));
     }
 
     #[test]
