@@ -10,7 +10,8 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, ExplicitSlot, FragmentKind, RawImagePath, SlideKey, SlotName, SourceFragment,
+        AspectRatio, ExplicitSlot, FragmentKind, RawImagePath, Resolution, SlideKey, SlotName,
+        SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -46,6 +47,8 @@ struct DeckFrontmatter {
     time: Option<PlannedTime>,
     #[serde(default)]
     aspect_ratio: Option<String>,
+    #[serde(default)]
+    resolution: Option<String>,
     #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
@@ -489,15 +492,35 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.aspect_ratio,
         key_lines.get("aspect_ratio").copied(),
     )?;
+    let resolution =
+        parse_frontmatter_resolution(parsed.resolution, key_lines.get("resolution").copied())?;
 
-    Ok(DeckSettings::new(
+    DeckSettings::new(
         parsed.time,
         aspect_ratio,
+        resolution,
         Vec::new(),
         parsed.layouts,
         parsed.css,
         parsed.syntaxes,
-    ))
+    )
+    .map_err(|message| {
+        let help = deck_settings_resolution_error_help(&message);
+        BuildError::new(
+            ErrorKind::Parse,
+            key_lines.get("resolution").copied(),
+            message,
+            help,
+        )
+    })
+}
+
+fn deck_settings_resolution_error_help(message: &str) -> &'static str {
+    if message.contains("smaller than the canvas logical size") {
+        "set resolution to at least the canvas dimensions or remove resolution to use the default"
+    } else {
+        "set resolution to match aspect_ratio or remove resolution to use the default"
+    }
 }
 
 fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, usize> {
@@ -507,7 +530,14 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
     };
 
     for (index, line) in raw.yaml.lines().enumerate() {
-        for key in ["time", "aspect_ratio", "layouts", "css", "syntaxes"] {
+        for key in [
+            "time",
+            "aspect_ratio",
+            "resolution",
+            "layouts",
+            "css",
+            "syntaxes",
+        ] {
             if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
                 key_lines.entry(key).or_insert(raw.line + index + 1);
             }
@@ -549,6 +579,32 @@ fn unknown_aspect_ratio_error(value: &str, line: Option<usize>) -> BuildError {
         format!("unknown aspect_ratio '{value}'; use one of: 16:9, 4:3"),
         "set aspect_ratio to 16:9 or 4:3",
     )
+}
+
+fn parse_frontmatter_resolution(
+    value: Option<String>,
+    line: Option<usize>,
+) -> Result<Option<Resolution>> {
+    match (value.as_deref(), line) {
+        (None, None) => Ok(None),
+        (Some(value), line) => {
+            let resolution = Resolution::from_frontmatter(value).map_err(|message| {
+                BuildError::new(
+                    ErrorKind::Parse,
+                    line,
+                    message,
+                    "set resolution to WxH pixels, like 1920x1080",
+                )
+            })?;
+            Ok(Some(resolution))
+        }
+        (None, Some(line)) => Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "resolution has no value",
+            "set resolution to WxH pixels, like 1920x1080",
+        )),
+    }
 }
 
 fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
@@ -600,9 +656,11 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
+    } else if frontmatter_message_mentions_key(message, "resolution") {
+        "set resolution to WxH pixels, like 1920x1080"
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -1822,6 +1880,132 @@ mod tests {
     }
 
     #[test]
+    fn parses_frontmatter_resolution() {
+        let deck = parse_markdown(
+            "---\naspect_ratio: 16:9\nresolution: 1920x1080\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().resolution().width(), 1920);
+        assert_eq!(deck.settings().resolution().height(), 1080);
+    }
+
+    #[test]
+    fn missing_frontmatter_resolution_defaults_from_aspect_ratio() {
+        let widescreen = parse_frontmatter("# Intro").unwrap();
+        assert_eq!(widescreen.settings().resolution().width(), 1920);
+        assert_eq!(widescreen.settings().resolution().height(), 1080);
+
+        let classic = parse_frontmatter("---\naspect_ratio: 4:3\n---\n# Intro").unwrap();
+        assert_eq!(classic.settings().resolution().width(), 1440);
+        assert_eq!(classic.settings().resolution().height(), 1080);
+    }
+
+    #[test]
+    fn rejects_frontmatter_resolution_that_mismatches_aspect_ratio() {
+        let markdown = "---\naspect_ratio: 16:9\nresolution: 1024x768\n---\n# Intro";
+        let err = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "resolution 1024x768 does not match aspect_ratio 16:9"
+        );
+        assert_eq!(
+            err.help,
+            "set resolution to match aspect_ratio or remove resolution to use the default"
+        );
+    }
+
+    #[test]
+    fn rejects_frontmatter_resolution_smaller_than_canvas() {
+        let markdown = "---\naspect_ratio: 16:9\nresolution: 16x9\n---\n# Intro";
+        let err = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "resolution 16x9 is smaller than the canvas logical size 1280x720; use at least the canvas dimensions"
+        );
+        assert_eq!(
+            err.help,
+            "set resolution to at least the canvas dimensions or remove resolution to use the default"
+        );
+    }
+
+    #[test]
+    fn accepts_frontmatter_resolution_equal_to_canvas() {
+        let deck = parse_markdown(
+            "---\naspect_ratio: 16:9\nresolution: 1280x720\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().resolution().width(), 1280);
+        assert_eq!(deck.settings().resolution().height(), 720);
+    }
+
+    #[test]
+    fn rejects_invalid_frontmatter_resolution_with_line_and_message() {
+        let cases = [
+            (
+                "resolution:",
+                "resolution has no value",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: abc",
+                "resolution must use WxH pixel format",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: 1920",
+                "resolution must use WxH pixel format",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: abcxdef",
+                "resolution width `abc` is not a valid u32",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: 9999999999x1080",
+                "resolution width `9999999999` is not a valid u32",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: 1080x9999999999",
+                "resolution height `9999999999` is not a valid u32",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: 0x1080",
+                "resolution width must be greater than zero",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+            (
+                "resolution: 1080x0",
+                "resolution height must be greater than zero",
+                "set resolution to WxH pixels, like 1920x1080",
+            ),
+        ];
+
+        for (frontmatter_line, message, help) in cases {
+            let markdown = format!("---\ntime: 15m\n{frontmatter_line}\n---\n# Intro");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(3), "case: {frontmatter_line}");
+            assert_eq!(err.message, message, "case: {frontmatter_line}");
+            assert_eq!(err.help, help, "case: {frontmatter_line}");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_frontmatter_aspect_ratio_with_line_and_message() {
         for value in ["16:10", "1920x1080"] {
             let markdown = format!("---\ntime: 15m\naspect_ratio: {value}\n---\n# Intro");
@@ -1898,6 +2082,14 @@ mod tests {
             parse_frontmatter("---\ntime: 15m\nsyntaxes: ./syntaxes\n---\n# Intro").unwrap();
 
         assert_eq!(frontmatter.key_line("syntaxes"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_resolution() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\nresolution: 1920x1080\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("resolution"), Some(3));
     }
 
     #[test]
@@ -2988,7 +3180,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
         );
     }
 
@@ -3156,7 +3348,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
         );
     }
 
@@ -3212,7 +3404,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
         );
     }
 
