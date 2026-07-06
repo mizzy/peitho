@@ -2051,7 +2051,9 @@ printf '0 bytes written to file %s\n' "$out" >&2
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("completed before one-shot output was ready"));
+        assert!(err
+            .to_string()
+            .contains("completed before one-shot output was ready"));
     }
 
     #[test]
