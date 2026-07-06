@@ -20,6 +20,7 @@ var SPECIAL_FONT_FAMILIES = /* @__PURE__ */ new Set([
   "math",
   "fangsong"
 ]);
+var colorContext = null;
 function measureDeck(document2 = globalThis.document) {
   const sections = Array.from(document2.querySelectorAll("section[data-slide-key]"));
   return {
@@ -44,7 +45,7 @@ async function appendMeasurement(document2 = globalThis.document) {
   return measured;
 }
 async function waitForImages(document2) {
-  const images = Array.from(document2.querySelectorAll("img"));
+  const images = Array.from(document2.querySelectorAll("img")).filter(isResolvedContentImage);
   await Promise.all(images.map(waitForImage));
 }
 async function waitForImage(image) {
@@ -70,7 +71,7 @@ function measureSlide(section) {
     key: section.getAttribute("data-slide-key") ?? "",
     backgroundColor: effectiveBackgroundColor(section),
     boxes: Array.from(section.querySelectorAll("[class]")).filter((element) => SLOT_CLASS.test(element.className)).map((box) => measureBox(section, box)),
-    images: Array.from(section.querySelectorAll("img")).map((image) => measureImage(section, image))
+    images: Array.from(section.querySelectorAll("img")).filter(isResolvedContentImage).map((image) => measureImage(section, image))
   };
 }
 function effectiveBackgroundColor(section) {
@@ -78,7 +79,7 @@ function effectiveBackgroundColor(section) {
   while (current) {
     const color = viewFor(current.ownerDocument).getComputedStyle(current).backgroundColor;
     if (!isTransparentColor(color)) {
-      return color;
+      return normalizeColor(color, section.ownerDocument);
     }
     if (current === current.ownerDocument.documentElement) {
       break;
@@ -125,8 +126,8 @@ function measureImage(section, image) {
 function measureBoxStyle(box) {
   const style = viewFor(box.ownerDocument).getComputedStyle(box);
   return {
-    backgroundColor: style.backgroundColor,
-    borderColor: style.borderTopColor,
+    backgroundColor: normalizeColor(style.backgroundColor, box.ownerDocument),
+    borderColor: normalizeColor(style.borderTopColor, box.ownerDocument),
     borderWidth: parsePx(style.borderTopWidth),
     borderRadius: firstPositivePx(
       style.borderTopLeftRadius,
@@ -163,20 +164,21 @@ function collectParagraphs(box) {
 }
 function collectListItemParagraphs(item) {
   const level = bulletLevel(item);
+  const numbered = listItemIsNumbered(item);
   const directBlocks = Array.from(item.children).filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR)).map((child) => child);
   if (directBlocks.length === 0) {
-    return [measureParagraph(item, level)];
+    return [measureParagraph(item, level, numbered)];
   }
   return directBlocks.flatMap((block) => {
     if (block.matches("pre")) {
-      return collectPreParagraphs(block, level);
+      return collectPreParagraphs(block, level, numbered);
     }
-    return [measureParagraph(block, level)];
+    return [measureParagraph(block, level, numbered)];
   });
 }
-function collectPreParagraphs(pre, level = null) {
+function collectPreParagraphs(pre, level = null, numbered = false) {
   const align = textAlign(pre);
-  const paragraphs = [{ align, bulletLevel: level, runs: [] }];
+  const paragraphs = [{ align, bulletLevel: level, numbered, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -184,16 +186,17 @@ function collectPreParagraphs(pre, level = null) {
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, numbered, runs: [] });
       }
     });
   }
   return paragraphs;
 }
-function measureParagraph(element, level) {
+function measureParagraph(element, level, numbered = false) {
   return {
     align: textAlign(element),
     bulletLevel: level,
+    numbered,
     runs: collectRuns(element, false)
   };
 }
@@ -219,7 +222,7 @@ function measureRun(text, element, root) {
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
     text,
-    color: style.color,
+    color: normalizeColor(style.color, element.ownerDocument),
     fontFamily,
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
@@ -257,6 +260,36 @@ function bulletLevel(element) {
     parent = parent.parentElement?.closest("li") ?? null;
   }
   return level;
+}
+function listItemIsNumbered(element) {
+  if (!element.matches("li")) {
+    return false;
+  }
+  return element.parentElement?.closest("ol,ul")?.tagName.toLowerCase() === "ol";
+}
+function isResolvedContentImage(image) {
+  return (image.getAttribute("src") ?? "").startsWith("assets/");
+}
+function normalizeColor(raw, document2) {
+  const context = colorNormalizationContext(document2);
+  if (!context) {
+    return raw;
+  }
+  const sentinel = "#000001";
+  context.fillStyle = sentinel;
+  context.fillStyle = raw;
+  if (context.fillStyle === sentinel && raw.trim().toLowerCase() !== sentinel) {
+    return raw;
+  }
+  return context.fillStyle;
+}
+function colorNormalizationContext(document2) {
+  if (colorContext) {
+    return colorContext;
+  }
+  const canvas = document2.createElement("canvas");
+  colorContext = canvas.getContext?.("2d") ?? null;
+  return colorContext;
 }
 function hasParagraphAncestor(element, root) {
   let parent = element.parentElement;

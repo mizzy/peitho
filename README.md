@@ -75,7 +75,9 @@ peitho publish -- aws s3 sync dist/ s3://your-bucket/
 
 ### Export
 
-PowerPoint export produces a `.pptx` with editable text boxes, images, and speaker notes. Keynote users should open or import that `.pptx` in Keynote; peitho does not generate `.key` files or provide an `export keynote` command.
+PowerPoint export produces a `.pptx` with editable text boxes, Markdown content images, and speaker notes. Keynote users should open or import that `.pptx` in Keynote; peitho does not generate `.key` files or provide an `export keynote` command.
+
+Only images resolved from Markdown content into `assets/...` are exported as editable picture parts. Images baked into layout HTML or remote image URLs are treated as design decoration and are not carried into the `.pptx`; use a Markdown image when the picture is part of the slide content.
 
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 

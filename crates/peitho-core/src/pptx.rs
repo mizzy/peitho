@@ -83,7 +83,7 @@ pub fn build_pptx(
             write_zip_file(
                 &mut zip,
                 &format!("ppt/slides/slide{}.xml", slide.number),
-                slide_xml(slide),
+                slide_xml(slide)?,
             )?;
             write_zip_file(
                 &mut zip,
@@ -94,7 +94,7 @@ pub fn build_pptx(
                 write_zip_file(
                     &mut zip,
                     &format!("ppt/notesSlides/notesSlide{}.xml", slide.number),
-                    notes_slide_xml(slide.number, notes),
+                    notes_slide_xml(slide.number, notes)?,
                 )?;
                 write_zip_file(
                     &mut zip,
@@ -102,13 +102,13 @@ pub fn build_pptx(
                     notes_slide_rels_xml(slide.number),
                 )?;
             }
-            for image in &slide.images {
-                write_zip_bytes(
-                    &mut zip,
-                    &format!("ppt/media/{}", image.media_name),
-                    &image.bytes,
-                )?;
-            }
+        }
+        for media in &prepared.media {
+            write_zip_bytes(
+                &mut zip,
+                &format!("ppt/media/{}", media.media_name),
+                &media.bytes,
+            )?;
         }
         zip.finish().map_err(pptx_io_error)?;
     }
@@ -120,6 +120,7 @@ struct PreparedPptx {
     canvas_width: f64,
     canvas_height: f64,
     slides: Vec<PreparedSlide>,
+    media: Vec<PreparedMedia>,
     media_extensions: BTreeSet<String>,
     has_notes: bool,
 }
@@ -135,6 +136,11 @@ struct PreparedSlide {
 #[derive(Debug)]
 struct PreparedImage {
     measured: MeasuredImage,
+    media_name: String,
+}
+
+#[derive(Debug)]
+struct PreparedMedia {
     media_name: String,
     bytes: Vec<u8>,
 }
@@ -161,6 +167,8 @@ fn prepare_pptx(
         .collect::<BTreeMap<_, _>>();
     let mut media_index = 1;
     let mut media_extensions = BTreeSet::new();
+    let mut media_by_source: BTreeMap<std::path::PathBuf, String> = BTreeMap::new();
+    let mut media = Vec::new();
     let mut slides = Vec::with_capacity(measured.slides.len());
     for (index, (measured_slide, rendered_slide)) in
         measured.slides.iter().zip(deck.slides()).enumerate()
@@ -177,21 +185,31 @@ fn prepare_pptx(
             let extension = media_extension(&image.src, &asset.source_abs)?;
             image_content_type(&extension)?;
             media_extensions.insert(extension.clone());
-            let bytes = fs::read(&asset.source_abs).map_err(|err| {
-                pptx_error(
-                    format!(
-                        "failed to read image asset {}: {err}",
-                        asset.source_abs.display()
-                    ),
-                    "make sure resolved image assets remain readable during pptx export",
-                )
-            })?;
+            let media_name = if let Some(media_name) = media_by_source.get(&asset.source_abs) {
+                media_name.clone()
+            } else {
+                let media_name = format!("image{media_index}.{extension}");
+                let bytes = fs::read(&asset.source_abs).map_err(|err| {
+                    pptx_error(
+                        format!(
+                            "failed to read image asset {}: {err}",
+                            asset.source_abs.display()
+                        ),
+                        "make sure resolved image assets remain readable during pptx export",
+                    )
+                })?;
+                media.push(PreparedMedia {
+                    media_name: media_name.clone(),
+                    bytes,
+                });
+                media_by_source.insert(asset.source_abs.clone(), media_name.clone());
+                media_index += 1;
+                media_name
+            };
             images.push(PreparedImage {
                 measured: image.clone(),
-                media_name: format!("image{media_index}.{extension}"),
-                bytes,
+                media_name,
             });
-            media_index += 1;
         }
         slides.push(PreparedSlide {
             number: index + 1,
@@ -208,6 +226,7 @@ fn prepare_pptx(
         canvas_width: measured.canvas_width,
         canvas_height: measured.canvas_height,
         slides,
+        media,
         media_extensions,
         has_notes,
     })
@@ -237,7 +256,7 @@ fn write_zip_file(
     path: &str,
     content: String,
 ) -> Result<()> {
-    write_zip_bytes(zip, path, content.as_bytes())
+    write_zip_entry(zip, path, content.as_bytes(), CompressionMethod::Deflated)
 }
 
 fn write_zip_bytes(
@@ -245,7 +264,16 @@ fn write_zip_bytes(
     path: &str,
     bytes: &[u8],
 ) -> Result<()> {
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    write_zip_entry(zip, path, bytes, CompressionMethod::Stored)
+}
+
+fn write_zip_entry(
+    zip: &mut ZipWriter<&mut Cursor<Vec<u8>>>,
+    path: &str,
+    bytes: &[u8],
+    compression: CompressionMethod,
+) -> Result<()> {
+    let options = SimpleFileOptions::default().compression_method(compression);
     zip.start_file(path, options).map_err(pptx_io_error)?;
     zip.write_all(bytes).map_err(pptx_io_error)
 }
@@ -313,9 +341,17 @@ fn presentation_xml(pptx: &PreparedPptx) -> String {
         .collect::<String>();
     let cx = px_to_emu(pptx.canvas_width);
     let cy = px_to_emu(pptx.canvas_height);
+    let notes_master_ids = if pptx.has_notes {
+        format!(
+            r#"<p:notesMasterIdLst><p:notesMasterId r:id="rId{}"/></p:notesMasterIdLst>"#,
+            pptx.slides.len() + 2
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}"/><p:notesSz cx="6858000" cy="9144000"/><p:defaultTextStyle/></p:presentation>"#
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master_ids}<p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}"/><p:notesSz cx="6858000" cy="9144000"/><p:defaultTextStyle/></p:presentation>"#
     )
 }
 
@@ -339,12 +375,12 @@ fn presentation_rels_xml(pptx: &PreparedPptx) -> String {
     relationships_xml(&rels)
 }
 
-fn slide_xml(slide: &PreparedSlide) -> String {
-    let background = slide_background_xml(&slide.measured.background_color);
+fn slide_xml(slide: &PreparedSlide) -> Result<String> {
+    let background = slide_background_xml(&slide.measured.background_color)?;
     let mut shapes = String::new();
     let mut shape_id = 2;
     for measured_box in &slide.measured.boxes {
-        shapes.push_str(&text_shape_xml(shape_id, &measured_box.slot, measured_box));
+        shapes.push_str(&text_shape_xml(shape_id, measured_box)?);
         shape_id += 1;
     }
     for (index, image) in slide.images.iter().enumerate() {
@@ -355,11 +391,11 @@ fn slide_xml(slide: &PreparedSlide) -> String {
         ));
         shape_id += 1;
     }
-    format!(
+    Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld>{background}<p:spTree>{group_shape_xml}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#,
         group_shape_xml = group_shape_xml(),
-    )
+    ))
 }
 
 fn slide_rels_xml(slide: &PreparedSlide) -> String {
@@ -383,17 +419,13 @@ fn slide_rels_xml(slide: &PreparedSlide) -> String {
     relationships_xml(&rels)
 }
 
-fn text_shape_xml(
-    shape_id: usize,
-    name: &str,
-    measured_box: &crate::domain::MeasuredBox,
-) -> String {
+fn text_shape_xml(shape_id: usize, measured_box: &crate::domain::MeasuredBox) -> Result<String> {
     let rect = xfrm_xml(&measured_box.rect);
-    let fill = fill_xml(&measured_box.style.background_color);
+    let fill = fill_xml(&measured_box.style.background_color)?;
     let line = line_xml(
         &measured_box.style.border_color,
         measured_box.style.border_width,
-    );
+    )?;
     let geometry = if measured_box.style.border_radius > 0.0 {
         r#"<a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>"#
     } else {
@@ -403,43 +435,54 @@ fn text_shape_xml(
         .paragraphs
         .iter()
         .map(paragraph_xml)
-        .collect::<String>();
-    format!(
-        r#"<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>{rect}{geometry}{fill}{line}</p:spPr><p:txBody><a:bodyPr wrap="square" anchor="t"><a:noAutofit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody></p:sp>"#,
-        name = xml_attr(name),
-    )
+        .collect::<Result<String>>()?;
+    Ok(format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr>{rect}{geometry}{fill}{line}</p:spPr><p:txBody><a:bodyPr wrap="square" anchor="t" lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody></p:sp>"#,
+        name = xml_attr(&measured_box.slot),
+    ))
 }
 
-fn paragraph_xml(paragraph: &MeasuredParagraph) -> String {
+fn paragraph_xml(paragraph: &MeasuredParagraph) -> Result<String> {
     let align = paragraph_align(&paragraph.align);
     let (bullet_attrs, bullet) = match paragraph.bullet_level {
-        Some(level) => bullet_xml(level),
+        Some(level) => bullet_xml(level, paragraph.numbered),
         None => (String::new(), String::new()),
     };
-    let runs = paragraph.runs.iter().map(run_xml).collect::<String>();
-    format!(r#"<a:p><a:pPr{bullet_attrs} algn="{align}">{bullet}</a:pPr>{runs}</a:p>"#)
+    let runs = paragraph
+        .runs
+        .iter()
+        .map(run_xml)
+        .collect::<Result<String>>()?;
+    Ok(format!(
+        r#"<a:p><a:pPr{bullet_attrs} algn="{align}">{bullet}</a:pPr>{runs}</a:p>"#
+    ))
 }
 
-fn bullet_xml(level: u8) -> (String, String) {
+fn bullet_xml(level: u8, numbered: bool) -> (String, String) {
     let margin = 342_900 * (i64::from(level) + 1);
     let indent = -171_450;
+    let bullet = if numbered {
+        r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/>"#
+    } else {
+        r#"<a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>"#
+    };
     (
         format!(r#" marL="{margin}" indent="{indent}""#),
-        r#"<a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>"#.to_owned(),
+        bullet.to_owned(),
     )
 }
 
-fn run_xml(run: &MeasuredRun) -> String {
+fn run_xml(run: &MeasuredRun) -> Result<String> {
     let size = (run.font_size_px * 75.0).round() as i64;
     let bold = if run.bold { r#" b="1""# } else { "" };
     let italic = if run.italic { r#" i="1""# } else { "" };
     let underline = if run.underline { r#" u="sng""# } else { "" };
-    let color = run_color_xml(&run.color);
-    format!(
+    let color = run_color_xml(&run.color)?;
+    Ok(format!(
         r#"<a:r><a:rPr lang="en-US" sz="{size}"{bold}{italic}{underline}>{color}<a:latin typeface="{font}"/></a:rPr><a:t>{text}</a:t></a:r>"#,
         font = xml_attr(&run.font_family),
         text = xml_text(&run.text),
-    )
+    ))
 }
 
 fn picture_xml(shape_id: usize, image: &MeasuredImage, rel_id: &str) -> String {
@@ -450,11 +493,11 @@ fn picture_xml(shape_id: usize, image: &MeasuredImage, rel_id: &str) -> String {
     )
 }
 
-fn slide_background_xml(color: &str) -> String {
-    match solid_fill_xml(color) {
+fn slide_background_xml(color: &str) -> Result<String> {
+    Ok(match solid_fill_xml(color)? {
         Some(fill) => format!(r#"<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>"#),
         None => String::new(),
-    }
+    })
 }
 
 fn xfrm_xml(rect: &MeasuredRect) -> String {
@@ -467,34 +510,33 @@ fn xfrm_xml(rect: &MeasuredRect) -> String {
     )
 }
 
-fn fill_xml(color: &str) -> String {
-    solid_fill_xml(color).unwrap_or_else(|| "<a:noFill/>".to_owned())
+fn fill_xml(color: &str) -> Result<String> {
+    Ok(solid_fill_xml(color)?.unwrap_or_else(|| "<a:noFill/>".to_owned()))
 }
 
-fn line_xml(color: &str, width_px: f64) -> String {
+fn line_xml(color: &str, width_px: f64) -> Result<String> {
     if width_px <= 0.0 {
-        return r#"<a:ln><a:noFill/></a:ln>"#.to_owned();
+        return Ok(r#"<a:ln><a:noFill/></a:ln>"#.to_owned());
     }
-    match solid_fill_xml(color) {
+    Ok(match solid_fill_xml(color)? {
         Some(fill) => format!(r#"<a:ln w="{}">{fill}</a:ln>"#, px_to_emu(width_px)),
         None => r#"<a:ln><a:noFill/></a:ln>"#.to_owned(),
-    }
+    })
 }
 
-fn run_color_xml(color: &str) -> String {
-    solid_fill_xml(color)
-        .unwrap_or_else(|| r#"<a:solidFill><a:srgbClr val="000000"/></a:solidFill>"#.to_owned())
+fn run_color_xml(color: &str) -> Result<String> {
+    Ok(solid_fill_xml(color)?.unwrap_or_else(|| "<a:noFill/>".to_owned()))
 }
 
-fn solid_fill_xml(color: &str) -> Option<String> {
+fn solid_fill_xml(color: &str) -> Result<Option<String>> {
     let color = parse_css_color(color)?;
     if color.alpha_zero {
-        return None;
+        return Ok(None);
     }
-    Some(format!(
+    Ok(Some(format!(
         r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
         color.hex
-    ))
+    )))
 }
 
 #[derive(Debug)]
@@ -503,17 +545,17 @@ struct CssColor {
     alpha_zero: bool,
 }
 
-fn parse_css_color(raw: &str) -> Option<CssColor> {
+fn parse_css_color(raw: &str) -> Result<CssColor> {
     let raw = raw.trim();
     if raw.eq_ignore_ascii_case("transparent") {
-        return Some(CssColor {
+        return Ok(CssColor {
             hex: "000000".to_owned(),
             alpha_zero: true,
         });
     }
     if let Some(hex) = raw.strip_prefix('#') {
         if hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            return Some(CssColor {
+            return Ok(CssColor {
                 hex: hex.to_ascii_uppercase(),
                 alpha_zero: false,
             });
@@ -527,22 +569,30 @@ fn parse_css_color(raw: &str) -> Option<CssColor> {
             raw.strip_prefix("rgba(")
                 .and_then(|s| s.strip_suffix(')'))
                 .map(|s| (s, Some(())))
-        })?;
+        })
+        .ok_or_else(|| unsupported_color_error(raw))?;
     let parts = args.0.split(',').map(str::trim).collect::<Vec<_>>();
     if parts.len() < 3 {
-        return None;
+        return Err(unsupported_color_error(raw));
     }
-    let r = parse_color_channel(parts[0])?;
-    let g = parse_color_channel(parts[1])?;
-    let b = parse_color_channel(parts[2])?;
+    let r = parse_color_channel(parts[0]).ok_or_else(|| unsupported_color_error(raw))?;
+    let g = parse_color_channel(parts[1]).ok_or_else(|| unsupported_color_error(raw))?;
+    let b = parse_color_channel(parts[2]).ok_or_else(|| unsupported_color_error(raw))?;
     let alpha_zero = parts
         .get(3)
         .and_then(|alpha| alpha.parse::<f64>().ok())
         .is_some_and(|alpha| alpha <= 0.0);
-    Some(CssColor {
+    Ok(CssColor {
         hex: format!("{r:02X}{g:02X}{b:02X}"),
         alpha_zero,
     })
+}
+
+fn unsupported_color_error(raw: &str) -> BuildError {
+    pptx_error(
+        format!("unsupported color value '{raw}'"),
+        "rerun measurement in Chrome so CSS colors are normalized before pptx export",
+    )
 }
 
 fn parse_color_channel(raw: &str) -> Option<u8> {
@@ -620,27 +670,27 @@ fn notes_master_rels_xml() -> String {
     )
 }
 
-fn notes_slide_xml(slide_number: usize, notes: &str) -> String {
+fn notes_slide_xml(slide_number: usize, notes: &str) -> Result<String> {
     let rect = MeasuredRect {
         x: 48.0,
         y: 360.0,
         w: 624.0,
         h: 288.0,
     };
-    let paragraphs = notes_paragraphs_xml(notes);
-    format!(
+    let paragraphs = notes_paragraphs_xml(notes)?;
+    Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>{group}<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder {slide_number}"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>{rect}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"#,
         group = group_shape_xml(),
         rect = xfrm_xml(&rect),
-    )
+    ))
 }
 
-fn notes_paragraphs_xml(notes: &str) -> String {
+fn notes_paragraphs_xml(notes: &str) -> Result<String> {
     notes.split('\n').map(note_paragraph_xml).collect()
 }
 
-fn note_paragraph_xml(line: &str) -> String {
+fn note_paragraph_xml(line: &str) -> Result<String> {
     let runs = if line.is_empty() {
         Vec::new()
     } else {
@@ -658,6 +708,7 @@ fn note_paragraph_xml(line: &str) -> String {
     paragraph_xml(&MeasuredParagraph {
         align: "left".to_owned(),
         bullet_level: None,
+        numbered: false,
         runs,
     })
 }
@@ -715,7 +766,7 @@ mod tests {
         path::Path,
     };
 
-    use zip::ZipArchive;
+    use zip::{CompressionMethod, ZipArchive};
 
     use crate::{
         domain::{
@@ -755,6 +806,9 @@ mod tests {
         assert!(presentation.contains(r#"<p:sldSz cx="12192000" cy="6858000"/>"#));
         assert!(!presentation.contains("type=\"wide\""));
         assert!(!presentation.contains("type=\"screen4x3\""));
+        assert!(presentation.contains(
+            r#"<p:notesMasterIdLst><p:notesMasterId r:id="rId3"/></p:notesMasterIdLst><p:sldIdLst>"#
+        ));
         assert!(presentation.contains(r#"r:id="rId2""#));
 
         let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
@@ -767,6 +821,9 @@ mod tests {
         assert!(slide.contains(r#"u="sng""#));
         assert!(slide.contains(r#"<a:srgbClr val="112233"/>"#));
         assert!(slide.contains(r#"<a:latin typeface="Inter"/>"#));
+        assert!(slide.contains(
+            r#"<a:bodyPr wrap="square" anchor="t" lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></a:bodyPr>"#
+        ));
         assert!(slide.contains(
             r#"<a:pPr marL="342900" indent="-171450" algn="ctr"><a:buFont typeface="Arial"/><a:buChar char="&#8226;"/></a:pPr>"#
         ));
@@ -785,6 +842,22 @@ mod tests {
         let slide_rels = read_zip(&mut zip, "ppt/slides/_rels/slide1.xml.rels");
         assert!(slide_rels.contains(r#"Target="../slideLayouts/slideLayout1.xml""#));
         assert!(slide_rels.contains(r#"Target="../media/image1.png""#));
+    }
+
+    #[test]
+    fn pptx_writer_emits_numbered_list_paragraphs() {
+        let mut measured = measured_deck_without_images("intro");
+        measured.slides[0].boxes[0].paragraphs[0].numbered = true;
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
+        assert!(slide.contains(
+            r#"<a:pPr marL="342900" indent="-171450" algn="ctr"><a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/></a:pPr>"#
+        ));
+        assert!(!slide.contains(r#"<a:buChar char="&#8226;"/>"#));
     }
 
     #[test]
@@ -840,6 +913,53 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn pptx_writer_rejects_unsupported_color_values() {
+        let mut measured = measured_deck_without_images("intro");
+        measured.slides[0].boxes[0].paragraphs[0].runs[0].color = "oklch(50% 0.1 120)".to_owned();
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let err = super::build_pptx(&measured, &deck, &[]).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unsupported color value 'oklch(50% 0.1 120)'"));
+    }
+
+    #[test]
+    fn pptx_writer_deduplicates_media_by_source_and_deflates_xml_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("arch.png");
+        fs::write(&image_path, b"png bytes").unwrap();
+        let image_asset = image_asset(&image_path, "arch.png");
+        let mut measured = measured_deck_with_notes_image(image_asset.dist_rel.as_str());
+        let mut second_slide = measured.slides[0].clone();
+        second_slide.key = "details".to_owned();
+        measured.slides.push(second_slide);
+        let deck = rendered_deck(vec![("intro", None), ("details", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[image_asset]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let media_names = (0..zip.len())
+            .map(|index| zip.by_index(index).unwrap().name().to_owned())
+            .filter(|name| name.starts_with("ppt/media/"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(media_names, vec!["ppt/media/image1.png"]);
+        assert_eq!(
+            zip.by_name("ppt/slides/slide1.xml").unwrap().compression(),
+            CompressionMethod::Deflated
+        );
+        assert_eq!(
+            zip.by_name("ppt/media/image1.png").unwrap().compression(),
+            CompressionMethod::Stored
+        );
+        let slide1_rels = read_zip(&mut zip, "ppt/slides/_rels/slide1.xml.rels");
+        let slide2_rels = read_zip(&mut zip, "ppt/slides/_rels/slide2.xml.rels");
+        assert!(slide1_rels.contains(r#"Target="../media/image1.png""#));
+        assert!(slide2_rels.contains(r#"Target="../media/image1.png""#));
+    }
+
     fn measured_deck_with_notes_image(src: &str) -> MeasuredDeck {
         MeasuredDeck {
             canvas_width: 1280.0,
@@ -864,6 +984,7 @@ mod tests {
                     paragraphs: vec![MeasuredParagraph {
                         align: "center".to_owned(),
                         bullet_level: Some(0),
+                        numbered: false,
                         runs: vec![MeasuredRun {
                             text: "Hello & welcome".to_owned(),
                             color: "rgb(17, 34, 51)".to_owned(),

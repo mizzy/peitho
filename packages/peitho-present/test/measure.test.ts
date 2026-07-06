@@ -1,5 +1,5 @@
 import { JSDOM } from "jsdom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { appendMeasurement, measureDeck } from "../src/measure";
 
 describe("measurement DOM walker", () => {
@@ -81,6 +81,45 @@ describe("measurement DOM walker", () => {
     expect(measured.slides[0]?.backgroundColor).toBe("rgb(12, 34, 56)");
   });
 
+  it("normalizes measured colors through canvas when available", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="colors" style="background-color: rgb(1, 2, 3);">
+        <div class="slot-body" style="background-color: rgb(4, 5, 6); border: 2px solid rgb(7, 8, 9); color: rgb(10, 11, 12);">
+          <p>Color</p>
+        </div>
+      </section>
+    `);
+    const canonical = new Map([
+      ["rgb(1, 2, 3)", "#010203"],
+      ["rgb(4, 5, 6)", "#040506"],
+      ["rgb(7, 8, 9)", "#070809"],
+      ["rgb(10, 11, 12)", "#0a0b0c"]
+    ]);
+    const context = {
+      value: "",
+      set fillStyle(raw: string) {
+        this.value = canonical.get(raw) ?? raw;
+      },
+      get fillStyle() {
+        return this.value;
+      }
+    };
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+      if (tagName.toLowerCase() === "canvas") {
+        return { getContext: (kind: string) => kind === "2d" ? context : null } as unknown as HTMLCanvasElement;
+      }
+      return createElement(tagName, options);
+    }) as Document["createElement"]);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.backgroundColor).toBe("#010203");
+    expect(measured.slides[0]?.boxes[0]?.style.backgroundColor).toBe("#040506");
+    expect(measured.slides[0]?.boxes[0]?.style.borderColor).toBe("#070809");
+    expect(measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs[0]?.color).toBe("#0a0b0c");
+  });
+
   it("falls back to a white slide background when all ancestors are transparent", () => {
     const { document } = createDocument(`
       <section data-slide-key="background" style="background-color: rgba(0, 0, 0, 0);">
@@ -113,6 +152,7 @@ describe("measurement DOM walker", () => {
       {
         align: "left",
         bulletLevel: null,
+        numbered: false,
         runs: [
           {
             text: "fn main()",
@@ -129,6 +169,7 @@ describe("measurement DOM walker", () => {
       {
         align: "left",
         bulletLevel: null,
+        numbered: false,
         runs: [
           {
             text: "println()",
@@ -141,6 +182,30 @@ describe("measurement DOM walker", () => {
             monospace: true
           }
         ]
+      }
+    ]);
+  });
+
+  it("measures only resolved content image assets", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="image-filter">
+        <img src="assets/content.png" alt="Content">
+        <img src="https://example.com/logo.png" alt="Remote">
+        <img src="decor/logo.png" alt="Decor">
+      </section>
+    `);
+    const section = document.querySelector("section")!;
+    const images = Array.from(document.querySelectorAll("img"));
+    setRect(section, { x: 10, y: 20, w: 1280, h: 720 });
+    images.forEach((image, index) => setRect(image, { x: 30 + index * 100, y: 50, w: 80, h: 40 }));
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.images).toEqual([
+      {
+        src: "assets/content.png",
+        alt: "Content",
+        rect: { x: 20, y: 30, w: 80, h: 40 }
       }
     ]);
   });
@@ -184,10 +249,33 @@ describe("measurement DOM walker", () => {
 
     expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
       bulletLevel: paragraph.bulletLevel,
+      numbered: paragraph.numbered,
       text: paragraph.runs.map((run) => run.text).join("")
     }))).toEqual([
-      { bulletLevel: 0, text: "Top" },
-      { bulletLevel: 1, text: "Nested" }
+      { bulletLevel: 0, numbered: false, text: "Top" },
+      { bulletLevel: 1, numbered: false, text: "Nested" }
+    ]);
+  });
+
+  it("marks ordered list item paragraphs as numbered", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ol><li>First</li></ol>
+          <ul><li>Bullet</li></ul>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      numbered: paragraph.numbered,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletLevel: 0, numbered: true, text: "First" },
+      { bulletLevel: 0, numbered: false, text: "Bullet" }
     ]);
   });
 

@@ -28,6 +28,7 @@ const SPECIAL_FONT_FAMILIES = new Set([
   "math",
   "fangsong"
 ]);
+let colorContext: CanvasRenderingContext2D | null = null;
 
 export function measureDeck(document: Document = globalThis.document): MeasuredDeck {
   const sections = Array.from(document.querySelectorAll<HTMLElement>("section[data-slide-key]"));
@@ -55,7 +56,7 @@ export async function appendMeasurement(document: Document = globalThis.document
 }
 
 async function waitForImages(document: Document): Promise<void> {
-  const images = Array.from(document.querySelectorAll<HTMLImageElement>("img"));
+  const images = Array.from(document.querySelectorAll<HTMLImageElement>("img")).filter(isResolvedContentImage);
   await Promise.all(images.map(waitForImage));
 }
 
@@ -85,7 +86,9 @@ function measureSlide(section: HTMLElement): MeasuredSlide {
     boxes: Array.from(section.querySelectorAll<HTMLElement>("[class]"))
       .filter((element) => SLOT_CLASS.test(element.className))
       .map((box) => measureBox(section, box)),
-    images: Array.from(section.querySelectorAll<HTMLImageElement>("img")).map((image) => measureImage(section, image))
+    images: Array.from(section.querySelectorAll<HTMLImageElement>("img"))
+      .filter(isResolvedContentImage)
+      .map((image) => measureImage(section, image))
   };
 }
 
@@ -94,7 +97,7 @@ function effectiveBackgroundColor(section: HTMLElement): string {
   while (current) {
     const color = viewFor(current.ownerDocument).getComputedStyle(current).backgroundColor;
     if (!isTransparentColor(color)) {
-      return color;
+      return normalizeColor(color, section.ownerDocument);
     }
     if (current === current.ownerDocument.documentElement) {
       break;
@@ -146,8 +149,8 @@ function measureImage(section: HTMLElement, image: HTMLImageElement): MeasuredIm
 function measureBoxStyle(box: HTMLElement): MeasuredBoxStyle {
   const style = viewFor(box.ownerDocument).getComputedStyle(box);
   return {
-    backgroundColor: style.backgroundColor,
-    borderColor: style.borderTopColor,
+    backgroundColor: normalizeColor(style.backgroundColor, box.ownerDocument),
+    borderColor: normalizeColor(style.borderTopColor, box.ownerDocument),
     borderWidth: parsePx(style.borderTopWidth),
     borderRadius: firstPositivePx(
       style.borderTopLeftRadius,
@@ -190,23 +193,24 @@ function collectParagraphs(box: HTMLElement): MeasuredParagraph[] {
 
 function collectListItemParagraphs(item: HTMLElement): MeasuredParagraph[] {
   const level = bulletLevel(item);
+  const numbered = listItemIsNumbered(item);
   const directBlocks = Array.from(item.children)
     .filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR))
     .map((child) => child as HTMLElement);
   if (directBlocks.length === 0) {
-    return [measureParagraph(item, level)];
+    return [measureParagraph(item, level, numbered)];
   }
   return directBlocks.flatMap((block) => {
     if (block.matches("pre")) {
-      return collectPreParagraphs(block, level);
+      return collectPreParagraphs(block, level, numbered);
     }
-    return [measureParagraph(block, level)];
+    return [measureParagraph(block, level, numbered)];
   });
 }
 
-function collectPreParagraphs(pre: HTMLElement, level: number | null = null): MeasuredParagraph[] {
+function collectPreParagraphs(pre: HTMLElement, level: number | null = null, numbered = false): MeasuredParagraph[] {
   const align = textAlign(pre);
-  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, runs: [] }];
+  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, numbered, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -214,17 +218,18 @@ function collectPreParagraphs(pre: HTMLElement, level: number | null = null): Me
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, numbered, runs: [] });
       }
     });
   }
   return paragraphs;
 }
 
-function measureParagraph(element: HTMLElement, level: number | null): MeasuredParagraph {
+function measureParagraph(element: HTMLElement, level: number | null, numbered = false): MeasuredParagraph {
   return {
     align: textAlign(element),
     bulletLevel: level,
+    numbered,
     runs: collectRuns(element, false)
   };
 }
@@ -252,7 +257,7 @@ function measureRun(text: string, element: HTMLElement, root: HTMLElement): Meas
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
     text,
-    color: style.color,
+    color: normalizeColor(style.color, element.ownerDocument),
     fontFamily,
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
@@ -296,6 +301,40 @@ function bulletLevel(element: HTMLElement): number | null {
     parent = parent.parentElement?.closest("li") ?? null;
   }
   return level;
+}
+
+function listItemIsNumbered(element: HTMLElement): boolean {
+  if (!element.matches("li")) {
+    return false;
+  }
+  return element.parentElement?.closest("ol,ul")?.tagName.toLowerCase() === "ol";
+}
+
+function isResolvedContentImage(image: HTMLImageElement): boolean {
+  return (image.getAttribute("src") ?? "").startsWith("assets/");
+}
+
+function normalizeColor(raw: string, document: Document): string {
+  const context = colorNormalizationContext(document);
+  if (!context) {
+    return raw;
+  }
+  const sentinel = "#000001";
+  context.fillStyle = sentinel;
+  context.fillStyle = raw;
+  if (context.fillStyle === sentinel && raw.trim().toLowerCase() !== sentinel) {
+    return raw;
+  }
+  return context.fillStyle;
+}
+
+function colorNormalizationContext(document: Document): CanvasRenderingContext2D | null {
+  if (colorContext) {
+    return colorContext;
+  }
+  const canvas = document.createElement("canvas");
+  colorContext = canvas.getContext?.("2d") ?? null;
+  return colorContext;
 }
 
 function hasParagraphAncestor(element: HTMLElement, root: HTMLElement): boolean {

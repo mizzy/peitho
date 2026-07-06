@@ -461,6 +461,8 @@ pub struct MeasuredBoxStyle {
 pub struct MeasuredParagraph {
     pub align: String,
     pub bullet_level: Option<u8>,
+    #[serde(default)]
+    pub numbered: bool,
     pub runs: Vec<MeasuredRun>,
 }
 
@@ -1127,6 +1129,7 @@ mod tests {
                     paragraphs: vec![MeasuredParagraph {
                         align: "center".to_owned(),
                         bullet_level: Some(1),
+                        numbered: true,
                         runs: vec![MeasuredRun {
                             text: "Intro".to_owned(),
                             color: "rgb(34, 34, 34)".to_owned(),
@@ -1163,6 +1166,10 @@ mod tests {
             1
         );
         assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["numbered"],
+            true
+        );
+        assert_eq!(
             json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontFamily"],
             "Inter"
         );
@@ -1176,6 +1183,7 @@ mod tests {
             round_tripped.slides[0].boxes[0].paragraphs[0].bullet_level,
             Some(1)
         );
+        assert!(round_tripped.slides[0].boxes[0].paragraphs[0].numbered);
     }
 
     #[test]
@@ -1212,6 +1220,7 @@ mod tests {
         assert!(box_binding.contains("style: MeasuredBoxStyle"));
         assert!(box_style.contains("borderRadius: number"));
         assert!(paragraph.contains("bulletLevel: number | null"));
+        assert!(paragraph.contains("numbered: boolean"));
         assert!(run.contains("fontFamily: string"));
         assert!(run.contains("fontSizePx: number"));
     }
