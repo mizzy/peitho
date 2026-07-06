@@ -1,11 +1,22 @@
 import { build } from "esbuild";
 
-await build({
-  entryPoints: ["src/index.ts"],
-  outfile: "dist/shell.js",
+const shared = {
   bundle: true,
   format: "esm",
   platform: "browser",
-  target: "es2022",
-  sourcemap: true
-});
+  target: "es2022"
+};
+
+await Promise.all([
+  build({
+    ...shared,
+    entryPoints: ["src/index.ts"],
+    outfile: "dist/shell.js",
+    sourcemap: true
+  }),
+  build({
+    ...shared,
+    entryPoints: ["src/measure.ts"],
+    outfile: "dist/measure.js"
+  })
+]);

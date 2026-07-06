@@ -10,12 +10,16 @@ pub mod notes;
 pub mod parser;
 pub mod phase;
 mod plain;
+pub mod pptx;
 pub mod present_config;
 pub mod render;
 pub mod theme;
 
 pub use check::check_deck;
-pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
+pub use domain::{
+    AspectRatio, MeasuredBox, MeasuredBoxStyle, MeasuredDeck, MeasuredImage, MeasuredParagraph,
+    MeasuredRect, MeasuredRun, MeasuredSlide, RawImagePath, ResolvedImageAsset, ResolvedImagePath,
+};
 pub use error::{BuildError, Result};
 pub use layout::{parse_layout, Layout, Layouts};
 pub use manifest::{
@@ -29,10 +33,11 @@ pub use phase::{
     require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, ImageRequest,
     Mapped, Rendered,
 };
+pub use pptx::build_pptx;
 pub use present_config::{present_config_json, PresentConfig};
 pub use render::{
-    render_deck, render_distribution_index, render_pdf_document, render_present_index,
-    render_presenter_index,
+    render_deck, render_distribution_index, render_measure_document, render_pdf_document,
+    render_present_index, render_presenter_index,
 };
 pub use theme::{build_theme_css, CssFile};
 

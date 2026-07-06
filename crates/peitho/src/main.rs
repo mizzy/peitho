@@ -3,10 +3,12 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
+    process::{Child, Stdio},
     sync::mpsc,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
@@ -203,6 +205,11 @@ enum ExportCommand {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    Pptx {
+        input: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// Built-in defaults compiled from the repository's own layout and theme,
@@ -257,6 +264,7 @@ fn main() -> miette::Result<()> {
         }
         Command::Export { command } => match command {
             ExportCommand::Pdf { input, out } => export_pdf(input, out),
+            ExportCommand::Pptx { input, out } => export_pptx(input, out),
         },
     }
 }
@@ -278,13 +286,89 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
     let tmp = tempfile::tempdir().into_diagnostic()?;
     emit_pdf_workspace(tmp.path(), &artifacts)?;
     let chrome = locate_chrome()?;
-    run_chrome_print(&chrome, tmp.path(), &out)?;
+    if let Err(err) = run_chrome_print(&chrome, tmp.path(), &out) {
+        return Err(keep_workspace_for_error(tmp, err));
+    }
     println!(
         "exported {} slide(s) to {}",
         artifacts.slide_count,
         out.display()
     );
     Ok(())
+}
+
+fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
+    let artifacts = build_artifacts(&input)?;
+    let out = out.unwrap_or_else(|| input.with_extension("pptx"));
+    let tmp = tempfile::tempdir().into_diagnostic()?;
+    emit_measure_workspace(tmp.path(), &artifacts)?;
+    let chrome = locate_chrome()?;
+    let dumped_dom = match run_chrome_dump_dom(&chrome, tmp.path()) {
+        Ok(dumped_dom) => dumped_dom,
+        Err(err) => return Err(keep_workspace_for_error(tmp, err)),
+    };
+    let measurement_json = match extract_measure_json(&dumped_dom) {
+        Ok(measurement_json) => measurement_json,
+        Err(err) => return Err(keep_measure_workspace_for_error(tmp, &dumped_dom, err)),
+    };
+    let measured: peitho_core::MeasuredDeck = match serde_json::from_str(&measurement_json) {
+        Ok(measured) => measured,
+        Err(err) => {
+            return Err(keep_measure_workspace_for_error(
+                tmp,
+                &dumped_dom,
+                miette::miette!(
+                "failed to parse measurement JSON\nhelp: rerun export; if this persists, inspect measure.html and the peitho-measure script payload\ncaused by: {err}"
+            ),
+            ));
+        }
+    };
+    let pptx = core(peitho_core::build_pptx(
+        &measured,
+        &artifacts.rendered,
+        &artifacts.image_assets,
+    ))?;
+    write_pptx_output(&out, pptx)?;
+    println!(
+        "exported {} slide(s) to {}",
+        artifacts.slide_count,
+        out.display()
+    );
+    Ok(())
+}
+
+fn write_pptx_output(out: &Path, pptx: Vec<u8>) -> miette::Result<()> {
+    fs::write(out, pptx).map_err(|err| {
+        miette::miette!(
+            "failed to write pptx output at {}\nhelp: check output path permissions and ensure the parent directory exists\ncaused by: {err}",
+            out.display()
+        )
+    })
+}
+
+fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
+    let kept = tmp.keep();
+    miette::miette!("{err}\nhelp: workspace kept at {}", kept.display())
+}
+
+fn keep_measure_workspace_for_error(
+    tmp: tempfile::TempDir,
+    dumped_dom: &str,
+    err: impl std::fmt::Display,
+) -> miette::Report {
+    let dump_path = tmp.path().join("chrome-dump.html");
+    let dump_note = match fs::write(&dump_path, dumped_dom) {
+        Ok(()) => format!("\nhelp: Chrome dump kept at {}", dump_path.display()),
+        Err(write_err) => format!(
+            "\nwarning: failed to keep Chrome dump at {}: {write_err}",
+            dump_path.display()
+        ),
+    };
+    let kept = tmp.keep();
+    miette::miette!(
+        "{err}{dump_note}\nhelp: workspace kept at {}",
+        kept.display()
+    )
 }
 
 fn rebuild_once_for_watch(
@@ -616,6 +700,13 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
     Ok(())
 }
 
+fn emit_measure_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    write_shared_assets(workspace, artifacts)?;
+    let measure_html = peitho_core::render_measure_document(&artifacts.rendered);
+    fs::write(workspace.join("measure.html"), measure_html).into_diagnostic()?;
+    Ok(())
+}
+
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
     fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
@@ -678,6 +769,268 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     })
 }
 
+const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
+
+enum ChromeCompletion {
+    PdfWritten { output_path: PathBuf },
+    DumpDom,
+}
+
+#[derive(Default)]
+struct ChromeCompletionState {
+    stdout_scanned: usize,
+    stderr_scanned: usize,
+    dump_dom_ready: bool,
+    pdf_signal_seen: bool,
+}
+
+impl ChromeCompletion {
+    fn description(&self) -> &'static str {
+        match self {
+            Self::PdfWritten { .. } => "PDF output",
+            Self::DumpDom => "dumped DOM",
+        }
+    }
+
+    fn is_ready(&self, stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
+        match self {
+            Self::PdfWritten { output_path } => {
+                if !state.pdf_signal_seen {
+                    state.pdf_signal_seen = scan_for_needle(
+                        stderr,
+                        &mut state.stderr_scanned,
+                        b"bytes written to file",
+                    );
+                }
+                output_file_is_nonempty(output_path) && state.pdf_signal_seen
+            }
+            Self::DumpDom => {
+                if !state.dump_dom_ready {
+                    state.dump_dom_ready =
+                        scan_for_needle(stdout, &mut state.stdout_scanned, b"</html>");
+                }
+                state.dump_dom_ready
+            }
+        }
+    }
+
+    fn is_ready_after_successful_exit(&self) -> bool {
+        match self {
+            Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
+            Self::DumpDom => false,
+        }
+    }
+}
+
+fn scan_for_needle(buffer: &[u8], scanned: &mut usize, needle: &[u8]) -> bool {
+    let overlap = needle.len().saturating_sub(1);
+    let start = (*scanned).saturating_sub(overlap).min(buffer.len());
+    let found = buffer[start..]
+        .windows(needle.len())
+        .any(|window| window == needle);
+    *scanned = buffer.len();
+    found
+}
+
+#[derive(Debug)]
+enum ChromePipeEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ChromePipe {
+    Stdout,
+    Stderr,
+}
+
+fn run_one_shot_chrome(
+    chrome: &Path,
+    args: &[OsString],
+    completion: ChromeCompletion,
+    timeout: Duration,
+) -> miette::Result<Vec<u8>> {
+    let mut child = std::process::Command::new(chrome)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            miette::miette!(
+                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+                chrome.display()
+            )
+        })?;
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
+        miette::miette!(
+            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
+        )
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        miette::miette!(
+            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
+        )
+    })?;
+    let (tx, rx) = mpsc::channel();
+    // Intentionally do not join these readers: lingering Chrome grandchildren can hold pipes open forever; threads exit with this process.
+    let _stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
+    let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut completion_state = ChromeCompletionState::default();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if completion.is_ready(&stdout, &stderr, &mut completion_state) {
+            kill_and_reap_child(&mut child)?;
+            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            return Ok(stdout);
+        }
+
+        if let Some(status) = child.try_wait().into_diagnostic()? {
+            drain_chrome_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
+            if completion.is_ready(&stdout, &stderr, &mut completion_state)
+                || (status.success() && completion.is_ready_after_successful_exit())
+            {
+                return Ok(stdout);
+            }
+            if !status.success() {
+                return Err(miette::miette!(
+                    "Chrome failed during one-shot operation with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr).trim()
+                ));
+            }
+            return Err(miette::miette!(
+                "Chrome completed before one-shot output was ready\nhelp: expected {} before Chrome exited\nstderr: {}",
+                completion.description(),
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            kill_and_reap_child(&mut child)?;
+            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            return Err(miette::miette!(
+                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
+                timeout.as_secs(),
+                completion.description(),
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(25));
+        let _ = receive_chrome_event_until(&rx, &mut stdout, &mut stderr, poll);
+    }
+}
+
+fn spawn_chrome_pipe_reader<R>(
+    mut pipe: R,
+    pipe_name: ChromePipe,
+    tx: mpsc::Sender<ChromePipeEvent>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let bytes = buffer[..n].to_vec();
+                    let event = match pipe_name {
+                        ChromePipe::Stdout => ChromePipeEvent::Stdout(bytes),
+                        ChromePipe::Stderr => ChromePipeEvent::Stderr(bytes),
+                    };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn append_chrome_event(event: ChromePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+    match event {
+        ChromePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        ChromePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+    }
+}
+
+fn drain_chrome_events(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) {
+    while let Ok(event) = rx.try_recv() {
+        append_chrome_event(event, stdout, stderr);
+    }
+}
+
+fn drain_chrome_events_for(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    duration: Duration,
+) {
+    let deadline = Instant::now() + duration;
+    loop {
+        drain_chrome_events(rx, stdout, stderr);
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(10));
+        match receive_chrome_event_until(rx, stdout, stderr, poll) {
+            ChromeReceive::Event | ChromeReceive::Timeout => {}
+            ChromeReceive::Disconnected => return,
+        }
+    }
+}
+
+enum ChromeReceive {
+    Event,
+    Timeout,
+    Disconnected,
+}
+
+fn receive_chrome_event_until(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    poll: Duration,
+) -> ChromeReceive {
+    match rx.recv_timeout(poll) {
+        Ok(event) => {
+            append_chrome_event(event, stdout, stderr);
+            ChromeReceive::Event
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => ChromeReceive::Timeout,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            thread::sleep(poll);
+            ChromeReceive::Disconnected
+        }
+    }
+}
+
+fn kill_and_reap_child(child: &mut Child) -> miette::Result<()> {
+    if child.try_wait().into_diagnostic()?.is_none() {
+        child.kill().into_diagnostic()?;
+    }
+    child.wait().into_diagnostic()?;
+    Ok(())
+}
+
+fn output_file_is_nonempty(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+
 fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
     vec![
         OsString::from("--headless=new"),
@@ -697,23 +1050,15 @@ fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Resu
     fs::create_dir_all(&profile).into_diagnostic()?;
     let pdf_html = workspace.join("pdf.html");
     let url = file_url(&pdf_html)?;
-    let output = std::process::Command::new(chrome)
-        .args(chrome_print_args(&profile, &abs_out, &url))
-        .output()
-        .map_err(|err| {
-            miette::miette!(
-                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
-                chrome.display()
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!(
-            "Chrome failed to print PDF with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
-            output.status,
-            stderr.trim()
-        ));
-    }
+    let args = chrome_print_args(&profile, &abs_out, &url);
+    run_one_shot_chrome(
+        chrome,
+        &args,
+        ChromeCompletion::PdfWritten {
+            output_path: abs_out.clone(),
+        },
+        CHROME_ONE_SHOT_TIMEOUT,
+    )?;
     let metadata = fs::metadata(&abs_out).map_err(|err| {
         miette::miette!(
             "Chrome did not create PDF output at {}\nhelp: check output path permissions\ncaused by: {err}",
@@ -727,6 +1072,83 @@ fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Resu
         ));
     }
     Ok(())
+}
+
+fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String> {
+    let profile = workspace.join("chrome-profile");
+    fs::create_dir_all(&profile).into_diagnostic()?;
+    let measure_html = workspace.join("measure.html");
+    let url = file_url(&measure_html)?;
+    let args = vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from("--dump-dom"),
+        OsString::from("--virtual-time-budget=20000"),
+        OsString::from(url),
+    ];
+    let stdout = run_one_shot_chrome(
+        chrome,
+        &args,
+        ChromeCompletion::DumpDom,
+        CHROME_ONE_SHOT_TIMEOUT,
+    )?;
+    String::from_utf8(stdout).map_err(|err| {
+        miette::miette!(
+            "Chrome dump-dom output was not UTF-8\nhelp: rerun export and inspect measure.html\ncaused by: {err}"
+        )
+    })
+}
+
+fn extract_measure_json(dumped_dom: &str) -> miette::Result<String> {
+    let error_marker = r#"<script type="application/json" id="peitho-measure-error">"#;
+    if let Some(payload) =
+        extract_script_payload(dumped_dom, error_marker, "measurement error marker")?
+    {
+        let message = measurement_error_message(&payload);
+        return Err(miette::miette!(
+            "measurement script failed in Chrome\nhelp: inspect measure.html and the peitho-measure-error script payload\ncaused by: {message}"
+        ));
+    }
+
+    let marker = r#"<script type="application/json" id="peitho-measure">"#;
+    extract_script_payload(dumped_dom, marker, "measurement marker")?.ok_or_else(|| {
+        miette::miette!(
+            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script type=\"application/json\" id=\"peitho-measure\">; very large images or fonts can exceed the measurement budget"
+        )
+    })
+}
+
+fn extract_script_payload(
+    dumped_dom: &str,
+    marker: &str,
+    label: &str,
+) -> miette::Result<Option<String>> {
+    let Some(payload_start) = dumped_dom.rfind(marker).map(|offset| offset + marker.len()) else {
+        return Ok(None);
+    };
+    let payload_end = dumped_dom[payload_start..]
+        .find("</script>")
+        .map(|offset| payload_start + offset)
+        .ok_or_else(|| {
+            miette::miette!(
+                "{label} closing tag not found\nhelp: rerun export and inspect Chrome dump-dom output"
+            )
+        })?;
+    Ok(Some(dumped_dom[payload_start..payload_end].to_owned()))
+}
+
+fn measurement_error_message(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| payload.to_owned())
 }
 
 fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
@@ -1685,10 +2107,45 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
-            Command::Build { .. } | Command::Present { .. } | Command::Publish { .. } => {
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. } => {
                 panic!("expected export pdf command");
             }
         }
+    }
+
+    #[test]
+    fn export_pptx_command_accepts_output_flag() {
+        let cli = Cli::parse_from(["peitho", "export", "pptx", "deck.md", "-o", "out.pptx"]);
+
+        match cli.command {
+            Command::Export {
+                command: ExportCommand::Pptx { input, out },
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(out, Some(PathBuf::from("out.pptx")));
+            }
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. } => {
+                panic!("expected export pptx command");
+            }
+        }
+    }
+
+    #[test]
+    fn export_pptx_output_write_error_includes_path_and_help() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("missing").join("deck.pptx");
+
+        let err = write_pptx_output(&out, vec![1, 2, 3]).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains(&out.display().to_string()));
+        assert!(message.contains("check output path permissions"));
     }
 
     #[test]
@@ -1740,6 +2197,125 @@ contexts:
         emit_pdf_workspace(&workspace, &artifacts).unwrap();
 
         assert!(workspace.join("pdf.html").is_file());
+    }
+
+    #[test]
+    fn emit_measure_workspace_writes_static_measure_entry_and_assets() {
+        let fixture = WatchFixture::new("# Export\n\n<!-- private note -->\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("measure-workspace");
+
+        emit_measure_workspace(&workspace, &artifacts).unwrap();
+
+        let html = fs::read_to_string(workspace.join("measure.html")).unwrap();
+        assert!(html.contains(r#"data-slide-key="export""#));
+        assert!(html.contains("peitho-measure"));
+        assert!(!html.contains("private note"));
+        assert!(!workspace.join("manifest.json").exists());
+        assert!(!workspace.join("slides").exists());
+        assert!(workspace.join("peitho.css").is_file());
+    }
+
+    #[test]
+    fn extract_measure_json_reads_marker_payload_from_dumped_dom() {
+        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
+
+        let json = extract_measure_json(dumped).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
+        );
+    }
+
+    #[test]
+    fn extract_measure_json_ignores_decoy_id_string_before_marker() {
+        let dumped = r#"<!doctype html><html><body><pre>id="peitho-measure"</pre><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
+
+        let json = extract_measure_json(dumped).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
+        );
+    }
+
+    #[test]
+    fn extract_measure_json_prefers_measurement_error_marker() {
+        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure-error">{"message":"bad \u003cmeasurement>"}</script></body></html>"#;
+
+        let err = extract_measure_json(dumped).unwrap_err();
+
+        assert!(err.to_string().contains("measurement script failed"));
+        assert!(err.to_string().contains("bad <measurement>"));
+    }
+
+    #[test]
+    fn extract_measure_json_reports_missing_marker() {
+        let err = extract_measure_json("<html></html>").unwrap_err();
+
+        assert!(err.to_string().contains("measurement marker not found"));
+        assert!(err.to_string().contains("large images or fonts"));
+    }
+
+    #[test]
+    fn kept_workspace_error_mentions_path_and_preserves_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
+
+        let err = keep_workspace_for_error(tmp, miette::miette!("measurement failed"));
+        let message = err.to_string();
+
+        assert!(message.contains("measurement failed"));
+        assert!(message.contains("workspace kept at"));
+        assert!(message.contains(&workspace.display().to_string()));
+        assert!(workspace.join("measure.html").is_file());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn kept_measure_workspace_error_writes_chrome_dump() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+
+        let err = keep_measure_workspace_for_error(
+            tmp,
+            "<html><body>dump</body></html>",
+            miette::miette!("measurement failed"),
+        );
+        let message = err.to_string();
+
+        assert!(message.contains("Chrome dump kept at"));
+        assert!(message.contains("workspace kept at"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("chrome-dump.html")).unwrap(),
+            "<html><body>dump</body></html>"
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_dump_dom_runner_returns_dump_after_html_closing_tag_and_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+printf '%s\n' '<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>'
+exec sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let dumped = run_chrome_dump_dom(&fake_chrome, &workspace).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(dumped.contains("peitho-measure"));
     }
 
     #[test]
@@ -1815,6 +2391,131 @@ contexts:
         assert!(message.contains("PEITHO_CHROME_PATH=<absolute-path>"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_returns_after_pdf_completion_signal_and_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+printf '%s' '%PDF-test' > "$out"
+printf '9 bytes written to file %s\n' "$out" >&2
+exec sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let stdout = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten {
+                output_path: out.clone(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(out.is_file());
+        assert!(stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_accepts_successful_pdf_exit_without_stderr_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+printf '%s' '%PDF-test' > "$out"
+"#,
+        );
+
+        let stdout = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten {
+                output_path: out.clone(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert!(out.is_file());
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn chrome_completion_scan_detects_needles_across_buffer_boundaries() {
+        let mut state = ChromeCompletionState::default();
+        let mut stdout = b"<!doctype html></ht".to_vec();
+
+        assert!(!ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
+
+        stdout.extend_from_slice(b"ml>");
+
+        assert!(ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_times_out_and_reaps_child_without_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+exec sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let err = run_one_shot_chrome(
+            &fake_chrome,
+            &[],
+            ChromeCompletion::DumpDom,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdf_completion_requires_nonempty_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+: > "$out"
+printf '0 bytes written to file %s\n' "$out" >&2
+"#,
+        );
+
+        let err = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten { output_path: out },
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("completed before one-shot output was ready"));
+    }
+
     #[test]
     fn emit_present_cache_writes_present_json() {
         let fixture = WatchFixture::new("# Intro\n");
@@ -1876,6 +2577,16 @@ contexts:
 
     fn write_fake_browser(path: &Path) {
         fs::write(path, "").unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
