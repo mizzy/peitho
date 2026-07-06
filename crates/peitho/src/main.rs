@@ -3,10 +3,12 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
+    process::{Child, Stdio},
     sync::mpsc,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
@@ -678,35 +680,217 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     })
 }
 
-fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Result<()> {
-    let abs_out = absolute_path_for_output(out)?;
-    let profile = workspace.join("chrome-profile");
-    fs::create_dir_all(&profile).into_diagnostic()?;
-    let pdf_html = workspace.join("pdf.html");
-    let url = file_url(&pdf_html)?;
-    let output = std::process::Command::new(chrome)
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--no-pdf-header-footer")
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!("--print-to-pdf={}", abs_out.display()))
-        .arg(url)
-        .output()
+const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
+
+enum ChromeCompletion {
+    PdfWritten { output_path: PathBuf },
+    DumpDom,
+}
+
+impl ChromeCompletion {
+    fn description(&self) -> &'static str {
+        match self {
+            Self::PdfWritten { .. } => "PDF output",
+            Self::DumpDom => "dumped DOM",
+        }
+    }
+
+    fn is_ready(&self, stdout: &[u8], stderr: &[u8]) -> bool {
+        match self {
+            Self::PdfWritten { output_path } => {
+                output_file_is_nonempty(output_path)
+                    && String::from_utf8_lossy(stderr).contains("bytes written to file")
+            }
+            Self::DumpDom => String::from_utf8_lossy(stdout).contains("</html>"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ChromePipeEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ChromePipe {
+    Stdout,
+    Stderr,
+}
+
+fn run_one_shot_chrome(
+    chrome: &Path,
+    args: &[OsString],
+    completion: ChromeCompletion,
+    timeout: Duration,
+) -> miette::Result<Vec<u8>> {
+    let mut child = std::process::Command::new(chrome)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| {
             miette::miette!(
                 "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
                 chrome.display()
             )
         })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!(
-            "Chrome failed to print PDF with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
-            output.status,
-            stderr.trim()
-        ));
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
+        miette::miette!(
+            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
+        )
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        miette::miette!(
+            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
+        )
+    })?;
+    let (tx, rx) = mpsc::channel();
+    let stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
+    let stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
+    let mut readers = Some([stdout_reader, stderr_reader]);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if completion.is_ready(&stdout, &stderr) {
+            kill_and_reap_child(&mut child)?;
+            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
+            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            return Ok(stdout);
+        }
+
+        if let Some(status) = child.try_wait().into_diagnostic()? {
+            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
+            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            if completion.is_ready(&stdout, &stderr) {
+                return Ok(stdout);
+            }
+            if !status.success() {
+                return Err(miette::miette!(
+                    "Chrome failed during one-shot operation with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr).trim()
+                ));
+            }
+            return Err(miette::miette!(
+                "Chrome completed before one-shot output was ready\nhelp: expected {} before Chrome exited\nstderr: {}",
+                completion.description(),
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            kill_and_reap_child(&mut child)?;
+            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
+            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            return Err(miette::miette!(
+                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the temporary workspace\nstderr: {}",
+                timeout.as_secs(),
+                completion.description(),
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(25));
+        match rx.recv_timeout(poll) {
+            Ok(event) => append_chrome_event(event, &mut stdout, &mut stderr),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
     }
+}
+
+fn spawn_chrome_pipe_reader<R>(
+    mut pipe: R,
+    pipe_name: ChromePipe,
+    tx: mpsc::Sender<ChromePipeEvent>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let bytes = buffer[..n].to_vec();
+                    let event = match pipe_name {
+                        ChromePipe::Stdout => ChromePipeEvent::Stdout(bytes),
+                        ChromePipe::Stderr => ChromePipeEvent::Stderr(bytes),
+                    };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn append_chrome_event(event: ChromePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+    match event {
+        ChromePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        ChromePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+    }
+}
+
+fn drain_chrome_events(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) {
+    while let Ok(event) = rx.try_recv() {
+        append_chrome_event(event, stdout, stderr);
+    }
+}
+
+fn join_chrome_pipe_readers(readers: [thread::JoinHandle<()>; 2]) {
+    for reader in readers {
+        let _ = reader.join();
+    }
+}
+
+fn kill_and_reap_child(child: &mut Child) -> miette::Result<()> {
+    if child.try_wait().into_diagnostic()?.is_none() {
+        child.kill().into_diagnostic()?;
+    }
+    child.wait().into_diagnostic()?;
+    Ok(())
+}
+
+fn output_file_is_nonempty(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+
+fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Result<()> {
+    let abs_out = absolute_path_for_output(out)?;
+    let profile = workspace.join("chrome-profile");
+    fs::create_dir_all(&profile).into_diagnostic()?;
+    let pdf_html = workspace.join("pdf.html");
+    let url = file_url(&pdf_html)?;
+    let args = vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from("--no-pdf-header-footer"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from(format!("--print-to-pdf={}", abs_out.display())),
+        OsString::from(url),
+    ];
+    run_one_shot_chrome(
+        chrome,
+        &args,
+        ChromeCompletion::PdfWritten {
+            output_path: abs_out.clone(),
+        },
+        CHROME_ONE_SHOT_TIMEOUT,
+    )?;
     let metadata = fs::metadata(&abs_out).map_err(|err| {
         miette::miette!(
             "Chrome did not create PDF output at {}\nhelp: check output path permissions\ncaused by: {err}",
@@ -1787,6 +1971,89 @@ contexts:
         assert!(message.contains("PEITHO_CHROME_PATH=<absolute-path>"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_returns_after_pdf_completion_signal_and_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+printf '%s' '%PDF-test' > "$out"
+printf '9 bytes written to file %s\n' "$out" >&2
+sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let stdout = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten {
+                output_path: out.clone(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(out.is_file());
+        assert!(stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_times_out_and_reaps_child_without_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let err = run_one_shot_chrome(
+            &fake_chrome,
+            &[],
+            ChromeCompletion::DumpDom,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdf_completion_requires_nonempty_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+: > "$out"
+printf '0 bytes written to file %s\n' "$out" >&2
+"#,
+        );
+
+        let err = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten { output_path: out },
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("completed before one-shot output was ready"));
+    }
+
     #[test]
     fn emit_present_cache_writes_present_json() {
         let fixture = WatchFixture::new("# Intro\n");
@@ -1848,6 +2115,16 @@ contexts:
 
     fn write_fake_browser(path: &Path) {
         fs::write(path, "").unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
