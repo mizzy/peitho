@@ -286,7 +286,9 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
     let tmp = tempfile::tempdir().into_diagnostic()?;
     emit_pdf_workspace(tmp.path(), &artifacts)?;
     let chrome = locate_chrome()?;
-    run_chrome_print(&chrome, tmp.path(), &out)?;
+    if let Err(err) = run_chrome_print(&chrome, tmp.path(), &out) {
+        return Err(keep_workspace_for_error(tmp, err));
+    }
     println!(
         "exported {} slide(s) to {}",
         artifacts.slide_count,
@@ -301,14 +303,26 @@ fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
     let tmp = tempfile::tempdir().into_diagnostic()?;
     emit_measure_workspace(tmp.path(), &artifacts)?;
     let chrome = locate_chrome()?;
-    let dumped_dom = run_chrome_dump_dom(&chrome, tmp.path())?;
-    let measurement_json = extract_measure_json(&dumped_dom)?;
-    let measured: peitho_core::MeasuredDeck =
-        serde_json::from_str(&measurement_json).map_err(|err| {
-            miette::miette!(
+    let dumped_dom = match run_chrome_dump_dom(&chrome, tmp.path()) {
+        Ok(dumped_dom) => dumped_dom,
+        Err(err) => return Err(keep_workspace_for_error(tmp, err)),
+    };
+    let measurement_json = match extract_measure_json(&dumped_dom) {
+        Ok(measurement_json) => measurement_json,
+        Err(err) => return Err(keep_measure_workspace_for_error(tmp, &dumped_dom, err)),
+    };
+    let measured: peitho_core::MeasuredDeck = match serde_json::from_str(&measurement_json) {
+        Ok(measured) => measured,
+        Err(err) => {
+            return Err(keep_measure_workspace_for_error(
+                tmp,
+                &dumped_dom,
+                miette::miette!(
                 "failed to parse measurement JSON\nhelp: rerun export; if this persists, inspect measure.html and the peitho-measure script payload\ncaused by: {err}"
-            )
-        })?;
+            ),
+            ));
+        }
+    };
     let pptx = core(peitho_core::build_pptx(
         &measured,
         &artifacts.rendered,
@@ -321,6 +335,31 @@ fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
         out.display()
     );
     Ok(())
+}
+
+fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
+    let kept = tmp.keep();
+    miette::miette!("{err}\nhelp: workspace kept at {}", kept.display())
+}
+
+fn keep_measure_workspace_for_error(
+    tmp: tempfile::TempDir,
+    dumped_dom: &str,
+    err: impl std::fmt::Display,
+) -> miette::Report {
+    let dump_path = tmp.path().join("chrome-dump.html");
+    let dump_note = match fs::write(&dump_path, dumped_dom) {
+        Ok(()) => format!("\nhelp: Chrome dump kept at {}", dump_path.display()),
+        Err(write_err) => format!(
+            "\nwarning: failed to keep Chrome dump at {}: {write_err}",
+            dump_path.display()
+        ),
+    };
+    let kept = tmp.keep();
+    miette::miette!(
+        "{err}{dump_note}\nhelp: workspace kept at {}",
+        kept.display()
+    )
 }
 
 fn rebuild_once_for_watch(
@@ -824,6 +863,7 @@ fn run_one_shot_chrome(
         )
     })?;
     let (tx, rx) = mpsc::channel();
+    // Intentionally do not join these readers: lingering Chrome grandchildren can hold pipes open forever; threads exit with this process.
     let _stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
     let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
     let mut stdout = Vec::new();
@@ -864,7 +904,7 @@ fn run_one_shot_chrome(
             kill_and_reap_child(&mut child)?;
             drain_chrome_events(&rx, &mut stdout, &mut stderr);
             return Err(miette::miette!(
-                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the temporary workspace\nstderr: {}",
+                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
                 timeout.as_secs(),
                 completion.description(),
                 String::from_utf8_lossy(&stderr).trim()
@@ -1031,7 +1071,7 @@ fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String
         OsString::from("--no-sandbox"),
         OsString::from(format!("--user-data-dir={}", profile.display())),
         OsString::from("--dump-dom"),
-        OsString::from("--virtual-time-budget=5000"),
+        OsString::from("--virtual-time-budget=20000"),
         OsString::from(url),
     ];
     let stdout = run_one_shot_chrome(
@@ -1048,24 +1088,53 @@ fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String
 }
 
 fn extract_measure_json(dumped_dom: &str) -> miette::Result<String> {
+    let error_marker = r#"<script type="application/json" id="peitho-measure-error">"#;
+    if let Some(payload) =
+        extract_script_payload(dumped_dom, error_marker, "measurement error marker")?
+    {
+        let message = measurement_error_message(&payload);
+        return Err(miette::miette!(
+            "measurement script failed in Chrome\nhelp: inspect measure.html and the peitho-measure-error script payload\ncaused by: {message}"
+        ));
+    }
+
     let marker = r#"<script type="application/json" id="peitho-measure">"#;
-    let payload_start = dumped_dom
-        .rfind(marker)
-        .map(|offset| offset + marker.len())
-        .ok_or_else(|| {
+    extract_script_payload(dumped_dom, marker, "measurement marker")?.ok_or_else(|| {
         miette::miette!(
-            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script type=\"application/json\" id=\"peitho-measure\">"
+            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script type=\"application/json\" id=\"peitho-measure\">; very large images or fonts can exceed the measurement budget"
         )
-    })?;
+    })
+}
+
+fn extract_script_payload(
+    dumped_dom: &str,
+    marker: &str,
+    label: &str,
+) -> miette::Result<Option<String>> {
+    let Some(payload_start) = dumped_dom.rfind(marker).map(|offset| offset + marker.len()) else {
+        return Ok(None);
+    };
     let payload_end = dumped_dom[payload_start..]
         .find("</script>")
         .map(|offset| payload_start + offset)
         .ok_or_else(|| {
             miette::miette!(
-                "measurement marker closing tag not found\nhelp: rerun export and inspect Chrome dump-dom output"
+                "{label} closing tag not found\nhelp: rerun export and inspect Chrome dump-dom output"
             )
         })?;
-    Ok(dumped_dom[payload_start..payload_end].to_owned())
+    Ok(Some(dumped_dom[payload_start..payload_end].to_owned()))
+}
+
+fn measurement_error_message(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| payload.to_owned())
 }
 
 fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
@@ -2125,10 +2194,58 @@ contexts:
     }
 
     #[test]
+    fn extract_measure_json_prefers_measurement_error_marker() {
+        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure-error">{"message":"bad \u003cmeasurement>"}</script></body></html>"#;
+
+        let err = extract_measure_json(dumped).unwrap_err();
+
+        assert!(err.to_string().contains("measurement script failed"));
+        assert!(err.to_string().contains("bad <measurement>"));
+    }
+
+    #[test]
     fn extract_measure_json_reports_missing_marker() {
         let err = extract_measure_json("<html></html>").unwrap_err();
 
         assert!(err.to_string().contains("measurement marker not found"));
+        assert!(err.to_string().contains("large images or fonts"));
+    }
+
+    #[test]
+    fn kept_workspace_error_mentions_path_and_preserves_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
+
+        let err = keep_workspace_for_error(tmp, miette::miette!("measurement failed"));
+        let message = err.to_string();
+
+        assert!(message.contains("measurement failed"));
+        assert!(message.contains("workspace kept at"));
+        assert!(message.contains(&workspace.display().to_string()));
+        assert!(workspace.join("measure.html").is_file());
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn kept_measure_workspace_error_writes_chrome_dump() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+
+        let err = keep_measure_workspace_for_error(
+            tmp,
+            "<html><body>dump</body></html>",
+            miette::miette!("measurement failed"),
+        );
+        let message = err.to_string();
+
+        assert!(message.contains("Chrome dump kept at"));
+        assert!(message.contains("workspace kept at"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("chrome-dump.html")).unwrap(),
+            "<html><body>dump</body></html>"
+        );
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(unix)]

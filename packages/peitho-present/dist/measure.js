@@ -1,5 +1,6 @@
 // src/measure.ts
 var MARKER_ID = "peitho-measure";
+var ERROR_MARKER_ID = "peitho-measure-error";
 var SLOT_CLASS = /(^|\s)slot-/;
 var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
 var LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
@@ -43,6 +44,14 @@ async function appendMeasurement(document2 = globalThis.document) {
   script.textContent = JSON.stringify(measured).replace(/</g, "\\u003c");
   document2.body.appendChild(script);
   return measured;
+}
+function appendMeasurementError(document2, error) {
+  document2.getElementById(ERROR_MARKER_ID)?.remove();
+  const script = document2.createElement("script");
+  script.type = "application/json";
+  script.id = ERROR_MARKER_ID;
+  script.textContent = JSON.stringify({ message: errorMessage(error) }).replace(/</g, "\\u003c");
+  document2.body.appendChild(script);
 }
 async function waitForImages(document2) {
   const images = Array.from(document2.querySelectorAll("img")).filter(isResolvedContentImage);
@@ -165,16 +174,22 @@ function collectParagraphs(box) {
 function collectListItemParagraphs(item) {
   const level = bulletLevel(item);
   const numbered = listItemIsNumbered(item);
+  const paragraphs = [];
+  const directRuns = collectRuns(item, false);
+  if (directRuns.length > 0) {
+    paragraphs.push({
+      align: textAlign(item),
+      bulletLevel: level,
+      numbered,
+      bulletContinuation: false,
+      runs: directRuns
+    });
+  }
   const directBlocks = Array.from(item.children).filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR)).map((child) => child);
-  if (directBlocks.length === 0) {
+  paragraphs.push(...directBlocks.flatMap((block) => collectListItemBlockParagraphs(block, level, numbered)));
+  if (paragraphs.length === 0) {
     return [measureParagraph(item, level, numbered)];
   }
-  const paragraphs = directBlocks.flatMap((block) => {
-    if (block.matches("pre")) {
-      return collectPreParagraphs(block, level, numbered);
-    }
-    return [measureParagraph(block, level, numbered)];
-  });
   return paragraphs.map((paragraph, index) => {
     if (index === 0) {
       return paragraph;
@@ -184,6 +199,30 @@ function collectListItemParagraphs(item) {
       numbered: false,
       bulletContinuation: true
     };
+  });
+}
+function collectListItemBlockParagraphs(block, level, numbered) {
+  if (block.matches("pre")) {
+    return collectPreParagraphs(block, level, numbered);
+  }
+  const candidates = block.matches(PARAGRAPH_SELECTOR) ? [block] : Array.from(block.querySelectorAll(PARAGRAPH_SELECTOR));
+  const paragraphElements = candidates.filter((candidate) => {
+    if (candidate.matches("li")) {
+      return true;
+    }
+    return !hasParagraphAncestor(candidate, block);
+  });
+  if (paragraphElements.length === 0) {
+    return [measureParagraph(block, level, numbered)];
+  }
+  return paragraphElements.flatMap((element) => {
+    if (element.matches("li")) {
+      return collectListItemParagraphs(element);
+    }
+    if (element.matches("pre")) {
+      return collectPreParagraphs(element, level, numbered);
+    }
+    return [measureParagraph(element, level, numbered)];
   });
 }
 function collectPreParagraphs(pre, level = null, numbered = false) {
@@ -439,6 +478,9 @@ function inlineStyleValue(element, property) {
   const match = style.match(new RegExp(`${property}\\s*:\\s*([^;]+)`, "i"));
   return match?.[1]?.trim() ?? "";
 }
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 function viewFor(document2) {
   const view = document2.defaultView;
   if (!view) {
@@ -447,9 +489,10 @@ function viewFor(document2) {
   return view;
 }
 if (typeof document !== "undefined" && document.querySelector("section[data-slide-key]")) {
-  void appendMeasurement(document);
+  void appendMeasurement(document).catch((error) => appendMeasurementError(document, error));
 }
 export {
   appendMeasurement,
+  appendMeasurementError,
   measureDeck
 };

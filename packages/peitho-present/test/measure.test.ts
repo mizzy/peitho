@@ -1,6 +1,6 @@
 import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
-import { appendMeasurement, measureDeck } from "../src/measure";
+import { appendMeasurement, appendMeasurementError, measureDeck } from "../src/measure";
 
 describe("measurement DOM walker", () => {
   it("measures slots, styled text-node runs, and images relative to each section", () => {
@@ -437,6 +437,50 @@ code next</pre></li>
     ]);
   });
 
+  it("keeps tight list item text before a direct pre block", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li>item<pre>code</pre></li>
+          </ul>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletContinuation: paragraph.bulletContinuation,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletContinuation: false, text: "item" },
+      { bulletContinuation: true, text: "code" }
+    ]);
+  });
+
+  it("unwraps blockquote paragraphs inside list items as continuations", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>item:</p><blockquote><p>quote</p></blockquote></li>
+          </ul>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletContinuation: paragraph.bulletContinuation,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletContinuation: false, text: "item:" },
+      { bulletContinuation: true, text: "quote" }
+    ]);
+  });
+
   it("appends escaped measurement JSON after fonts are ready", async () => {
     const { document } = createDocument(`
       <section data-slide-key="json">
@@ -490,6 +534,21 @@ code next</pre></li>
 
     expect(measured.slides[0]?.images[0]?.rect).toEqual({ x: 12, y: 24, w: 320, h: 180 });
     expect(JSON.parse(document.querySelector("#peitho-measure")?.textContent ?? "{}").slides[0].key).toBe("image");
+  });
+
+  it("appends escaped measurement error JSON", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="error">
+        <div class="slot-body"><p>Error</p></div>
+      </section>
+    `);
+
+    appendMeasurementError(document, new Error("bad <measurement>"));
+
+    const marker = document.querySelector<HTMLScriptElement>("#peitho-measure-error");
+    expect(marker?.type).toBe("application/json");
+    expect(marker?.textContent).toContain("\\u003c");
+    expect(JSON.parse(marker?.textContent ?? "{}").message).toBe("bad <measurement>");
   });
 });
 
