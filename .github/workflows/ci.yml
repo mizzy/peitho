@@ -22,6 +22,8 @@ jobs:
         working-directory: packages/peitho-present
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
       - run: cargo test --workspace
       - run: git diff --exit-code bindings/
 
@@ -33,6 +35,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --all --check
+
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      PEITHO_CHROME_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+      - run: google-chrome --version
+      - run: cargo test --workspace -- --ignored --test-threads=1
 
   node:
     runs-on: ubuntu-latest

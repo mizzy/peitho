@@ -861,13 +861,7 @@
   }
 
   async function applyOuterShadow(target, raster) {
-    var image = document.createElement("img");
-    image.src = raster.dataUrl;
-    if (image.decode) {
-      await image.decode();
-    } else {
-      await loadImage(raster.dataUrl);
-    }
+    var image = await loadImage(raster.dataUrl);
     image.setAttribute("data-peitho-pdf-shadow", "outer");
     image.style.position = "absolute";
     image.style.left = target.localX - raster.padX + "px";

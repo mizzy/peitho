@@ -190,6 +190,7 @@ target.slide.appendChild(image);
 ```
 
 - `await image.decode()`はDOM挿入前に行う。既存`loadImage` helperを再利用してもよいが、virtual time下のprintタイミングに対して画像decode完了を決定的にする
+  - **【2026-07-06に廃止 — Issue #155】** この`decode()`推奨はLinuxのheadless Chrome + `--virtual-time-budget`でresolveもrejectもされず無音ハングすることが判明し、`loadImage`（loadイベント待ち）へ一本化された。`decode()`を再導入しないこと。詳細: `docs/plans/2026-07-06-pdf-flatten-linux-decode-hang.md`
 - all-or-nothingのため、`box-shadow:none`はこの時点ではまだ設定しない
 
 ### Task 5: inset shadowをbackground先頭レイヤーへ置換
