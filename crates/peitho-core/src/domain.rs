@@ -481,7 +481,6 @@ pub struct MeasuredRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
-    pub monospace: bool,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -1138,7 +1137,6 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
-                            monospace: false,
                         }],
                     }],
                 }],
@@ -1223,6 +1221,7 @@ mod tests {
         assert!(paragraph.contains("numbered: boolean"));
         assert!(run.contains("fontFamily: string"));
         assert!(run.contains("fontSizePx: number"));
+        assert!(!run.contains("monospace"));
     }
 
     #[test]

@@ -237,19 +237,43 @@ function measureParagraph(element: HTMLElement, level: number | null, numbered =
 function collectRuns(root: HTMLElement, preserveWhitespace: boolean): MeasuredRun[] {
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const runs: MeasuredRun[] = [];
+  let pendingSpace = false;
   while (walker.nextNode()) {
     const node = walker.currentNode as Text;
     const text = node.nodeValue ?? "";
-    if (preserveWhitespace ? text.length === 0 : text.trim().length === 0) {
-      continue;
-    }
     if (hasNestedParagraphAncestor(node, root)) {
       continue;
     }
     const element = node.parentElement ?? root;
-    runs.push(measureRun(text, element, root));
+    if (preserveWhitespace) {
+      if (text.length > 0) {
+        runs.push(measureRun(text, element, root));
+      }
+      continue;
+    }
+
+    const normalized = text.replace(/\s+/g, " ");
+    const trimmed = normalized.trim();
+    if (trimmed.length === 0) {
+      if (runs.length > 0) {
+        pendingSpace = true;
+      }
+      continue;
+    }
+    if ((pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
+      appendTrailingSpace(runs);
+    }
+    runs.push(measureRun(trimmed, element, root));
+    pendingSpace = normalized.endsWith(" ");
   }
   return runs;
+}
+
+function appendTrailingSpace(runs: MeasuredRun[]): void {
+  const run = runs[runs.length - 1];
+  if (run && !run.text.endsWith(" ")) {
+    run.text += " ";
+  }
 }
 
 function measureRun(text: string, element: HTMLElement, root: HTMLElement): MeasuredRun {
@@ -262,8 +286,7 @@ function measureRun(text: string, element: HTMLElement, root: HTMLElement): Meas
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
-    underline: hasUnderline(element, root),
-    monospace: fontFamily.toLowerCase().includes("mono") || element.closest("pre,code") !== null
+    underline: hasUnderline(element, root)
   };
 }
 

@@ -47,8 +47,7 @@ describe("measurement DOM walker", () => {
         fontSizePx: 20,
         bold: true,
         italic: false,
-        underline: true,
-        monospace: false
+        underline: true
       },
       {
         text: "world",
@@ -57,8 +56,7 @@ describe("measurement DOM walker", () => {
         fontSizePx: 20,
         bold: true,
         italic: true,
-        underline: true,
-        monospace: false
+        underline: true
       }
     ]);
     expect(measured.slides[0]?.images[0]).toEqual({
@@ -161,8 +159,7 @@ describe("measurement DOM walker", () => {
             fontSizePx: 16,
             bold: false,
             italic: false,
-            underline: false,
-            monospace: true
+            underline: false
           }
         ]
       },
@@ -178,12 +175,42 @@ describe("measurement DOM walker", () => {
             fontSizePx: 16,
             bold: false,
             italic: false,
-            underline: false,
-            monospace: true
+            underline: false
           }
         ]
       }
     ]);
+  });
+
+  it("preserves a single visible space between inline sibling runs", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="inline">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <p><strong>bold</strong> <em>italic</em></p>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+    const runs = measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs ?? [];
+
+    expect(runs.map((run) => run.text).join("")).toBe("bold italic");
+  });
+
+  it("collapses non-pre soft-break whitespace to reflowable spaces", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="soft-break">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <p>line one
+line two</p>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+    const text = measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs.map((run) => run.text).join("");
+
+    expect(text).toBe("line one line two");
   });
 
   it("measures only resolved content image assets", () => {

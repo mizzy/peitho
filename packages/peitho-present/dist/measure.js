@@ -203,19 +203,41 @@ function measureParagraph(element, level, numbered = false) {
 function collectRuns(root, preserveWhitespace) {
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const runs = [];
+  let pendingSpace = false;
   while (walker.nextNode()) {
     const node = walker.currentNode;
     const text = node.nodeValue ?? "";
-    if (preserveWhitespace ? text.length === 0 : text.trim().length === 0) {
-      continue;
-    }
     if (hasNestedParagraphAncestor(node, root)) {
       continue;
     }
     const element = node.parentElement ?? root;
-    runs.push(measureRun(text, element, root));
+    if (preserveWhitespace) {
+      if (text.length > 0) {
+        runs.push(measureRun(text, element, root));
+      }
+      continue;
+    }
+    const normalized = text.replace(/\s+/g, " ");
+    const trimmed = normalized.trim();
+    if (trimmed.length === 0) {
+      if (runs.length > 0) {
+        pendingSpace = true;
+      }
+      continue;
+    }
+    if ((pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
+      appendTrailingSpace(runs);
+    }
+    runs.push(measureRun(trimmed, element, root));
+    pendingSpace = normalized.endsWith(" ");
   }
   return runs;
+}
+function appendTrailingSpace(runs) {
+  const run = runs[runs.length - 1];
+  if (run && !run.text.endsWith(" ")) {
+    run.text += " ";
+  }
 }
 function measureRun(text, element, root) {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
@@ -227,8 +249,7 @@ function measureRun(text, element, root) {
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
-    underline: hasUnderline(element, root),
-    monospace: fontFamily.toLowerCase().includes("mono") || element.closest("pre,code") !== null
+    underline: hasUnderline(element, root)
   };
 }
 function relativeRect(section, element) {

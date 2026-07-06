@@ -530,19 +530,25 @@ fn run_color_xml(color: &str) -> Result<String> {
 
 fn solid_fill_xml(color: &str) -> Result<Option<String>> {
     let color = parse_css_color(color)?;
-    if color.alpha_zero {
+    if color.alpha <= 0.0 {
         return Ok(None);
     }
-    Ok(Some(format!(
-        r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
-        color.hex
-    )))
+    let srgb = if color.alpha >= 1.0 {
+        format!(r#"<a:srgbClr val="{}"/>"#, color.hex)
+    } else {
+        format!(
+            r#"<a:srgbClr val="{}"><a:alpha val="{}"/></a:srgbClr>"#,
+            color.hex,
+            alpha_to_ooxml(color.alpha)
+        )
+    };
+    Ok(Some(format!(r#"<a:solidFill>{srgb}</a:solidFill>"#)))
 }
 
 #[derive(Debug)]
 struct CssColor {
     hex: String,
-    alpha_zero: bool,
+    alpha: f64,
 }
 
 fn parse_css_color(raw: &str) -> Result<CssColor> {
@@ -550,14 +556,14 @@ fn parse_css_color(raw: &str) -> Result<CssColor> {
     if raw.eq_ignore_ascii_case("transparent") {
         return Ok(CssColor {
             hex: "000000".to_owned(),
-            alpha_zero: true,
+            alpha: 0.0,
         });
     }
     if let Some(hex) = raw.strip_prefix('#') {
         if hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
             return Ok(CssColor {
                 hex: hex.to_ascii_uppercase(),
-                alpha_zero: false,
+                alpha: 1.0,
             });
         }
     }
@@ -572,19 +578,20 @@ fn parse_css_color(raw: &str) -> Result<CssColor> {
         })
         .ok_or_else(|| unsupported_color_error(raw))?;
     let parts = args.0.split(',').map(str::trim).collect::<Vec<_>>();
-    if parts.len() < 3 {
+    if !(3..=4).contains(&parts.len()) {
         return Err(unsupported_color_error(raw));
     }
     let r = parse_color_channel(parts[0]).ok_or_else(|| unsupported_color_error(raw))?;
     let g = parse_color_channel(parts[1]).ok_or_else(|| unsupported_color_error(raw))?;
     let b = parse_color_channel(parts[2]).ok_or_else(|| unsupported_color_error(raw))?;
-    let alpha_zero = parts
+    let alpha = parts
         .get(3)
-        .and_then(|alpha| alpha.parse::<f64>().ok())
-        .is_some_and(|alpha| alpha <= 0.0);
+        .map(|alpha| parse_alpha_channel(alpha).ok_or_else(|| unsupported_color_error(raw)))
+        .transpose()?
+        .unwrap_or(1.0);
     Ok(CssColor {
         hex: format!("{r:02X}{g:02X}{b:02X}"),
-        alpha_zero,
+        alpha,
     })
 }
 
@@ -598,6 +605,20 @@ fn unsupported_color_error(raw: &str) -> BuildError {
 fn parse_color_channel(raw: &str) -> Option<u8> {
     let value = raw.parse::<f64>().ok()?.round();
     (0.0..=255.0).contains(&value).then_some(value as u8)
+}
+
+fn parse_alpha_channel(raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    let value = if let Some(percent) = raw.strip_suffix('%') {
+        percent.parse::<f64>().ok()? / 100.0
+    } else {
+        raw.parse::<f64>().ok()?
+    };
+    (0.0..=1.0).contains(&value).then_some(value)
+}
+
+fn alpha_to_ooxml(alpha: f64) -> i64 {
+    (alpha * 100_000.0).round() as i64
 }
 
 fn paragraph_align(raw: &str) -> &'static str {
@@ -702,7 +723,6 @@ fn note_paragraph_xml(line: &str) -> Result<String> {
             bold: false,
             italic: false,
             underline: false,
-            monospace: false,
         }]
     };
     paragraph_xml(&MeasuredParagraph {
@@ -721,7 +741,7 @@ fn notes_slide_rels_xml(slide_number: usize) -> String {
 
 fn theme_xml() -> String {
     r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Peitho"><a:themeElements><a:clrScheme name="Peitho"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F2937"/></a:dk2><a:lt2><a:srgbClr val="F8FAFC"/></a:lt2><a:accent1><a:srgbClr val="2563EB"/></a:accent1><a:accent2><a:srgbClr val="16A34A"/></a:accent2><a:accent3><a:srgbClr val="DC2626"/></a:accent3><a:accent4><a:srgbClr val="7C3AED"/></a:accent4><a:accent5><a:srgbClr val="0891B2"/></a:accent5><a:accent6><a:srgbClr val="CA8A04"/></a:accent6><a:hlink><a:srgbClr val="2563EB"/></a:hlink><a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink></a:clrScheme><a:fontScheme name="Peitho"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="Peitho"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle/></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.to_owned()
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Peitho"><a:themeElements><a:clrScheme name="Peitho"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F2937"/></a:dk2><a:lt2><a:srgbClr val="F8FAFC"/></a:lt2><a:accent1><a:srgbClr val="2563EB"/></a:accent1><a:accent2><a:srgbClr val="16A34A"/></a:accent2><a:accent3><a:srgbClr val="DC2626"/></a:accent3><a:accent4><a:srgbClr val="7C3AED"/></a:accent4><a:accent5><a:srgbClr val="0891B2"/></a:accent5><a:accent6><a:srgbClr val="CA8A04"/></a:accent6><a:hlink><a:srgbClr val="2563EB"/></a:hlink><a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink></a:clrScheme><a:fontScheme name="Peitho"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Peitho"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="25400"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.to_owned()
 }
 
 fn relationships_xml(inner: &str) -> String {
@@ -927,6 +947,40 @@ mod tests {
     }
 
     #[test]
+    fn solid_fill_xml_preserves_fractional_alpha() {
+        let transparent_fill = super::solid_fill_xml("rgba(0, 0, 0, 0.08)")
+            .unwrap()
+            .unwrap();
+        assert!(transparent_fill
+            .contains(r#"<a:srgbClr val="000000"><a:alpha val="8000"/></a:srgbClr>"#));
+
+        let opaque_fill = super::solid_fill_xml("rgb(0, 0, 0)").unwrap().unwrap();
+        assert!(opaque_fill.contains(r#"<a:srgbClr val="000000"/>"#));
+        assert!(!opaque_fill.contains("<a:alpha"));
+    }
+
+    #[test]
+    fn theme_xml_emits_schema_minimum_format_scheme_and_font_children() {
+        let theme = super::theme_xml();
+        let fill_styles = between(&theme, "<a:fillStyleLst>", "</a:fillStyleLst>");
+        let line_styles = between(&theme, "<a:lnStyleLst>", "</a:lnStyleLst>");
+        let effect_styles = between(&theme, "<a:effectStyleLst>", "</a:effectStyleLst>");
+        let background_fill_styles = between(&theme, "<a:bgFillStyleLst>", "</a:bgFillStyleLst>");
+
+        assert_eq!(fill_styles.matches("<a:solidFill>").count(), 3);
+        assert_eq!(line_styles.matches("<a:ln ").count(), 3);
+        assert_eq!(effect_styles.matches("<a:effectStyle>").count(), 3);
+        assert_eq!(effect_styles.matches("<a:effectLst/>").count(), 3);
+        assert_eq!(background_fill_styles.matches("<a:solidFill>").count(), 3);
+        assert!(theme.contains(
+            r#"<a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>"#
+        ));
+        assert!(theme.contains(
+            r#"<a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>"#
+        ));
+    }
+
+    #[test]
     fn pptx_writer_deduplicates_media_by_source_and_deflates_xml_parts() {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("arch.png");
@@ -993,7 +1047,6 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
-                            monospace: false,
                         }],
                     }],
                 }],
@@ -1046,5 +1099,10 @@ mod tests {
         let mut content = String::new();
         file.read_to_string(&mut content).unwrap();
         content
+    }
+
+    fn between<'a>(haystack: &'a str, start: &str, end: &str) -> &'a str {
+        let after_start = haystack.split_once(start).unwrap().1;
+        after_start.split_once(end).unwrap().0
     }
 }
