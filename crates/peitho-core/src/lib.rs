@@ -15,7 +15,10 @@ pub mod render;
 pub mod theme;
 
 pub use check::check_deck;
-pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
+pub use domain::{
+    AspectRatio, MeasuredBox, MeasuredBoxStyle, MeasuredDeck, MeasuredImage, MeasuredParagraph,
+    MeasuredRect, MeasuredRun, MeasuredSlide, RawImagePath, ResolvedImageAsset, ResolvedImagePath,
+};
 pub use error::{BuildError, Result};
 pub use layout::{parse_layout, Layout, Layouts};
 pub use manifest::{

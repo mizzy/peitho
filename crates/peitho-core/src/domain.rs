@@ -396,6 +396,119 @@ pub struct ResolvedImageAsset {
     pub dist_rel: ResolvedImagePath,
 }
 
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredDeck {
+    pub canvas_width: f64,
+    pub canvas_height: f64,
+    pub slides: Vec<MeasuredSlide>,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredSlide {
+    pub key: String,
+    pub background_color: String,
+    pub boxes: Vec<MeasuredBox>,
+    pub images: Vec<MeasuredImage>,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredBox {
+    pub slot: String,
+    pub rect: MeasuredRect,
+    pub style: MeasuredBoxStyle,
+    pub paragraphs: Vec<MeasuredParagraph>,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredBoxStyle {
+    pub background_color: String,
+    pub border_color: String,
+    pub border_width: f64,
+    pub border_radius: f64,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredParagraph {
+    pub align: String,
+    pub bullet_level: Option<u8>,
+    pub runs: Vec<MeasuredRun>,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredRun {
+    pub text: String,
+    pub color: String,
+    pub font_family: String,
+    pub font_size_px: f64,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub monospace: bool,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredImage {
+    pub src: String,
+    pub alt: String,
+    pub rect: MeasuredRect,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
 
@@ -987,6 +1100,120 @@ mod tests {
         assert!(err
             .to_string()
             .contains("resolution width `9999999999` is not a valid u32"));
+    }
+
+    #[test]
+    fn measured_deck_serializes_with_browser_contract_field_names() {
+        let deck = MeasuredDeck {
+            canvas_width: 1280.0,
+            canvas_height: 720.0,
+            slides: vec![MeasuredSlide {
+                key: "intro".to_owned(),
+                background_color: "rgb(255, 255, 255)".to_owned(),
+                boxes: vec![MeasuredBox {
+                    slot: "title".to_owned(),
+                    rect: MeasuredRect {
+                        x: 96.0,
+                        y: 80.0,
+                        w: 640.0,
+                        h: 120.0,
+                    },
+                    style: MeasuredBoxStyle {
+                        background_color: "rgba(0, 0, 0, 0)".to_owned(),
+                        border_color: "rgb(0, 0, 0)".to_owned(),
+                        border_width: 2.0,
+                        border_radius: 8.0,
+                    },
+                    paragraphs: vec![MeasuredParagraph {
+                        align: "center".to_owned(),
+                        bullet_level: Some(1),
+                        runs: vec![MeasuredRun {
+                            text: "Intro".to_owned(),
+                            color: "rgb(34, 34, 34)".to_owned(),
+                            font_family: "Inter".to_owned(),
+                            font_size_px: 56.0,
+                            bold: true,
+                            italic: false,
+                            underline: true,
+                            monospace: false,
+                        }],
+                    }],
+                }],
+                images: vec![MeasuredImage {
+                    src: "assets/0123456789abcdef-arch.png".to_owned(),
+                    alt: "Architecture".to_owned(),
+                    rect: MeasuredRect {
+                        x: 700.0,
+                        y: 120.0,
+                        w: 420.0,
+                        h: 240.0,
+                    },
+                }],
+            }],
+        };
+
+        let json = serde_json::to_value(&deck).unwrap();
+
+        assert_eq!(json["canvasWidth"], 1280.0);
+        assert_eq!(json["canvasHeight"], 720.0);
+        assert_eq!(json["slides"][0]["backgroundColor"], "rgb(255, 255, 255)");
+        assert_eq!(json["slides"][0]["boxes"][0]["style"]["borderWidth"], 2.0);
+        assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["bulletLevel"],
+            1
+        );
+        assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontFamily"],
+            "Inter"
+        );
+        assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontSizePx"],
+            56.0
+        );
+
+        let round_tripped: MeasuredDeck = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            round_tripped.slides[0].boxes[0].paragraphs[0].bullet_level,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn exports_measured_bindings_with_camel_case_contract() {
+        use std::{fs, path::Path};
+
+        use ts_rs::{Config, TS};
+
+        let cfg = Config::from_env();
+        MeasuredDeck::export_all(&cfg).unwrap();
+        MeasuredSlide::export_all(&cfg).unwrap();
+        MeasuredBox::export_all(&cfg).unwrap();
+        MeasuredBoxStyle::export_all(&cfg).unwrap();
+        MeasuredParagraph::export_all(&cfg).unwrap();
+        MeasuredRun::export_all(&cfg).unwrap();
+        MeasuredImage::export_all(&cfg).unwrap();
+        MeasuredRect::export_all(&cfg).unwrap();
+
+        let root_bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
+        let deck = fs::read_to_string(root_bindings.join("MeasuredDeck.ts")).unwrap();
+        let slide = fs::read_to_string(root_bindings.join("MeasuredSlide.ts")).unwrap();
+        let box_binding = fs::read_to_string(root_bindings.join("MeasuredBox.ts")).unwrap();
+        let box_style = fs::read_to_string(root_bindings.join("MeasuredBoxStyle.ts")).unwrap();
+        let paragraph = fs::read_to_string(root_bindings.join("MeasuredParagraph.ts")).unwrap();
+        let run = fs::read_to_string(root_bindings.join("MeasuredRun.ts")).unwrap();
+
+        assert!(deck.contains(r#"import type { MeasuredSlide } from "./MeasuredSlide";"#));
+        assert!(deck.contains("canvasWidth: number"));
+        assert!(deck.contains("canvasHeight: number"));
+        assert!(deck.contains("slides: Array<MeasuredSlide>"));
+        assert!(slide.contains("backgroundColor: string"));
+        assert!(slide.contains("boxes: Array<MeasuredBox>"));
+        assert!(slide.contains("images: Array<MeasuredImage>"));
+        assert!(box_binding.contains("style: MeasuredBoxStyle"));
+        assert!(box_style.contains("borderRadius: number"));
+        assert!(paragraph.contains("bulletLevel: number | null"));
+        assert!(run.contains("fontFamily: string"));
+        assert!(run.contains("fontSizePx: number"));
     }
 
     #[test]
