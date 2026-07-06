@@ -48,7 +48,7 @@ describe("measurement DOM walker", () => {
         bold: true,
         italic: false,
         underline: true,
-        breakBefore: false
+        breaksBefore: 0
       },
       {
         text: "world",
@@ -58,7 +58,7 @@ describe("measurement DOM walker", () => {
         bold: true,
         italic: true,
         underline: true,
-        breakBefore: false
+        breaksBefore: 0
       }
     ]);
     expect(measured.slides[0]?.images[0]).toEqual({
@@ -154,6 +154,7 @@ describe("measurement DOM walker", () => {
         bulletLevel: null,
         numbered: false,
         bulletContinuation: false,
+        numberingStartAt: null,
         runs: [
           {
             text: "fn main()",
@@ -163,7 +164,7 @@ describe("measurement DOM walker", () => {
             bold: false,
             italic: false,
             underline: false,
-            breakBefore: false
+            breaksBefore: 0
           }
         ]
       },
@@ -172,6 +173,7 @@ describe("measurement DOM walker", () => {
         bulletLevel: null,
         numbered: false,
         bulletContinuation: false,
+        numberingStartAt: null,
         runs: [
           {
             text: "println()",
@@ -181,7 +183,7 @@ describe("measurement DOM walker", () => {
             bold: false,
             italic: false,
             underline: false,
-            breakBefore: false
+            breaksBefore: 0
           }
         ]
       }
@@ -200,9 +202,27 @@ describe("measurement DOM walker", () => {
     const measured = measureDeck(document);
     const runs = measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs ?? [];
 
-    expect(runs.map((run) => ({ text: run.text, breakBefore: run.breakBefore }))).toEqual([
-      { text: "line one", breakBefore: false },
-      { text: "line two", breakBefore: true }
+    expect(runs.map((run) => ({ text: run.text, breaksBefore: run.breaksBefore }))).toEqual([
+      { text: "line one", breaksBefore: 0 },
+      { text: "line two", breaksBefore: 1 }
+    ]);
+  });
+
+  it("counts consecutive hard line breaks on the following run", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="hard-break">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <p>one<br><br>two</p>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+    const runs = measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs ?? [];
+
+    expect(runs.map((run) => ({ text: run.text, breaksBefore: run.breaksBefore }))).toEqual([
+      { text: "one", breaksBefore: 0 },
+      { text: "two", breaksBefore: 2 }
     ]);
   });
 
@@ -351,10 +371,36 @@ line two</p>
     expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
       bulletLevel: paragraph.bulletLevel,
       numbered: paragraph.numbered,
+      numberingStartAt: paragraph.numberingStartAt,
       text: paragraph.runs.map((run) => run.text).join("")
     }))).toEqual([
-      { bulletLevel: 0, numbered: true, text: "First" },
-      { bulletLevel: 0, numbered: false, text: "Bullet" }
+      { bulletLevel: 0, numbered: true, numberingStartAt: 1, text: "First" },
+      { bulletLevel: 0, numbered: false, numberingStartAt: null, text: "Bullet" }
+    ]);
+  });
+
+  it("restarts numbering for each ordered list and honors explicit start values", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ol><li>One</li><li>Two</li></ol>
+          <ol><li>Again</li></ol>
+          <ol start="3"><li>Three</li></ol>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      numbered: paragraph.numbered,
+      numberingStartAt: paragraph.numberingStartAt,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { numbered: true, numberingStartAt: 1, text: "One" },
+      { numbered: true, numberingStartAt: null, text: "Two" },
+      { numbered: true, numberingStartAt: 1, text: "Again" },
+      { numbered: true, numberingStartAt: 3, text: "Three" }
     ]);
   });
 
@@ -478,6 +524,53 @@ code next</pre></li>
     }))).toEqual([
       { bulletContinuation: false, text: "item:" },
       { bulletContinuation: true, text: "quote" }
+    ]);
+  });
+
+  it("emits blockquote nested list items once at their nested level", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>item</p><blockquote><ul><li>quoted</li></ul></blockquote></li>
+          </ul>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      bulletContinuation: paragraph.bulletContinuation,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletLevel: 0, bulletContinuation: false, text: "item" },
+      { bulletLevel: 1, bulletContinuation: false, text: "quoted" }
+    ]);
+  });
+
+  it("keeps list item content after a nested list in document order", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>text</p><ul><li>nested</li></ul><p>after</p></li>
+          </ul>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      bulletContinuation: paragraph.bulletContinuation,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletLevel: 0, bulletContinuation: false, text: "text" },
+      { bulletLevel: 1, bulletContinuation: false, text: "nested" },
+      { bulletLevel: 0, bulletContinuation: true, text: "after" }
     ]);
   });
 

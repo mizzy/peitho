@@ -465,6 +465,8 @@ pub struct MeasuredParagraph {
     pub numbered: bool,
     #[serde(default)]
     pub bullet_continuation: bool,
+    #[serde(default)]
+    pub numbering_start_at: Option<u16>,
     pub runs: Vec<MeasuredRun>,
 }
 
@@ -484,7 +486,7 @@ pub struct MeasuredRun {
     pub italic: bool,
     pub underline: bool,
     #[serde(default)]
-    pub break_before: bool,
+    pub breaks_before: u32,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -1134,6 +1136,7 @@ mod tests {
                         bullet_level: Some(1),
                         numbered: true,
                         bullet_continuation: false,
+                        numbering_start_at: Some(3),
                         runs: vec![MeasuredRun {
                             text: "Intro".to_owned(),
                             color: "rgb(34, 34, 34)".to_owned(),
@@ -1142,7 +1145,7 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
-                            break_before: false,
+                            breaks_before: 2,
                         }],
                     }],
                 }],
@@ -1178,6 +1181,10 @@ mod tests {
             false
         );
         assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["numberingStartAt"],
+            3
+        );
+        assert_eq!(
             json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontFamily"],
             "Inter"
         );
@@ -1186,8 +1193,8 @@ mod tests {
             56.0
         );
         assert_eq!(
-            json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["breakBefore"],
-            false
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["breaksBefore"],
+            2
         );
 
         let round_tripped: MeasuredDeck = serde_json::from_value(json).unwrap();
@@ -1197,6 +1204,10 @@ mod tests {
         );
         assert!(round_tripped.slides[0].boxes[0].paragraphs[0].numbered);
         assert!(!round_tripped.slides[0].boxes[0].paragraphs[0].bullet_continuation);
+        assert_eq!(
+            round_tripped.slides[0].boxes[0].paragraphs[0].numbering_start_at,
+            Some(3)
+        );
     }
 
     #[test]
@@ -1235,9 +1246,11 @@ mod tests {
         assert!(paragraph.contains("bulletLevel: number | null"));
         assert!(paragraph.contains("numbered: boolean"));
         assert!(paragraph.contains("bulletContinuation: boolean"));
+        assert!(paragraph.contains("numberingStartAt: number | null"));
         assert!(run.contains("fontFamily: string"));
         assert!(run.contains("fontSizePx: number"));
-        assert!(run.contains("breakBefore: boolean"));
+        assert!(run.contains("breaksBefore: number"));
+        assert!(!run.contains("breakBefore"));
         assert!(!run.contains("monospace"));
     }
 

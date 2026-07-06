@@ -445,7 +445,12 @@ fn text_shape_xml(shape_id: usize, measured_box: &crate::domain::MeasuredBox) ->
 fn paragraph_xml(paragraph: &MeasuredParagraph) -> Result<String> {
     let align = paragraph_align(&paragraph.align);
     let (bullet_attrs, bullet) = match paragraph.bullet_level {
-        Some(level) => bullet_xml(level, paragraph.numbered, paragraph.bullet_continuation),
+        Some(level) => bullet_xml(
+            level,
+            paragraph.numbered,
+            paragraph.bullet_continuation,
+            paragraph.numbering_start_at,
+        ),
         None => (String::new(), String::new()),
     };
     let runs = paragraph
@@ -458,21 +463,28 @@ fn paragraph_xml(paragraph: &MeasuredParagraph) -> Result<String> {
     ))
 }
 
-fn bullet_xml(level: u8, numbered: bool, continuation: bool) -> (String, String) {
+fn bullet_xml(
+    level: u8,
+    numbered: bool,
+    continuation: bool,
+    numbering_start_at: Option<u16>,
+) -> (String, String) {
     let margin = 342_900 * (i64::from(level) + 1);
     if continuation {
         return (format!(r#" marL="{margin}""#), r#"<a:buNone/>"#.to_owned());
     }
     let indent = -171_450;
     let bullet = if numbered {
-        r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/>"#
+        match numbering_start_at {
+            Some(start_at) => format!(
+                r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod" startAt="{start_at}"/>"#
+            ),
+            None => r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/>"#.to_owned(),
+        }
     } else {
-        r#"<a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>"#
+        r#"<a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>"#.to_owned()
     };
-    (
-        format!(r#" marL="{margin}" indent="{indent}""#),
-        bullet.to_owned(),
-    )
+    (format!(r#" marL="{margin}" indent="{indent}""#), bullet)
 }
 
 fn run_xml(run: &MeasuredRun) -> Result<String> {
@@ -481,9 +493,9 @@ fn run_xml(run: &MeasuredRun) -> Result<String> {
     let italic = if run.italic { r#" i="1""# } else { "" };
     let underline = if run.underline { r#" u="sng""# } else { "" };
     let color = run_color_xml(&run.color)?;
-    let break_before = if run.break_before { "<a:br/>" } else { "" };
+    let breaks_before = "<a:br/>".repeat(run.breaks_before as usize);
     Ok(format!(
-        r#"{break_before}<a:r><a:rPr lang="en-US" sz="{size}"{bold}{italic}{underline}>{color}<a:latin typeface="{font}"/></a:rPr><a:t>{text}</a:t></a:r>"#,
+        r#"{breaks_before}<a:r><a:rPr lang="en-US" sz="{size}"{bold}{italic}{underline}>{color}<a:latin typeface="{font}"/></a:rPr><a:t>{text}</a:t></a:r>"#,
         font = xml_attr(&run.font_family),
         text = xml_text(&run.text),
     ))
@@ -727,7 +739,7 @@ fn note_paragraph_xml(line: &str) -> Result<String> {
             bold: false,
             italic: false,
             underline: false,
-            break_before: false,
+            breaks_before: 0,
         }]
     };
     paragraph_xml(&MeasuredParagraph {
@@ -735,6 +747,7 @@ fn note_paragraph_xml(line: &str) -> Result<String> {
         bullet_level: None,
         numbered: false,
         bullet_continuation: false,
+        numbering_start_at: None,
         runs,
     })
 }
@@ -887,12 +900,42 @@ mod tests {
     }
 
     #[test]
-    fn pptx_writer_emits_hard_breaks_before_marked_runs() {
+    fn pptx_writer_emits_numbering_start_values() {
+        let mut measured = measured_deck_without_images("intro");
+        let mut first = measured.slides[0].boxes[0].paragraphs[0].clone();
+        first.numbered = true;
+        first.numbering_start_at = Some(1);
+        first.runs[0].text = "One".to_owned();
+        let mut second = first.clone();
+        second.numbering_start_at = None;
+        second.runs[0].text = "Two".to_owned();
+        let mut restarted = first.clone();
+        restarted.numbering_start_at = Some(3);
+        restarted.runs[0].text = "Three".to_owned();
+        measured.slides[0].boxes[0].paragraphs = vec![first, second, restarted];
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
+        assert!(slide.contains(r#"<a:buAutoNum type="arabicPeriod" startAt="1"/>"#));
+        assert!(slide.contains(r#"<a:buAutoNum type="arabicPeriod" startAt="3"/>"#));
+        assert_eq!(
+            slide
+                .matches(r#"<a:buAutoNum type="arabicPeriod"/>"#)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pptx_writer_emits_counted_hard_breaks_before_marked_runs() {
         let mut measured = measured_deck_without_images("intro");
         let mut continuation = measured.slides[0].boxes[0].paragraphs[0].runs[0].clone();
         measured.slides[0].boxes[0].paragraphs[0].runs[0].text = "line one".to_owned();
         continuation.text = "line two".to_owned();
-        continuation.break_before = true;
+        continuation.breaks_before = 2;
         measured.slides[0].boxes[0].paragraphs[0]
             .runs
             .push(continuation);
@@ -902,7 +945,7 @@ mod tests {
         let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
 
         let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
-        assert!(slide.contains("<a:t>line one</a:t></a:r><a:br/><a:r>"));
+        assert!(slide.contains("<a:t>line one</a:t></a:r><a:br/><a:br/><a:r>"));
         assert!(slide.contains("<a:t>line two</a:t>"));
     }
 
@@ -1107,6 +1150,7 @@ mod tests {
                         bullet_level: Some(0),
                         numbered: false,
                         bullet_continuation: false,
+                        numbering_start_at: None,
                         runs: vec![MeasuredRun {
                             text: "Hello & welcome".to_owned(),
                             color: "rgb(17, 34, 51)".to_owned(),
@@ -1115,7 +1159,7 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
-                            break_before: false,
+                            breaks_before: 0,
                         }],
                     }],
                 }],

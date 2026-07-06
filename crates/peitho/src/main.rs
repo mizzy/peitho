@@ -328,13 +328,22 @@ fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
         &artifacts.rendered,
         &artifacts.image_assets,
     ))?;
-    fs::write(&out, pptx).into_diagnostic()?;
+    write_pptx_output(&out, pptx)?;
     println!(
         "exported {} slide(s) to {}",
         artifacts.slide_count,
         out.display()
     );
     Ok(())
+}
+
+fn write_pptx_output(out: &Path, pptx: Vec<u8>) -> miette::Result<()> {
+    fs::write(out, pptx).map_err(|err| {
+        miette::miette!(
+            "failed to write pptx output at {}\nhelp: check output path permissions and ensure the parent directory exists\ncaused by: {err}",
+            out.display()
+        )
+    })
 }
 
 fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
@@ -2120,6 +2129,18 @@ contexts:
                 panic!("expected export pptx command");
             }
         }
+    }
+
+    #[test]
+    fn export_pptx_output_write_error_includes_path_and_help() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("missing").join("deck.pptx");
+
+        let err = write_pptx_output(&out, vec![1, 2, 3]).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains(&out.display().to_string()));
+        assert!(message.contains("check output path permissions"));
     }
 
     #[test]

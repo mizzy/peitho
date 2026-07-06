@@ -10,8 +10,7 @@ import type { MeasuredSlide } from "../../../bindings/MeasuredSlide";
 const MARKER_ID = "peitho-measure";
 const ERROR_MARKER_ID = "peitho-measure-error";
 const SLOT_CLASS = /(^|\s)slot-/;
-const PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
-const LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
+const PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6";
 const SPECIAL_FONT_FAMILIES = new Set([
   "monospace",
   "ui-monospace",
@@ -30,6 +29,20 @@ const SPECIAL_FONT_FAMILIES = new Set([
   "fangsong"
 ]);
 let colorContext: CanvasRenderingContext2D | null = null;
+
+type ParagraphContext = {
+  bulletLevel: number | null;
+  numbered: boolean;
+  bulletContinuation: boolean;
+  numberingStartAt: number | null;
+};
+
+const DEFAULT_PARAGRAPH_CONTEXT: ParagraphContext = {
+  bulletLevel: null,
+  numbered: false,
+  bulletContinuation: false,
+  numberingStartAt: null
+};
 
 export function measureDeck(document: Document = globalThis.document): MeasuredDeck {
   const sections = Array.from(document.querySelectorAll<HTMLElement>("section[data-slide-key]"));
@@ -176,98 +189,149 @@ function measureBoxStyle(box: HTMLElement): MeasuredBoxStyle {
 
 function collectParagraphs(box: HTMLElement): MeasuredParagraph[] {
   if (box.matches("pre")) {
-    return collectPreParagraphs(box);
+    return collectPreParagraphs(box, DEFAULT_PARAGRAPH_CONTEXT);
   }
-  const candidates = box.matches(PARAGRAPH_SELECTOR)
-    ? [box]
-    : Array.from(box.querySelectorAll<HTMLElement>(PARAGRAPH_SELECTOR));
-  const paragraphElements = candidates.filter((candidate) => {
-    if (candidate.matches("li")) {
-      return true;
-    }
-    return !hasParagraphAncestor(candidate, box);
-  });
-
-  if (paragraphElements.length === 0) {
-    return [measureParagraph(box, null)];
-  }
-
-  return paragraphElements.flatMap((element) => {
-    if (element.matches("li")) {
-      return collectListItemParagraphs(element);
-    }
-    if (element.matches("pre")) {
-      return collectPreParagraphs(element);
-    }
-    return [measureParagraph(element, bulletLevel(element))];
-  });
+  const paragraphs = collectContainerParagraphs(box, DEFAULT_PARAGRAPH_CONTEXT);
+  return paragraphs.length > 0 ? paragraphs : [measureParagraph(box, DEFAULT_PARAGRAPH_CONTEXT)];
 }
 
-function collectListItemParagraphs(item: HTMLElement): MeasuredParagraph[] {
-  const level = bulletLevel(item);
-  const numbered = listItemIsNumbered(item);
+function collectContainerParagraphs(container: HTMLElement, context: ParagraphContext): MeasuredParagraph[] {
   const paragraphs: MeasuredParagraph[] = [];
-  const directRuns = collectRuns(item, false);
-  if (directRuns.length > 0) {
-    paragraphs.push({
-      align: textAlign(item),
-      bulletLevel: level,
-      numbered,
-      bulletContinuation: false,
-      runs: directRuns
-    });
-  }
-  const directBlocks = Array.from(item.children)
-    .filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR))
-    .map((child) => child as HTMLElement);
-  paragraphs.push(...directBlocks.flatMap((block) => collectListItemBlockParagraphs(block, level, numbered)));
-  if (paragraphs.length === 0) {
-    return [measureParagraph(item, level, numbered)];
-  }
-  return paragraphs.map((paragraph, index) => {
-    if (index === 0) {
-      return paragraph;
+  let inlineNodes: Node[] = [];
+
+  const flushInline = () => {
+    const runs = collectRunsFromNodes(container, inlineNodes, false);
+    inlineNodes = [];
+    if (runs.length > 0) {
+      paragraphs.push(paragraphFromRuns(container, runs, context));
     }
-    return {
-      ...paragraph,
-      numbered: false,
-      bulletContinuation: true
-    };
-  });
+  };
+
+  for (const child of Array.from(container.childNodes)) {
+    if (isInlineNode(child)) {
+      inlineNodes.push(child);
+      continue;
+    }
+    flushInline();
+    paragraphs.push(...collectBlockParagraphs(child as HTMLElement, context));
+  }
+  flushInline();
+  return paragraphs;
 }
 
-function collectListItemBlockParagraphs(block: HTMLElement, level: number | null, numbered: boolean): MeasuredParagraph[] {
+function collectBlockParagraphs(block: HTMLElement, context: ParagraphContext): MeasuredParagraph[] {
+  if (block.matches(PARAGRAPH_SELECTOR)) {
+    return [measureParagraph(block, context)];
+  }
   if (block.matches("pre")) {
-    return collectPreParagraphs(block, level, numbered);
+    return collectPreParagraphs(block, context);
   }
-  const candidates = block.matches(PARAGRAPH_SELECTOR)
-    ? [block]
-    : Array.from(block.querySelectorAll<HTMLElement>(PARAGRAPH_SELECTOR));
-  const paragraphElements = candidates.filter((candidate) => {
-    if (candidate.matches("li")) {
-      return true;
-    }
-    return !hasParagraphAncestor(candidate, block);
-  });
-
-  if (paragraphElements.length === 0) {
-    return [measureParagraph(block, level, numbered)];
+  if (isListElement(block)) {
+    return collectListParagraphs(block);
   }
-
-  return paragraphElements.flatMap((element) => {
-    if (element.matches("li")) {
-      return collectListItemParagraphs(element);
-    }
-    if (element.matches("pre")) {
-      return collectPreParagraphs(element, level, numbered);
-    }
-    return [measureParagraph(element, level, numbered)];
-  });
+  if (block.matches("li")) {
+    const parentList = block.parentElement;
+    const numbered = parentList?.tagName.toLowerCase() === "ol";
+    return collectListItemParagraphs(block, numbered, numbered ? orderedListStart(parentList) : null);
+  }
+  return collectContainerParagraphs(block, context);
 }
 
-function collectPreParagraphs(pre: HTMLElement, level: number | null = null, numbered = false): MeasuredParagraph[] {
+function collectListParagraphs(list: HTMLElement): MeasuredParagraph[] {
+  const numbered = list.tagName.toLowerCase() === "ol";
+  let itemIndex = 0;
+  return Array.from(list.children)
+    .filter((child) => child.tagName.toLowerCase() === "li")
+    .flatMap((child) => {
+      const startAt = numbered && itemIndex === 0 ? orderedListStart(list) : null;
+      itemIndex += 1;
+      return collectListItemParagraphs(child as HTMLElement, numbered, startAt);
+    });
+}
+
+function collectListItemParagraphs(item: HTMLElement, numbered: boolean, numberingStartAt: number | null): MeasuredParagraph[] {
+  const paragraphs: MeasuredParagraph[] = [];
+  const level = bulletLevel(item);
+  let ownParagraphCount = 0;
+  let inlineNodes: Node[] = [];
+
+  const pushOwnParagraphs = (ownParagraphs: MeasuredParagraph[]) => {
+    for (const paragraph of ownParagraphs) {
+      const continuation = ownParagraphCount > 0;
+      paragraphs.push({
+        ...paragraph,
+        bulletLevel: level,
+        numbered: continuation ? false : numbered,
+        bulletContinuation: continuation,
+        numberingStartAt: continuation ? null : numberingStartAt
+      });
+      ownParagraphCount += 1;
+    }
+  };
+
+  const flushInline = () => {
+    const runs = collectRunsFromNodes(item, inlineNodes, false);
+    inlineNodes = [];
+    if (runs.length > 0) {
+      pushOwnParagraphs([paragraphFromRuns(item, runs, DEFAULT_PARAGRAPH_CONTEXT)]);
+    }
+  };
+
+  const processBlock = (block: HTMLElement) => {
+    if (block.matches(PARAGRAPH_SELECTOR)) {
+      pushOwnParagraphs([measureParagraph(block, DEFAULT_PARAGRAPH_CONTEXT)]);
+      return;
+    }
+    if (block.matches("pre")) {
+      pushOwnParagraphs(collectPreParagraphs(block, DEFAULT_PARAGRAPH_CONTEXT));
+      return;
+    }
+    if (isListElement(block)) {
+      paragraphs.push(...collectListParagraphs(block));
+      return;
+    }
+    processContainer(block);
+  };
+
+  const processContainer = (container: HTMLElement) => {
+    let nestedInlineNodes: Node[] = [];
+    const flushNestedInline = () => {
+      const runs = collectRunsFromNodes(container, nestedInlineNodes, false);
+      nestedInlineNodes = [];
+      if (runs.length > 0) {
+        pushOwnParagraphs([paragraphFromRuns(container, runs, DEFAULT_PARAGRAPH_CONTEXT)]);
+      }
+    };
+    for (const child of Array.from(container.childNodes)) {
+      if (isInlineNode(child)) {
+        nestedInlineNodes.push(child);
+        continue;
+      }
+      flushNestedInline();
+      processBlock(child as HTMLElement);
+    }
+    flushNestedInline();
+  };
+
+  for (const child of Array.from(item.childNodes)) {
+    if (isInlineNode(child)) {
+      inlineNodes.push(child);
+      continue;
+    }
+    flushInline();
+    processBlock(child as HTMLElement);
+  }
+  flushInline();
+
+  if (paragraphs.length === 0) {
+    pushOwnParagraphs([measureParagraph(item, DEFAULT_PARAGRAPH_CONTEXT)]);
+  }
+  return paragraphs;
+}
+
+function collectPreParagraphs(pre: HTMLElement, context: ParagraphContext): MeasuredParagraph[] {
   const align = textAlign(pre);
-  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] }];
+  const paragraphs: MeasuredParagraph[] = [{ align, ...context, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -275,71 +339,107 @@ function collectPreParagraphs(pre: HTMLElement, level: number | null = null, num
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] });
+        paragraphs.push({ align, ...context, runs: [] });
       }
     });
   }
   return paragraphs;
 }
 
-function measureParagraph(element: HTMLElement, level: number | null, numbered = false): MeasuredParagraph {
+function measureParagraph(element: HTMLElement, context: ParagraphContext): MeasuredParagraph {
+  return paragraphFromRuns(element, collectRuns(element, false), context);
+}
+
+function paragraphFromRuns(element: HTMLElement, runs: MeasuredRun[], context: ParagraphContext): MeasuredParagraph {
   return {
     align: textAlign(element),
-    bulletLevel: level,
-    numbered,
-    bulletContinuation: false,
-    runs: collectRuns(element, false)
+    ...context,
+    runs
   };
 }
 
 function collectRuns(root: HTMLElement, preserveWhitespace: boolean): MeasuredRun[] {
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
-  const runs: MeasuredRun[] = [];
-  let pendingSpace = false;
-  let pendingBreak = false;
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    if (!preserveWhitespace && node.nodeType === 1) {
-      const element = node as Element;
-      if (element.tagName.toLowerCase() === "br" && !hasNestedParagraphAncestor(element, root)) {
-        pendingSpace = false;
-        pendingBreak = runs.length > 0;
-      }
-      continue;
-    }
-    if (node.nodeType !== 3) {
-      continue;
-    }
-    const textNode = node as Text;
-    const text = textNode.nodeValue ?? "";
-    if (hasNestedParagraphAncestor(textNode, root)) {
-      continue;
-    }
-    const element = textNode.parentElement ?? root;
-    if (preserveWhitespace) {
-      if (text.length > 0) {
-        runs.push(measureRun(text, element, root));
-      }
-      continue;
-    }
+  return collectRunsFromNodes(root, Array.from(root.childNodes), preserveWhitespace);
+}
 
-    const normalized = text.replace(/\s+/g, " ");
-    const trimmed = normalized.trim();
-    if (trimmed.length === 0) {
-      if (!pendingBreak && runs.length > 0) {
-        pendingSpace = true;
-      }
-      continue;
-    }
-    const breakBefore = pendingBreak;
-    pendingBreak = false;
-    if (!breakBefore && (pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
-      appendTrailingSpace(runs);
-    }
-    runs.push(measureRun(trimmed, element, root, breakBefore));
-    pendingSpace = normalized.endsWith(" ");
-  }
+function collectRunsFromNodes(root: HTMLElement, nodes: Node[], preserveWhitespace: boolean): MeasuredRun[] {
+  const runs: MeasuredRun[] = [];
+  const state = { runs, pendingSpace: false, pendingBreaks: 0 };
+  nodes.forEach((node) => visitRunNode(node, root, preserveWhitespace, state));
   return runs;
+}
+
+function visitRunNode(
+  node: Node,
+  root: HTMLElement,
+  preserveWhitespace: boolean,
+  state: { runs: MeasuredRun[]; pendingSpace: boolean; pendingBreaks: number }
+): void {
+  if (!preserveWhitespace && node.nodeType === 1) {
+    const element = node as HTMLElement;
+    if (element.tagName.toLowerCase() === "br") {
+      state.pendingSpace = false;
+      if (state.runs.length > 0) {
+        state.pendingBreaks += 1;
+      }
+      return;
+    }
+    if (isBlockElement(element)) {
+      return;
+    }
+  }
+
+  if (node.nodeType === 1) {
+    Array.from(node.childNodes).forEach((child) => visitRunNode(child, root, preserveWhitespace, state));
+    return;
+  }
+
+  if (node.nodeType !== 3) {
+    return;
+  }
+
+  const textNode = node as Text;
+  const text = textNode.nodeValue ?? "";
+  const element = textNode.parentElement ?? root;
+  if (preserveWhitespace) {
+    if (text.length > 0) {
+      state.runs.push(measureRun(text, element, root));
+    }
+    return;
+  }
+
+  const normalized = text.replace(/\s+/g, " ");
+  const trimmed = normalized.trim();
+  if (trimmed.length === 0) {
+    if (state.pendingBreaks === 0 && state.runs.length > 0) {
+      state.pendingSpace = true;
+    }
+    return;
+  }
+  const breaksBefore = state.pendingBreaks;
+  state.pendingBreaks = 0;
+  if (breaksBefore === 0 && (state.pendingSpace || normalized.startsWith(" ")) && state.runs.length > 0) {
+    appendTrailingSpace(state.runs);
+  }
+  state.runs.push(measureRun(trimmed, element, root, breaksBefore));
+  state.pendingSpace = normalized.endsWith(" ");
+}
+
+function isInlineNode(node: Node): boolean {
+  return node.nodeType !== 1 || !isBlockElement(node as HTMLElement);
+}
+
+function isBlockElement(element: HTMLElement): boolean {
+  return element.matches(PARAGRAPH_SELECTOR) || element.matches("pre,ul,ol,blockquote,li");
+}
+
+function isListElement(element: HTMLElement): boolean {
+  return element.tagName.toLowerCase() === "ul" || element.tagName.toLowerCase() === "ol";
+}
+
+function orderedListStart(list: Element | null): number {
+  const parsed = Number.parseInt(list?.getAttribute("start") ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 65535) : 1;
 }
 
 function appendTrailingSpace(runs: MeasuredRun[]): void {
@@ -349,7 +449,7 @@ function appendTrailingSpace(runs: MeasuredRun[]): void {
   }
 }
 
-function measureRun(text: string, element: HTMLElement, root: HTMLElement, breakBefore = false): MeasuredRun {
+function measureRun(text: string, element: HTMLElement, root: HTMLElement, breaksBefore = 0): MeasuredRun {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
@@ -360,7 +460,7 @@ function measureRun(text: string, element: HTMLElement, root: HTMLElement, break
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
     underline: hasUnderline(element, root),
-    breakBefore
+    breaksBefore
   };
 }
 
@@ -400,13 +500,6 @@ function bulletLevel(element: HTMLElement): number | null {
   return level;
 }
 
-function listItemIsNumbered(element: HTMLElement): boolean {
-  if (!element.matches("li")) {
-    return false;
-  }
-  return element.parentElement?.closest("ol,ul")?.tagName.toLowerCase() === "ol";
-}
-
 function isResolvedContentImage(image: HTMLImageElement): boolean {
   return (image.getAttribute("src") ?? "").startsWith("assets/");
 }
@@ -441,28 +534,6 @@ function colorNormalizationContext(document: Document): CanvasRenderingContext2D
   const canvas = document.createElement("canvas");
   colorContext = canvas.getContext?.("2d") ?? null;
   return colorContext;
-}
-
-function hasParagraphAncestor(element: HTMLElement, root: HTMLElement): boolean {
-  let parent = element.parentElement;
-  while (parent && parent !== root) {
-    if (parent.matches(PARAGRAPH_SELECTOR)) {
-      return true;
-    }
-    parent = parent.parentElement;
-  }
-  return false;
-}
-
-function hasNestedParagraphAncestor(node: Node, root: HTMLElement): boolean {
-  let parent = node.parentElement;
-  while (parent && parent !== root) {
-    if (parent.matches(PARAGRAPH_SELECTOR)) {
-      return true;
-    }
-    parent = parent.parentElement;
-  }
-  return false;
 }
 
 function hasUnderline(element: HTMLElement, root: HTMLElement): boolean {

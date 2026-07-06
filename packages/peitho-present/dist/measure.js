@@ -2,8 +2,7 @@
 var MARKER_ID = "peitho-measure";
 var ERROR_MARKER_ID = "peitho-measure-error";
 var SLOT_CLASS = /(^|\s)slot-/;
-var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
-var LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
+var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6";
 var SPECIAL_FONT_FAMILIES = /* @__PURE__ */ new Set([
   "monospace",
   "ui-monospace",
@@ -22,6 +21,12 @@ var SPECIAL_FONT_FAMILIES = /* @__PURE__ */ new Set([
   "fangsong"
 ]);
 var colorContext = null;
+var DEFAULT_PARAGRAPH_CONTEXT = {
+  bulletLevel: null,
+  numbered: false,
+  bulletContinuation: false,
+  numberingStartAt: null
+};
 function measureDeck(document2 = globalThis.document) {
   const sections = Array.from(document2.querySelectorAll("section[data-slide-key]"));
   return {
@@ -149,85 +154,134 @@ function measureBoxStyle(box) {
 }
 function collectParagraphs(box) {
   if (box.matches("pre")) {
-    return collectPreParagraphs(box);
+    return collectPreParagraphs(box, DEFAULT_PARAGRAPH_CONTEXT);
   }
-  const candidates = box.matches(PARAGRAPH_SELECTOR) ? [box] : Array.from(box.querySelectorAll(PARAGRAPH_SELECTOR));
-  const paragraphElements = candidates.filter((candidate) => {
-    if (candidate.matches("li")) {
-      return true;
-    }
-    return !hasParagraphAncestor(candidate, box);
-  });
-  if (paragraphElements.length === 0) {
-    return [measureParagraph(box, null)];
-  }
-  return paragraphElements.flatMap((element) => {
-    if (element.matches("li")) {
-      return collectListItemParagraphs(element);
-    }
-    if (element.matches("pre")) {
-      return collectPreParagraphs(element);
-    }
-    return [measureParagraph(element, bulletLevel(element))];
-  });
+  const paragraphs = collectContainerParagraphs(box, DEFAULT_PARAGRAPH_CONTEXT);
+  return paragraphs.length > 0 ? paragraphs : [measureParagraph(box, DEFAULT_PARAGRAPH_CONTEXT)];
 }
-function collectListItemParagraphs(item) {
-  const level = bulletLevel(item);
-  const numbered = listItemIsNumbered(item);
+function collectContainerParagraphs(container, context) {
   const paragraphs = [];
-  const directRuns = collectRuns(item, false);
-  if (directRuns.length > 0) {
-    paragraphs.push({
-      align: textAlign(item),
-      bulletLevel: level,
-      numbered,
-      bulletContinuation: false,
-      runs: directRuns
-    });
-  }
-  const directBlocks = Array.from(item.children).filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR)).map((child) => child);
-  paragraphs.push(...directBlocks.flatMap((block) => collectListItemBlockParagraphs(block, level, numbered)));
-  if (paragraphs.length === 0) {
-    return [measureParagraph(item, level, numbered)];
-  }
-  return paragraphs.map((paragraph, index) => {
-    if (index === 0) {
-      return paragraph;
+  let inlineNodes = [];
+  const flushInline = () => {
+    const runs = collectRunsFromNodes(container, inlineNodes, false);
+    inlineNodes = [];
+    if (runs.length > 0) {
+      paragraphs.push(paragraphFromRuns(container, runs, context));
     }
-    return {
-      ...paragraph,
-      numbered: false,
-      bulletContinuation: true
-    };
-  });
+  };
+  for (const child of Array.from(container.childNodes)) {
+    if (isInlineNode(child)) {
+      inlineNodes.push(child);
+      continue;
+    }
+    flushInline();
+    paragraphs.push(...collectBlockParagraphs(child, context));
+  }
+  flushInline();
+  return paragraphs;
 }
-function collectListItemBlockParagraphs(block, level, numbered) {
+function collectBlockParagraphs(block, context) {
+  if (block.matches(PARAGRAPH_SELECTOR)) {
+    return [measureParagraph(block, context)];
+  }
   if (block.matches("pre")) {
-    return collectPreParagraphs(block, level, numbered);
+    return collectPreParagraphs(block, context);
   }
-  const candidates = block.matches(PARAGRAPH_SELECTOR) ? [block] : Array.from(block.querySelectorAll(PARAGRAPH_SELECTOR));
-  const paragraphElements = candidates.filter((candidate) => {
-    if (candidate.matches("li")) {
-      return true;
-    }
-    return !hasParagraphAncestor(candidate, block);
-  });
-  if (paragraphElements.length === 0) {
-    return [measureParagraph(block, level, numbered)];
+  if (isListElement(block)) {
+    return collectListParagraphs(block);
   }
-  return paragraphElements.flatMap((element) => {
-    if (element.matches("li")) {
-      return collectListItemParagraphs(element);
-    }
-    if (element.matches("pre")) {
-      return collectPreParagraphs(element, level, numbered);
-    }
-    return [measureParagraph(element, level, numbered)];
+  if (block.matches("li")) {
+    const parentList = block.parentElement;
+    const numbered = parentList?.tagName.toLowerCase() === "ol";
+    return collectListItemParagraphs(block, numbered, numbered ? orderedListStart(parentList) : null);
+  }
+  return collectContainerParagraphs(block, context);
+}
+function collectListParagraphs(list) {
+  const numbered = list.tagName.toLowerCase() === "ol";
+  let itemIndex = 0;
+  return Array.from(list.children).filter((child) => child.tagName.toLowerCase() === "li").flatMap((child) => {
+    const startAt = numbered && itemIndex === 0 ? orderedListStart(list) : null;
+    itemIndex += 1;
+    return collectListItemParagraphs(child, numbered, startAt);
   });
 }
-function collectPreParagraphs(pre, level = null, numbered = false) {
+function collectListItemParagraphs(item, numbered, numberingStartAt) {
+  const paragraphs = [];
+  const level = bulletLevel(item);
+  let ownParagraphCount = 0;
+  let inlineNodes = [];
+  const pushOwnParagraphs = (ownParagraphs) => {
+    for (const paragraph of ownParagraphs) {
+      const continuation = ownParagraphCount > 0;
+      paragraphs.push({
+        ...paragraph,
+        bulletLevel: level,
+        numbered: continuation ? false : numbered,
+        bulletContinuation: continuation,
+        numberingStartAt: continuation ? null : numberingStartAt
+      });
+      ownParagraphCount += 1;
+    }
+  };
+  const flushInline = () => {
+    const runs = collectRunsFromNodes(item, inlineNodes, false);
+    inlineNodes = [];
+    if (runs.length > 0) {
+      pushOwnParagraphs([paragraphFromRuns(item, runs, DEFAULT_PARAGRAPH_CONTEXT)]);
+    }
+  };
+  const processBlock = (block) => {
+    if (block.matches(PARAGRAPH_SELECTOR)) {
+      pushOwnParagraphs([measureParagraph(block, DEFAULT_PARAGRAPH_CONTEXT)]);
+      return;
+    }
+    if (block.matches("pre")) {
+      pushOwnParagraphs(collectPreParagraphs(block, DEFAULT_PARAGRAPH_CONTEXT));
+      return;
+    }
+    if (isListElement(block)) {
+      paragraphs.push(...collectListParagraphs(block));
+      return;
+    }
+    processContainer(block);
+  };
+  const processContainer = (container) => {
+    let nestedInlineNodes = [];
+    const flushNestedInline = () => {
+      const runs = collectRunsFromNodes(container, nestedInlineNodes, false);
+      nestedInlineNodes = [];
+      if (runs.length > 0) {
+        pushOwnParagraphs([paragraphFromRuns(container, runs, DEFAULT_PARAGRAPH_CONTEXT)]);
+      }
+    };
+    for (const child of Array.from(container.childNodes)) {
+      if (isInlineNode(child)) {
+        nestedInlineNodes.push(child);
+        continue;
+      }
+      flushNestedInline();
+      processBlock(child);
+    }
+    flushNestedInline();
+  };
+  for (const child of Array.from(item.childNodes)) {
+    if (isInlineNode(child)) {
+      inlineNodes.push(child);
+      continue;
+    }
+    flushInline();
+    processBlock(child);
+  }
+  flushInline();
+  if (paragraphs.length === 0) {
+    pushOwnParagraphs([measureParagraph(item, DEFAULT_PARAGRAPH_CONTEXT)]);
+  }
+  return paragraphs;
+}
+function collectPreParagraphs(pre, context) {
   const align = textAlign(pre);
-  const paragraphs = [{ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] }];
+  const paragraphs = [{ align, ...context, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -235,68 +289,89 @@ function collectPreParagraphs(pre, level = null, numbered = false) {
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] });
+        paragraphs.push({ align, ...context, runs: [] });
       }
     });
   }
   return paragraphs;
 }
-function measureParagraph(element, level, numbered = false) {
+function measureParagraph(element, context) {
+  return paragraphFromRuns(element, collectRuns(element, false), context);
+}
+function paragraphFromRuns(element, runs, context) {
   return {
     align: textAlign(element),
-    bulletLevel: level,
-    numbered,
-    bulletContinuation: false,
-    runs: collectRuns(element, false)
+    ...context,
+    runs
   };
 }
 function collectRuns(root, preserveWhitespace) {
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  return collectRunsFromNodes(root, Array.from(root.childNodes), preserveWhitespace);
+}
+function collectRunsFromNodes(root, nodes, preserveWhitespace) {
   const runs = [];
-  let pendingSpace = false;
-  let pendingBreak = false;
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    if (!preserveWhitespace && node.nodeType === 1) {
-      const element2 = node;
-      if (element2.tagName.toLowerCase() === "br" && !hasNestedParagraphAncestor(element2, root)) {
-        pendingSpace = false;
-        pendingBreak = runs.length > 0;
-      }
-      continue;
-    }
-    if (node.nodeType !== 3) {
-      continue;
-    }
-    const textNode = node;
-    const text = textNode.nodeValue ?? "";
-    if (hasNestedParagraphAncestor(textNode, root)) {
-      continue;
-    }
-    const element = textNode.parentElement ?? root;
-    if (preserveWhitespace) {
-      if (text.length > 0) {
-        runs.push(measureRun(text, element, root));
-      }
-      continue;
-    }
-    const normalized = text.replace(/\s+/g, " ");
-    const trimmed = normalized.trim();
-    if (trimmed.length === 0) {
-      if (!pendingBreak && runs.length > 0) {
-        pendingSpace = true;
-      }
-      continue;
-    }
-    const breakBefore = pendingBreak;
-    pendingBreak = false;
-    if (!breakBefore && (pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
-      appendTrailingSpace(runs);
-    }
-    runs.push(measureRun(trimmed, element, root, breakBefore));
-    pendingSpace = normalized.endsWith(" ");
-  }
+  const state = { runs, pendingSpace: false, pendingBreaks: 0 };
+  nodes.forEach((node) => visitRunNode(node, root, preserveWhitespace, state));
   return runs;
+}
+function visitRunNode(node, root, preserveWhitespace, state) {
+  if (!preserveWhitespace && node.nodeType === 1) {
+    const element2 = node;
+    if (element2.tagName.toLowerCase() === "br") {
+      state.pendingSpace = false;
+      if (state.runs.length > 0) {
+        state.pendingBreaks += 1;
+      }
+      return;
+    }
+    if (isBlockElement(element2)) {
+      return;
+    }
+  }
+  if (node.nodeType === 1) {
+    Array.from(node.childNodes).forEach((child) => visitRunNode(child, root, preserveWhitespace, state));
+    return;
+  }
+  if (node.nodeType !== 3) {
+    return;
+  }
+  const textNode = node;
+  const text = textNode.nodeValue ?? "";
+  const element = textNode.parentElement ?? root;
+  if (preserveWhitespace) {
+    if (text.length > 0) {
+      state.runs.push(measureRun(text, element, root));
+    }
+    return;
+  }
+  const normalized = text.replace(/\s+/g, " ");
+  const trimmed = normalized.trim();
+  if (trimmed.length === 0) {
+    if (state.pendingBreaks === 0 && state.runs.length > 0) {
+      state.pendingSpace = true;
+    }
+    return;
+  }
+  const breaksBefore = state.pendingBreaks;
+  state.pendingBreaks = 0;
+  if (breaksBefore === 0 && (state.pendingSpace || normalized.startsWith(" ")) && state.runs.length > 0) {
+    appendTrailingSpace(state.runs);
+  }
+  state.runs.push(measureRun(trimmed, element, root, breaksBefore));
+  state.pendingSpace = normalized.endsWith(" ");
+}
+function isInlineNode(node) {
+  return node.nodeType !== 1 || !isBlockElement(node);
+}
+function isBlockElement(element) {
+  return element.matches(PARAGRAPH_SELECTOR) || element.matches("pre,ul,ol,blockquote,li");
+}
+function isListElement(element) {
+  return element.tagName.toLowerCase() === "ul" || element.tagName.toLowerCase() === "ol";
+}
+function orderedListStart(list) {
+  const parsed = Number.parseInt(list?.getAttribute("start") ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 65535) : 1;
 }
 function appendTrailingSpace(runs) {
   const run = runs[runs.length - 1];
@@ -304,7 +379,7 @@ function appendTrailingSpace(runs) {
     run.text += " ";
   }
 }
-function measureRun(text, element, root, breakBefore = false) {
+function measureRun(text, element, root, breaksBefore = 0) {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
@@ -315,7 +390,7 @@ function measureRun(text, element, root, breakBefore = false) {
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
     underline: hasUnderline(element, root),
-    breakBefore
+    breaksBefore
   };
 }
 function relativeRect(section, element) {
@@ -348,12 +423,6 @@ function bulletLevel(element) {
   }
   return level;
 }
-function listItemIsNumbered(element) {
-  if (!element.matches("li")) {
-    return false;
-  }
-  return element.parentElement?.closest("ol,ul")?.tagName.toLowerCase() === "ol";
-}
 function isResolvedContentImage(image) {
   return (image.getAttribute("src") ?? "").startsWith("assets/");
 }
@@ -385,26 +454,6 @@ function colorNormalizationContext(document2) {
   const canvas = document2.createElement("canvas");
   colorContext = canvas.getContext?.("2d") ?? null;
   return colorContext;
-}
-function hasParagraphAncestor(element, root) {
-  let parent = element.parentElement;
-  while (parent && parent !== root) {
-    if (parent.matches(PARAGRAPH_SELECTOR)) {
-      return true;
-    }
-    parent = parent.parentElement;
-  }
-  return false;
-}
-function hasNestedParagraphAncestor(node, root) {
-  let parent = node.parentElement;
-  while (parent && parent !== root) {
-    if (parent.matches(PARAGRAPH_SELECTOR)) {
-      return true;
-    }
-    parent = parent.parentElement;
-  }
-  return false;
 }
 function hasUnderline(element, root) {
   let current = element;
