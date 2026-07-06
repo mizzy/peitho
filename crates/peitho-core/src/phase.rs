@@ -5,8 +5,8 @@ use std::{
 
 use crate::{
     domain::{
-        AspectRatio, RawImagePath, RenderedSlide, ResolvedImageAsset, ResolvedImagePath, SlideKey,
-        SlotContract, SlotName, SourceFragment,
+        AspectRatio, RawImagePath, RenderedSlide, Resolution, ResolvedImageAsset,
+        ResolvedImagePath, SlideKey, SlotContract, SlotName, SourceFragment,
     },
     error::{BuildError, Result},
     layout::Layout,
@@ -87,6 +87,7 @@ impl DeckSection {
 pub struct DeckSettings {
     planned_time: Option<PlannedTime>,
     aspect_ratio: AspectRatio,
+    resolution: Resolution,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -103,19 +104,25 @@ impl DeckSettings {
     pub fn new(
         planned_time: Option<PlannedTime>,
         aspect_ratio: AspectRatio,
+        resolution: Option<Resolution>,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
         syntaxes: Option<AssetPath>,
-    ) -> Self {
-        Self {
+    ) -> std::result::Result<Self, String> {
+        let resolution =
+            resolution.unwrap_or_else(|| Resolution::from_aspect_ratio_default(aspect_ratio));
+        resolution.check_matches(aspect_ratio)?;
+        resolution.check_not_smaller_than_canvas(aspect_ratio)?;
+        Ok(Self {
             planned_time,
             aspect_ratio,
+            resolution,
             sections,
             layouts,
             css,
             syntaxes,
-        }
+        })
     }
 
     pub fn planned_time(&self) -> Option<PlannedTime> {
@@ -124,6 +131,10 @@ impl DeckSettings {
 
     pub fn aspect_ratio(&self) -> AspectRatio {
         self.aspect_ratio
+    }
+
+    pub fn resolution(&self) -> Resolution {
+        self.resolution
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -578,11 +589,13 @@ mod tests {
         let settings = DeckSettings::new(
             Some(setup.planned()),
             AspectRatio::default(),
+            Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             vec![setup.clone()],
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 60_000);
         assert_eq!(settings.sections(), &[setup]);
@@ -602,15 +615,69 @@ mod tests {
         let settings = DeckSettings::new(
             None,
             AspectRatio::default(),
+            Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             vec![setup.clone()],
             None,
             None,
             None,
         )
+        .unwrap()
         .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
 
         assert_eq!(settings.planned_time().unwrap().as_millis(), 120_000);
         assert_eq!(settings.sections(), &[setup]);
+    }
+
+    #[test]
+    fn deck_settings_new_derives_resolution_when_absent() {
+        let settings = DeckSettings::new(
+            None,
+            AspectRatio::Ratio4To3,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.resolution().width(), 1440);
+        assert_eq!(settings.resolution().height(), 1080);
+    }
+
+    #[test]
+    fn deck_settings_new_rejects_resolution_that_mismatches_aspect_ratio() {
+        let err = DeckSettings::new(
+            None,
+            AspectRatio::Ratio16To9,
+            Some(Resolution::from_frontmatter("1024x768").unwrap()),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "resolution 1024x768 does not match aspect_ratio 16:9");
+    }
+
+    #[test]
+    fn deck_settings_new_rejects_resolution_smaller_than_canvas() {
+        let err = DeckSettings::new(
+            None,
+            AspectRatio::Ratio16To9,
+            Some(Resolution::from_frontmatter("16x9").unwrap()),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "resolution 16x9 is smaller than the canvas logical size 1280x720; use at least the canvas dimensions"
+        );
     }
 
     #[test]

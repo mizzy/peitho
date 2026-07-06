@@ -30,7 +30,8 @@ pub use phase::{
 };
 pub use present_config::{present_config_json, PresentConfig};
 pub use render::{
-    render_deck, render_distribution_index, render_present_index, render_presenter_index,
+    render_deck, render_distribution_index, render_pdf_document, render_present_index,
+    render_presenter_index,
 };
 pub use theme::{build_theme_css, CssFile};
 

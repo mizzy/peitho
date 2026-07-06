@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    env,
     ffi::OsString,
     fs,
     io::Write,
@@ -189,6 +190,19 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
     },
+    Export {
+        #[command(subcommand)]
+        command: ExportCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExportCommand {
+    Pdf {
+        input: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// Built-in defaults compiled from the repository's own layout and theme,
@@ -241,6 +255,9 @@ fn main() -> miette::Result<()> {
             }
             Ok(())
         }
+        Command::Export { command } => match command {
+            ExportCommand::Pdf { input, out } => export_pdf(input, out),
+        },
     }
 }
 
@@ -251,6 +268,21 @@ fn build(options: &BuildOptions) -> miette::Result<()> {
         "built {} slide(s) into {}",
         artifacts.slide_count,
         options.out.display()
+    );
+    Ok(())
+}
+
+fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
+    let artifacts = build_artifacts(&input)?;
+    let out = out.unwrap_or_else(|| input.with_extension("pdf"));
+    let tmp = tempfile::tempdir().into_diagnostic()?;
+    emit_pdf_workspace(tmp.path(), &artifacts)?;
+    let chrome = locate_chrome()?;
+    run_chrome_print(&chrome, tmp.path(), &out)?;
+    println!(
+        "exported {} slide(s) to {}",
+        artifacts.slide_count,
+        out.display()
     );
     Ok(())
 }
@@ -566,10 +598,8 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
 }
 
 fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
-    fs::create_dir_all(out).into_diagnostic()?;
-    fs::write(out.join("peitho.css"), &artifacts.css).into_diagnostic()?;
+    write_shared_assets(out, artifacts)?;
     write_slide_fragments(out, &artifacts.rendered)?;
-    write_image_assets(out, &artifacts.image_assets)?;
     fs::write(out.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         out.join("index.html"),
@@ -577,6 +607,131 @@ fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<(
     )
     .into_diagnostic()?;
     Ok(())
+}
+
+fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    write_shared_assets(workspace, artifacts)?;
+    let pdf_html = peitho_core::render_pdf_document(&artifacts.rendered);
+    fs::write(workspace.join("pdf.html"), pdf_html).into_diagnostic()?;
+    Ok(())
+}
+
+fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    fs::create_dir_all(dir).into_diagnostic()?;
+    fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
+    write_image_assets(dir, &artifacts.image_assets)
+}
+
+#[derive(Debug, Clone)]
+struct ChromeLookupEnv {
+    env_path: Option<PathBuf>,
+    mac_chrome: PathBuf,
+    path_dirs: Vec<PathBuf>,
+}
+
+fn locate_chrome() -> miette::Result<PathBuf> {
+    let path_dirs = env::var_os("PATH")
+        .map(|path| env::split_paths(&path).collect())
+        .unwrap_or_default();
+    locate_chrome_with_env(&ChromeLookupEnv {
+        env_path: env::var_os("PEITHO_CHROME_PATH").map(PathBuf::from),
+        mac_chrome: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        path_dirs,
+    })
+}
+
+fn locate_chrome_with_env(lookup: &ChromeLookupEnv) -> miette::Result<PathBuf> {
+    if let Some(path) = &lookup.env_path {
+        if path.is_file() {
+            return Ok(path.clone());
+        }
+        return Err(miette::miette!(
+            "Chrome not found at PEITHO_CHROME_PATH={}\nhelp: install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
+            path.display()
+        ));
+    }
+
+    if lookup.mac_chrome.is_file() {
+        return Ok(lookup.mac_chrome.clone());
+    }
+
+    for program in [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ] {
+        if let Some(path) = find_chrome_in_path(program, &lookup.path_dirs) {
+            return Ok(path);
+        }
+    }
+
+    Err(miette::miette!(
+        "Chrome not found\nhelp: install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>"
+    ))
+}
+
+fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> {
+    path_dirs.iter().find_map(|dir| {
+        let candidate = dir.join(program);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Result<()> {
+    let abs_out = absolute_path_for_output(out)?;
+    let profile = workspace.join("chrome-profile");
+    fs::create_dir_all(&profile).into_diagnostic()?;
+    let pdf_html = workspace.join("pdf.html");
+    let url = file_url(&pdf_html)?;
+    let output = std::process::Command::new(chrome)
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--no-sandbox")
+        .arg("--no-pdf-header-footer")
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--print-to-pdf={}", abs_out.display()))
+        .arg(url)
+        .output()
+        .map_err(|err| {
+            miette::miette!(
+                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+                chrome.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "Chrome failed to print PDF with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let metadata = fs::metadata(&abs_out).map_err(|err| {
+        miette::miette!(
+            "Chrome did not create PDF output at {}\nhelp: check output path permissions\ncaused by: {err}",
+            abs_out.display()
+        )
+    })?;
+    if metadata.len() == 0 {
+        return Err(miette::miette!(
+            "Chrome created an empty PDF at {}\nhelp: rerun export and check Chrome stderr",
+            abs_out.display()
+        ));
+    }
+    Ok(())
+}
+
+fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
+    if out.is_absolute() {
+        return Ok(out.to_path_buf());
+    }
+    Ok(env::current_dir().into_diagnostic()?.join(out))
+}
+
+fn file_url(path: &Path) -> miette::Result<String> {
+    let abs = absolute_path_for_output(path)?;
+    Ok(format!("file://{}", abs.display()))
 }
 
 struct PublishDistribution {
@@ -1506,10 +1661,130 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert!(presenter_windowed);
             }
-            Command::Build { .. } | Command::Publish { .. } => {
+            Command::Build { .. } | Command::Publish { .. } | Command::Export { .. } => {
                 panic!("expected present command");
             }
         }
+    }
+
+    #[test]
+    fn export_pdf_command_accepts_output_flag() {
+        let cli = Cli::parse_from(["peitho", "export", "pdf", "deck.md", "-o", "out.pdf"]);
+
+        match cli.command {
+            Command::Export {
+                command: ExportCommand::Pdf { input, out },
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(out, Some(PathBuf::from("out.pdf")));
+            }
+            Command::Build { .. } | Command::Present { .. } | Command::Publish { .. } => {
+                panic!("expected export pdf command");
+            }
+        }
+    }
+
+    #[test]
+    fn emit_pdf_workspace_writes_static_pdf_entry_without_notes_or_manifest() {
+        let fixture = WatchFixture::new(
+            "---\nresolution: 1920x1080\n---\n# Export\n\n<!-- private note -->\n",
+        );
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_pdf_workspace(&workspace, &artifacts).unwrap();
+
+        let html = fs::read_to_string(workspace.join("pdf.html")).unwrap();
+        assert!(html.contains("@page { size: 1920px 1080px; margin: 0; }"));
+        assert!(html.contains(r#"data-slide-key="export""#));
+        assert!(!html.contains("private note"));
+        assert!(!workspace.join("manifest.json").exists());
+        assert!(!workspace.join("slides").exists());
+        assert!(workspace.join("peitho.css").is_file());
+    }
+
+    #[test]
+    fn emit_pdf_workspace_allows_note_text_that_also_appears_in_slide_html() {
+        let fixture = WatchFixture::new("# PDF Export\n\n<!-- PDF -->\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_pdf_workspace(&workspace, &artifacts).unwrap();
+
+        assert!(workspace.join("pdf.html").is_file());
+    }
+
+    #[test]
+    fn locate_chrome_prefers_env_var_without_running_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_chrome = dir.path().join("env-chrome");
+        let mac_chrome = dir.path().join("mac-chrome");
+        let path_chrome_dir = dir.path().join("bin");
+        fs::create_dir_all(&path_chrome_dir).unwrap();
+        write_fake_browser(&env_chrome);
+        write_fake_browser(&mac_chrome);
+        write_fake_browser(&path_chrome_dir.join("google-chrome"));
+
+        let chrome = locate_chrome_with_env(&ChromeLookupEnv {
+            env_path: Some(env_chrome.clone()),
+            mac_chrome,
+            path_dirs: vec![path_chrome_dir],
+        })
+        .unwrap();
+
+        assert_eq!(chrome, env_chrome);
+    }
+
+    #[test]
+    fn locate_chrome_uses_mac_default_before_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mac_chrome = dir.path().join("mac-chrome");
+        let path_chrome_dir = dir.path().join("bin");
+        fs::create_dir_all(&path_chrome_dir).unwrap();
+        write_fake_browser(&mac_chrome);
+        write_fake_browser(&path_chrome_dir.join("google-chrome"));
+
+        let chrome = locate_chrome_with_env(&ChromeLookupEnv {
+            env_path: None,
+            mac_chrome: mac_chrome.clone(),
+            path_dirs: vec![path_chrome_dir],
+        })
+        .unwrap();
+
+        assert_eq!(chrome, mac_chrome);
+    }
+
+    #[test]
+    fn locate_chrome_searches_path_in_required_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_chrome_dir = dir.path().join("bin");
+        fs::create_dir_all(&path_chrome_dir).unwrap();
+        write_fake_browser(&path_chrome_dir.join("chromium"));
+        write_fake_browser(&path_chrome_dir.join("google-chrome-stable"));
+
+        let chrome = locate_chrome_with_env(&ChromeLookupEnv {
+            env_path: None,
+            mac_chrome: dir.path().join("missing-mac-chrome"),
+            path_dirs: vec![path_chrome_dir.clone()],
+        })
+        .unwrap();
+
+        assert_eq!(chrome, path_chrome_dir.join("google-chrome-stable"));
+    }
+
+    #[test]
+    fn locate_chrome_reports_help_when_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = locate_chrome_with_env(&ChromeLookupEnv {
+            env_path: None,
+            mac_chrome: dir.path().join("missing-mac-chrome"),
+            path_dirs: Vec::new(),
+        })
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("Chrome not found"));
+        assert!(message.contains("PEITHO_CHROME_PATH=<absolute-path>"));
     }
 
     #[test]
@@ -1571,6 +1846,10 @@ contexts:
         assert_eq!(resolver.deck_dir, PathBuf::from("."));
     }
 
+    fn write_fake_browser(path: &Path) {
+        fs::write(path, "").unwrap();
+    }
+
     #[test]
     fn build_command_accepts_watch_flag() {
         let cli = Cli::parse_from(["peitho", "build", "deck.md", "--watch"]);
@@ -1580,7 +1859,7 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert!(watch);
             }
-            Command::Present { .. } | Command::Publish { .. } => {
+            Command::Present { .. } | Command::Publish { .. } | Command::Export { .. } => {
                 panic!("expected build command");
             }
         }
@@ -1596,7 +1875,7 @@ contexts:
                 assert_eq!(out, PathBuf::from("dist"));
                 assert!(!watch);
             }
-            Command::Present { .. } | Command::Publish { .. } => {
+            Command::Present { .. } | Command::Publish { .. } | Command::Export { .. } => {
                 panic!("expected build command");
             }
         }

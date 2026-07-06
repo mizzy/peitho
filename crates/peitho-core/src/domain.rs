@@ -63,6 +63,122 @@ impl FromStr for AspectRatio {
     }
 }
 
+impl fmt::Display for AspectRatio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ratio16To9 => "16:9",
+            Self::Ratio4To3 => "4:3",
+        })
+    }
+}
+
+/// A physical PDF page size in CSS pixels (96 dpi).
+///
+/// Constructed only via validated constructors, so raw `(u32, u32)` pairs
+/// cannot masquerade as a checked PDF resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Resolution {
+    width: u32,
+    height: u32,
+}
+
+impl Resolution {
+    /// Frontmatter parse: accepts only `WxH` pixel dimensions with non-zero
+    /// `u32` width and height.
+    pub fn from_frontmatter(raw: &str) -> Result<Self, String> {
+        let (width_raw, height_raw) = raw
+            .split_once('x')
+            .filter(|(_, height)| !height.contains('x'))
+            .ok_or_else(|| "resolution must use WxH pixel format".to_owned())?;
+        if width_raw.is_empty() || height_raw.is_empty() {
+            return Err("resolution must use WxH pixel format".to_owned());
+        }
+        let width = parse_resolution_dimension("width", width_raw)?;
+        let height = parse_resolution_dimension("height", height_raw)?;
+
+        Ok(Self { width, height })
+    }
+
+    pub fn from_aspect_ratio_default(ratio: AspectRatio) -> Self {
+        match ratio {
+            AspectRatio::Ratio16To9 => Self {
+                width: 1920,
+                height: 1080,
+            },
+            AspectRatio::Ratio4To3 => Self {
+                width: 1440,
+                height: 1080,
+            },
+        }
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.height
+    }
+
+    pub(crate) fn check_matches(self, ratio: AspectRatio) -> Result<(), String> {
+        let resolution_width = u64::from(self.width);
+        let resolution_height = u64::from(self.height);
+        let ratio_width = u64::from(ratio.width());
+        let ratio_height = u64::from(ratio.height());
+        if resolution_width * ratio_height == resolution_height * ratio_width {
+            return Ok(());
+        }
+        Err(format!(
+            "resolution {}x{} does not match aspect_ratio {}",
+            self.width, self.height, ratio
+        ))
+    }
+
+    pub(crate) fn check_not_smaller_than_canvas(self, ratio: AspectRatio) -> Result<(), String> {
+        if self.width >= ratio.width() && self.height >= ratio.height() {
+            return Ok(());
+        }
+        Err(format!(
+            "resolution {}x{} is smaller than the canvas logical size {}x{}; use at least the canvas dimensions",
+            self.width,
+            self.height,
+            ratio.width(),
+            ratio.height()
+        ))
+    }
+}
+
+impl TryFrom<String> for Resolution {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::from_frontmatter(&value)
+    }
+}
+
+impl From<Resolution> for String {
+    fn from(resolution: Resolution) -> Self {
+        format!("{}x{}", resolution.width, resolution.height)
+    }
+}
+
+impl Default for Resolution {
+    fn default() -> Self {
+        Self::from_aspect_ratio_default(AspectRatio::default())
+    }
+}
+
+fn parse_resolution_dimension(label: &str, raw: &str) -> Result<u32, String> {
+    let value = raw
+        .parse::<u32>()
+        .map_err(|_| format!("resolution {label} `{raw}` is not a valid u32"))?;
+    if value == 0 {
+        return Err(format!("resolution {label} must be greater than zero"));
+    }
+    Ok(value)
+}
+
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
 #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -753,6 +869,124 @@ mod tests {
     #[test]
     fn aspect_ratio_rejects_pixel_dimension_object() {
         assert!(serde_json::from_str::<AspectRatio>(r#"{"width":1280,"height":720}"#).is_err());
+    }
+
+    #[test]
+    fn aspect_ratio_display_matches_frontmatter_label() {
+        assert_eq!(AspectRatio::Ratio16To9.to_string(), "16:9");
+        assert_eq!(AspectRatio::Ratio4To3.to_string(), "4:3");
+    }
+
+    #[test]
+    fn resolution_from_frontmatter_accepts_wxh_pixels() {
+        let resolution = Resolution::from_frontmatter("1920x1080").unwrap();
+
+        assert_eq!(resolution.width(), 1920);
+        assert_eq!(resolution.height(), 1080);
+    }
+
+    #[test]
+    fn resolution_from_frontmatter_rejects_invalid_shape() {
+        for raw in ["", "1920", "1920x1080x2"] {
+            let err = Resolution::from_frontmatter(raw).unwrap_err();
+
+            assert_eq!(err, "resolution must use WxH pixel format");
+        }
+    }
+
+    #[test]
+    fn resolution_from_frontmatter_rejects_non_numeric_dimensions() {
+        let err = Resolution::from_frontmatter("abcx1080").unwrap_err();
+        assert_eq!(err, "resolution width `abc` is not a valid u32");
+
+        let err = Resolution::from_frontmatter("1920xdef").unwrap_err();
+        assert_eq!(err, "resolution height `def` is not a valid u32");
+    }
+
+    #[test]
+    fn resolution_from_frontmatter_rejects_u32_overflow() {
+        let err = Resolution::from_frontmatter("9999999999x1080").unwrap_err();
+        assert_eq!(err, "resolution width `9999999999` is not a valid u32");
+
+        let err = Resolution::from_frontmatter("1080x9999999999").unwrap_err();
+        assert_eq!(err, "resolution height `9999999999` is not a valid u32");
+    }
+
+    #[test]
+    fn resolution_from_frontmatter_rejects_zero_dimensions() {
+        let err = Resolution::from_frontmatter("0x1080").unwrap_err();
+        assert_eq!(err, "resolution width must be greater than zero");
+
+        let err = Resolution::from_frontmatter("1920x0").unwrap_err();
+        assert_eq!(err, "resolution height must be greater than zero");
+    }
+
+    #[test]
+    fn resolution_defaults_to_high_dpi_canvas_for_aspect_ratio() {
+        let widescreen = Resolution::from_aspect_ratio_default(AspectRatio::Ratio16To9);
+        assert_eq!(widescreen.width(), 1920);
+        assert_eq!(widescreen.height(), 1080);
+
+        let classic = Resolution::from_aspect_ratio_default(AspectRatio::Ratio4To3);
+        assert_eq!(classic.width(), 1440);
+        assert_eq!(classic.height(), 1080);
+    }
+
+    #[test]
+    fn resolution_default_uses_default_aspect_ratio() {
+        let resolution = Resolution::default();
+
+        assert_eq!(resolution.width(), 1920);
+        assert_eq!(resolution.height(), 1080);
+    }
+
+    #[test]
+    fn resolution_check_matches_accepts_same_aspect_ratio() {
+        Resolution::from_frontmatter("1920x1080")
+            .unwrap()
+            .check_matches(AspectRatio::Ratio16To9)
+            .unwrap();
+        Resolution::from_frontmatter("1440x1080")
+            .unwrap()
+            .check_matches(AspectRatio::Ratio4To3)
+            .unwrap();
+    }
+
+    #[test]
+    fn resolution_check_matches_rejects_mismatched_aspect_ratio() {
+        let err = Resolution::from_frontmatter("1024x768")
+            .unwrap()
+            .check_matches(AspectRatio::Ratio16To9)
+            .unwrap_err();
+
+        assert_eq!(err, "resolution 1024x768 does not match aspect_ratio 16:9");
+    }
+
+    #[test]
+    fn resolution_serializes_as_wxh_string() {
+        let resolution = Resolution::from_frontmatter("1920x1080").unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&resolution).unwrap(),
+            r#""1920x1080""#
+        );
+    }
+
+    #[test]
+    fn resolution_deserializes_through_validated_wxh_string() {
+        let resolution = serde_json::from_str::<Resolution>(r#""1440x1080""#).unwrap();
+
+        assert_eq!(resolution.width(), 1440);
+        assert_eq!(resolution.height(), 1080);
+    }
+
+    #[test]
+    fn resolution_deserialization_rejects_invalid_wxh_string() {
+        let err = serde_json::from_str::<Resolution>(r#""9999999999x1080""#).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("resolution width `9999999999` is not a valid u32"));
     }
 
     #[test]

@@ -383,6 +383,51 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
     fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
+pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
+    let settings = deck.settings();
+    let aspect_ratio = settings.aspect_ratio();
+    let resolution = settings.resolution();
+    let scale = format_pdf_scale(resolution.width(), aspect_ratio.width());
+    let mut slides = String::new();
+    for slide in deck.slides() {
+        slides.push_str(r#"  <div class="peitho-slide-wrap">"#);
+        slides.push_str(slide.html());
+        slides.push_str("</div>\n");
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="peitho.css">
+  <title>Peitho PDF Export</title>
+  <style>
+    @page {{ size: {page_width}px {page_height}px; margin: 0; }}
+    :root {{ --peitho-canvas-width: {canvas_width}px; --peitho-canvas-height: {canvas_height}px; --peitho-canvas-aspect: {canvas_aspect}; }}
+    html, body {{ margin: 0; padding: 0; background: #fff; }}
+    body {{ width: {page_width}px; }}
+    .peitho-slide-wrap {{ width: {page_width}px; height: {page_height}px; page-break-after: always; page-break-inside: avoid; break-after: page; break-inside: avoid; overflow: hidden; }}
+    .peitho-slide-wrap:last-child {{ page-break-after: auto; break-after: auto; }}
+    .peitho-slide {{ transform: scale({scale}); transform-origin: top left; }}
+  </style>
+</head>
+<body>
+{slides}</body>
+</html>"#,
+        page_width = resolution.width(),
+        page_height = resolution.height(),
+        canvas_width = aspect_ratio.width(),
+        canvas_height = aspect_ratio.height(),
+        canvas_aspect = aspect_ratio.css_aspect_value(),
+    )
+}
+
+fn format_pdf_scale(page_width: u32, canvas_width: u32) -> String {
+    let scale = f64::from(page_width) / f64::from(canvas_width);
+    scale.to_string()
+}
+
 fn fill_canvas_tokens(template: &str, aspect_ratio: AspectRatio) -> String {
     template
         .replace("__PEITHO_CANVAS_WIDTH__", &aspect_ratio.width().to_string())
@@ -1356,6 +1401,55 @@ mod tests {
         assert!(controls_index < mount_index);
         assert!(html.contains("peitho.installPresentationControls({ root, window, document })"));
         assert!(!html.contains("openPresenter"));
+    }
+
+    #[test]
+    fn pdf_document_inlines_all_slides_with_print_page_css() {
+        let rendered =
+            render_checked_deck("---\nresolution: 1920x1080\n---\n# Intro\n\n---\n# Details");
+
+        let html = render_pdf_document(&rendered);
+
+        assert!(html.contains(r#"<!doctype html>"#));
+        assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
+        assert!(html.contains("@page { size: 1920px 1080px; margin: 0; }"));
+        assert!(html.contains("--peitho-canvas-width: 1280px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains(".peitho-slide-wrap { width: 1920px; height: 1080px;"));
+        assert!(html.contains("page-break-after: always;"));
+        assert!(html.contains("break-after: page;"));
+        assert!(html.contains("transform: scale(1.5);"));
+        assert!(html.contains(r#"data-slide-key="intro""#));
+        assert!(html.contains(r#"data-slide-key="details""#));
+        assert!(html.contains(">Intro</span>"));
+        assert!(html.contains(">Details</span>"));
+        assert!(!html.contains("fetch("));
+        assert!(!html.contains("manifest.json"));
+        assert!(!html.contains("notes.json"));
+    }
+
+    #[test]
+    fn pdf_document_uses_four_by_three_resolution_and_scale() {
+        let rendered = render_checked_deck("---\naspect_ratio: 4:3\n---\n# Intro");
+
+        let html = render_pdf_document(&rendered);
+
+        assert!(html.contains("@page { size: 1440px 1080px; margin: 0; }"));
+        assert!(html.contains("--peitho-canvas-width: 960px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains(".peitho-slide-wrap { width: 1440px; height: 1080px;"));
+        assert!(html.contains("transform: scale(1.5);"));
+    }
+
+    #[test]
+    fn pdf_document_does_not_include_speaker_notes() {
+        let rendered = render_checked_deck("# Intro\n\n<!-- speaker secret -->");
+
+        assert_eq!(rendered.slides()[0].notes(), Some("speaker secret"));
+
+        let html = render_pdf_document(&rendered);
+
+        assert!(!html.contains("speaker secret"));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
