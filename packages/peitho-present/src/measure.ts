@@ -85,9 +85,11 @@ function measureSlide(section: HTMLElement): MeasuredSlide {
     backgroundColor: effectiveBackgroundColor(section),
     boxes: Array.from(section.querySelectorAll<HTMLElement>("[class]"))
       .filter((element) => SLOT_CLASS.test(element.className))
+      .filter(isVisibleElement)
       .map((box) => measureBox(section, box)),
     images: Array.from(section.querySelectorAll<HTMLImageElement>("img"))
       .filter(isResolvedContentImage)
+      .filter(isVisibleElement)
       .map((image) => measureImage(section, image))
   };
 }
@@ -200,17 +202,27 @@ function collectListItemParagraphs(item: HTMLElement): MeasuredParagraph[] {
   if (directBlocks.length === 0) {
     return [measureParagraph(item, level, numbered)];
   }
-  return directBlocks.flatMap((block) => {
+  const paragraphs = directBlocks.flatMap((block) => {
     if (block.matches("pre")) {
       return collectPreParagraphs(block, level, numbered);
     }
     return [measureParagraph(block, level, numbered)];
   });
+  return paragraphs.map((paragraph, index) => {
+    if (index === 0) {
+      return paragraph;
+    }
+    return {
+      ...paragraph,
+      numbered: false,
+      bulletContinuation: true
+    };
+  });
 }
 
 function collectPreParagraphs(pre: HTMLElement, level: number | null = null, numbered = false): MeasuredParagraph[] {
   const align = textAlign(pre);
-  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, numbered, runs: [] }];
+  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -218,7 +230,7 @@ function collectPreParagraphs(pre: HTMLElement, level: number | null = null, num
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, numbered, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] });
       }
     });
   }
@@ -230,21 +242,35 @@ function measureParagraph(element: HTMLElement, level: number | null, numbered =
     align: textAlign(element),
     bulletLevel: level,
     numbered,
+    bulletContinuation: false,
     runs: collectRuns(element, false)
   };
 }
 
 function collectRuns(root: HTMLElement, preserveWhitespace: boolean): MeasuredRun[] {
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   const runs: MeasuredRun[] = [];
   let pendingSpace = false;
+  let pendingBreak = false;
   while (walker.nextNode()) {
-    const node = walker.currentNode as Text;
-    const text = node.nodeValue ?? "";
-    if (hasNestedParagraphAncestor(node, root)) {
+    const node = walker.currentNode;
+    if (!preserveWhitespace && node.nodeType === 1) {
+      const element = node as Element;
+      if (element.tagName.toLowerCase() === "br" && !hasNestedParagraphAncestor(element, root)) {
+        pendingSpace = false;
+        pendingBreak = runs.length > 0;
+      }
       continue;
     }
-    const element = node.parentElement ?? root;
+    if (node.nodeType !== 3) {
+      continue;
+    }
+    const textNode = node as Text;
+    const text = textNode.nodeValue ?? "";
+    if (hasNestedParagraphAncestor(textNode, root)) {
+      continue;
+    }
+    const element = textNode.parentElement ?? root;
     if (preserveWhitespace) {
       if (text.length > 0) {
         runs.push(measureRun(text, element, root));
@@ -255,15 +281,17 @@ function collectRuns(root: HTMLElement, preserveWhitespace: boolean): MeasuredRu
     const normalized = text.replace(/\s+/g, " ");
     const trimmed = normalized.trim();
     if (trimmed.length === 0) {
-      if (runs.length > 0) {
+      if (!pendingBreak && runs.length > 0) {
         pendingSpace = true;
       }
       continue;
     }
-    if ((pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
+    const breakBefore = pendingBreak;
+    pendingBreak = false;
+    if (!breakBefore && (pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
       appendTrailingSpace(runs);
     }
-    runs.push(measureRun(trimmed, element, root));
+    runs.push(measureRun(trimmed, element, root, breakBefore));
     pendingSpace = normalized.endsWith(" ");
   }
   return runs;
@@ -276,7 +304,7 @@ function appendTrailingSpace(runs: MeasuredRun[]): void {
   }
 }
 
-function measureRun(text: string, element: HTMLElement, root: HTMLElement): MeasuredRun {
+function measureRun(text: string, element: HTMLElement, root: HTMLElement, breakBefore = false): MeasuredRun {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
@@ -286,7 +314,8 @@ function measureRun(text: string, element: HTMLElement, root: HTMLElement): Meas
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
-    underline: hasUnderline(element, root)
+    underline: hasUnderline(element, root),
+    breakBefore
   };
 }
 
@@ -337,6 +366,15 @@ function isResolvedContentImage(image: HTMLImageElement): boolean {
   return (image.getAttribute("src") ?? "").startsWith("assets/");
 }
 
+function isVisibleElement(element: Element): boolean {
+  const rect = element.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    return false;
+  }
+  const style = viewFor(element.ownerDocument).getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden";
+}
+
 function normalizeColor(raw: string, document: Document): string {
   const context = colorNormalizationContext(document);
   if (!context) {
@@ -371,7 +409,7 @@ function hasParagraphAncestor(element: HTMLElement, root: HTMLElement): boolean 
   return false;
 }
 
-function hasNestedParagraphAncestor(node: Text, root: HTMLElement): boolean {
+function hasNestedParagraphAncestor(node: Node, root: HTMLElement): boolean {
   let parent = node.parentElement;
   while (parent && parent !== root) {
     if (parent.matches(PARAGRAPH_SELECTOR)) {

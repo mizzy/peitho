@@ -70,8 +70,8 @@ function measureSlide(section) {
   return {
     key: section.getAttribute("data-slide-key") ?? "",
     backgroundColor: effectiveBackgroundColor(section),
-    boxes: Array.from(section.querySelectorAll("[class]")).filter((element) => SLOT_CLASS.test(element.className)).map((box) => measureBox(section, box)),
-    images: Array.from(section.querySelectorAll("img")).filter(isResolvedContentImage).map((image) => measureImage(section, image))
+    boxes: Array.from(section.querySelectorAll("[class]")).filter((element) => SLOT_CLASS.test(element.className)).filter(isVisibleElement).map((box) => measureBox(section, box)),
+    images: Array.from(section.querySelectorAll("img")).filter(isResolvedContentImage).filter(isVisibleElement).map((image) => measureImage(section, image))
   };
 }
 function effectiveBackgroundColor(section) {
@@ -169,16 +169,26 @@ function collectListItemParagraphs(item) {
   if (directBlocks.length === 0) {
     return [measureParagraph(item, level, numbered)];
   }
-  return directBlocks.flatMap((block) => {
+  const paragraphs = directBlocks.flatMap((block) => {
     if (block.matches("pre")) {
       return collectPreParagraphs(block, level, numbered);
     }
     return [measureParagraph(block, level, numbered)];
   });
+  return paragraphs.map((paragraph, index) => {
+    if (index === 0) {
+      return paragraph;
+    }
+    return {
+      ...paragraph,
+      numbered: false,
+      bulletContinuation: true
+    };
+  });
 }
 function collectPreParagraphs(pre, level = null, numbered = false) {
   const align = textAlign(pre);
-  const paragraphs = [{ align, bulletLevel: level, numbered, runs: [] }];
+  const paragraphs = [{ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -186,7 +196,7 @@ function collectPreParagraphs(pre, level = null, numbered = false) {
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: level, numbered, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, numbered, bulletContinuation: false, runs: [] });
       }
     });
   }
@@ -197,20 +207,34 @@ function measureParagraph(element, level, numbered = false) {
     align: textAlign(element),
     bulletLevel: level,
     numbered,
+    bulletContinuation: false,
     runs: collectRuns(element, false)
   };
 }
 function collectRuns(root, preserveWhitespace) {
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   const runs = [];
   let pendingSpace = false;
+  let pendingBreak = false;
   while (walker.nextNode()) {
     const node = walker.currentNode;
-    const text = node.nodeValue ?? "";
-    if (hasNestedParagraphAncestor(node, root)) {
+    if (!preserveWhitespace && node.nodeType === 1) {
+      const element2 = node;
+      if (element2.tagName.toLowerCase() === "br" && !hasNestedParagraphAncestor(element2, root)) {
+        pendingSpace = false;
+        pendingBreak = runs.length > 0;
+      }
       continue;
     }
-    const element = node.parentElement ?? root;
+    if (node.nodeType !== 3) {
+      continue;
+    }
+    const textNode = node;
+    const text = textNode.nodeValue ?? "";
+    if (hasNestedParagraphAncestor(textNode, root)) {
+      continue;
+    }
+    const element = textNode.parentElement ?? root;
     if (preserveWhitespace) {
       if (text.length > 0) {
         runs.push(measureRun(text, element, root));
@@ -220,15 +244,17 @@ function collectRuns(root, preserveWhitespace) {
     const normalized = text.replace(/\s+/g, " ");
     const trimmed = normalized.trim();
     if (trimmed.length === 0) {
-      if (runs.length > 0) {
+      if (!pendingBreak && runs.length > 0) {
         pendingSpace = true;
       }
       continue;
     }
-    if ((pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
+    const breakBefore = pendingBreak;
+    pendingBreak = false;
+    if (!breakBefore && (pendingSpace || normalized.startsWith(" ")) && runs.length > 0) {
       appendTrailingSpace(runs);
     }
-    runs.push(measureRun(trimmed, element, root));
+    runs.push(measureRun(trimmed, element, root, breakBefore));
     pendingSpace = normalized.endsWith(" ");
   }
   return runs;
@@ -239,7 +265,7 @@ function appendTrailingSpace(runs) {
     run.text += " ";
   }
 }
-function measureRun(text, element, root) {
+function measureRun(text, element, root, breakBefore = false) {
   const style = viewFor(element.ownerDocument).getComputedStyle(element);
   const fontFamily = firstFontFamily(style.fontFamily);
   return {
@@ -249,7 +275,8 @@ function measureRun(text, element, root) {
     fontSizePx: parsePx(style.fontSize),
     bold: fontWeightIsBold(style.fontWeight),
     italic: style.fontStyle === "italic" || style.fontStyle === "oblique",
-    underline: hasUnderline(element, root)
+    underline: hasUnderline(element, root),
+    breakBefore
   };
 }
 function relativeRect(section, element) {
@@ -290,6 +317,14 @@ function listItemIsNumbered(element) {
 }
 function isResolvedContentImage(image) {
   return (image.getAttribute("src") ?? "").startsWith("assets/");
+}
+function isVisibleElement(element) {
+  const rect = element.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    return false;
+  }
+  const style = viewFor(element.ownerDocument).getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden";
 }
 function normalizeColor(raw, document2) {
   const context = colorNormalizationContext(document2);

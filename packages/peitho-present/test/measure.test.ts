@@ -47,7 +47,8 @@ describe("measurement DOM walker", () => {
         fontSizePx: 20,
         bold: true,
         italic: false,
-        underline: true
+        underline: true,
+        breakBefore: false
       },
       {
         text: "world",
@@ -56,7 +57,8 @@ describe("measurement DOM walker", () => {
         fontSizePx: 20,
         bold: true,
         italic: true,
-        underline: true
+        underline: true,
+        breakBefore: false
       }
     ]);
     expect(measured.slides[0]?.images[0]).toEqual({
@@ -151,6 +153,7 @@ describe("measurement DOM walker", () => {
         align: "left",
         bulletLevel: null,
         numbered: false,
+        bulletContinuation: false,
         runs: [
           {
             text: "fn main()",
@@ -159,7 +162,8 @@ describe("measurement DOM walker", () => {
             fontSizePx: 16,
             bold: false,
             italic: false,
-            underline: false
+            underline: false,
+            breakBefore: false
           }
         ]
       },
@@ -167,6 +171,7 @@ describe("measurement DOM walker", () => {
         align: "left",
         bulletLevel: null,
         numbered: false,
+        bulletContinuation: false,
         runs: [
           {
             text: "println()",
@@ -175,10 +180,29 @@ describe("measurement DOM walker", () => {
             fontSizePx: 16,
             bold: false,
             italic: false,
-            underline: false
+            underline: false,
+            breakBefore: false
           }
         ]
       }
+    ]);
+  });
+
+  it("marks hard line breaks on the following run without adding padding spaces", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="hard-break">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <p>line one<br>line two</p>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+    const runs = measured.slides[0]?.boxes[0]?.paragraphs[0]?.runs ?? [];
+
+    expect(runs.map((run) => ({ text: run.text, breakBefore: run.breakBefore }))).toEqual([
+      { text: "line one", breakBefore: false },
+      { text: "line two", breakBefore: true }
     ]);
   });
 
@@ -235,6 +259,34 @@ line two</p>
         rect: { x: 20, y: 30, w: 80, h: 40 }
       }
     ]);
+  });
+
+  it("skips hidden and zero-size slot boxes and images", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="hidden">
+        <div class="slot-body"><p>Visible</p></div>
+        <div class="slot-hidden" style="display: none;"><p>Hidden</p></div>
+        <div class="slot-invisible" style="visibility: hidden;"><p>Invisible</p></div>
+        <div class="slot-zero"><p>Zero</p></div>
+        <img src="assets/visible.png" alt="Visible">
+        <img src="assets/hidden.png" alt="Hidden" style="display: none;">
+        <img src="assets/zero.png" alt="Zero">
+      </section>
+    `);
+    const section = document.querySelector("section")!;
+    const visibleBox = document.querySelector(".slot-body")!;
+    const zeroBox = document.querySelector(".slot-zero")!;
+    const [visibleImage, _hiddenImage, zeroImage] = Array.from(document.querySelectorAll("img"));
+    setRect(section, { x: 0, y: 0, w: 1280, h: 720 });
+    setRect(visibleBox, { x: 10, y: 20, w: 200, h: 80 });
+    setRect(zeroBox, { x: 20, y: 40, w: 0, h: 0 });
+    setRect(visibleImage!, { x: 300, y: 100, w: 160, h: 90 });
+    setRect(zeroImage!, { x: 500, y: 100, w: 0, h: 0 });
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes.map((box) => box.slot)).toEqual(["body"]);
+    expect(measured.slides[0]?.images.map((image) => image.src)).toEqual(["assets/visible.png"]);
   });
 
   it("resolves CSS font-family stacks to concrete office-safe typefaces", () => {
@@ -344,10 +396,44 @@ line two</p>
 
     expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
       bulletLevel: paragraph.bulletLevel,
+      bulletContinuation: paragraph.bulletContinuation,
       text: paragraph.runs.map((run) => run.text).join("")
     }))).toEqual([
-      { bulletLevel: 0, text: "First paragraph" },
-      { bulletLevel: 0, text: "Second paragraph" }
+      { bulletLevel: 0, bulletContinuation: false, text: "First paragraph" },
+      { bulletLevel: 0, bulletContinuation: true, text: "Second paragraph" }
+    ]);
+  });
+
+  it("marks list item block and pre-split continuation paragraphs without advancing numbers", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>First paragraph</p><pre>code line
+code next</pre></li>
+          </ul>
+          <ol>
+            <li><p>One</p><p>Continuation</p></li>
+            <li><p>Two</p></li>
+          </ol>
+        </div>
+      </section>
+    `);
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      numbered: paragraph.numbered,
+      bulletContinuation: paragraph.bulletContinuation,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletLevel: 0, numbered: false, bulletContinuation: false, text: "First paragraph" },
+      { bulletLevel: 0, numbered: false, bulletContinuation: true, text: "code line" },
+      { bulletLevel: 0, numbered: false, bulletContinuation: true, text: "code next" },
+      { bulletLevel: 0, numbered: true, bulletContinuation: false, text: "One" },
+      { bulletLevel: 0, numbered: false, bulletContinuation: true, text: "Continuation" },
+      { bulletLevel: 0, numbered: true, bulletContinuation: false, text: "Two" }
     ]);
   });
 
@@ -414,7 +500,14 @@ function createDocument(body: string): { document: Document } {
     `<!doctype html><html style="--peitho-canvas-width: 1280px; --peitho-canvas-height: 720px;"><body>${body}</body></html>`,
     { pretendToBeVisual: true, url: "http://localhost/" }
   );
-  return { document: dom.window.document };
+  const { document } = dom.window;
+  document
+    .querySelectorAll("section[data-slide-key]")
+    .forEach((section) => setRect(section, { x: 0, y: 0, w: 1280, h: 720 }));
+  document
+    .querySelectorAll(":not(section)[class], img")
+    .forEach((element) => setRect(element, { x: 0, y: 0, w: 320, h: 120 }));
+  return { document };
 }
 
 function setRect(element: Element, rect: Rect): void {

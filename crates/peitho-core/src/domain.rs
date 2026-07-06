@@ -463,6 +463,8 @@ pub struct MeasuredParagraph {
     pub bullet_level: Option<u8>,
     #[serde(default)]
     pub numbered: bool,
+    #[serde(default)]
+    pub bullet_continuation: bool,
     pub runs: Vec<MeasuredRun>,
 }
 
@@ -481,6 +483,8 @@ pub struct MeasuredRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default)]
+    pub break_before: bool,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -1129,6 +1133,7 @@ mod tests {
                         align: "center".to_owned(),
                         bullet_level: Some(1),
                         numbered: true,
+                        bullet_continuation: false,
                         runs: vec![MeasuredRun {
                             text: "Intro".to_owned(),
                             color: "rgb(34, 34, 34)".to_owned(),
@@ -1137,6 +1142,7 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
+                            break_before: false,
                         }],
                     }],
                 }],
@@ -1168,12 +1174,20 @@ mod tests {
             true
         );
         assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["bulletContinuation"],
+            false
+        );
+        assert_eq!(
             json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontFamily"],
             "Inter"
         );
         assert_eq!(
             json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["fontSizePx"],
             56.0
+        );
+        assert_eq!(
+            json["slides"][0]["boxes"][0]["paragraphs"][0]["runs"][0]["breakBefore"],
+            false
         );
 
         let round_tripped: MeasuredDeck = serde_json::from_value(json).unwrap();
@@ -1182,6 +1196,7 @@ mod tests {
             Some(1)
         );
         assert!(round_tripped.slides[0].boxes[0].paragraphs[0].numbered);
+        assert!(!round_tripped.slides[0].boxes[0].paragraphs[0].bullet_continuation);
     }
 
     #[test]
@@ -1219,8 +1234,10 @@ mod tests {
         assert!(box_style.contains("borderRadius: number"));
         assert!(paragraph.contains("bulletLevel: number | null"));
         assert!(paragraph.contains("numbered: boolean"));
+        assert!(paragraph.contains("bulletContinuation: boolean"));
         assert!(run.contains("fontFamily: string"));
         assert!(run.contains("fontSizePx: number"));
+        assert!(run.contains("breakBefore: boolean"));
         assert!(!run.contains("monospace"));
     }
 

@@ -445,7 +445,7 @@ fn text_shape_xml(shape_id: usize, measured_box: &crate::domain::MeasuredBox) ->
 fn paragraph_xml(paragraph: &MeasuredParagraph) -> Result<String> {
     let align = paragraph_align(&paragraph.align);
     let (bullet_attrs, bullet) = match paragraph.bullet_level {
-        Some(level) => bullet_xml(level, paragraph.numbered),
+        Some(level) => bullet_xml(level, paragraph.numbered, paragraph.bullet_continuation),
         None => (String::new(), String::new()),
     };
     let runs = paragraph
@@ -458,8 +458,11 @@ fn paragraph_xml(paragraph: &MeasuredParagraph) -> Result<String> {
     ))
 }
 
-fn bullet_xml(level: u8, numbered: bool) -> (String, String) {
+fn bullet_xml(level: u8, numbered: bool, continuation: bool) -> (String, String) {
     let margin = 342_900 * (i64::from(level) + 1);
+    if continuation {
+        return (format!(r#" marL="{margin}""#), r#"<a:buNone/>"#.to_owned());
+    }
     let indent = -171_450;
     let bullet = if numbered {
         r#"<a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/>"#
@@ -473,13 +476,14 @@ fn bullet_xml(level: u8, numbered: bool) -> (String, String) {
 }
 
 fn run_xml(run: &MeasuredRun) -> Result<String> {
-    let size = (run.font_size_px * 75.0).round() as i64;
+    let size = ((run.font_size_px * 75.0).round() as i64).max(100);
     let bold = if run.bold { r#" b="1""# } else { "" };
     let italic = if run.italic { r#" i="1""# } else { "" };
     let underline = if run.underline { r#" u="sng""# } else { "" };
     let color = run_color_xml(&run.color)?;
+    let break_before = if run.break_before { "<a:br/>" } else { "" };
     Ok(format!(
-        r#"<a:r><a:rPr lang="en-US" sz="{size}"{bold}{italic}{underline}>{color}<a:latin typeface="{font}"/></a:rPr><a:t>{text}</a:t></a:r>"#,
+        r#"{break_before}<a:r><a:rPr lang="en-US" sz="{size}"{bold}{italic}{underline}>{color}<a:latin typeface="{font}"/></a:rPr><a:t>{text}</a:t></a:r>"#,
         font = xml_attr(&run.font_family),
         text = xml_text(&run.text),
     ))
@@ -723,12 +727,14 @@ fn note_paragraph_xml(line: &str) -> Result<String> {
             bold: false,
             italic: false,
             underline: false,
+            break_before: false,
         }]
     };
     paragraph_xml(&MeasuredParagraph {
         align: "left".to_owned(),
         bullet_level: None,
         numbered: false,
+        bullet_continuation: false,
         runs,
     })
 }
@@ -878,6 +884,67 @@ mod tests {
             r#"<a:pPr marL="342900" indent="-171450" algn="ctr"><a:buFont typeface="Arial"/><a:buAutoNum type="arabicPeriod"/></a:pPr>"#
         ));
         assert!(!slide.contains(r#"<a:buChar char="&#8226;"/>"#));
+    }
+
+    #[test]
+    fn pptx_writer_emits_hard_breaks_before_marked_runs() {
+        let mut measured = measured_deck_without_images("intro");
+        let mut continuation = measured.slides[0].boxes[0].paragraphs[0].runs[0].clone();
+        measured.slides[0].boxes[0].paragraphs[0].runs[0].text = "line one".to_owned();
+        continuation.text = "line two".to_owned();
+        continuation.break_before = true;
+        measured.slides[0].boxes[0].paragraphs[0]
+            .runs
+            .push(continuation);
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
+        assert!(slide.contains("<a:t>line one</a:t></a:r><a:br/><a:r>"));
+        assert!(slide.contains("<a:t>line two</a:t>"));
+    }
+
+    #[test]
+    fn pptx_writer_emits_bullet_continuations_without_extra_bullets_or_numbers() {
+        let mut measured = measured_deck_without_images("intro");
+        let mut first = measured.slides[0].boxes[0].paragraphs[0].clone();
+        first.numbered = true;
+        first.runs[0].text = "First".to_owned();
+        let mut continuation = first.clone();
+        continuation.bullet_continuation = true;
+        continuation.runs[0].text = "Continuation".to_owned();
+        let mut second = first.clone();
+        second.runs[0].text = "Second".to_owned();
+        measured.slides[0].boxes[0].paragraphs = vec![first, continuation, second];
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
+        assert_eq!(
+            slide
+                .matches(r#"<a:buAutoNum type="arabicPeriod"/>"#)
+                .count(),
+            2
+        );
+        assert!(slide.contains(r#"<a:pPr marL="342900" algn="ctr"><a:buNone/></a:pPr>"#));
+    }
+
+    #[test]
+    fn pptx_writer_clamps_tiny_font_sizes_to_ooxml_minimum() {
+        let mut measured = measured_deck_without_images("intro");
+        measured.slides[0].boxes[0].paragraphs[0].runs[0].font_size_px = 0.0;
+        let deck = rendered_deck(vec![("intro", None)]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let slide = read_zip(&mut zip, "ppt/slides/slide1.xml");
+        assert!(slide.contains(r#"sz="100""#));
+        assert!(!slide.contains(r#"sz="0""#));
     }
 
     #[test]
@@ -1039,6 +1106,7 @@ mod tests {
                         align: "center".to_owned(),
                         bullet_level: Some(0),
                         numbered: false,
+                        bullet_continuation: false,
                         runs: vec![MeasuredRun {
                             text: "Hello & welcome".to_owned(),
                             color: "rgb(17, 34, 51)".to_owned(),
@@ -1047,6 +1115,7 @@ mod tests {
                             bold: true,
                             italic: false,
                             underline: true,
+                            break_before: false,
                         }],
                     }],
                 }],

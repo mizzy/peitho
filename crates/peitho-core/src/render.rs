@@ -172,7 +172,7 @@ fn render_code_fragment(
         Some(language) => highlighter
             .highlight_html(fragment.code_text(), language, fragment.line())
             .map(|html| html.trim_end().to_owned()),
-        None => Ok(encode_text(fragment.code_text()).into_owned()),
+        None => Ok(encode_text(fragment.code_text().trim_end()).into_owned()),
     }
 }
 
@@ -878,6 +878,30 @@ mod tests {
 
         assert!(html.contains(r#"<figure class="code"></figure>"#));
         assert!(!html.contains(r#"class="slot-code""#));
+    }
+
+    #[test]
+    fn untagged_code_slot_trims_trailing_newline_like_highlighted_code() {
+        let markdown = "```\nlet value = 1;\n```";
+        let layout = parse_layout(
+            "code-only",
+            r#"<section><slot name="code" accepts="code" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rendered = render_checked(checked);
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"<pre class="slot-code"><code>let value = 1;</code></pre>"#));
+        assert!(!html.contains("let value = 1;\n</code>"));
     }
 
     #[test]
