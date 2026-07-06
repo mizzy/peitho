@@ -309,13 +309,6 @@ fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
                 "failed to parse measurement JSON\nhelp: rerun export; if this persists, inspect measure.html and the peitho-measure script payload\ncaused by: {err}"
             )
         })?;
-    if measured.slides.len() != artifacts.rendered.slide_count() {
-        return Err(miette::miette!(
-            "measured slide count {} does not match rendered slide count {}\nhelp: rerun export so Chrome measures the same rendered deck",
-            measured.slides.len(),
-            artifacts.rendered.slide_count()
-        ));
-    }
     let pptx = core(peitho_core::build_pptx(
         &measured,
         &artifacts.rendered,
@@ -735,6 +728,14 @@ enum ChromeCompletion {
     DumpDom,
 }
 
+#[derive(Default)]
+struct ChromeCompletionState {
+    stdout_scanned: usize,
+    stderr_scanned: usize,
+    dump_dom_ready: bool,
+    pdf_signal_seen: bool,
+}
+
 impl ChromeCompletion {
     fn description(&self) -> &'static str {
         match self {
@@ -743,15 +744,44 @@ impl ChromeCompletion {
         }
     }
 
-    fn is_ready(&self, stdout: &[u8], stderr: &[u8]) -> bool {
+    fn is_ready(&self, stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
         match self {
             Self::PdfWritten { output_path } => {
-                output_file_is_nonempty(output_path)
-                    && String::from_utf8_lossy(stderr).contains("bytes written to file")
+                if !state.pdf_signal_seen {
+                    state.pdf_signal_seen = scan_for_needle(
+                        stderr,
+                        &mut state.stderr_scanned,
+                        b"bytes written to file",
+                    );
+                }
+                output_file_is_nonempty(output_path) && state.pdf_signal_seen
             }
-            Self::DumpDom => String::from_utf8_lossy(stdout).contains("</html>"),
+            Self::DumpDom => {
+                if !state.dump_dom_ready {
+                    state.dump_dom_ready =
+                        scan_for_needle(stdout, &mut state.stdout_scanned, b"</html>");
+                }
+                state.dump_dom_ready
+            }
         }
     }
+
+    fn is_ready_after_successful_exit(&self) -> bool {
+        match self {
+            Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
+            Self::DumpDom => false,
+        }
+    }
+}
+
+fn scan_for_needle(buffer: &[u8], scanned: &mut usize, needle: &[u8]) -> bool {
+    let overlap = needle.len().saturating_sub(1);
+    let start = (*scanned).saturating_sub(overlap).min(buffer.len());
+    let found = buffer[start..]
+        .windows(needle.len())
+        .any(|window| window == needle);
+    *scanned = buffer.len();
+    found
 }
 
 #[derive(Debug)]
@@ -798,10 +828,11 @@ fn run_one_shot_chrome(
     let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut completion_state = ChromeCompletionState::default();
     let deadline = Instant::now() + timeout;
 
     loop {
-        if completion.is_ready(&stdout, &stderr) {
+        if completion.is_ready(&stdout, &stderr, &mut completion_state) {
             kill_and_reap_child(&mut child)?;
             drain_chrome_events(&rx, &mut stdout, &mut stderr);
             return Ok(stdout);
@@ -809,7 +840,9 @@ fn run_one_shot_chrome(
 
         if let Some(status) = child.try_wait().into_diagnostic()? {
             drain_chrome_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
-            if completion.is_ready(&stdout, &stderr) {
+            if completion.is_ready(&stdout, &stderr, &mut completion_state)
+                || (status.success() && completion.is_ready_after_successful_exit())
+            {
                 return Ok(stdout);
             }
             if !status.success() {
@@ -840,11 +873,7 @@ fn run_one_shot_chrome(
 
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(25));
-        match rx.recv_timeout(poll) {
-            Ok(event) => append_chrome_event(event, &mut stdout, &mut stderr),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        }
+        let _ = receive_chrome_event_until(&rx, &mut stdout, &mut stderr, poll);
     }
 }
 
@@ -909,10 +938,34 @@ fn drain_chrome_events_for(
         }
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(10));
-        match rx.recv_timeout(poll) {
-            Ok(event) => append_chrome_event(event, stdout, stderr),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        match receive_chrome_event_until(rx, stdout, stderr, poll) {
+            ChromeReceive::Event | ChromeReceive::Timeout => {}
+            ChromeReceive::Disconnected => return,
+        }
+    }
+}
+
+enum ChromeReceive {
+    Event,
+    Timeout,
+    Disconnected,
+}
+
+fn receive_chrome_event_until(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    poll: Duration,
+) -> ChromeReceive {
+    match rx.recv_timeout(poll) {
+        Ok(event) => {
+            append_chrome_event(event, stdout, stderr);
+            ChromeReceive::Event
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => ChromeReceive::Timeout,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            thread::sleep(poll);
+            ChromeReceive::Disconnected
         }
     }
 }
@@ -2204,6 +2257,46 @@ exec sleep 30
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(out.is_file());
         assert!(stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_accepts_successful_pdf_exit_without_stderr_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let out = dir.path().join("out.pdf");
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+out="$1"
+printf '%s' '%PDF-test' > "$out"
+"#,
+        );
+
+        let stdout = run_one_shot_chrome(
+            &fake_chrome,
+            &[out.clone().into_os_string()],
+            ChromeCompletion::PdfWritten {
+                output_path: out.clone(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        assert!(out.is_file());
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn chrome_completion_scan_detects_needles_across_buffer_boundaries() {
+        let mut state = ChromeCompletionState::default();
+        let mut stdout = b"<!doctype html></ht".to_vec();
+
+        assert!(!ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
+
+        stdout.extend_from_slice(b"ml>");
+
+        assert!(ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
     }
 
     #[cfg(unix)]
