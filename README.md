@@ -63,9 +63,6 @@ peitho present deck.md
 # Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
 peitho present deck.md --presenter-windowed
 
-# Export an editable PowerPoint file (speaker notes are included in the notes pane)
-peitho export pptx deck.md -o deck.pptx
-
 # Export a PDF
 peitho export pdf deck.md -o deck.pdf
 
@@ -73,15 +70,9 @@ peitho export pdf deck.md -o deck.pdf
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
 
-### Export
-
-PowerPoint export produces a `.pptx` with editable text boxes, Markdown content images, and speaker notes. Keynote users should open or import that `.pptx` in Keynote; peitho does not generate `.key` files or provide an `export keynote` command.
-
-Only images resolved from Markdown content into `assets/...` are exported as editable picture parts. Images baked into layout HTML or remote image URLs are treated as design decoration and are not carried into the `.pptx`; use a Markdown image when the picture is part of the slide content.
-
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
-When developing the presentation shell or measurement script (TS), rebuild `dist/shell.js` and `dist/measure.js` with `cd packages/peitho-present && npm ci && npm run build` (both are committed; CI checks for drift).
+When developing the presentation shell (TS), rebuild `dist/shell.js` with `cd packages/peitho-present && npm ci && npm run build` (it is committed; CI checks for drift).
 
 ## Writing a deck
 

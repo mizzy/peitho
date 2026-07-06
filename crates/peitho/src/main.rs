@@ -205,11 +205,6 @@ enum ExportCommand {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
-    Pptx {
-        input: PathBuf,
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-    },
 }
 
 /// Built-in defaults compiled from the repository's own layout and theme,
@@ -264,7 +259,6 @@ fn main() -> miette::Result<()> {
         }
         Command::Export { command } => match command {
             ExportCommand::Pdf { input, out } => export_pdf(input, out),
-            ExportCommand::Pptx { input, out } => export_pptx(input, out),
         },
     }
 }
@@ -297,78 +291,9 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
     Ok(())
 }
 
-fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
-    let artifacts = build_artifacts(&input)?;
-    let out = out.unwrap_or_else(|| input.with_extension("pptx"));
-    let tmp = tempfile::tempdir().into_diagnostic()?;
-    emit_measure_workspace(tmp.path(), &artifacts)?;
-    let chrome = locate_chrome()?;
-    let dumped_dom = match run_chrome_dump_dom(&chrome, tmp.path()) {
-        Ok(dumped_dom) => dumped_dom,
-        Err(err) => return Err(keep_workspace_for_error(tmp, err)),
-    };
-    let measurement_json = match extract_measure_json(&dumped_dom) {
-        Ok(measurement_json) => measurement_json,
-        Err(err) => return Err(keep_measure_workspace_for_error(tmp, &dumped_dom, err)),
-    };
-    let measured: peitho_core::MeasuredDeck = match serde_json::from_str(&measurement_json) {
-        Ok(measured) => measured,
-        Err(err) => {
-            return Err(keep_measure_workspace_for_error(
-                tmp,
-                &dumped_dom,
-                miette::miette!(
-                "failed to parse measurement JSON\nhelp: rerun export; if this persists, inspect measure.html and the peitho-measure script payload\ncaused by: {err}"
-            ),
-            ));
-        }
-    };
-    let pptx = core(peitho_core::build_pptx(
-        &measured,
-        &artifacts.rendered,
-        &artifacts.image_assets,
-    ))?;
-    write_pptx_output(&out, pptx)?;
-    println!(
-        "exported {} slide(s) to {}",
-        artifacts.slide_count,
-        out.display()
-    );
-    Ok(())
-}
-
-fn write_pptx_output(out: &Path, pptx: Vec<u8>) -> miette::Result<()> {
-    fs::write(out, pptx).map_err(|err| {
-        miette::miette!(
-            "failed to write pptx output at {}\nhelp: check output path permissions and ensure the parent directory exists\ncaused by: {err}",
-            out.display()
-        )
-    })
-}
-
 fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
     let kept = tmp.keep();
     miette::miette!("{err}\nhelp: workspace kept at {}", kept.display())
-}
-
-fn keep_measure_workspace_for_error(
-    tmp: tempfile::TempDir,
-    dumped_dom: &str,
-    err: impl std::fmt::Display,
-) -> miette::Report {
-    let dump_path = tmp.path().join("chrome-dump.html");
-    let dump_note = match fs::write(&dump_path, dumped_dom) {
-        Ok(()) => format!("\nhelp: Chrome dump kept at {}", dump_path.display()),
-        Err(write_err) => format!(
-            "\nwarning: failed to keep Chrome dump at {}: {write_err}",
-            dump_path.display()
-        ),
-    };
-    let kept = tmp.keep();
-    miette::miette!(
-        "{err}{dump_note}\nhelp: workspace kept at {}",
-        kept.display()
-    )
 }
 
 fn rebuild_once_for_watch(
@@ -700,13 +625,6 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
     Ok(())
 }
 
-fn emit_measure_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
-    write_shared_assets(workspace, artifacts)?;
-    let measure_html = peitho_core::render_measure_document(&artifacts.rendered);
-    fs::write(workspace.join("measure.html"), measure_html).into_diagnostic()?;
-    Ok(())
-}
-
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
     fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
@@ -773,14 +691,11 @@ const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 enum ChromeCompletion {
     PdfWritten { output_path: PathBuf },
-    DumpDom,
 }
 
 #[derive(Default)]
 struct ChromeCompletionState {
-    stdout_scanned: usize,
     stderr_scanned: usize,
-    dump_dom_ready: bool,
     pdf_signal_seen: bool,
 }
 
@@ -788,11 +703,10 @@ impl ChromeCompletion {
     fn description(&self) -> &'static str {
         match self {
             Self::PdfWritten { .. } => "PDF output",
-            Self::DumpDom => "dumped DOM",
         }
     }
 
-    fn is_ready(&self, stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
+    fn is_ready(&self, _stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
         match self {
             Self::PdfWritten { output_path } => {
                 if !state.pdf_signal_seen {
@@ -804,20 +718,12 @@ impl ChromeCompletion {
                 }
                 output_file_is_nonempty(output_path) && state.pdf_signal_seen
             }
-            Self::DumpDom => {
-                if !state.dump_dom_ready {
-                    state.dump_dom_ready =
-                        scan_for_needle(stdout, &mut state.stdout_scanned, b"</html>");
-                }
-                state.dump_dom_ready
-            }
         }
     }
 
     fn is_ready_after_successful_exit(&self) -> bool {
         match self {
             Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
-            Self::DumpDom => false,
         }
     }
 }
@@ -1072,83 +978,6 @@ fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Resu
         ));
     }
     Ok(())
-}
-
-fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String> {
-    let profile = workspace.join("chrome-profile");
-    fs::create_dir_all(&profile).into_diagnostic()?;
-    let measure_html = workspace.join("measure.html");
-    let url = file_url(&measure_html)?;
-    let args = vec![
-        OsString::from("--headless=new"),
-        OsString::from("--disable-gpu"),
-        OsString::from("--no-sandbox"),
-        OsString::from(format!("--user-data-dir={}", profile.display())),
-        OsString::from("--dump-dom"),
-        OsString::from("--virtual-time-budget=20000"),
-        OsString::from(url),
-    ];
-    let stdout = run_one_shot_chrome(
-        chrome,
-        &args,
-        ChromeCompletion::DumpDom,
-        CHROME_ONE_SHOT_TIMEOUT,
-    )?;
-    String::from_utf8(stdout).map_err(|err| {
-        miette::miette!(
-            "Chrome dump-dom output was not UTF-8\nhelp: rerun export and inspect measure.html\ncaused by: {err}"
-        )
-    })
-}
-
-fn extract_measure_json(dumped_dom: &str) -> miette::Result<String> {
-    let error_marker = r#"<script type="application/json" id="peitho-measure-error">"#;
-    if let Some(payload) =
-        extract_script_payload(dumped_dom, error_marker, "measurement error marker")?
-    {
-        let message = measurement_error_message(&payload);
-        return Err(miette::miette!(
-            "measurement script failed in Chrome\nhelp: inspect measure.html and the peitho-measure-error script payload\ncaused by: {message}"
-        ));
-    }
-
-    let marker = r#"<script type="application/json" id="peitho-measure">"#;
-    extract_script_payload(dumped_dom, marker, "measurement marker")?.ok_or_else(|| {
-        miette::miette!(
-            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script type=\"application/json\" id=\"peitho-measure\">; very large images or fonts can exceed the measurement budget"
-        )
-    })
-}
-
-fn extract_script_payload(
-    dumped_dom: &str,
-    marker: &str,
-    label: &str,
-) -> miette::Result<Option<String>> {
-    let Some(payload_start) = dumped_dom.rfind(marker).map(|offset| offset + marker.len()) else {
-        return Ok(None);
-    };
-    let payload_end = dumped_dom[payload_start..]
-        .find("</script>")
-        .map(|offset| payload_start + offset)
-        .ok_or_else(|| {
-            miette::miette!(
-                "{label} closing tag not found\nhelp: rerun export and inspect Chrome dump-dom output"
-            )
-        })?;
-    Ok(Some(dumped_dom[payload_start..payload_end].to_owned()))
-}
-
-fn measurement_error_message(payload: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| payload.to_owned())
 }
 
 fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
@@ -2107,45 +1936,10 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
-            Command::Build { .. }
-            | Command::Present { .. }
-            | Command::Publish { .. }
-            | Command::Export { .. } => {
+            Command::Build { .. } | Command::Present { .. } | Command::Publish { .. } => {
                 panic!("expected export pdf command");
             }
         }
-    }
-
-    #[test]
-    fn export_pptx_command_accepts_output_flag() {
-        let cli = Cli::parse_from(["peitho", "export", "pptx", "deck.md", "-o", "out.pptx"]);
-
-        match cli.command {
-            Command::Export {
-                command: ExportCommand::Pptx { input, out },
-            } => {
-                assert_eq!(input, PathBuf::from("deck.md"));
-                assert_eq!(out, Some(PathBuf::from("out.pptx")));
-            }
-            Command::Build { .. }
-            | Command::Present { .. }
-            | Command::Publish { .. }
-            | Command::Export { .. } => {
-                panic!("expected export pptx command");
-            }
-        }
-    }
-
-    #[test]
-    fn export_pptx_output_write_error_includes_path_and_help() {
-        let tmp = tempfile::tempdir().unwrap();
-        let out = tmp.path().join("missing").join("deck.pptx");
-
-        let err = write_pptx_output(&out, vec![1, 2, 3]).unwrap_err();
-        let message = err.to_string();
-
-        assert!(message.contains(&out.display().to_string()));
-        assert!(message.contains("check output path permissions"));
     }
 
     #[test]
@@ -2200,122 +1994,19 @@ contexts:
     }
 
     #[test]
-    fn emit_measure_workspace_writes_static_measure_entry_and_assets() {
-        let fixture = WatchFixture::new("# Export\n\n<!-- private note -->\n");
-        let artifacts = build_artifacts(&fixture.options.input).unwrap();
-        let workspace = fixture._dir.path().join("measure-workspace");
-
-        emit_measure_workspace(&workspace, &artifacts).unwrap();
-
-        let html = fs::read_to_string(workspace.join("measure.html")).unwrap();
-        assert!(html.contains(r#"data-slide-key="export""#));
-        assert!(html.contains("peitho-measure"));
-        assert!(!html.contains("private note"));
-        assert!(!workspace.join("manifest.json").exists());
-        assert!(!workspace.join("slides").exists());
-        assert!(workspace.join("peitho.css").is_file());
-    }
-
-    #[test]
-    fn extract_measure_json_reads_marker_payload_from_dumped_dom() {
-        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
-
-        let json = extract_measure_json(dumped).unwrap();
-
-        assert_eq!(
-            json,
-            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
-        );
-    }
-
-    #[test]
-    fn extract_measure_json_ignores_decoy_id_string_before_marker() {
-        let dumped = r#"<!doctype html><html><body><pre>id="peitho-measure"</pre><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
-
-        let json = extract_measure_json(dumped).unwrap();
-
-        assert_eq!(
-            json,
-            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
-        );
-    }
-
-    #[test]
-    fn extract_measure_json_prefers_measurement_error_marker() {
-        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure-error">{"message":"bad \u003cmeasurement>"}</script></body></html>"#;
-
-        let err = extract_measure_json(dumped).unwrap_err();
-
-        assert!(err.to_string().contains("measurement script failed"));
-        assert!(err.to_string().contains("bad <measurement>"));
-    }
-
-    #[test]
-    fn extract_measure_json_reports_missing_marker() {
-        let err = extract_measure_json("<html></html>").unwrap_err();
-
-        assert!(err.to_string().contains("measurement marker not found"));
-        assert!(err.to_string().contains("large images or fonts"));
-    }
-
-    #[test]
     fn kept_workspace_error_mentions_path_and_preserves_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();
-        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
+        fs::write(workspace.join("pdf.html"), "<html></html>").unwrap();
 
-        let err = keep_workspace_for_error(tmp, miette::miette!("measurement failed"));
+        let err = keep_workspace_for_error(tmp, miette::miette!("export failed"));
         let message = err.to_string();
 
-        assert!(message.contains("measurement failed"));
+        assert!(message.contains("export failed"));
         assert!(message.contains("workspace kept at"));
         assert!(message.contains(&workspace.display().to_string()));
-        assert!(workspace.join("measure.html").is_file());
+        assert!(workspace.join("pdf.html").is_file());
         fs::remove_dir_all(workspace).unwrap();
-    }
-
-    #[test]
-    fn kept_measure_workspace_error_writes_chrome_dump() {
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace = tmp.path().to_path_buf();
-
-        let err = keep_measure_workspace_for_error(
-            tmp,
-            "<html><body>dump</body></html>",
-            miette::miette!("measurement failed"),
-        );
-        let message = err.to_string();
-
-        assert!(message.contains("Chrome dump kept at"));
-        assert!(message.contains("workspace kept at"));
-        assert_eq!(
-            fs::read_to_string(workspace.join("chrome-dump.html")).unwrap(),
-            "<html><body>dump</body></html>"
-        );
-        fs::remove_dir_all(workspace).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn chrome_dump_dom_runner_returns_dump_after_html_closing_tag_and_kills_child() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_chrome = dir.path().join("fake-chrome");
-        let workspace = dir.path().join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
-        write_executable_script(
-            &fake_chrome,
-            r#"#!/bin/sh
-printf '%s\n' '<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>'
-exec sleep 30
-"#,
-        );
-
-        let started = std::time::Instant::now();
-        let dumped = run_chrome_dump_dom(&fake_chrome, &workspace).unwrap();
-
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(dumped.contains("peitho-measure"));
     }
 
     #[test]
@@ -2452,15 +2143,25 @@ printf '%s' '%PDF-test' > "$out"
     }
 
     #[test]
-    fn chrome_completion_scan_detects_needles_across_buffer_boundaries() {
+    fn pdf_completion_scan_detects_needles_across_buffer_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.pdf");
+        fs::write(&out, "%PDF-test").unwrap();
         let mut state = ChromeCompletionState::default();
-        let mut stdout = b"<!doctype html></ht".to_vec();
+        let mut stderr = b"9 bytes written to fi".to_vec();
 
-        assert!(!ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
+        assert!(!ChromeCompletion::PdfWritten {
+            output_path: out.clone()
+        }
+        .is_ready(&[], &stderr, &mut state));
 
-        stdout.extend_from_slice(b"ml>");
+        stderr.extend_from_slice(b"le /tmp/out.pdf\n");
 
-        assert!(ChromeCompletion::DumpDom.is_ready(&stdout, &[], &mut state));
+        assert!(ChromeCompletion::PdfWritten { output_path: out }.is_ready(
+            &[],
+            &stderr,
+            &mut state
+        ));
     }
 
     #[cfg(unix)]
@@ -2476,10 +2177,11 @@ exec sleep 30
         );
 
         let started = std::time::Instant::now();
+        let out = dir.path().join("out.pdf");
         let err = run_one_shot_chrome(
             &fake_chrome,
             &[],
-            ChromeCompletion::DumpDom,
+            ChromeCompletion::PdfWritten { output_path: out },
             Duration::from_millis(100),
         )
         .unwrap_err();
