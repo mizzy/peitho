@@ -1,8 +1,11 @@
-use std::{env, fs, path::PathBuf};
+use std::fs;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
+
+mod util;
+use util::test_chrome_path;
 
 #[test]
 #[ignore]
@@ -142,7 +145,7 @@ fn export_pdf_flattens_box_shadows_without_luminosity_smask_to_images() {
     let bytes = fs::read(&out).unwrap();
     assert!(bytes.len() > 4);
     assert_eq!(&bytes[..5], b"%PDF-");
-    assert!(!pdf_bytes_contain(&bytes, b"/S /Luminosity"));
+    assert!(!pdf_bytes_contain(&bytes, b"/Luminosity"));
     assert!(
         pdf_bytes_contain(&bytes, b"/Subtype /Image")
             || pdf_bytes_contain(&bytes, b"/Subtype/Image")
@@ -199,7 +202,7 @@ fn export_pdf_flattens_inset_box_shadows_without_luminosity_smask_to_images() {
     let bytes = fs::read(&out).unwrap();
     assert!(bytes.len() > 4);
     assert_eq!(&bytes[..5], b"%PDF-");
-    assert!(!pdf_bytes_contain(&bytes, b"/S /Luminosity"));
+    assert!(!pdf_bytes_contain(&bytes, b"/Luminosity"));
     assert!(
         pdf_bytes_contain(&bytes, b"/Subtype /Image")
             || pdf_bytes_contain(&bytes, b"/Subtype/Image")
@@ -209,38 +212,4 @@ fn export_pdf_flattens_inset_box_shadows_without_luminosity_smask_to_images() {
 
 fn pdf_bytes_contain(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|window| window == needle)
-}
-
-fn test_chrome_path() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("PEITHO_CHROME_PATH").map(PathBuf::from) {
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-
-    let mac_chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
-    if mac_chrome.is_file() {
-        return Some(mac_chrome);
-    }
-
-    for program in [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-    ] {
-        if let Some(path) = find_in_path(program) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn find_in_path(program: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(program);
-        candidate.is_file().then_some(candidate)
-    })
 }
