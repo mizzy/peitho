@@ -205,6 +205,11 @@ enum ExportCommand {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    Pptx {
+        input: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// Built-in defaults compiled from the repository's own layout and theme,
@@ -259,6 +264,7 @@ fn main() -> miette::Result<()> {
         }
         Command::Export { command } => match command {
             ExportCommand::Pdf { input, out } => export_pdf(input, out),
+            ExportCommand::Pptx { input, out } => export_pptx(input, out),
         },
     }
 }
@@ -281,6 +287,41 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
     emit_pdf_workspace(tmp.path(), &artifacts)?;
     let chrome = locate_chrome()?;
     run_chrome_print(&chrome, tmp.path(), &out)?;
+    println!(
+        "exported {} slide(s) to {}",
+        artifacts.slide_count,
+        out.display()
+    );
+    Ok(())
+}
+
+fn export_pptx(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
+    let artifacts = build_artifacts(&input)?;
+    let out = out.unwrap_or_else(|| input.with_extension("pptx"));
+    let tmp = tempfile::tempdir().into_diagnostic()?;
+    emit_measure_workspace(tmp.path(), &artifacts)?;
+    let chrome = locate_chrome()?;
+    let dumped_dom = run_chrome_dump_dom(&chrome, tmp.path())?;
+    let measurement_json = extract_measure_json(&dumped_dom)?;
+    let measured: peitho_core::MeasuredDeck =
+        serde_json::from_str(&measurement_json).map_err(|err| {
+            miette::miette!(
+                "failed to parse measurement JSON\nhelp: rerun export; if this persists, inspect measure.html and the peitho-measure script payload\ncaused by: {err}"
+            )
+        })?;
+    if measured.slides.len() != artifacts.rendered.slide_count() {
+        return Err(miette::miette!(
+            "measured slide count {} does not match rendered slide count {}\nhelp: rerun export so Chrome measures the same rendered deck",
+            measured.slides.len(),
+            artifacts.rendered.slide_count()
+        ));
+    }
+    let pptx = core(peitho_core::build_pptx(
+        &measured,
+        &artifacts.rendered,
+        &artifacts.image_assets,
+    ))?;
+    fs::write(&out, pptx).into_diagnostic()?;
     println!(
         "exported {} slide(s) to {}",
         artifacts.slide_count,
@@ -618,6 +659,13 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
     Ok(())
 }
 
+fn emit_measure_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    write_shared_assets(workspace, artifacts)?;
+    let measure_html = peitho_core::render_measure_document(&artifacts.rendered);
+    fs::write(workspace.join("measure.html"), measure_html).into_diagnostic()?;
+    Ok(())
+}
+
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
     fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
@@ -746,9 +794,8 @@ fn run_one_shot_chrome(
         )
     })?;
     let (tx, rx) = mpsc::channel();
-    let stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
-    let stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
-    let mut readers = Some([stdout_reader, stderr_reader]);
+    let _stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
+    let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let deadline = Instant::now() + timeout;
@@ -756,14 +803,12 @@ fn run_one_shot_chrome(
     loop {
         if completion.is_ready(&stdout, &stderr) {
             kill_and_reap_child(&mut child)?;
-            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
             drain_chrome_events(&rx, &mut stdout, &mut stderr);
             return Ok(stdout);
         }
 
         if let Some(status) = child.try_wait().into_diagnostic()? {
-            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
-            drain_chrome_events(&rx, &mut stdout, &mut stderr);
+            drain_chrome_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
             if completion.is_ready(&stdout, &stderr) {
                 return Ok(stdout);
             }
@@ -784,7 +829,6 @@ fn run_one_shot_chrome(
         let now = Instant::now();
         if now >= deadline {
             kill_and_reap_child(&mut child)?;
-            join_chrome_pipe_readers(readers.take().expect("readers are joined once"));
             drain_chrome_events(&rx, &mut stdout, &mut stderr);
             return Err(miette::miette!(
                 "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the temporary workspace\nstderr: {}",
@@ -850,9 +894,26 @@ fn drain_chrome_events(
     }
 }
 
-fn join_chrome_pipe_readers(readers: [thread::JoinHandle<()>; 2]) {
-    for reader in readers {
-        let _ = reader.join();
+fn drain_chrome_events_for(
+    rx: &mpsc::Receiver<ChromePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    duration: Duration,
+) {
+    let deadline = Instant::now() + duration;
+    loop {
+        drain_chrome_events(rx, stdout, stderr);
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(10));
+        match rx.recv_timeout(poll) {
+            Ok(event) => append_chrome_event(event, stdout, stderr),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 
@@ -904,6 +965,59 @@ fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Resu
         ));
     }
     Ok(())
+}
+
+fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String> {
+    let profile = workspace.join("chrome-profile");
+    fs::create_dir_all(&profile).into_diagnostic()?;
+    let measure_html = workspace.join("measure.html");
+    let url = file_url(&measure_html)?;
+    let args = vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from("--dump-dom"),
+        OsString::from("--virtual-time-budget=5000"),
+        OsString::from(url),
+    ];
+    let stdout = run_one_shot_chrome(
+        chrome,
+        &args,
+        ChromeCompletion::DumpDom,
+        CHROME_ONE_SHOT_TIMEOUT,
+    )?;
+    String::from_utf8(stdout).map_err(|err| {
+        miette::miette!(
+            "Chrome dump-dom output was not UTF-8\nhelp: rerun export and inspect measure.html\ncaused by: {err}"
+        )
+    })
+}
+
+fn extract_measure_json(dumped_dom: &str) -> miette::Result<String> {
+    let marker = r#"id="peitho-measure""#;
+    let id_pos = dumped_dom.find(marker).ok_or_else(|| {
+        miette::miette!(
+            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script id=\"peitho-measure\" type=\"application/json\">"
+        )
+    })?;
+    let payload_start = dumped_dom[id_pos..]
+        .find('>')
+        .map(|offset| id_pos + offset + 1)
+        .ok_or_else(|| {
+            miette::miette!(
+                "measurement marker opening tag was incomplete\nhelp: rerun export and inspect Chrome dump-dom output"
+            )
+        })?;
+    let payload_end = dumped_dom[payload_start..]
+        .find("</script>")
+        .map(|offset| payload_start + offset)
+        .ok_or_else(|| {
+            miette::miette!(
+                "measurement marker closing tag not found\nhelp: rerun export and inspect Chrome dump-dom output"
+            )
+        })?;
+    Ok(dumped_dom[payload_start..payload_end].to_owned())
 }
 
 fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
@@ -1862,8 +1976,31 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
-            Command::Build { .. } | Command::Present { .. } | Command::Publish { .. } => {
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. } => {
                 panic!("expected export pdf command");
+            }
+        }
+    }
+
+    #[test]
+    fn export_pptx_command_accepts_output_flag() {
+        let cli = Cli::parse_from(["peitho", "export", "pptx", "deck.md", "-o", "out.pptx"]);
+
+        match cli.command {
+            Command::Export {
+                command: ExportCommand::Pptx { input, out },
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(out, Some(PathBuf::from("out.pptx")));
+            }
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. } => {
+                panic!("expected export pptx command");
             }
         }
     }
@@ -1896,6 +2033,65 @@ contexts:
         emit_pdf_workspace(&workspace, &artifacts).unwrap();
 
         assert!(workspace.join("pdf.html").is_file());
+    }
+
+    #[test]
+    fn emit_measure_workspace_writes_static_measure_entry_and_assets() {
+        let fixture = WatchFixture::new("# Export\n\n<!-- private note -->\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("measure-workspace");
+
+        emit_measure_workspace(&workspace, &artifacts).unwrap();
+
+        let html = fs::read_to_string(workspace.join("measure.html")).unwrap();
+        assert!(html.contains(r#"data-slide-key="export""#));
+        assert!(html.contains("peitho-measure"));
+        assert!(!html.contains("private note"));
+        assert!(!workspace.join("manifest.json").exists());
+        assert!(!workspace.join("slides").exists());
+        assert!(workspace.join("peitho.css").is_file());
+    }
+
+    #[test]
+    fn extract_measure_json_reads_marker_payload_from_dumped_dom() {
+        let dumped = r#"<!doctype html><html><body><script id="peitho-measure" type="application/json">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
+
+        let json = extract_measure_json(dumped).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
+        );
+    }
+
+    #[test]
+    fn extract_measure_json_reports_missing_marker() {
+        let err = extract_measure_json("<html></html>").unwrap_err();
+
+        assert!(err.to_string().contains("measurement marker not found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_dump_dom_runner_returns_dump_after_html_closing_tag_and_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("measure.html"), "<html></html>").unwrap();
+        write_executable_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+printf '%s\n' '<!doctype html><html><body><script id="peitho-measure" type="application/json">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>'
+exec sleep 30
+"#,
+        );
+
+        let started = std::time::Instant::now();
+        let dumped = run_chrome_dump_dom(&fake_chrome, &workspace).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(dumped.contains("peitho-measure"));
     }
 
     #[test]
@@ -1983,7 +2179,7 @@ contexts:
 out="$1"
 printf '%s' '%PDF-test' > "$out"
 printf '9 bytes written to file %s\n' "$out" >&2
-sleep 30
+exec sleep 30
 "#,
         );
 
@@ -2011,7 +2207,7 @@ sleep 30
         write_executable_script(
             &fake_chrome,
             r#"#!/bin/sh
-sleep 30
+exec sleep 30
 "#,
         );
 
