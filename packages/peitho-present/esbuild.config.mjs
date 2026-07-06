@@ -7,16 +7,9 @@ const shared = {
   target: "es2022"
 };
 
-await Promise.all([
-  build({
-    ...shared,
-    entryPoints: ["src/index.ts"],
-    outfile: "dist/shell.js",
-    sourcemap: true
-  }),
-  build({
-    ...shared,
-    entryPoints: ["src/measure.ts"],
-    outfile: "dist/measure.js"
-  })
-]);
+await build({
+  ...shared,
+  entryPoints: ["src/index.ts"],
+  outfile: "dist/shell.js",
+  sourcemap: true
+});
