@@ -142,6 +142,51 @@ describe("measurement DOM walker", () => {
     ]);
   });
 
+  it("records loose list item text from nested paragraphs", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>Loose item</p></li>
+          </ul>
+        </div>
+      </section>
+    `);
+    setRect(document.querySelector("section")!, { x: 0, y: 0, w: 1280, h: 720 });
+    setRect(document.querySelector(".slot-body")!, { x: 64, y: 64, w: 400, h: 200 });
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([{ bulletLevel: 0, text: "Loose item" }]);
+  });
+
+  it("records multiple direct block children in one list item as separate bullet paragraphs", () => {
+    const { document } = createDocument(`
+      <section data-slide-key="list">
+        <div class="slot-body" style="font-family: Inter; font-size: 18px;">
+          <ul>
+            <li><p>First paragraph</p><p>Second paragraph</p></li>
+          </ul>
+        </div>
+      </section>
+    `);
+    setRect(document.querySelector("section")!, { x: 0, y: 0, w: 1280, h: 720 });
+    setRect(document.querySelector(".slot-body")!, { x: 64, y: 64, w: 400, h: 200 });
+
+    const measured = measureDeck(document);
+
+    expect(measured.slides[0]?.boxes[0]?.paragraphs.map((paragraph) => ({
+      bulletLevel: paragraph.bulletLevel,
+      text: paragraph.runs.map((run) => run.text).join("")
+    }))).toEqual([
+      { bulletLevel: 0, text: "First paragraph" },
+      { bulletLevel: 0, text: "Second paragraph" }
+    ]);
+  });
+
   it("appends escaped measurement JSON after fonts are ready", async () => {
     const { document } = createDocument(`
       <section data-slide-key="json">
@@ -162,6 +207,40 @@ describe("measurement DOM walker", () => {
     expect(marker?.textContent).toContain("\\u003c");
     expect(JSON.parse(marker?.textContent ?? "{}").slides[0].key).toBe("json");
   });
+
+  it("waits for pending images before appending measurement JSON", async () => {
+    const { document } = createDocument(`
+      <section data-slide-key="image">
+        <img src="assets/photo.png" alt="Photo">
+      </section>
+    `);
+    const section = document.querySelector("section")!;
+    const image = document.querySelector("img")!;
+    setRect(section, { x: 100, y: 200, w: 1280, h: 720 });
+    setRect(image, { x: 100, y: 200, w: 0, h: 0 });
+
+    let resolveDecode = () => {};
+    const decode = new Promise<void>((resolve) => {
+      resolveDecode = () => {
+        setRect(image, { x: 112, y: 224, w: 320, h: 180 });
+        resolve();
+      };
+    });
+    Object.defineProperty(image, "decode", {
+      configurable: true,
+      value: () => decode
+    });
+
+    const pending = appendMeasurement(document);
+    await Promise.resolve();
+
+    expect(document.querySelector("#peitho-measure")).toBeNull();
+    resolveDecode();
+    const measured = await pending;
+
+    expect(measured.slides[0]?.images[0]?.rect).toEqual({ x: 12, y: 24, w: 320, h: 180 });
+    expect(JSON.parse(document.querySelector("#peitho-measure")?.textContent ?? "{}").slides[0].key).toBe("image");
+  });
 });
 
 type Rect = { x: number; y: number; w: number; h: number };
@@ -169,7 +248,7 @@ type Rect = { x: number; y: number; w: number; h: number };
 function createDocument(body: string): { document: Document } {
   const dom = new JSDOM(
     `<!doctype html><html style="--peitho-canvas-width: 1280px; --peitho-canvas-height: 720px;"><body>${body}</body></html>`,
-    { pretendToBeVisual: true }
+    { pretendToBeVisual: true, url: "http://localhost/" }
   );
   return { document: dom.window.document };
 }

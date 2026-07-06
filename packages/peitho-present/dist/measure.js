@@ -2,6 +2,7 @@
 var MARKER_ID = "peitho-measure";
 var SLOT_CLASS = /(^|\s)slot-/;
 var PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
+var LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
 function measureDeck(document2 = globalThis.document) {
   const sections = Array.from(document2.querySelectorAll("section[data-slide-key]"));
   return {
@@ -15,6 +16,7 @@ async function appendMeasurement(document2 = globalThis.document) {
   if (fonts?.ready) {
     await fonts.ready;
   }
+  await waitForImages(document2);
   const measured = measureDeck(document2);
   document2.getElementById(MARKER_ID)?.remove();
   const script = document2.createElement("script");
@@ -23,6 +25,28 @@ async function appendMeasurement(document2 = globalThis.document) {
   script.textContent = JSON.stringify(measured).replace(/</g, "\\u003c");
   document2.body.appendChild(script);
   return measured;
+}
+async function waitForImages(document2) {
+  const images = Array.from(document2.querySelectorAll("img"));
+  await Promise.all(images.map(waitForImage));
+}
+async function waitForImage(image) {
+  if (image.complete) {
+    return;
+  }
+  if (typeof image.decode === "function") {
+    await image.decode().catch(() => void 0);
+    return;
+  }
+  await new Promise((resolve) => {
+    const settle = () => {
+      image.removeEventListener("load", settle);
+      image.removeEventListener("error", settle);
+      resolve();
+    };
+    image.addEventListener("load", settle, { once: true });
+    image.addEventListener("error", settle, { once: true });
+  });
 }
 function measureSlide(section) {
   const style = viewFor(section.ownerDocument).getComputedStyle(section);
@@ -78,15 +102,31 @@ function collectParagraphs(box) {
     return [measureParagraph(box, null)];
   }
   return paragraphElements.flatMap((element) => {
+    if (element.matches("li")) {
+      return collectListItemParagraphs(element);
+    }
     if (element.matches("pre")) {
       return collectPreParagraphs(element);
     }
     return [measureParagraph(element, bulletLevel(element))];
   });
 }
-function collectPreParagraphs(pre) {
+function collectListItemParagraphs(item) {
+  const level = bulletLevel(item);
+  const directBlocks = Array.from(item.children).filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR)).map((child) => child);
+  if (directBlocks.length === 0) {
+    return [measureParagraph(item, level)];
+  }
+  return directBlocks.flatMap((block) => {
+    if (block.matches("pre")) {
+      return collectPreParagraphs(block, level);
+    }
+    return [measureParagraph(block, level)];
+  });
+}
+function collectPreParagraphs(pre, level = null) {
   const align = textAlign(pre);
-  const paragraphs = [{ align, bulletLevel: null, runs: [] }];
+  const paragraphs = [{ align, bulletLevel: level, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -94,7 +134,7 @@ function collectPreParagraphs(pre) {
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: null, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, runs: [] });
       }
     });
   }

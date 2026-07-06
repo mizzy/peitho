@@ -417,16 +417,20 @@ fn text_shape_xml(
 
 fn paragraph_xml(paragraph: &MeasuredParagraph) -> String {
     let align = paragraph_align(&paragraph.align);
-    let bullet = paragraph.bullet_level.map(bullet_xml).unwrap_or_default();
+    let (bullet_attrs, bullet) = match paragraph.bullet_level {
+        Some(level) => bullet_xml(level),
+        None => (String::new(), String::new()),
+    };
     let runs = paragraph.runs.iter().map(run_xml).collect::<String>();
-    format!(r#"<a:p><a:pPr algn="{align}">{bullet}</a:pPr>{runs}</a:p>"#)
+    format!(r#"<a:p><a:pPr{bullet_attrs} algn="{align}">{bullet}</a:pPr>{runs}</a:p>"#)
 }
 
-fn bullet_xml(level: u8) -> String {
+fn bullet_xml(level: u8) -> (String, String) {
     let margin = 342_900 * (i64::from(level) + 1);
     let indent = -171_450;
-    format!(
-        r#"<a:buChar char="&#8226;"/><a:buFont typeface="Arial"/><a:marL val="{margin}"/><a:indent val="{indent}"/>"#
+    (
+        format!(r#" marL="{margin}" indent="{indent}""#),
+        r#"<a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>"#.to_owned(),
     )
 }
 
@@ -623,16 +627,30 @@ fn notes_master_rels_xml() -> String {
 
 fn notes_slide_xml(slide_number: usize, notes: &str) -> String {
     let rect = MeasuredRect {
-        x: 72.0,
+        x: 48.0,
         y: 360.0,
-        w: 816.0,
+        w: 624.0,
         h: 288.0,
     };
-    let paragraph = MeasuredParagraph {
-        align: "left".to_owned(),
-        bullet_level: None,
-        runs: vec![MeasuredRun {
-            text: notes.to_owned(),
+    let paragraphs = notes_paragraphs_xml(notes);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>{group}<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder {slide_number}"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>{rect}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"#,
+        group = group_shape_xml(),
+        rect = xfrm_xml(&rect),
+    )
+}
+
+fn notes_paragraphs_xml(notes: &str) -> String {
+    notes.split('\n').map(note_paragraph_xml).collect()
+}
+
+fn note_paragraph_xml(line: &str) -> String {
+    let runs = if line.is_empty() {
+        Vec::new()
+    } else {
+        vec![MeasuredRun {
+            text: line.to_owned(),
             color: "rgb(0, 0, 0)".to_owned(),
             font_family: "Arial".to_owned(),
             font_size_px: 16.0,
@@ -640,15 +658,13 @@ fn notes_slide_xml(slide_number: usize, notes: &str) -> String {
             italic: false,
             underline: false,
             monospace: false,
-        }],
+        }]
     };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>{group}<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder {slide_number}"/><p:cNvSpPr txBox="1"/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr>{rect}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/>{paragraph}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"#,
-        group = group_shape_xml(),
-        rect = xfrm_xml(&rect),
-        paragraph = paragraph_xml(&paragraph),
-    )
+    paragraph_xml(&MeasuredParagraph {
+        align: "left".to_owned(),
+        bullet_level: None,
+        runs,
+    })
 }
 
 fn notes_slide_rels_xml(slide_number: usize) -> String {
@@ -754,16 +770,39 @@ mod tests {
         assert!(slide.contains(r#"u="sng""#));
         assert!(slide.contains(r#"<a:srgbClr val="112233"/>"#));
         assert!(slide.contains(r#"<a:latin typeface="Inter"/>"#));
-        assert!(slide.contains(r#"<a:buChar char="&#8226;"/>"#));
+        assert!(slide.contains(
+            r#"<a:pPr marL="342900" indent="-171450" algn="ctr"><a:buFont typeface="Arial"/><a:buChar char="&#8226;"/></a:pPr>"#
+        ));
+        assert!(!slide.contains("<a:marL"));
+        assert!(!slide.contains("<a:indent"));
         assert!(slide.contains(r#"descr="Architecture""#));
         assert!(slide.contains(r#"<a:blip r:embed="rId2"/>"#));
 
         let notes = read_zip(&mut zip, "ppt/notesSlides/notesSlide1.xml");
         assert!(notes.contains("speaker notes &lt;private&gt;"));
+        assert!(notes.contains(r#"<a:off x="457200" y="3429000"/>"#));
+        assert!(notes.contains(r#"<a:ext cx="5943600" cy="2743200"/>"#));
+        assert!(notes.contains(r#"<p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>"#));
+        assert!(!notes.contains(r#"<p:cNvSpPr txBox="1"/>"#));
 
         let slide_rels = read_zip(&mut zip, "ppt/slides/_rels/slide1.xml.rels");
         assert!(slide_rels.contains(r#"Target="../slideLayouts/slideLayout1.xml""#));
         assert!(slide_rels.contains(r#"Target="../media/image1.png""#));
+    }
+
+    #[test]
+    fn pptx_writer_splits_multiline_notes_into_ooxml_paragraphs() {
+        let measured = measured_deck_without_images("intro");
+        let deck = rendered_deck(vec![("intro", Some("first paragraph\n\nsecond paragraph"))]);
+
+        let bytes = super::build_pptx(&measured, &deck, &[]).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+
+        let notes = read_zip(&mut zip, "ppt/notesSlides/notesSlide1.xml");
+        assert!(notes.contains("<a:t>first paragraph</a:t>"));
+        assert!(notes.contains(r#"<a:p><a:pPr algn="l"></a:pPr></a:p>"#));
+        assert!(notes.contains("<a:t>second paragraph</a:t>"));
+        assert!(!notes.contains("first paragraph\n\nsecond paragraph"));
     }
 
     #[test]

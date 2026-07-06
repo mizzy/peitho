@@ -995,20 +995,15 @@ fn run_chrome_dump_dom(chrome: &Path, workspace: &Path) -> miette::Result<String
 }
 
 fn extract_measure_json(dumped_dom: &str) -> miette::Result<String> {
-    let marker = r#"id="peitho-measure""#;
-    let id_pos = dumped_dom.find(marker).ok_or_else(|| {
+    let marker = r#"<script type="application/json" id="peitho-measure">"#;
+    let payload_start = dumped_dom
+        .rfind(marker)
+        .map(|offset| offset + marker.len())
+        .ok_or_else(|| {
         miette::miette!(
-            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script id=\"peitho-measure\" type=\"application/json\">"
+            "measurement marker not found in Chrome dump\nhelp: ensure measure.js ran and appended <script type=\"application/json\" id=\"peitho-measure\">"
         )
     })?;
-    let payload_start = dumped_dom[id_pos..]
-        .find('>')
-        .map(|offset| id_pos + offset + 1)
-        .ok_or_else(|| {
-            miette::miette!(
-                "measurement marker opening tag was incomplete\nhelp: rerun export and inspect Chrome dump-dom output"
-            )
-        })?;
     let payload_end = dumped_dom[payload_start..]
         .find("</script>")
         .map(|offset| payload_start + offset)
@@ -2054,7 +2049,19 @@ contexts:
 
     #[test]
     fn extract_measure_json_reads_marker_payload_from_dumped_dom() {
-        let dumped = r#"<!doctype html><html><body><script id="peitho-measure" type="application/json">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
+        let dumped = r#"<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
+
+        let json = extract_measure_json(dumped).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"canvasWidth":1280,"canvasHeight":720,"slides":[]}"#
+        );
+    }
+
+    #[test]
+    fn extract_measure_json_ignores_decoy_id_string_before_marker() {
+        let dumped = r#"<!doctype html><html><body><pre>id="peitho-measure"</pre><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>"#;
 
         let json = extract_measure_json(dumped).unwrap();
 
@@ -2082,7 +2089,7 @@ contexts:
         write_executable_script(
             &fake_chrome,
             r#"#!/bin/sh
-printf '%s\n' '<!doctype html><html><body><script id="peitho-measure" type="application/json">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>'
+printf '%s\n' '<!doctype html><html><body><script type="application/json" id="peitho-measure">{"canvasWidth":1280,"canvasHeight":720,"slides":[]}</script></body></html>'
 exec sleep 30
 "#,
         );

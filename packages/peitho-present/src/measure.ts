@@ -10,6 +10,7 @@ import type { MeasuredSlide } from "../../../bindings/MeasuredSlide";
 const MARKER_ID = "peitho-measure";
 const SLOT_CLASS = /(^|\s)slot-/;
 const PARAGRAPH_SELECTOR = "p,h1,h2,h3,h4,h5,h6,li,pre";
+const LIST_ITEM_BLOCK_SELECTOR = "p,h1,h2,h3,h4,h5,h6,pre,blockquote";
 
 export function measureDeck(document: Document = globalThis.document): MeasuredDeck {
   const sections = Array.from(document.querySelectorAll<HTMLElement>("section[data-slide-key]"));
@@ -25,6 +26,7 @@ export async function appendMeasurement(document: Document = globalThis.document
   if (fonts?.ready) {
     await fonts.ready;
   }
+  await waitForImages(document);
   const measured = measureDeck(document);
   document.getElementById(MARKER_ID)?.remove();
   const script = document.createElement("script");
@@ -33,6 +35,30 @@ export async function appendMeasurement(document: Document = globalThis.document
   script.textContent = JSON.stringify(measured).replace(/</g, "\\u003c");
   document.body.appendChild(script);
   return measured;
+}
+
+async function waitForImages(document: Document): Promise<void> {
+  const images = Array.from(document.querySelectorAll<HTMLImageElement>("img"));
+  await Promise.all(images.map(waitForImage));
+}
+
+async function waitForImage(image: HTMLImageElement): Promise<void> {
+  if (image.complete) {
+    return;
+  }
+  if (typeof image.decode === "function") {
+    await image.decode().catch(() => undefined);
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const settle = () => {
+      image.removeEventListener("load", settle);
+      image.removeEventListener("error", settle);
+      resolve();
+    };
+    image.addEventListener("load", settle, { once: true });
+    image.addEventListener("error", settle, { once: true });
+  });
 }
 
 function measureSlide(section: HTMLElement): MeasuredSlide {
@@ -99,6 +125,9 @@ function collectParagraphs(box: HTMLElement): MeasuredParagraph[] {
   }
 
   return paragraphElements.flatMap((element) => {
+    if (element.matches("li")) {
+      return collectListItemParagraphs(element);
+    }
     if (element.matches("pre")) {
       return collectPreParagraphs(element);
     }
@@ -106,9 +135,25 @@ function collectParagraphs(box: HTMLElement): MeasuredParagraph[] {
   });
 }
 
-function collectPreParagraphs(pre: HTMLElement): MeasuredParagraph[] {
+function collectListItemParagraphs(item: HTMLElement): MeasuredParagraph[] {
+  const level = bulletLevel(item);
+  const directBlocks = Array.from(item.children)
+    .filter((child) => child.matches(LIST_ITEM_BLOCK_SELECTOR))
+    .map((child) => child as HTMLElement);
+  if (directBlocks.length === 0) {
+    return [measureParagraph(item, level)];
+  }
+  return directBlocks.flatMap((block) => {
+    if (block.matches("pre")) {
+      return collectPreParagraphs(block, level);
+    }
+    return [measureParagraph(block, level)];
+  });
+}
+
+function collectPreParagraphs(pre: HTMLElement, level: number | null = null): MeasuredParagraph[] {
   const align = textAlign(pre);
-  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: null, runs: [] }];
+  const paragraphs: MeasuredParagraph[] = [{ align, bulletLevel: level, runs: [] }];
   for (const run of collectRuns(pre, true)) {
     const parts = run.text.split("\n");
     parts.forEach((part, index) => {
@@ -116,7 +161,7 @@ function collectPreParagraphs(pre: HTMLElement): MeasuredParagraph[] {
         paragraphs[paragraphs.length - 1]?.runs.push({ ...run, text: part });
       }
       if (index < parts.length - 1) {
-        paragraphs.push({ align, bulletLevel: null, runs: [] });
+        paragraphs.push({ align, bulletLevel: level, runs: [] });
       }
     });
   }
