@@ -569,6 +569,93 @@ pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
     fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
+pub fn render_preview_index(aspect_ratio: AspectRatio) -> String {
+    const TEMPLATE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho Preview</title>
+  <style>
+    :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #peitho-preview-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
+  </style>
+</head>
+<body>
+  <main id="peitho-preview-root"></main>
+  <script type="module">
+    import * as peitho from './preview.js';
+
+    function showError(message) {
+      const root = document.getElementById('peitho-preview-root');
+      root.textContent = message;
+    }
+
+    async function main() {
+      const root = document.getElementById('peitho-preview-root');
+      try {
+        peitho.installPreviewKeyboard(window);
+        const shell = await peitho.mountPreviewShell({ root });
+        peitho.installPreviewReload(shell);
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>"#;
+
+    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+}
+
+pub fn render_preview_error_index(generation: u64, error: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho Preview Error</title>
+  <style>
+    html, body {{ margin: 0; min-height: 100%; background: #111; color: #f5f5f5; font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    main {{ box-sizing: border-box; min-height: 100vh; padding: 24px; white-space: pre-wrap; }}
+  </style>
+</head>
+<body>
+  <main>{}</main>
+  <script>
+    const baselineGeneration = {};
+    let seq = null;
+    async function poll() {{
+      try {{
+        const response = seq === null ? await fetch('/sync') : await fetch(`/sync?seq=${{seq}}`);
+        if (response.status === 204) {{
+          poll();
+          return;
+        }}
+        const body = await response.json();
+        seq = body.seq;
+        if (body.generation !== baselineGeneration) {{
+          location.reload();
+          return;
+        }}
+      }} catch (_error) {{
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }}
+      poll();
+    }}
+    poll();
+  </script>
+</body>
+</html>"#,
+        encode_text(error),
+        generation
+    )
+}
+
 pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
@@ -1439,6 +1526,18 @@ mod tests {
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
         assert!(!html.contains("installSyncBridge(window);"));
+    }
+
+    #[test]
+    fn preview_error_index_escapes_error_and_handshakes_before_polling() {
+        let html = render_preview_error_index(3, "bad <deck> & broken");
+
+        assert!(html.contains("bad &lt;deck&gt; &amp; broken"));
+        assert!(html.contains("const baselineGeneration = 3;"));
+        assert!(html.contains("fetch('/sync')"));
+        assert!(html.contains("fetch(`/sync?seq=${seq}`)"));
+        assert!(html.contains("body.generation !== baselineGeneration"));
+        assert!(!html.contains("seq=now"));
     }
 
     #[test]

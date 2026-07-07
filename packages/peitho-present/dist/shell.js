@@ -811,6 +811,9 @@ function isIndexSyncMessage(value) {
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
+function isGenerationSyncMessage(value) {
+  return isRecord(value) && typeof value.generation === "number";
+}
 function defaultChannelFactory(name) {
   const channel = new BroadcastChannel(name);
   let onmessage = null;
@@ -852,6 +855,9 @@ function serverSyncChannelFactory(options = {}) {
       if (typeof body.swapped === "boolean") {
         onmessage?.({ data: { swapped: body.swapped } });
       }
+      if (typeof body.generation === "number") {
+        onmessage?.({ data: { generation: body.generation } });
+      }
     };
     const delay = () => new Promise((resolve) => {
       retryTimer = setTimeoutFn(() => {
@@ -886,10 +892,13 @@ function serverSyncChannelFactory(options = {}) {
       }
     };
     const poll = async () => {
-      while (!closed && !await handshake()) {
-        continue;
-      }
+      let needsHandshake = true;
       while (!closed) {
+        while (!closed && needsHandshake && !await handshake()) {
+          continue;
+        }
+        if (closed) return;
+        needsHandshake = false;
         abortController = new AbortControllerCtor();
         try {
           const response = await fetcher(`${url}?seq=${seq}`, {
@@ -909,11 +918,14 @@ function serverSyncChannelFactory(options = {}) {
             continue;
           }
           seq = body.seq;
-          onmessage?.({ data: body.message });
+          if (body.message != null) {
+            onmessage?.({ data: body.message });
+          }
           deliverReplayState(body);
         } catch (error) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
+            needsHandshake = true;
             await delay();
           }
         }
@@ -988,6 +1000,9 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       }
       if (data.swapped === route.swapped) return;
       navigate(route.counterpart);
+      return;
+    }
+    if (isGenerationSyncMessage(data)) {
       return;
     }
     console.error("Invalid peitho sync message");

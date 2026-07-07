@@ -13,3 +13,10 @@ await build({
   outfile: "dist/shell.js",
   sourcemap: true
 });
+
+await build({
+  ...shared,
+  entryPoints: ["src/preview.ts"],
+  outfile: "dist/preview.js",
+  sourcemap: true
+});

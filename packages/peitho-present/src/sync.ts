@@ -24,6 +24,7 @@ type ServerSyncPollResponse = {
   message: unknown;
   index?: unknown;
   swapped?: unknown;
+  generation?: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,6 +41,10 @@ function isIndexSyncMessage(value: unknown): value is { index: number } {
 
 function isSwappedSyncMessage(value: unknown): value is { swapped: boolean } {
   return isRecord(value) && typeof value.swapped === "boolean";
+}
+
+export function isGenerationSyncMessage(value: unknown): value is { generation: number } {
+  return isRecord(value) && typeof value.generation === "number";
 }
 
 function defaultChannelFactory(name: string): SyncChannel {
@@ -86,6 +91,9 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
       if (typeof body.swapped === "boolean") {
         onmessage?.({ data: { swapped: body.swapped } });
       }
+      if (typeof body.generation === "number") {
+        onmessage?.({ data: { generation: body.generation } });
+      }
     };
 
     const delay = (): Promise<void> =>
@@ -124,10 +132,13 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
     };
 
     const poll = async (): Promise<void> => {
-      while (!closed && !(await handshake())) {
-        continue;
-      }
+      let needsHandshake = true;
       while (!closed) {
+        while (!closed && needsHandshake && !(await handshake())) {
+          continue;
+        }
+        if (closed) return;
+        needsHandshake = false;
         abortController = new AbortControllerCtor();
         try {
           const response = await fetcher(`${url}?seq=${seq}`, {
@@ -147,11 +158,14 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
             continue;
           }
           seq = body.seq;
-          onmessage?.({ data: body.message });
+          if (body.message != null) {
+            onmessage?.({ data: body.message });
+          }
           deliverReplayState(body);
         } catch (error: unknown) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
+            needsHandshake = true;
             await delay();
           }
         }
@@ -237,6 +251,9 @@ export function installSyncBridge(
       }
       if (data.swapped === route.swapped) return;
       navigate(route.counterpart);
+      return;
+    }
+    if (isGenerationSyncMessage(data)) {
       return;
     }
     console.error("Invalid peitho sync message");

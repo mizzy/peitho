@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex, RwLock},
     thread,
     time::Duration,
 };
@@ -22,12 +22,13 @@ struct SyncState {
     latest: Option<String>,
     index: Option<usize>,
     swapped: bool,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncPoll {
     snapshot: SyncSnapshot,
-    message: String,
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ struct SyncSnapshot {
     seq: u64,
     index: Option<usize>,
     swapped: bool,
+    generation: u64,
 }
 
 impl SyncHub {
@@ -54,6 +56,17 @@ impl SyncHub {
         seq
     }
 
+    fn broadcast_reload(&self) -> u64 {
+        let (lock, cvar) = &*self.state;
+        let mut state = lock.lock().expect("sync hub mutex");
+        state.generation += 1;
+        state.seq += 1;
+        state.latest = None;
+        let seq = state.seq;
+        cvar.notify_all();
+        seq
+    }
+
     fn wait_after(&self, seq: u64, timeout: Duration) -> Option<SyncPoll> {
         let (lock, cvar) = &*self.state;
         let state = lock.lock().expect("sync hub mutex");
@@ -68,8 +81,9 @@ impl SyncHub {
                 seq: state.seq,
                 index: state.index,
                 swapped: state.swapped,
+                generation: state.generation,
             },
-            message: state.latest.clone().expect("latest sync message"),
+            message: state.latest.clone(),
         })
     }
 
@@ -80,18 +94,23 @@ impl SyncHub {
             seq: state.seq,
             index: state.index,
             swapped: state.swapped,
+            generation: state.generation,
         }
     }
 }
 
-pub(crate) fn resolve_request_path(root: &Path, url: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_request_path(
+    root: &Path,
+    url: &str,
+    default_document: &str,
+) -> Option<PathBuf> {
     let path = url.split('?').next().unwrap_or(url);
     if path.contains("://") {
         return None;
     }
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
-        return Some(root.join("present.html"));
+        return Some(root.join(default_document));
     }
     // Extensionless aliases keeping Chrome app names dot-free so app window
     // placement is saved and restored (see browser::presenter_url).
@@ -126,18 +145,21 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 pub struct PresentServer {
-    root: PathBuf,
+    root: Arc<RwLock<PathBuf>>,
+    default_document: String,
     server: Arc<Server>,
     sync: SyncHub,
 }
 
 impl PresentServer {
-    pub fn bind(root: PathBuf, port: u16) -> miette::Result<Self> {
+    pub fn bind(root: PathBuf, port: u16, default_document: &'static str) -> miette::Result<Self> {
         let server = Server::http(("127.0.0.1", port))
             .map_err(|err| miette::miette!("failed to bind present server: {err}"))?;
         Ok(Self {
-            root,
+            root: Arc::new(RwLock::new(root)),
+            default_document: default_document.to_owned(),
             server: Arc::new(server),
             sync: SyncHub::default(),
         })
@@ -152,6 +174,22 @@ impl PresentServer {
 
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}/present.html", self.addr().port())
+    }
+
+    pub fn preview_url(&self) -> String {
+        format!("http://127.0.0.1:{}/", self.addr().port())
+    }
+
+    pub fn broadcast_reload(&self) -> u64 {
+        self.sync.broadcast_reload()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.sync.snapshot().generation
+    }
+
+    pub fn swap_root(&self, root: PathBuf) {
+        *self.root.write().expect("present server root rwlock") = root;
     }
 
     pub fn serve_forever(self) -> miette::Result<()> {
@@ -207,7 +245,7 @@ impl PresentServer {
                 Some(event) => {
                     send_json_response(
                         request,
-                        sync_response_body(event.snapshot, Some(&event.message)),
+                        sync_response_body(event.snapshot, event.message.as_deref()),
                     );
                 }
                 None => send_response(request, Response::empty(StatusCode(204))),
@@ -248,7 +286,12 @@ impl PresentServer {
     }
 
     fn respond_static(&self, request: tiny_http::Request) {
-        let Some(path) = resolve_request_path(&self.root, request.url()) else {
+        let root = self
+            .root
+            .read()
+            .expect("present server root rwlock")
+            .clone();
+        let Some(path) = resolve_request_path(&root, request.url(), &self.default_document) else {
             send_response(
                 request,
                 Response::from_string("404\n").with_status_code(StatusCode(404)),
@@ -318,7 +361,10 @@ struct SyncCloseMessage {
 
 impl SyncMessage {
     fn is_valid(&self) -> bool {
-        !matches!(self, Self::Close(message) if !message.close)
+        match self {
+            Self::Close(message) => message.close,
+            Self::Index(_) | Self::Swap(_) => true,
+        }
     }
 }
 
@@ -339,7 +385,7 @@ fn sync_get(url: &str) -> Option<SyncGet> {
             continue;
         };
         if key == "seq" {
-            if value.is_empty() || value == "now" {
+            if value.is_empty() {
                 return Some(SyncGet::Handshake);
             }
             return value.parse().ok().map(SyncGet::Poll);
@@ -353,11 +399,12 @@ fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
         .index
         .map_or_else(|| "null".to_owned(), |index| index.to_string());
     format!(
-        r#"{{"seq":{},"message":{},"index":{},"swapped":{}}}"#,
+        r#"{{"seq":{},"message":{},"index":{},"swapped":{},"generation":{}}}"#,
         snapshot.seq,
         message.unwrap_or("null"),
         index,
-        snapshot.swapped
+        snapshot.swapped,
+        snapshot.generation
     )
 }
 
@@ -385,21 +432,25 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn resolves_root_to_present_html() {
+    fn resolves_root_to_configured_default_document() {
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/").unwrap(),
+            resolve_request_path(Path::new("/cache"), "/", "present.html").unwrap(),
             Path::new("/cache").join("present.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/", "index.html").unwrap(),
+            Path::new("/cache").join("index.html")
         );
     }
 
     #[test]
     fn resolves_extensionless_presenter_route() {
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/presenter").unwrap(),
+            resolve_request_path(Path::new("/cache"), "/presenter", "present.html").unwrap(),
             Path::new("/cache").join("presenter.html")
         );
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/presenter?seq=1").unwrap(),
+            resolve_request_path(Path::new("/cache"), "/presenter?seq=1", "present.html").unwrap(),
             Path::new("/cache").join("presenter.html")
         );
     }
@@ -407,28 +458,50 @@ mod tests {
     #[test]
     fn resolves_swapped_routes_to_role_pages() {
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/present-swapped").unwrap(),
+            resolve_request_path(Path::new("/cache"), "/present-swapped", "present.html").unwrap(),
             Path::new("/cache").join("present.html")
         );
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/present-swapped?seq=1").unwrap(),
+            resolve_request_path(
+                Path::new("/cache"),
+                "/present-swapped?seq=1",
+                "present.html"
+            )
+            .unwrap(),
             Path::new("/cache").join("present.html")
         );
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/presenter-swapped").unwrap(),
+            resolve_request_path(Path::new("/cache"), "/presenter-swapped", "present.html")
+                .unwrap(),
             Path::new("/cache").join("presenter.html")
         );
         assert_eq!(
-            resolve_request_path(Path::new("/cache"), "/presenter-swapped?seq=1").unwrap(),
+            resolve_request_path(
+                Path::new("/cache"),
+                "/presenter-swapped?seq=1",
+                "present.html"
+            )
+            .unwrap(),
             Path::new("/cache").join("presenter.html")
         );
     }
 
     #[test]
     fn rejects_path_traversal() {
-        assert!(resolve_request_path(Path::new("/cache"), "/../manifest.json").is_none());
-        assert!(resolve_request_path(Path::new("/cache"), "/slides/../../secret").is_none());
-        assert!(resolve_request_path(Path::new("/cache"), "http://x/manifest.json").is_none());
+        assert!(
+            resolve_request_path(Path::new("/cache"), "/../manifest.json", "present.html")
+                .is_none()
+        );
+        assert!(
+            resolve_request_path(Path::new("/cache"), "/slides/../../secret", "present.html")
+                .is_none()
+        );
+        assert!(resolve_request_path(
+            Path::new("/cache"),
+            "http://x/manifest.json",
+            "present.html"
+        )
+        .is_none());
     }
 
     #[test]
@@ -469,22 +542,73 @@ mod tests {
                 snapshot: SyncSnapshot {
                     seq: 1,
                     index: Some(2),
-                    swapped: false
+                    swapped: false,
+                    generation: 0
                 },
-                message: r#"{"index":2}"#.to_owned()
+                message: Some(r#"{"index":2}"#.to_owned())
             }
         );
         assert!(hub.wait_after(1, Duration::from_millis(1)).is_none());
     }
 
     #[test]
+    fn sync_hub_broadcast_reload_advances_generation_without_transient_message() {
+        let hub = SyncHub::default();
+
+        let seq = hub.broadcast_reload();
+
+        assert_eq!(seq, 1);
+        assert_eq!(
+            hub.wait_after(0, Duration::from_secs(1)).unwrap(),
+            SyncPoll {
+                snapshot: SyncSnapshot {
+                    seq: 1,
+                    index: None,
+                    swapped: false,
+                    generation: 1
+                },
+                message: None
+            }
+        );
+        assert_eq!(
+            hub.snapshot(),
+            SyncSnapshot {
+                seq: 1,
+                index: None,
+                swapped: false,
+                generation: 1
+            }
+        );
+    }
+
+    #[test]
+    fn sync_response_body_always_includes_generation() {
+        let body = sync_response_body(
+            SyncSnapshot {
+                seq: 4,
+                index: Some(2),
+                swapped: true,
+                generation: 9,
+            },
+            None,
+        );
+
+        assert!(body.contains(r#""generation":9"#));
+        assert!(body.contains(r#""message":null"#));
+        assert!(body.contains(r#""index":2"#));
+        assert!(body.contains(r#""swapped":true"#));
+    }
+
+    #[test]
+    fn reload_is_not_accepted_as_a_posted_sync_message() {
+        assert!(serde_json::from_str::<SyncMessage>(r#"{"reload":true}"#).is_err());
+    }
+
+    #[test]
     fn parses_sync_get_query() {
         assert!(matches!(sync_get("/sync"), Some(SyncGet::Handshake)));
         assert!(matches!(sync_get("/sync?seq="), Some(SyncGet::Handshake)));
-        assert!(matches!(
-            sync_get("/sync?seq=now"),
-            Some(SyncGet::Handshake)
-        ));
+        assert!(sync_get("/sync?seq=now").is_none());
         assert!(matches!(sync_get("/sync?seq=42"), Some(SyncGet::Poll(42))));
         assert!(matches!(
             sync_get("/sync?other=x&seq=7"),
