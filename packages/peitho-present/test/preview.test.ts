@@ -3,6 +3,7 @@ import {
   installPreviewKeyboard,
   installPreviewReload,
   mountPreviewShell,
+  previewGridColumnCount,
   type PreviewShell
 } from "../src/preview";
 import type { SyncChannel } from "../src/sync";
@@ -52,16 +53,39 @@ const manifest = {
 
 const cssText = ".slot-title { color: red; }";
 
-function standardFetch(): typeof fetch {
+function manifestWithSlideCount(slideCount: number): typeof manifest {
+  return {
+    ...manifest,
+    slideCount,
+    slides: Array.from({ length: slideCount }, (_, index) => ({
+      index,
+      key: `slide-${index}`,
+      src: `slides/${String(index).padStart(3, "0")}.html`,
+      hasNotes: false,
+      text: { title: "", body: "", code: "" }
+    }))
+  };
+}
+
+function fetchForManifest(deck: typeof manifest): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
-    if (url === "manifest.json") return okJson(manifest);
+    if (url === "manifest.json") return okJson(deck);
     if (url === "peitho.css") return okText(cssText);
-    if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
-    if (url === "slides/001-middle.html") return okText("<section><h1>Middle</h1></section>");
-    if (url === "slides/002-end.html") return okText("<section><h1>End</h1></section>");
+    if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   }) as typeof fetch;
+}
+
+function standardFetch(): typeof fetch {
+  return fetchForManifest(manifest);
+}
+
+function setRootWidth(root: HTMLElement, width: number): void {
+  Object.defineProperty(root, "clientWidth", {
+    configurable: true,
+    value: width
+  });
 }
 
 const shells: PreviewShell[] = [];
@@ -101,6 +125,12 @@ function mockChannel() {
   };
   return channel;
 }
+
+it("computes preview grid columns from root width and clamps to one", () => {
+  expect(previewGridColumnCount(1044)).toBe(3);
+  expect(previewGridColumnCount(367)).toBe(1);
+  expect(previewGridColumnCount(0)).toBe(1);
+});
 
 it("preview keyboard emits overview requests from o and ignores chord modifiers", () => {
   const bus = new EventTarget();
@@ -150,19 +180,46 @@ it("preview keyboard emits command requests and ignores chord-modified commands"
     metaKey: true,
     cancelable: true
   });
+  const bareUp = new KeyboardEvent("keydown", { key: "ArrowUp", cancelable: true });
+  const chordUp = new KeyboardEvent("keydown", {
+    key: "ArrowUp",
+    metaKey: true,
+    cancelable: true
+  });
+  const bareDown = new KeyboardEvent("keydown", { key: "ArrowDown", cancelable: true });
+  const chordDown = new KeyboardEvent("keydown", {
+    key: "ArrowDown",
+    metaKey: true,
+    cancelable: true
+  });
 
-  for (const event of [bareEscape, chordEscape, bareEnter, chordEnter, bareArrow, chordArrow]) {
+  for (const event of [
+    bareEscape,
+    chordEscape,
+    bareEnter,
+    chordEnter,
+    bareArrow,
+    chordArrow,
+    bareUp,
+    chordUp,
+    bareDown,
+    chordDown
+  ]) {
     window.dispatchEvent(event);
   }
 
   expect(requests).toEqual([{ action: "exit" }, { action: "activate" }]);
-  expect(navigations).toEqual([{ to: "next" }]);
+  expect(navigations).toEqual([{ to: "next" }, { to: "up" }, { to: "down" }]);
   expect(bareEscape.defaultPrevented).toBe(true);
   expect(chordEscape.defaultPrevented).toBe(false);
   expect(bareEnter.defaultPrevented).toBe(true);
   expect(chordEnter.defaultPrevented).toBe(false);
   expect(bareArrow.defaultPrevented).toBe(true);
   expect(chordArrow.defaultPrevented).toBe(false);
+  expect(bareUp.defaultPrevented).toBe(false);
+  expect(chordUp.defaultPrevented).toBe(false);
+  expect(bareDown.defaultPrevented).toBe(false);
+  expect(chordDown.defaultPrevented).toBe(false);
 });
 
 it("overview requests toggle between single and grid mode", async () => {
@@ -212,6 +269,84 @@ it("grid arrow navigation moves selection and Enter shows the selected slide", a
   expect(shell.currentIndex).toBe(1);
   const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-preview-slide")];
   expect(hosts.map((host) => host.hidden)).toEqual([true, false, true]);
+});
+
+it("grid vertical navigation moves by one computed row and stops at row edges", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  setRootWidth(root, 1044);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(manifestWithSlideCount(7)),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1044, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } }));
+  const handledDown = new CustomEvent("peitho:navigate", {
+    cancelable: true,
+    detail: { to: "down" }
+  });
+  bus.dispatchEvent(handledDown);
+  expect(shell.selectedIndex).toBe(4);
+  expect(handledDown.defaultPrevented).toBe(true);
+
+  const handledUp = new CustomEvent("peitho:navigate", {
+    cancelable: true,
+    detail: { to: "up" }
+  });
+  bus.dispatchEvent(handledUp);
+  expect(shell.selectedIndex).toBe(1);
+  expect(handledUp.defaultPrevented).toBe(true);
+
+  const blockedUp = new CustomEvent("peitho:navigate", {
+    cancelable: true,
+    detail: { to: "up" }
+  });
+  bus.dispatchEvent(blockedUp);
+  expect(shell.selectedIndex).toBe(1);
+  expect(blockedUp.defaultPrevented).toBe(false);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 4 } } }));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "down" } }));
+  expect(shell.selectedIndex).toBe(4);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "down" } }));
+  expect(shell.selectedIndex).toBe(6);
+});
+
+it("single mode ignores preview vertical navigation requests", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  setRootWidth(root, 1044);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(manifestWithSlideCount(7)),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1044, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
+  const saved = sessionStorage.getItem("peitho:preview-state");
+  const up = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
+  const down = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "down" } });
+  bus.dispatchEvent(up);
+  bus.dispatchEvent(down);
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(3);
+  expect(shell.selectedIndex).toBe(3);
+  expect(sessionStorage.getItem("peitho:preview-state")).toBe(saved);
+  expect(up.defaultPrevented).toBe(false);
+  expect(down.defaultPrevented).toBe(false);
 });
 
 it("clicking a grid tile shows that slide in single mode", async () => {

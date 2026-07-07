@@ -2,7 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { hasChordModifier } from "./keyboard";
-import type { NavigateDetail, NavigateTarget, SlideChangeDetail } from "./shell";
+import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import {
   isGenerationSyncMessage,
   serverSyncChannelFactory,
@@ -12,6 +12,8 @@ import {
 export type PreviewMode = "single" | "grid";
 export type OverviewRequestAction = "toggle" | "enter" | "exit" | "activate";
 export type OverviewRequestDetail = { action: OverviewRequestAction };
+export type PreviewNavigateTarget = NavigateTarget | "up" | "down";
+type PreviewNavigateDetail = { to: PreviewNavigateTarget };
 
 export type PreviewShell = {
   manifest: Manifest | null;
@@ -19,7 +21,7 @@ export type PreviewShell = {
   selectedIndex: number;
   mode: PreviewMode;
   generation: number;
-  navigate(to: NavigateTarget): void;
+  navigate(to: PreviewNavigateTarget): void;
   saveState(): void;
   destroy(): void;
 };
@@ -55,15 +57,26 @@ type PreviewState = {
 const PREVIEW_STATE_KEY = "peitho:preview-state";
 const GRID_TILE_WIDTH = 320;
 const GRID_GAP = 18;
+const GRID_PADDING = 24;
 
-const previewNavigationKeyMap = new Map<string, NavigateTarget>([
+export function previewGridColumnCount(rootWidth: number): number {
+  const columns = Math.floor(
+    (rootWidth - GRID_PADDING * 2 + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)
+  );
+  return Math.max(1, columns);
+}
+
+const previewNavigationKeyMap = new Map<string, PreviewNavigateTarget>([
   ["ArrowRight", "next"],
   ["PageDown", "next"],
   ["ArrowLeft", "prev"],
   ["PageUp", "prev"],
+  ["ArrowUp", "up"],
+  ["ArrowDown", "down"],
   ["Home", "first"],
   ["End", "last"]
 ]);
+const verticalPreviewNavigationTargets = new Set<PreviewNavigateTarget>(["up", "down"]);
 
 export function installPreviewKeyboard(
   win: Window = window,
@@ -88,8 +101,14 @@ export function installPreviewKeyboard(
     }
     const to = previewNavigationKeyMap.get(event.key);
     if (!to) return;
-    event.preventDefault();
-    bus.dispatchEvent(new CustomEvent<NavigateDetail>("peitho:navigate", { detail: { to } }));
+    const request = new CustomEvent<PreviewNavigateDetail>("peitho:navigate", {
+      cancelable: true,
+      detail: { to }
+    });
+    bus.dispatchEvent(request);
+    if (!verticalPreviewNavigationTargets.has(to) || request.defaultPrevented) {
+      event.preventDefault();
+    }
   };
   win.addEventListener("keydown", onKeyDown);
   return () => win.removeEventListener("keydown", onKeyDown);
@@ -147,12 +166,14 @@ class PreviewShellController implements PreviewShell {
   private dimensions: CanvasDimensions = { width: 1280, height: 720 };
   private readonly onNavigate = (event: Event): void => {
     if (!this.isLoaded()) return;
-    const detail = (event as CustomEvent<NavigateDetail>).detail;
+    const detail = (event as CustomEvent<PreviewNavigateDetail>).detail;
     if (!detail || !("to" in detail)) {
       this.log.error("Invalid peitho:navigate event");
       return;
     }
-    this.navigate(detail.to);
+    if (this.navigateToTarget(detail.to)) {
+      event.preventDefault();
+    }
   };
   private readonly onOverviewRequest = (event: Event): void => {
     if (!this.isLoaded()) return;
@@ -224,11 +245,16 @@ class PreviewShellController implements PreviewShell {
     }
   }
 
-  navigate(to: NavigateTarget): void {
+  navigate(to: PreviewNavigateTarget): void {
     if (!this.isLoaded()) return;
+    this.navigateToTarget(to);
+  }
+
+  private navigateToTarget(to: PreviewNavigateTarget): boolean {
     const index = this.resolveTarget(to);
-    if (index === null) return;
+    if (index === null) return false;
     this.setIndex(index);
+    return true;
   }
 
   saveState(): void {
@@ -352,11 +378,12 @@ class PreviewShellController implements PreviewShell {
     this.saveState();
   }
 
-  private resolveTarget(to: NavigateTarget): number | null {
+  private resolveTarget(to: PreviewNavigateTarget): number | null {
     if (to === "first") return 0;
     if (to === "last") return this.slides.length - 1;
     if (to === "next") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
     if (to === "prev") return Math.max(this.selectedIndex - 1, 0);
+    if (to === "up" || to === "down") return this.resolveGridVerticalTarget(to);
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
@@ -370,6 +397,20 @@ class PreviewShellController implements PreviewShell {
       return null;
     }
     return index;
+  }
+
+  private resolveGridVerticalTarget(direction: "up" | "down"): number | null {
+    if (this.mode !== "grid") return null;
+    const columns = previewGridColumnCount(this.gridRootWidth());
+    const selected = this.clampIndex(this.selectedIndex);
+    const next = selected + (direction === "up" ? -columns : columns);
+    if (next < 0 || next > this.slides.length - 1) return null;
+    return next;
+  }
+
+  private gridRootWidth(): number {
+    if (this.root.clientWidth > 0) return this.root.clientWidth;
+    return this.viewport?.().width ?? this.win.innerWidth;
   }
 
   private clampIndex(index: number): number {
@@ -423,7 +464,7 @@ class PreviewShellController implements PreviewShell {
     this.root.style.alignContent = "start";
     this.root.style.justifyContent = "center";
     this.root.style.overflow = "auto";
-    this.root.style.padding = "24px";
+    this.root.style.padding = `${GRID_PADDING}px`;
     this.root.style.boxSizing = "border-box";
 
     this.slides.forEach((slide, index) => {
