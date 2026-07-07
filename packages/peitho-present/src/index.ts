@@ -6,12 +6,14 @@ export {
   installCanvasClickNavigation,
   installFullscreenShortcut,
   installPresentationControls,
+  installSwipeNavigation,
   toggleFullscreen
 } from "./controls";
 export type {
   CanvasClickNavigationOptions,
   FullscreenShortcutOptions,
-  PresentationControlsOptions
+  PresentationControlsOptions,
+  SwipeNavigationOptions
 } from "./controls";
 export {
   fallbackFeatures,
