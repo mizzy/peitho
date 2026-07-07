@@ -11,7 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
@@ -242,6 +243,9 @@ enum Command {
         #[command(subcommand)]
         command: ExportCommand,
     },
+    Completions {
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -306,6 +310,12 @@ fn main() -> miette::Result<()> {
         Command::Export { command } => match command {
             ExportCommand::Pdf { input, out } => export_pdf(input, out),
         },
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, name, &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 
@@ -2241,7 +2251,10 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert!(presenter_windowed);
             }
-            Command::Build { .. } | Command::Publish { .. } | Command::Export { .. } => {
+            Command::Build { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
                 panic!("expected present command");
             }
         }
@@ -2258,8 +2271,28 @@ contexts:
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
-            Command::Build { .. } | Command::Present { .. } | Command::Publish { .. } => {
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Completions { .. } => {
                 panic!("expected export pdf command");
+            }
+        }
+    }
+
+    #[test]
+    fn completions_command_accepts_shell_argument() {
+        let cli = Cli::parse_from(["peitho", "completions", "bash"]);
+
+        match cli.command {
+            Command::Completions { shell } => {
+                assert_eq!(shell, Shell::Bash);
+            }
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. } => {
+                panic!("expected completions command");
             }
         }
     }
@@ -2643,7 +2676,10 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
                 assert!(watch);
             }
-            Command::Present { .. } | Command::Publish { .. } | Command::Export { .. } => {
+            Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
                 panic!("expected build command");
             }
         }
@@ -2659,7 +2695,10 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(out, PathBuf::from("dist"));
                 assert!(!watch);
             }
-            Command::Present { .. } | Command::Publish { .. } | Command::Export { .. } => {
+            Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
                 panic!("expected build command");
             }
         }

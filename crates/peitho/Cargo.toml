@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+clap_complete.workspace = true
 miette.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
