@@ -251,6 +251,19 @@ it("Escape exits grid mode and is a no-op in single mode", async () => {
   expect(shell.mode).toBe("single");
 });
 
+it("Enter activate request enters grid from single mode with the current slide selected", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.selectedIndex).toBe(2);
+});
+
 it("grid arrow navigation moves selection and Enter shows the selected slide", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");

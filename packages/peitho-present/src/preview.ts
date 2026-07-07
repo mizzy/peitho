@@ -363,8 +363,8 @@ class PreviewShellController implements PreviewShell {
   }
 
   private activateSelection(): void {
-    if (this.mode !== "grid") return;
-    this.exitGrid();
+    if (this.mode === "grid") this.exitGrid();
+    else this.enterGrid();
   }
 
   private setIndex(index: number): void {

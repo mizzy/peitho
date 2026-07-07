@@ -448,8 +448,8 @@ var PreviewShellController = class {
     this.saveState();
   }
   activateSelection() {
-    if (this.mode !== "grid") return;
-    this.exitGrid();
+    if (this.mode === "grid") this.exitGrid();
+    else this.enterGrid();
   }
   setIndex(index) {
     const next = this.clampIndex(index);
