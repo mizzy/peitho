@@ -60,21 +60,26 @@ Available targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-
 
 ## Usage
 
+The deck argument defaults to `deck.md` in the current directory, so it can be omitted when the file follows the convention.
+
 ```sh
 # Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
-peitho build deck.md
+peitho build            # same as: peitho build deck.md
 
 # Rebuild on every save
-peitho build deck.md --watch
+peitho build --watch
 
 # Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
-peitho present deck.md
+peitho present
 
 # Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
-peitho present deck.md --presenter-windowed
+peitho present --presenter-windowed
 
 # Export a PDF
-peitho export pdf deck.md -o deck.pdf
+peitho export pdf -o deck.pdf
+
+# A deck with a non-default name is passed explicitly
+peitho build slides.md
 
 # Publish (inspects, then delegates to your existing deploy command. Don't reinvent the deploy)
 peitho publish -- aws s3 sync dist/ s3://your-bucket/

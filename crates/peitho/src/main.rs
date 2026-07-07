@@ -212,6 +212,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Build {
+        #[arg(default_value = "deck.md")]
         input: PathBuf,
         #[arg(long, default_value = "dist")]
         out: PathBuf,
@@ -219,6 +220,7 @@ enum Command {
         watch: bool,
     },
     Present {
+        #[arg(default_value = "deck.md")]
         input: PathBuf,
         #[arg(long, help = "shell bundle path (default: built-in present shell)")]
         shell: Option<PathBuf>,
@@ -251,6 +253,7 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum ExportCommand {
     Pdf {
+        #[arg(default_value = "deck.md")]
         input: PathBuf,
         #[arg(short, long)]
         out: Option<PathBuf>,
@@ -623,7 +626,12 @@ fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>
 }
 
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
-    let markdown = fs::read_to_string(input).into_diagnostic()?;
+    let markdown = fs::read_to_string(input).map_err(|err| {
+        miette::miette!(
+            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
+            input.display()
+        )
+    })?;
     let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
     let assets = resolve_assets(input, &frontmatter)?;
     let highlighter = match assets.syntaxes.as_deref() {
@@ -2669,6 +2677,74 @@ printf '0 bytes written to file %s\n' "$out" >&2
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn build_command_defaults_input_to_deck_md() {
+        let cli = Cli::parse_from(["peitho", "build"]);
+
+        match cli.command {
+            Command::Build { input, .. } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+            }
+            Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected build command");
+            }
+        }
+    }
+
+    #[test]
+    fn present_command_defaults_input_to_deck_md() {
+        let cli = Cli::parse_from(["peitho", "present"]);
+
+        match cli.command {
+            Command::Present { input, .. } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+            }
+            Command::Build { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
+    }
+
+    #[test]
+    fn export_pdf_command_defaults_input_to_deck_md() {
+        let cli = Cli::parse_from(["peitho", "export", "pdf"]);
+
+        match cli.command {
+            Command::Export {
+                command: ExportCommand::Pdf { input, .. },
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+            }
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Completions { .. } => {
+                panic!("expected export pdf command");
+            }
+        }
+    }
+
+    #[test]
+    fn build_artifacts_missing_input_error_names_path_and_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-deck.md");
+
+        let err = match build_artifacts(&missing) {
+            Ok(_) => panic!("expected missing input error"),
+            Err(err) => err,
+        };
+
+        let message = format!("{err:?}");
+        assert!(message.contains("no-such-deck.md"));
+        assert!(message.contains("defaults to deck.md"));
     }
 
     #[test]
