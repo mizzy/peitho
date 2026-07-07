@@ -28,6 +28,7 @@ struct BuildArtifacts {
     manifest_json: String,
     css: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
+    fonts_source: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +40,7 @@ struct BuildOptions {
 #[derive(Debug, Clone)]
 struct WatchRoot {
     path: PathBuf,
-    ext: &'static str,
+    ext: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,24 +55,30 @@ impl WatchTargets {
     fn new(input: PathBuf, assets: ResolvedAssets) -> Self {
         let mut roots = vec![WatchRoot {
             path: input,
-            ext: "md",
+            ext: Some("md"),
         }];
         if let Some(path) = &assets.layouts {
             roots.push(WatchRoot {
                 path: path.clone(),
-                ext: "html",
+                ext: Some("html"),
             });
         }
         if let Some(path) = &assets.css {
             roots.push(WatchRoot {
                 path: path.clone(),
-                ext: "css",
+                ext: Some("css"),
             });
         }
         if let Some(path) = &assets.syntaxes {
             roots.push(WatchRoot {
                 path: path.clone(),
-                ext: "sublime-syntax",
+                ext: Some("sublime-syntax"),
+            });
+        }
+        if let Some(path) = &assets.fonts {
+            roots.push(WatchRoot {
+                path: path.clone(),
+                ext: None,
             });
         }
         Self { roots, assets }
@@ -82,27 +89,66 @@ impl WatchTargets {
             if same_watch_path(&root.path, changed) {
                 return true;
             }
-            root.path.is_dir()
-                && changed.extension().and_then(|e| e.to_str()) == Some(root.ext)
-                && changed
-                    .parent()
-                    .is_some_and(|parent| same_watch_path(&root.path, parent))
+            let matches_root_filter = match root.ext {
+                Some(ext) => {
+                    changed.extension().and_then(|e| e.to_str()) == Some(ext)
+                        && changed
+                            .parent()
+                            .is_some_and(|parent| same_watch_path(&root.path, parent))
+                }
+                None => {
+                    changed.starts_with(&root.path)
+                        && changed
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_none_or(|name| !name.starts_with('.'))
+                }
+            };
+            root.path.is_dir() && matches_root_filter
         })
     }
 
     fn watch_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         for root in &self.roots {
-            let dir = if root.path.is_dir() {
-                root.path.clone()
+            if root.path.is_dir() {
+                if root.ext.is_none() {
+                    collect_watch_tree(&root.path, &mut dirs);
+                } else {
+                    push_watch_dir(&mut dirs, root.path.clone());
+                }
             } else {
-                parent_dir_for_watch(&root.path)
-            };
-            if !dirs.iter().any(|existing| same_watch_path(existing, &dir)) {
-                dirs.push(dir);
+                push_watch_dir(&mut dirs, parent_dir_for_watch(&root.path));
             }
         }
         dirs
+    }
+}
+
+fn collect_watch_tree(root: &Path, dirs: &mut Vec<PathBuf>) {
+    push_watch_dir(dirs, root.to_path_buf());
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut child_dirs = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|file_type| file_type.is_dir())
+                .map(|_| entry.path())
+        })
+        .collect::<Vec<_>>();
+    child_dirs.sort();
+    for child in child_dirs {
+        collect_watch_tree(&child, dirs);
+    }
+}
+
+fn push_watch_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.iter().any(|existing| same_watch_path(existing, &dir)) {
+        dirs.push(dir);
     }
 }
 
@@ -476,6 +522,9 @@ fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     if let Some(path) = &assets.syntaxes {
         parts.push(format!("syntaxes={}", path.display()));
     }
+    if let Some(path) = &assets.fonts {
+        parts.push(format!("fonts={}", path.display()));
+    }
     if parts.is_empty() {
         "none".to_owned()
     } else {
@@ -603,6 +652,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         manifest_json,
         css,
         image_assets,
+        fonts_source: assets.fonts,
     })
 }
 
@@ -628,7 +678,78 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
     fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
-    write_image_assets(dir, &artifacts.image_assets)
+    write_image_assets(dir, &artifacts.image_assets)?;
+    write_fonts_assets(dir, artifacts.fonts_source.as_deref())
+}
+
+fn write_fonts_assets(out: &Path, fonts_source: Option<&Path>) -> miette::Result<()> {
+    let fonts_dir = out.join("fonts");
+    if fonts_dir.exists() {
+        fs::remove_dir_all(&fonts_dir).into_diagnostic()?;
+    }
+    let Some(fonts_source) = fonts_source else {
+        return Ok(());
+    };
+    let file_type = fs::symlink_metadata(fonts_source)
+        .into_diagnostic()?
+        .file_type();
+    if file_type.is_symlink() {
+        return Err(miette::miette!(
+            "unsupported fonts: source {} (symlink)\nhelp: point fonts: at a regular file or a directory",
+            fonts_source.display()
+        ));
+    }
+
+    fs::create_dir_all(&fonts_dir).into_diagnostic()?;
+
+    if file_type.is_dir() {
+        copy_dir_contents(fonts_source, &fonts_dir)
+    } else if file_type.is_file() {
+        let file_name = fonts_source.file_name().ok_or_else(|| {
+            miette::miette!(
+                "cannot copy font file without a file name: {}",
+                fonts_source.display()
+            )
+        })?;
+        fs::copy(fonts_source, fonts_dir.join(file_name)).into_diagnostic()?;
+        Ok(())
+    } else {
+        Err(miette::miette!(
+            "unsupported fonts: source {} (special file)\nhelp: point fonts: at a regular file or a directory",
+            fonts_source.display()
+        ))
+    }
+}
+
+fn copy_dir_contents(source: &Path, destination: &Path) -> miette::Result<()> {
+    fs::create_dir_all(destination).into_diagnostic()?;
+    let mut entries = fs::read_dir(source)
+        .into_diagnostic()?
+        .collect::<std::io::Result<Vec<_>>>()
+        .into_diagnostic()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().into_diagnostic()?;
+        if file_type.is_dir() {
+            copy_dir_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).into_diagnostic()?;
+        } else {
+            let entry_type = if file_type.is_symlink() {
+                "symlink"
+            } else {
+                "special file"
+            };
+            return Err(miette::miette!(
+                "unsupported entry in fonts directory: {} ({entry_type})\nhelp: only regular files and subdirectories are supported inside fonts/",
+                source_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1269,6 +1390,7 @@ fn emit_present_cache(
     fs::write(cache.join("peitho.css"), &artifacts.css).into_diagnostic()?;
     write_slide_fragments(cache, &artifacts.rendered)?;
     write_image_assets(cache, &artifacts.image_assets)?;
+    write_fonts_assets(cache, artifacts.fonts_source.as_deref())?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         cache.join("notes.json"),
@@ -1521,6 +1643,7 @@ contexts:
                 layouts: Some(layouts.clone()),
                 css: Some(css.clone()),
                 syntaxes: Some(syntaxes.clone()),
+                fonts: None,
             },
         );
 
@@ -1536,6 +1659,75 @@ contexts:
         assert!(dirs.iter().any(|d| d == &css));
         assert!(dirs.iter().any(|d| d == &syntaxes));
         assert!(dirs.iter().any(|d| d == dir.path()));
+    }
+
+    #[test]
+    fn watch_covers_fonts_dir_contents_without_extension_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let fonts = dir.path().join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        let targets = WatchTargets::new(
+            dir.path().join("deck.md"),
+            ResolvedAssets {
+                layouts: None,
+                css: None,
+                syntaxes: None,
+                fonts: Some(fonts.clone()),
+            },
+        );
+
+        assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
+        assert!(targets.is_relevant_change(&fonts.join("font-face.css")));
+        assert!(!targets.is_relevant_change(&dir.path().join("other.woff2")));
+
+        let dirs = targets.watch_dirs();
+        assert!(dirs.iter().any(|d| d == &fonts));
+        assert!(dirs.iter().any(|d| d == dir.path()));
+    }
+
+    #[test]
+    fn watch_ignores_dotfiles_in_fonts_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let fonts = dir.path().join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        let targets = WatchTargets::new(
+            dir.path().join("deck.md"),
+            ResolvedAssets {
+                layouts: None,
+                css: None,
+                syntaxes: None,
+                fonts: Some(fonts.clone()),
+            },
+        );
+
+        assert!(!targets.is_relevant_change(&fonts.join(".DS_Store")));
+        assert!(!targets.is_relevant_change(&fonts.join(".swp")));
+        assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
+    }
+
+    #[test]
+    fn watch_covers_nested_font_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let fonts = dir.path().join("fonts");
+        let nested = fonts.join("inter");
+        fs::create_dir_all(&nested).unwrap();
+        let targets = WatchTargets::new(
+            dir.path().join("deck.md"),
+            ResolvedAssets {
+                layouts: None,
+                css: None,
+                syntaxes: None,
+                fonts: Some(fonts.clone()),
+            },
+        );
+
+        assert!(targets.is_relevant_change(&nested.join("400.woff2")));
+        assert!(!targets.is_relevant_change(&nested.join(".DS_Store")));
+        assert!(!targets.is_relevant_change(&dir.path().join("other/400.woff2")));
+
+        let dirs = targets.watch_dirs();
+        assert!(dirs.iter().any(|dir| dir == &fonts));
+        assert!(dirs.iter().any(|dir| dir == &nested));
     }
 
     #[test]
@@ -1624,6 +1816,135 @@ contexts:
     }
 
     #[test]
+    fn write_shared_assets_copies_fonts_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("fonts");
+        let out = dir.path().join("dist");
+
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(fonts.join("deck-font.woff2"), b"font bytes").unwrap();
+        fs::write(
+            fonts.join("font-face.css"),
+            r#"@font-face { src: url("deck-font.woff2"); }"#,
+        )
+        .unwrap();
+
+        let artifacts = build_artifacts(&deck).unwrap();
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(out.join("fonts/deck-font.woff2")).unwrap(),
+            b"font bytes"
+        );
+        assert!(fs::read_to_string(out.join("fonts/font-face.css"))
+            .unwrap()
+            .contains("@font-face"));
+    }
+
+    #[test]
+    fn write_shared_assets_copies_single_font_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let font = dir.path().join("deck-font.woff2");
+        let out = dir.path().join("dist");
+
+        fs::write(&deck, "---\nfonts: ./deck-font.woff2\n---\n# Intro\n").unwrap();
+        fs::write(&font, b"single font bytes").unwrap();
+
+        let artifacts = build_artifacts(&deck).unwrap();
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(out.join("fonts/deck-font.woff2")).unwrap(),
+            b"single font bytes"
+        );
+    }
+
+    #[test]
+    fn write_fonts_assets_clears_stale_fonts_when_source_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("dist");
+        let existing_fonts = out.join("fonts");
+        fs::create_dir_all(&existing_fonts).unwrap();
+        fs::write(existing_fonts.join("stale.woff2"), b"stale font").unwrap();
+
+        write_fonts_assets(&out, None).unwrap();
+
+        assert!(!existing_fonts.join("stale.woff2").exists());
+        assert!(!existing_fonts.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fonts_assets_rejects_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("fonts");
+        let target = dir.path().join("font.woff2");
+        let out = dir.path().join("dist");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(&target, b"font bytes").unwrap();
+        symlink(&target, source.join("linked.woff2")).unwrap();
+
+        let err = write_fonts_assets(&out, Some(&source)).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("unsupported entry in fonts directory"));
+        assert!(message.contains("linked.woff2"));
+        assert!(message.contains("only regular files and subdirectories"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fonts_assets_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("font.woff2");
+        let linked = dir.path().join("linked.woff2");
+        let out = dir.path().join("dist");
+        fs::write(&target, b"font bytes").unwrap();
+        symlink(&target, &linked).unwrap();
+
+        let err = write_fonts_assets(&out, Some(&linked)).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("unsupported fonts: source"));
+        assert!(message.contains("linked.woff2"));
+        assert!(message.contains("symlink"));
+        assert!(message.contains("point fonts: at a regular file or a directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fonts_assets_rejects_symlink_to_directory_source() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let real_fonts = dir.path().join("real-fonts");
+        let linked = dir.path().join("theme-fonts");
+        let out = dir.path().join("dist");
+
+        fs::write(&deck, "---\nfonts: ./theme-fonts\n---\n# Intro\n").unwrap();
+        fs::create_dir_all(&real_fonts).unwrap();
+        fs::write(real_fonts.join("deck-font.woff2"), b"font bytes").unwrap();
+        symlink(&real_fonts, &linked).unwrap();
+
+        let artifacts = build_artifacts(&deck).unwrap();
+        let err = write_shared_assets(&out, &artifacts).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("unsupported fonts: source"));
+        assert!(message.contains("theme-fonts"));
+        assert!(message.contains("symlink"));
+        assert!(!out.join("fonts/deck-font.woff2").exists());
+    }
+
+    #[test]
     fn collect_asset_files_sorts_directory_entries_by_name() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("b.css"), "").unwrap();
@@ -1657,6 +1978,7 @@ contexts:
                 layouts: Some(dir.path().join("title-body-code.html")),
                 css: Some(dir.path().join("base.css")),
                 syntaxes: None,
+                fonts: None,
             },
         );
 
@@ -2271,6 +2593,27 @@ printf '0 bytes written to file %s\n' "$out" >&2
     }
 
     #[test]
+    fn present_cache_copies_fonts() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("fonts");
+        let cache = dir.path().join("present-cache");
+
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(fonts.join("deck-font.woff2"), b"font bytes").unwrap();
+
+        let artifacts = build_artifacts(&deck).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+
+        assert_eq!(
+            fs::read(cache.join("fonts/deck-font.woff2")).unwrap(),
+            b"font bytes"
+        );
+    }
+
+    #[test]
     fn image_resolver_handles_bare_deck_filename() {
         let resolver = ImageResolver::new(Path::new("deck.md"));
 
@@ -2388,6 +2731,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             layouts: None,
             css: None,
             syntaxes: None,
+            fonts: None,
         }
     }
 }
