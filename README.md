@@ -35,6 +35,16 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install mizzy/tap/peitho
+```
+
+Shell completions for bash/zsh/fish are installed automatically.
+
+### Prebuilt binaries
+
 Grab a prebuilt binary from the [Releases page](https://github.com/mizzy/peitho/releases). Each release ships a tarball per target with a single `peitho` binary — everything (layouts, base theme, presentation shell) is embedded, so Node.js and npm are not needed at runtime.
 
 ```sh
@@ -68,6 +78,9 @@ peitho export pdf deck.md -o deck.pdf
 
 # Publish (inspects, then delegates to your existing deploy command. Don't reinvent the deploy)
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
+
+# Generate a shell completion script (bash / zsh / fish / powershell / elvish)
+peitho completions zsh
 ```
 
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
