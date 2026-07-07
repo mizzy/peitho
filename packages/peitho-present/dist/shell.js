@@ -458,6 +458,57 @@ function installCanvasClickNavigation(options) {
   options.root.addEventListener("click", onClick);
   return () => options.root.removeEventListener("click", onClick);
 }
+function installSwipeNavigation(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const minHorizontalPx = options.minHorizontalPx ?? 50;
+  const maxDurationMs = options.maxDurationMs ?? 800;
+  const minRatio = options.minRatio ?? 1.5;
+  const clickSuppressPx = minHorizontalPx / 2;
+  let active = false;
+  let x0 = 0;
+  let y0 = 0;
+  let t0 = 0;
+  const onTouchStart = (event) => {
+    if (active) return;
+    if (event.touches.length !== 1) return;
+    if (event.target.closest('[data-peitho-control-bar="true"]')) return;
+    const touch = event.touches[0];
+    x0 = touch.clientX;
+    y0 = touch.clientY;
+    t0 = win.performance.now();
+    active = true;
+  };
+  const onTouchEnd = (event) => {
+    if (!active) return;
+    active = false;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - x0;
+    const dy = touch.clientY - y0;
+    const dt = win.performance.now() - t0;
+    if (Math.abs(dx) >= clickSuppressPx) event.preventDefault();
+    if (Math.abs(dx) < minHorizontalPx) return;
+    if (Math.abs(dx) / Math.max(Math.abs(dy), 1) <= minRatio) return;
+    if (dt > maxDurationMs) return;
+    bus.dispatchEvent(
+      new CustomEvent("peitho:navigate", {
+        detail: { to: dx < 0 ? "next" : "prev" }
+      })
+    );
+  };
+  const onTouchCancel = () => {
+    active = false;
+  };
+  options.root.addEventListener("touchstart", onTouchStart, { passive: true });
+  options.root.addEventListener("touchend", onTouchEnd, { passive: false });
+  options.root.addEventListener("touchcancel", onTouchCancel);
+  return () => {
+    options.root.removeEventListener("touchstart", onTouchStart);
+    options.root.removeEventListener("touchend", onTouchEnd);
+    options.root.removeEventListener("touchcancel", onTouchCancel);
+  };
+}
 function installFullscreenShortcut(options = {}) {
   const win = options.window ?? window;
   const doc = options.document ?? document;
@@ -1360,6 +1411,7 @@ export {
   installPresentationControls,
   installPresenterKeyboard,
   installSwapShortcut,
+  installSwipeNavigation,
   installSyncBridge,
   installTimeTracker,
   isOverrun,

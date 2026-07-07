@@ -242,8 +242,8 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
   <title>Peitho Deck</title>
   <style>
     :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
-    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-    #peitho-slides { position: fixed; inset: 0; overflow: hidden; background: #000; }
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: pan-y; }
+    #peitho-slides { position: fixed; inset: 0; overflow: hidden; background: #000; touch-action: pan-y; }
     #peitho-canvas { position: absolute; left: 0; top: 0; width: __PEITHO_CANVAS_WIDTH__px; height: __PEITHO_CANVAS_HEIGHT__px; transform-origin: top left; }
   </style>
 </head>
@@ -372,6 +372,31 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
     document.addEventListener('click', (event) => {
       navigate(event.clientX < window.innerWidth / 4 ? 'prev' : 'next');
     });
+    let __swipeState = null;
+    document.addEventListener('touchstart', (event) => {
+      if (__swipeState !== null) return;
+      if (event.touches.length !== 1) return;
+      const t = event.touches[0];
+      __swipeState = { x: t.clientX, y: t.clientY, t: performance.now() };
+    }, { passive: true });
+    document.addEventListener('touchend', (event) => {
+      if (__swipeState === null) return;
+      const state = __swipeState;
+      __swipeState = null;
+      const t = event.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - state.x;
+      const dy = t.clientY - state.y;
+      const dt = performance.now() - state.t;
+      // Click-suppress: half the swipe threshold. Kept in sync with
+      // installSwipeNavigation's `clickSuppressPx = minHorizontalPx / 2`.
+      if (Math.abs(dx) >= 25) event.preventDefault();
+      if (Math.abs(dx) < 50) return;
+      if (Math.abs(dx) / Math.max(Math.abs(dy), 1) <= 1.5) return;
+      if (dt > 800) return;
+      navigate(dx < 0 ? 'next' : 'prev');
+    }, { passive: false });
+    document.addEventListener('touchcancel', () => { __swipeState = null; });
     // `#slide=N` / `#N` are load-time fallbacks only; after load, query is canonical.
     window.addEventListener('popstate', () => {
       showSlide(readSlideIndexFromUrl() - 1);
@@ -453,8 +478,8 @@ pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
   <title>Peitho Present</title>
   <style>
     :root { --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
-    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-    #peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; }
+    html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: pan-y; }
+    #peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; touch-action: pan-y; }
     .peitho-control-bar { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; gap: 8px; align-items: center; padding: 8px; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 6px; }
     .peitho-control-bar[hidden] { display: none; }
     .peitho-time-tracker { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; z-index: 5; pointer-events: none; background: rgba(255, 255, 255, 0.18); }
@@ -495,6 +520,7 @@ pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
         peitho.installKeyboardNavigation(window);
         peitho.installPresentationControls({ root, window, document });
         peitho.installCanvasClickNavigation({ root, window });
+        peitho.installSwipeNavigation({ root, window });
         peitho.installFullscreenShortcut({ window, document });
         const shell = await peitho.mountPresentShell({ root });
         peitho.installSyncBridge(window, peitho.serverSyncChannelFactory());
@@ -1030,12 +1056,20 @@ mod tests {
         assert!(html.contains("--peitho-canvas-width: 1280px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
         assert!(html.contains("width: 1280px; height: 720px;"));
+        assert!(html.contains(
+            "html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: pan-y; }"
+        ));
+        assert!(html.contains(
+            "#peitho-slides { position: fixed; inset: 0; overflow: hidden; background: #000; touch-action: pan-y; }"
+        ));
         assert!(html.contains("const CANVAS_WIDTH = 1280"));
         assert!(html.contains("const CANVAS_HEIGHT = 720"));
         assert!(html.contains("function resizeCanvas()"));
         assert!(html.contains("function showSlide(index)"));
         assert!(html.contains("document.addEventListener('keydown'"));
         assert!(html.contains("document.addEventListener('click'"));
+        assert!(html.contains("__swipeState"));
+        assert!(html.contains("document.addEventListener('touchstart'"));
         assert!(html.contains("fetchOk('manifest.json')"));
         assert!(html.contains("fetchOk(slide.src)"));
         assert!(html.contains("response.ok"));
@@ -1134,8 +1168,15 @@ mod tests {
         let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
+        assert!(html.contains(
+            "html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: pan-y; }"
+        ));
+        assert!(html.contains(
+            "#peitho-present-root { position: fixed; inset: 0; overflow: hidden; background: #000; touch-action: pan-y; }"
+        ));
         assert!(html.contains("installPresentationControls"));
         assert!(html.contains("installCanvasClickNavigation"));
+        assert!(html.contains("installSwipeNavigation"));
         assert!(html.contains("installFullscreenShortcut"));
         assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("fetchOk('notes.json')"));

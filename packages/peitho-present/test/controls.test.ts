@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   installCanvasClickNavigation,
   installFullscreenShortcut,
-  installPresentationControls
+  installPresentationControls,
+  installSwipeNavigation
 } from "../src/index";
 
 const cleanups: Array<() => void> = [];
@@ -10,6 +11,24 @@ const cleanups: Array<() => void> = [];
 function listenWindow(type: string, listener: EventListener): void {
   window.addEventListener(type, listener);
   cleanups.push(() => window.removeEventListener(type, listener));
+}
+
+function touch(clientX: number, clientY: number): Touch {
+  return { clientX, clientY } as Touch;
+}
+
+function touchEvent(
+  type: "touchstart" | "touchend" | "touchcancel",
+  options: { touches?: Touch[]; changedTouches?: Touch[] } = {}
+): Event {
+  const event = new Event(type, { bubbles: true, cancelable: type === "touchend" });
+  Object.defineProperty(event, "touches", {
+    value: options.touches ?? []
+  });
+  Object.defineProperty(event, "changedTouches", {
+    value: options.changedTouches ?? []
+  });
+  return event;
 }
 
 beforeEach(() => {
@@ -177,6 +196,190 @@ it("does not navigate when a click starts inside the control bar", () => {
   root
     .querySelector<HTMLElement>('[data-peitho-control-bar="true"]')
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+
+  expect(requests).toEqual([]);
+});
+
+it("swipe left dispatches next", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  const end = touchEvent("touchend", { changedTouches: [touch(100, 305)] });
+  root.dispatchEvent(end);
+
+  expect(requests).toEqual([{ to: "next" }]);
+  expect(end.defaultPrevented).toBe(true);
+});
+
+it("swipe right dispatches prev", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(100, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(200, 305)] }));
+
+  expect(requests).toEqual([{ to: "prev" }]);
+});
+
+it("too-short horizontal swipe does not dispatch", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(160, 300)] }));
+
+  expect(requests).toEqual([]);
+});
+
+it("too-short horizontal drag does not preventDefault touchend", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  const end = touchEvent("touchend", { changedTouches: [touch(210, 300)] });
+  root.dispatchEvent(end);
+
+  expect(requests).toEqual([]);
+  expect(end.defaultPrevented).toBe(false);
+});
+
+it("failed swipe with significant horizontal movement DOES preventDefault touchend to suppress follow-up click", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  const end = touchEvent("touchend", { changedTouches: [touch(240, 500)] });
+  root.dispatchEvent(end);
+
+  expect(requests).toEqual([]);
+  expect(end.defaultPrevented).toBe(true);
+});
+
+it("mostly-vertical swipe does not dispatch", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 500)] }));
+
+  expect(requests).toEqual([]);
+});
+
+it("too-slow swipe does not dispatch", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  vi.spyOn(window.performance, "now").mockReturnValueOnce(0).mockReturnValueOnce(801);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 305)] }));
+
+  expect(requests).toEqual([]);
+});
+
+it("multi-touch touchstart is ignored", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(
+    touchEvent("touchstart", {
+      touches: [touch(200, 300), touch(220, 320)]
+    })
+  );
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 305)] }));
+
+  expect(requests).toEqual([]);
+});
+
+it("mid-swipe multi-touch touchstart does not cancel the active gesture", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(
+    touchEvent("touchstart", {
+      touches: [touch(200, 300), touch(220, 320)]
+    })
+  );
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 305)] }));
+
+  expect(requests).toEqual([{ to: "next" }]);
+});
+
+it("swipe that starts inside control bar is ignored", () => {
+  const root = document.createElement("main");
+  const bar = document.createElement("nav");
+  const requests: unknown[] = [];
+  bar.dataset.peithoControlBar = "true";
+  root.appendChild(bar);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  bar.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 305)] }));
+
+  expect(requests).toEqual([]);
+});
+
+it("cleanup() removes swipe listeners", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanup();
+
+  root.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(100, 305)] }));
 
   expect(requests).toEqual([]);
 });
