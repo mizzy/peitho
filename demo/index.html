@@ -96,6 +96,18 @@
         <span class="name">Lightning Talk</span>
         <span class="desc">ダーク+大型タイポのLT向けデザイン。レイアウトにcodeスロットが無いので、コードを書くとビルドエラーになる。</span>
       </a></li>
+      <li><a class="deck" href="./two-column/">
+        <span class="name">Two Column</span>
+        <span class="desc">明示スロット構文<code>::: {slot=name}</code>で左右2カラムに振り分けるデッキ。同じ<code>accepts="blocks"</code>のスロットが2つあると慣習マッピングでは判別できないため、著者が明示的に行き先を指定する。</span>
+      </a></li>
+      <li><a class="deck" href="./image-showcase/">
+        <span class="name">Image Showcase</span>
+        <span class="desc">Markdown画像<code>![alt](img/arch.png)</code>を<code>accepts="image"</code>スロットで受ける額装風レイアウト。画像パスの検証はビルド時に行われ、壊れた参照はエラーで止まる。</span>
+      </a></li>
+      <li><a class="deck" href="./aspect-ratio-4-3/">
+        <span class="name">Aspect Ratio 4:3</span>
+        <span class="desc">frontmatterの<code>aspect_ratio: 4:3</code>で960x720キャンバスに切り替えたデッキ。レイアウトとテーマはそのまま、論理キャンバスの縦横比だけが変わる。</span>
+      </a></li>
       <li><a class="deck" href="./minimal/">
         <span class="name">Minimal</span>
         <span class="desc">バイナリ内蔵のデフォルトレイアウトとテーマだけで、deck.md単体からビルドした最小構成。</span>

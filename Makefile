@@ -5,7 +5,7 @@ PRESENT_FLAGS ?=
 PRESENT = cargo run -q -p peitho -- present
 PEITHO = cargo run -q -p peitho --
 DEMO_OUT = .demo-site
-DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour
+DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour two-column image-showcase aspect-ratio-4-3
 WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
@@ -72,6 +72,9 @@ demo-site:
 	$(PEITHO) build examples/code-walkthrough/deck.md --out $(DEMO_OUT)/code-walkthrough
 	$(PEITHO) build examples/keynote/deck.md --out $(DEMO_OUT)/keynote
 	$(PEITHO) build examples/feature-tour/deck.md --out $(DEMO_OUT)/feature-tour
+	$(PEITHO) build examples/two-column/deck.md --out $(DEMO_OUT)/two-column
+	$(PEITHO) build examples/image-showcase/deck.md --out $(DEMO_OUT)/image-showcase
+	$(PEITHO) build examples/aspect-ratio-4-3/deck.md --out $(DEMO_OUT)/aspect-ratio-4-3
 	for d in $(DEMO_DECKS); do \
 		$(PEITHO) publish --dist $(DEMO_OUT)/$$d -- true || exit 1; \
 	done
