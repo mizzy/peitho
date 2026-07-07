@@ -8,13 +8,13 @@ use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
     domain::{
-        AspectRatio, FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName,
+        Accepts, AspectRatio, FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName,
         SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     layout::Layout,
-    phase::{Checked, Deck, Rendered},
+    phase::{Checked, CheckedSlot, Deck, Rendered},
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
@@ -45,7 +45,7 @@ pub fn render_deck(
 
 fn render_slide(
     key: &SlideKey,
-    slots: &BTreeMap<SlotName, Vec<SourceFragment<ResolvedImagePath>>>,
+    slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
     layout: &Layout,
     highlighter: &Highlighter,
 ) -> Result<String> {
@@ -88,9 +88,21 @@ fn render_slide(
                             "rename the slot",
                         ))
                     })?;
-                    let fragments = slot_values.get(&slot).cloned().unwrap_or_default();
-                    let html =
-                        render_slot(&slot, &fragments, highlighter).map_err(box_build_error)?;
+                    let checked_slot = slot_values.get(&slot).ok_or_else(|| {
+                        box_build_error(BuildError::new(
+                            ErrorKind::Layout,
+                            None,
+                            format!("checked slot '{}' is missing its contract", slot.as_str()),
+                            "keep checked slides synchronized with layout slots",
+                        ))
+                    })?;
+                    let html = render_slot(
+                        &slot,
+                        checked_slot.contract().accepts,
+                        checked_slot.fragments(),
+                        highlighter,
+                    )
+                    .map_err(box_build_error)?;
                     el.replace(&html, ContentType::Html);
                     Ok(())
                 }),
@@ -115,6 +127,7 @@ fn render_slide(
 
 fn render_slot(
     slot: &SlotName,
+    accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
     highlighter: &Highlighter,
 ) -> Result<String> {
@@ -123,16 +136,16 @@ fn render_slot(
     }
 
     let class_name = slot.class_name();
-    Ok(match fragments.first().map(SourceFragment::kind) {
-        Some(FragmentKind::Heading { .. }) => {
+    Ok(match accepts {
+        Accepts::Inline => {
             let body = fragments
                 .iter()
-                .map(|fragment| render_heading_inline(fragment.markdown()))
-                .collect::<Vec<_>>()
+                .map(render_heading_inline_fragment)
+                .collect::<Result<Vec<_>>>()?
                 .join(" ");
             format!(r#"<span class="{class_name}">{body}</span>"#)
         }
-        Some(FragmentKind::Code) => {
+        Accepts::Code => {
             let body = fragments
                 .iter()
                 .map(|fragment| render_code_fragment(fragment, highlighter))
@@ -140,25 +153,38 @@ fn render_slot(
                 .join("\n");
             format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
         }
-        Some(FragmentKind::Image { .. }) => {
-            let body = fragments
-                .iter()
-                .map(render_image_fragment)
-                .collect::<Result<Vec<_>>>()?
-                .join("\n");
-            body
-        }
-        _ => {
-            let markdown = fragments
-                .iter()
-                .map(SourceFragment::markdown)
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            let mut body = String::new();
-            html::push_html(&mut body, Parser::new_ext(&markdown, Options::empty()));
-            format!(r#"<div class="{class_name}">{body}</div>"#)
+        Accepts::Image => fragments
+            .iter()
+            .map(render_image_fragment)
+            .collect::<Result<Vec<_>>>()?
+            .join("\n"),
+        Accepts::Blocks | Accepts::Text | Accepts::List => {
+            render_block_slot(&class_name, accepts, fragments)?
         }
     })
+}
+
+fn render_block_slot(
+    class_name: &str,
+    accepts: Accepts,
+    fragments: &[SourceFragment<ResolvedImagePath>],
+) -> Result<String> {
+    for fragment in fragments {
+        ensure_fragment_matches_contract(accepts, fragment)?;
+    }
+    let markdown = fragments
+        .iter()
+        .map(SourceFragment::markdown)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut body = String::new();
+    html::push_html(&mut body, Parser::new_ext(&markdown, Options::empty()));
+    Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
+}
+
+fn render_heading_inline_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+    ensure_fragment_matches_contract(Accepts::Inline, fragment)?;
+    Ok(render_heading_inline(fragment.markdown()))
 }
 
 /// A tagged code block is highlighted at build time into `hl-*` classed
@@ -168,6 +194,7 @@ fn render_code_fragment(
     fragment: &SourceFragment<ResolvedImagePath>,
     highlighter: &Highlighter,
 ) -> Result<String> {
+    ensure_fragment_matches_contract(Accepts::Code, fragment)?;
     match fragment.language() {
         Some(language) => highlighter
             .highlight_html(fragment.code_text(), language, fragment.line())
@@ -177,19 +204,61 @@ fn render_code_fragment(
 }
 
 fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+    ensure_fragment_matches_contract(Accepts::Image, fragment)?;
     match fragment.kind() {
         FragmentKind::Image { alt, src } => Ok(format!(
             r#"<img src="{}" alt="{}">"#,
             encode_double_quoted_attribute(src.as_str()),
             encode_double_quoted_attribute(alt),
         )),
-        other => Err(BuildError::new(
-            ErrorKind::Layout,
-            Some(fragment.line()),
-            format!("expected image fragment, got {other}"),
-            "keep image slots mapped only to image fragments",
-        )),
+        FragmentKind::Heading { .. }
+        | FragmentKind::Paragraph
+        | FragmentKind::Text
+        | FragmentKind::Code
+        | FragmentKind::List
+        | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
     }
+}
+
+fn ensure_fragment_matches_contract(
+    accepts: Accepts,
+    fragment: &SourceFragment<ResolvedImagePath>,
+) -> Result<()> {
+    if accepts_fragment(accepts, fragment) {
+        return Ok(());
+    }
+    let expected = expected_fragment_label(accepts);
+    Err(BuildError::new(
+        ErrorKind::Layout,
+        Some(fragment.line()),
+        format!("expected {expected} fragment, got {}", fragment.kind()),
+        format!("keep {accepts} slots mapped only to {expected} fragments"),
+    ))
+}
+
+fn expected_fragment_label(accepts: Accepts) -> &'static str {
+    match accepts {
+        Accepts::Inline => "heading",
+        Accepts::Blocks => "block",
+        Accepts::Text => "text",
+        Accepts::Code => "code",
+        Accepts::Image => "image",
+        Accepts::List => "list",
+    }
+}
+
+fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePath>) -> bool {
+    matches!(
+        (accepts, fragment.kind()),
+        (Accepts::Inline, FragmentKind::Heading { .. })
+            | (Accepts::Blocks, FragmentKind::Heading { .. })
+            | (Accepts::Blocks, FragmentKind::Paragraph)
+            | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Text, FragmentKind::Text)
+            | (Accepts::Code, FragmentKind::Code)
+            | (Accepts::Image, FragmentKind::Image { .. })
+            | (Accepts::List, FragmentKind::List)
+    )
 }
 
 fn render_heading_inline(markdown: &str) -> String {
@@ -887,7 +956,7 @@ mod tests {
         layout::parse_layout,
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
-        phase::{CheckedSlide, DeckSettings, PlannedTime},
+        phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
     };
 
     fn parse_markdown(
@@ -1019,14 +1088,18 @@ mod tests {
         )
         .unwrap();
         let hero = SlotName::new("hero").unwrap();
+        let contract = layout.slot("hero").unwrap().clone();
         let mut slots = BTreeMap::new();
         slots.insert(
             hero,
-            vec![SourceFragment::image(
-                3,
-                "<Diagram>, \"Notes\" & emoji 🎉",
-                ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
-            )],
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::image(
+                    3,
+                    "<Diagram>, \"Notes\" & emoji 🎉",
+                    ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
+                )],
+            ),
         );
         let checked = Deck::checked(
             DeckSettings::default(),
@@ -1087,6 +1160,50 @@ mod tests {
         let atx_html = render_checked(atx).slides()[0].html().to_owned();
         assert!(atx_html.contains(r#"<span class="slot-title">Architecture</span>"#));
         assert!(!atx_html.contains("Architecture #"));
+    }
+
+    #[test]
+    fn renders_heading_paragraph_and_list_in_blocks_slot_as_block_html() {
+        let markdown = r#"# Title
+
+::: {slot=left}
+
+## Block Heading
+
+Paragraph after heading.
+
+- First
+- Second
+
+:::
+"#;
+        let layout = parse_layout(
+            "two-column",
+            r#"<section>
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <slot name="left" accepts="blocks" arity="1..*"></slot>
+</section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rendered = render_checked(checked);
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"<div class="slot-left">"#));
+        assert!(html.contains("<h2>Block Heading</h2>"));
+        assert!(html.contains("<p>Paragraph after heading.</p>"));
+        assert!(html.contains("<ul>"));
+        assert!(html.contains("<li>First</li>"));
+        assert!(html.contains("<li>Second</li>"));
+        assert!(!html.contains(r#"<span class="slot-left">"#));
     }
 
     #[test]
