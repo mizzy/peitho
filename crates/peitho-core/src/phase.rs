@@ -286,8 +286,14 @@ pub struct CheckedSlide<S = RawImagePath> {
     index: usize,
     key: SlideKey,
     layout: Layout,
-    slots: BTreeMap<SlotName, Vec<SourceFragment<S>>>,
+    slots: BTreeMap<SlotName, CheckedSlot<S>>,
     notes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedSlot<S = RawImagePath> {
+    contract: SlotContract,
+    fragments: Vec<SourceFragment<S>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -357,7 +363,7 @@ impl<S> CheckedSlide<S> {
         index: usize,
         key: SlideKey,
         layout: Layout,
-        slots: BTreeMap<SlotName, Vec<SourceFragment<S>>>,
+        slots: BTreeMap<SlotName, CheckedSlot<S>>,
         notes: Option<String>,
     ) -> Self {
         Self {
@@ -381,7 +387,7 @@ impl<S> CheckedSlide<S> {
         &self.key
     }
 
-    pub(crate) fn slots(&self) -> &BTreeMap<SlotName, Vec<SourceFragment<S>>> {
+    pub(crate) fn slots(&self) -> &BTreeMap<SlotName, CheckedSlot<S>> {
         &self.slots
     }
 
@@ -393,8 +399,26 @@ impl<S> CheckedSlide<S> {
         let title = SlotName::new("title").ok()?;
         self.slots
             .get(&title)?
+            .fragments()
             .iter()
             .find_map(SourceFragment::heading_text)
+    }
+}
+
+impl<S> CheckedSlot<S> {
+    pub(crate) fn new(contract: SlotContract, fragments: Vec<SourceFragment<S>>) -> Self {
+        Self {
+            contract,
+            fragments,
+        }
+    }
+
+    pub fn contract(&self) -> &SlotContract {
+        &self.contract
+    }
+
+    pub fn fragments(&self) -> &[SourceFragment<S>] {
+        &self.fragments
     }
 }
 
@@ -473,7 +497,11 @@ where
         let slide_key_for_error = key.as_str().to_owned();
         let mut resolved_slots = BTreeMap::new();
 
-        for (slot, fragments) in slots {
+        for (slot, checked_slot) in slots {
+            let CheckedSlot {
+                contract,
+                fragments,
+            } = checked_slot;
             let mut resolved_fragments = Vec::with_capacity(fragments.len());
             for fragment in fragments {
                 let line = fragment.line();
@@ -500,7 +528,7 @@ where
                 })?;
                 resolved_fragments.push(resolved);
             }
-            resolved_slots.insert(slot, resolved_fragments);
+            resolved_slots.insert(slot, CheckedSlot::new(contract, resolved_fragments));
         }
 
         slides.push(CheckedSlide::new(index, key, layout, resolved_slots, notes));
@@ -718,13 +746,17 @@ mod tests {
         )
         .unwrap();
         let hero = SlotName::new("hero").unwrap();
+        let contract = layout.slot("hero").unwrap().clone();
         let mut slots = BTreeMap::new();
         slots.insert(
             hero,
-            vec![
-                SourceFragment::image(3, "A", RawImagePath::new_unchecked("a.png".into())),
-                SourceFragment::image(5, "B", RawImagePath::new_unchecked("b.png".into())),
-            ],
+            CheckedSlot::new(
+                contract,
+                vec![
+                    SourceFragment::image(3, "A", RawImagePath::new_unchecked("a.png".into())),
+                    SourceFragment::image(5, "B", RawImagePath::new_unchecked("b.png".into())),
+                ],
+            ),
         );
         let deck = Deck::checked(
             DeckSettings::default(),

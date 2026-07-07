@@ -833,6 +833,30 @@ fn lightning_talk_example_declares_five_minute_planned_duration() {
 }
 
 #[test]
+fn two_column_example_preserves_blocks_slot_paragraph_after_heading() {
+    let out = tempdir().unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(workspace_root())
+        .args([
+            "build",
+            "examples/two-column/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 3 slide(s)"));
+
+    let html = fs::read_to_string(out.path().join("slides/001-vs.html")).unwrap();
+    assert!(html.contains("<h2>慣習マッピング</h2>"));
+    assert!(html.contains("見出しは<code>title</code>、コードは<code>code</code>、それ以外はまとめて<code>body</code>。"));
+    assert!(html.contains("<h2>明示指定</h2>"));
+    assert!(html.contains("複数の<code>blocks</code> slotを持つレイアウト"));
+}
+
+#[test]
 fn lightning_talk_example_declares_agenda_sections() {
     let out = tempdir().unwrap();
 

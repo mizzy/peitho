@@ -4,7 +4,10 @@ use crate::{
     domain::{Accepts, FragmentKind, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
     layout::Layout,
-    phase::{Checked, CheckedSlide, Deck, Mapped, MappedSlide, MappedSlot, UnassignedFragment},
+    phase::{
+        Checked, CheckedSlide, CheckedSlot, Deck, Mapped, MappedSlide, MappedSlot,
+        UnassignedFragment,
+    },
 };
 
 pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
@@ -14,11 +17,26 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
         let slide_number = slide.index + 1;
         let slide_key = slide.key.as_str().to_owned();
         check_slide(&slide).map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
+        let mut mapped_slots = slide.slots;
         let checked_slots = slide
-            .slots
-            .into_iter()
-            .map(|(slot, mapped_slot)| (slot, mapped_slot.fragments().to_vec()))
+            .layout
+            .slots()
+            .iter()
+            .map(|(slot, contract)| {
+                let (checked_contract, fragments) = mapped_slots
+                    .remove(slot)
+                    .map(|mapped_slot| {
+                        (
+                            mapped_slot.contract().clone(),
+                            mapped_slot.fragments().to_vec(),
+                        )
+                    })
+                    .unwrap_or_else(|| (contract.clone(), Vec::new()));
+                (slot.clone(), CheckedSlot::new(checked_contract, fragments))
+            })
             .collect();
+        check_no_unknown_mapped_slots(&mapped_slots, &slide.layout)
+            .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         slides.push(CheckedSlide::new(
             slide.index,
             slide.key,
@@ -28,6 +46,29 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
         ));
     }
     Ok(Deck::checked(settings, slides))
+}
+
+fn check_no_unknown_mapped_slots(
+    mapped_slots: &BTreeMap<SlotName, MappedSlot>,
+    layout: &Layout,
+) -> Result<()> {
+    if mapped_slots.is_empty() {
+        return Ok(());
+    }
+    let names = mapped_slots
+        .keys()
+        .map(SlotName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(BuildError::new(
+        ErrorKind::Layout,
+        None,
+        format!(
+            "mapped slide for layout '{}' contains slot(s) not declared by layout: {names}",
+            layout.name()
+        ),
+        "keep mapping output synchronized with the layout slot contracts",
+    ))
 }
 
 /// Validate one mapped slide against the layout it carries. Also used by
@@ -139,7 +180,7 @@ fn check_no_unassigned(unassigned: &[UnassignedFragment]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        domain::{RawImagePath, SlideKey},
+        domain::{Arity, RawImagePath, SlideKey, SlotContract},
         error::ErrorKind,
         layout::parse_layout,
         mapping::map_by_convention,
@@ -318,6 +359,51 @@ mod tests {
         };
 
         check_slide(&slide).unwrap();
+    }
+
+    #[test]
+    fn rejects_mapped_slot_not_declared_by_layout_before_checked_conversion() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let title = SlotName::new("title").unwrap();
+        let extra = SlotName::new("extra").unwrap();
+        let mut title_slot = MappedSlot::new(layout.slot_by_name(&title).unwrap().clone());
+        title_slot.push(SourceFragment::heading(1, 1, "# Title", "Title"));
+        let mut extra_slot = MappedSlot::new(SlotContract {
+            name: extra.clone(),
+            accepts: Accepts::Blocks,
+            arity: Arity::ZeroOrMore,
+        });
+        extra_slot.push(SourceFragment::paragraph(3, "Should not disappear"));
+        let mut slots = BTreeMap::new();
+        slots.insert(title, title_slot);
+        slots.insert(extra, extra_slot);
+        let mapped = Deck::mapped(
+            crate::phase::DeckSettings::default(),
+            vec![MappedSlide {
+                index: 0,
+                key: SlideKey::new("title").unwrap(),
+                layout,
+                slots,
+                unassigned: Vec::new(),
+                notes: None,
+            }],
+        );
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert!(err.to_string().contains("slide 1 ('title')"));
+        assert!(err
+            .to_string()
+            .contains("slot(s) not declared by layout: extra"));
+        assert_eq!(
+            err.help,
+            "keep mapping output synchronized with the layout slot contracts"
+        );
     }
 
     #[test]

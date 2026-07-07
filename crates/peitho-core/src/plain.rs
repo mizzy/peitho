@@ -7,7 +7,8 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
     let mut body = Vec::new();
     let mut code = Vec::new();
 
-    for (slot, fragments) in slide.slots() {
+    for (slot, checked_slot) in slide.slots() {
+        let fragments = checked_slot.fragments();
         match slot.as_str() {
             "title" => {
                 title.extend(
@@ -89,7 +90,7 @@ mod tests {
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown},
-        phase::{Checked, Deck},
+        phase::{Checked, CheckedSlot, Deck},
     };
 
     #[test]
@@ -173,19 +174,18 @@ mod tests {
 
     #[test]
     fn body_slot_image_markdown_produces_no_text() {
+        let layout = all_slots_layout();
         let body = SlotName::new("body").unwrap();
+        let contract = layout.slot("body").unwrap().clone();
         let mut slots = BTreeMap::new();
         slots.insert(
             body,
-            vec![SourceFragment::paragraph(1, "![Alt text](x.png)")],
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::paragraph(1, "![Alt text](x.png)")],
+            ),
         );
-        let slide = CheckedSlide::new(
-            0,
-            SlideKey::new("intro").unwrap(),
-            all_slots_layout(),
-            slots,
-            None,
-        );
+        let slide = CheckedSlide::new(0, SlideKey::new("intro").unwrap(), layout, slots, None);
 
         let text = slide_text(&slide);
 
