@@ -2460,11 +2460,13 @@ exec sleep 30
             ChromeCompletion::PdfWritten {
                 output_path: out.clone(),
             },
-            Duration::from_secs(2),
+            CHROME_ONE_SHOT_TIMEOUT,
         )
         .unwrap();
 
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Well below the child's `sleep 30`: proves the completion signal
+        // triggered the early return, with headroom for loaded CI runners.
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(out.is_file());
         assert!(stdout.is_empty());
     }
@@ -2489,7 +2491,7 @@ printf '%s' '%PDF-test' > "$out"
             ChromeCompletion::PdfWritten {
                 output_path: out.clone(),
             },
-            Duration::from_secs(2),
+            CHROME_ONE_SHOT_TIMEOUT,
         )
         .unwrap();
 
@@ -2541,7 +2543,9 @@ exec sleep 30
         )
         .unwrap_err();
 
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Well below the child's `sleep 30`: proves the deadline killed the
+        // child instead of waiting it out, with headroom for loaded CI runners.
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(err.to_string().contains("timed out"));
     }
 
@@ -2564,7 +2568,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             &fake_chrome,
             &[out.clone().into_os_string()],
             ChromeCompletion::PdfWritten { output_path: out },
-            Duration::from_secs(2),
+            CHROME_ONE_SHOT_TIMEOUT,
         )
         .unwrap_err();
 
