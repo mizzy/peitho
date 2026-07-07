@@ -55,6 +55,8 @@ struct DeckFrontmatter {
     css: Option<AssetPath>,
     #[serde(default)]
     syntaxes: Option<AssetPath>,
+    #[serde(default)]
+    fonts: Option<AssetPath>,
 }
 
 #[derive(Debug)]
@@ -503,6 +505,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.layouts,
         parsed.css,
         parsed.syntaxes,
+        parsed.fonts,
     )
     .map_err(|message| {
         let help = deck_settings_resolution_error_help(&message);
@@ -537,6 +540,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "layouts",
             "css",
             "syntaxes",
+            "fonts",
         ] {
             if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
                 key_lines.entry(key).or_insert(raw.line + index + 1);
@@ -656,7 +660,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -667,6 +671,8 @@ fn frontmatter_help(message: &str) -> &'static str {
         "provide a path (relative to the deck file), or remove the css: key"
     } else if frontmatter_message_mentions_key(message, "syntaxes") {
         "provide a path (relative to the deck file), or remove the syntaxes: key"
+    } else if frontmatter_message_mentions_key(message, "fonts") {
+        "provide a path (relative to the deck file), or remove the fonts: key"
     } else if frontmatter_message_mentions_key(message, "time")
         || message.contains("duration")
         || message.contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE)
@@ -2040,6 +2046,7 @@ mod tests {
         assert!(frontmatter.settings().layouts().is_none());
         assert!(frontmatter.settings().css().is_none());
         assert!(frontmatter.settings().syntaxes().is_none());
+        assert!(frontmatter.settings().fonts().is_none());
         assert_eq!(frontmatter.body_start, 0);
     }
 
@@ -2082,6 +2089,14 @@ mod tests {
             parse_frontmatter("---\ntime: 15m\nsyntaxes: ./syntaxes\n---\n# Intro").unwrap();
 
         assert_eq!(frontmatter.key_line("syntaxes"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_fonts() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\nfonts: ./fonts\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("fonts"), Some(3));
     }
 
     #[test]
@@ -2167,6 +2182,20 @@ mod tests {
         assert_eq!(
             deck.settings().syntaxes().map(|path| path.as_path()),
             Some(Path::new("./syntaxes"))
+        );
+    }
+
+    #[test]
+    fn parses_frontmatter_fonts_key_carries_to_settings() {
+        let deck = parse_markdown(
+            "---\nfonts: ./fonts\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings().fonts().map(|path| path.as_path()),
+            Some(Path::new("./fonts"))
         );
     }
 
@@ -3180,7 +3209,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
         );
     }
 
@@ -3239,6 +3268,23 @@ After list
     }
 
     #[test]
+    fn rejects_empty_fonts_string_with_line_and_help() {
+        let err = parse_markdown(
+            "---\nfonts: \"\"\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("fonts: value is empty"), "{err}");
+        assert_eq!(
+            err.help,
+            "provide a path (relative to the deck file), or remove the fonts: key"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_frontmatter_time_with_line_and_help() {
         for value in ["0", "0s", "-1", "abc", ""] {
             let markdown = format!("---\ntime: {value}\n---\n# Intro");
@@ -3268,6 +3314,10 @@ After list
             (
                 "---\nsyntaxes: \"\"\n---\n# Intro",
                 "provide a path (relative to the deck file), or remove the syntaxes: key",
+            ),
+            (
+                "---\nfonts: \"\"\n---\n# Intro",
+                "provide a path (relative to the deck file), or remove the fonts: key",
             ),
             (
                 "---\ntime: bad-value\n---\n# Intro",
@@ -3348,7 +3398,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
         );
     }
 
@@ -3404,7 +3454,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
         );
     }
 

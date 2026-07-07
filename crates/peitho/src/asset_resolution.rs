@@ -11,6 +11,7 @@ pub struct ResolvedAssets {
     pub layouts: Option<PathBuf>,
     pub css: Option<PathBuf>,
     pub syntaxes: Option<PathBuf>,
+    pub fonts: Option<PathBuf>,
 }
 
 pub fn resolve_assets(
@@ -22,6 +23,7 @@ pub fn resolve_assets(
         layouts: resolve_asset(deck, frontmatter, "layouts", settings.layouts())?,
         css: resolve_asset(deck, frontmatter, "css", settings.css())?,
         syntaxes: resolve_asset(deck, frontmatter, "syntaxes", settings.syntaxes())?,
+        fonts: resolve_asset(deck, frontmatter, "fonts", settings.fonts())?,
     })
 }
 
@@ -94,6 +96,19 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_fonts_path_resolves_relative_to_deck_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("theme").join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let frontmatter = parse("---\nfonts: ./theme/fonts\n---\n# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.fonts, Some(fonts));
+    }
+
+    #[test]
     fn missing_frontmatter_path_reports_key_line_and_help() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -109,6 +124,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_frontmatter_fonts_path_reports_key_line_and_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("---\ntime: 15m\nfonts: ./missing\n---\n# Intro\n");
+
+        let err = resolve_assets(&deck, &frontmatter).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("fonts path does not exist"));
+        assert!(message.contains("line 3"));
+        assert!(message.contains("help: check the fonts: value"));
+        assert!(!message.contains("-->"));
+    }
+
+    #[test]
     fn deck_adjacent_directory_is_used_without_frontmatter_key() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -119,5 +149,18 @@ mod tests {
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
         assert_eq!(assets.css, Some(css));
+    }
+
+    #[test]
+    fn deck_adjacent_fonts_directory_is_used_without_frontmatter_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.fonts, Some(fonts));
     }
 }

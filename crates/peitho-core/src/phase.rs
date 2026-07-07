@@ -92,6 +92,7 @@ pub struct DeckSettings {
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
     syntaxes: Option<AssetPath>,
+    fonts: Option<AssetPath>,
 }
 
 impl DeckSettings {
@@ -101,6 +102,7 @@ impl DeckSettings {
     /// invariant is enforced only by `finalize_section_settings` at the end of
     /// parsing. Direct callers of this constructor must uphold that invariant
     /// themselves.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         planned_time: Option<PlannedTime>,
         aspect_ratio: AspectRatio,
@@ -109,6 +111,7 @@ impl DeckSettings {
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
         syntaxes: Option<AssetPath>,
+        fonts: Option<AssetPath>,
     ) -> std::result::Result<Self, String> {
         let resolution =
             resolution.unwrap_or_else(|| Resolution::from_aspect_ratio_default(aspect_ratio));
@@ -122,6 +125,7 @@ impl DeckSettings {
             layouts,
             css,
             syntaxes,
+            fonts,
         })
     }
 
@@ -151,6 +155,10 @@ impl DeckSettings {
 
     pub fn syntaxes(&self) -> Option<&AssetPath> {
         self.syntaxes.as_ref()
+    }
+
+    pub fn fonts(&self) -> Option<&AssetPath> {
+        self.fonts.as_ref()
     }
 
     pub(crate) fn with_sections(mut self, sections: Vec<DeckSection>) -> Self {
@@ -594,6 +602,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -620,6 +629,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
@@ -635,6 +645,7 @@ mod tests {
             AspectRatio::Ratio4To3,
             None,
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -655,6 +666,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
 
@@ -668,6 +680,7 @@ mod tests {
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("16x9").unwrap()),
             Vec::new(),
+            None,
             None,
             None,
             None,
