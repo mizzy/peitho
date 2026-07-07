@@ -29,6 +29,7 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 - **Build-time syntax highlighting** — code blocks with a language tag are turned into `hl-*` class spans by syntect at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering)
 - **Time tracking with agenda sections** — declare a planned time in frontmatter (`time: 15m`) and, optionally, per-section budgets on page-settings comments (`{"section":"Setup","time":"1m"}`). The presenter agenda shows planned vs. actual per section in real time. Section totals must equal the deck's planned time — mismatches are build errors with line numbers
 - **Speaker notes as HTML comments** — non-JSON HTML comments in a slide body become that slide's speaker note (Marp / k1LoW/deck-style). Notes ride only into the presenter view; `dist/` never contains them (the publish contamination check enforces this)
+- **One-command preview loop** — `peitho preview` watches the deck and assets, rebuilds into a volatile preview cache, serves it locally, and reloads the browser while preserving the current slide and overview mode
 - **Keynote-style presenting** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Space starts/pauses the timer; arrows navigate; Esc closes everything
 
 ![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
@@ -66,7 +67,12 @@ The deck argument defaults to `deck.md` in the current directory, so it can be o
 # Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
 peitho build            # same as: peitho build deck.md
 
-# Rebuild on every save
+# Daily editing loop: watch, serve, open, and reload on every successful rebuild
+peitho preview
+
+# Preview controls: o toggles single-slide and tile overview modes; Esc exits overview; arrows move; Enter/click opens the selected tile
+
+# Rebuild on every save for an external server or pipeline
 peitho build --watch
 
 # Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
@@ -90,7 +96,7 @@ peitho completions zsh
 
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
-When developing the presentation shell (TS), rebuild `dist/shell.js` with `cd packages/peitho-present && npm ci && npm run build` (it is committed; CI checks for drift).
+When developing the presentation shell (TS), rebuild `dist/shell.js` and `dist/preview.js` with `cd packages/peitho-present && npm ci && npm run build` (both are committed; CI checks for drift).
 
 ## Writing a deck
 
@@ -190,6 +196,7 @@ The Makefile targets are handy for smoke-testing (`make help` for a list; `make 
 ```
 Markdown ─→ peitho build (parse, map, 4-stage check. Deterministic, pure functions)
               ├─ emit distribute → dist/ (distribution only; no shell or notes mixed in)
+              ├─ emit preview    → .peitho/preview-cache/ (preview shell; volatile)
               └─ emit present    → .peitho/present-cache/ (presentation shell; volatile)
 ```
 

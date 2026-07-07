@@ -15,7 +15,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use miette::IntoDiagnostic;
 use notify::{PollWatcher, RecursiveMode};
-use notify_debouncer_mini::{new_debouncer_opt, Config as DebounceConfig, DebounceEventResult};
+use notify_debouncer_mini::{
+    new_debouncer_opt, Config as DebounceConfig, DebounceEventResult, Debouncer,
+};
 use sha2::{Digest, Sha256};
 
 mod asset_resolution;
@@ -48,6 +50,13 @@ struct WatchRoot {
 struct WatchTargets {
     roots: Vec<WatchRoot>,
     assets: ResolvedAssets,
+}
+
+struct WatchRuntime {
+    input: PathBuf,
+    targets: WatchTargets,
+    debouncer: Debouncer<PollWatcher>,
+    rx: mpsc::Receiver<DebounceEventResult>,
 }
 
 impl WatchTargets {
@@ -200,6 +209,12 @@ struct PresentOptions {
     presenter_windowed: bool,
 }
 
+struct PreviewOptions {
+    input: PathBuf,
+    port: u16,
+    no_open: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "peitho")]
 #[command(version)]
@@ -218,6 +233,14 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         watch: bool,
+    },
+    Preview {
+        #[arg(default_value = "deck.md")]
+        input: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
     },
     Present {
         #[arg(default_value = "deck.md")]
@@ -270,8 +293,10 @@ const BUILTIN_BASE_CSS: &str = include_str!("../../../themes/base.css");
 /// The committed esbuild bundle; CI rebuilds it and fails on drift, the same
 /// discipline as the generated TS types in bindings/.
 const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/dist/shell.js");
+const BUILTIN_PREVIEW_JS: &str = include_str!("../../../packages/peitho-present/dist/preview.js");
 
 const PRESENT_CACHE: &str = ".peitho/present-cache";
+const PREVIEW_CACHE: &str = ".peitho/preview-cache";
 const PRESENTATION_ONLY_DIST_FILES: &[&str] =
     &["present.html", "presenter.html", "notes.json", "shell.js"];
 
@@ -286,6 +311,15 @@ fn main() -> miette::Result<()> {
                 build(&options)
             }
         }
+        Command::Preview {
+            input,
+            port,
+            no_open,
+        } => preview(PreviewOptions {
+            input,
+            port,
+            no_open,
+        }),
         Command::Present {
             input,
             shell,
@@ -386,14 +420,18 @@ fn rebuild_once_for_watch(
     Ok(())
 }
 
-fn handle_watch_paths(
-    options: &BuildOptions,
+fn handle_watch_paths_with_rebuild<F>(
+    input: &Path,
     targets: &mut WatchTargets,
     watcher: &mut dyn WatchController,
     changed_paths: &[PathBuf],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
-) -> miette::Result<()> {
+    mut rebuild: F,
+) -> miette::Result<()>
+where
+    F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
+{
     let relevant = changed_paths
         .iter()
         .any(|changed| targets.is_relevant_change(changed));
@@ -401,18 +439,62 @@ fn handle_watch_paths(
     if relevant {
         if changed_paths
             .iter()
-            .any(|changed| same_watch_path(&options.input, changed))
+            .any(|changed| same_watch_path(input, changed))
         {
-            refresh_watch_targets_after_deck_change(&options.input, targets, watcher, stderr)?;
+            refresh_watch_targets_after_deck_change(input, targets, watcher, stderr)?;
         }
-        rebuild_once_for_watch(options, stdout, stderr)?;
+        rebuild(stdout, stderr)?;
     }
 
     Ok(())
 }
 
 fn watch_build(options: BuildOptions) -> miette::Result<()> {
-    let mut targets = resolve_watch_targets(&options.input)?;
+    let (runtime, ()) = run_after_watch_registration(&options.input, prepare_watch_loop, || {
+        println!("watching deck and resolved asset paths");
+        rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())
+    })?;
+    watch_paths_loop(runtime, move |stdout, stderr| {
+        rebuild_once_for_watch(&options, stdout, stderr)
+    })
+}
+
+fn run_after_watch_registration<W, T, P, A>(
+    input: &Path,
+    prepare_watch: P,
+    action: A,
+) -> miette::Result<(W, T)>
+where
+    P: FnOnce(PathBuf) -> miette::Result<W>,
+    A: FnOnce() -> miette::Result<T>,
+{
+    let watch = prepare_watch(input.to_path_buf())?;
+    let value = action()?;
+    Ok((watch, value))
+}
+
+fn watch_paths_loop<F>(mut runtime: WatchRuntime, mut rebuild: F) -> miette::Result<()>
+where
+    F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
+{
+    while let Ok(result) = runtime.rx.recv() {
+        let mut watcher = NotifyWatchController::new(runtime.debouncer.watcher());
+        handle_watch_event_result(
+            result,
+            &runtime.input,
+            &mut runtime.targets,
+            &mut watcher,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+            &mut rebuild,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn prepare_watch_loop(input: PathBuf) -> miette::Result<WatchRuntime> {
+    let targets = resolve_watch_targets_or_deck_only(&input);
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
     let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(200));
     let debounce_config = DebounceConfig::default()
@@ -427,41 +509,67 @@ fn watch_build(options: BuildOptions) -> miette::Result<()> {
 
     {
         let mut watcher = NotifyWatchController::new(debouncer.watcher());
-        watch_all_dirs(&mut watcher, &targets.watch_dirs())?;
+        register_watch_target_dirs(&targets, &mut watcher)?;
     }
 
-    println!("watching deck and resolved asset paths");
-    rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())?;
+    Ok(WatchRuntime {
+        input,
+        targets,
+        debouncer,
+        rx,
+    })
+}
 
-    for result in rx {
-        match result {
-            Ok(events) => {
-                let paths = events
-                    .into_iter()
-                    .map(|event| event.path)
-                    .collect::<Vec<_>>();
-                let mut watcher = NotifyWatchController::new(debouncer.watcher());
-                handle_watch_paths(
-                    &options,
-                    &mut targets,
-                    &mut watcher,
-                    &paths,
-                    &mut std::io::stdout(),
-                    &mut std::io::stderr(),
-                )?;
-            }
-            Err(err) => {
-                eprintln!("watch error: {err}");
-            }
-        }
-    }
+fn register_watch_target_dirs(
+    targets: &WatchTargets,
+    watcher: &mut dyn WatchController,
+) -> miette::Result<()> {
+    watch_all_dirs(watcher, &targets.watch_dirs())
+}
 
-    Ok(())
+fn handle_watch_event_result<F>(
+    result: DebounceEventResult,
+    input: &Path,
+    targets: &mut WatchTargets,
+    watcher: &mut dyn WatchController,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    rebuild: F,
+) -> miette::Result<()>
+where
+    F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
+{
+    let events = result.map_err(|err| {
+        miette::miette!(
+            "watch error: {err}\nhelp: restart the command after checking file watcher permissions"
+        )
+    })?;
+    let paths = events
+        .into_iter()
+        .map(|event| event.path)
+        .collect::<Vec<_>>();
+    handle_watch_paths_with_rebuild(input, targets, watcher, &paths, stdout, stderr, rebuild)
 }
 
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
     let assets = resolve_deck_assets(input)?;
     Ok(WatchTargets::new(input.to_path_buf(), assets))
+}
+
+fn resolve_watch_targets_or_deck_only(input: &Path) -> WatchTargets {
+    resolve_watch_targets(input).unwrap_or_else(|_| deck_only_watch_targets(input))
+}
+
+fn deck_only_watch_targets(input: &Path) -> WatchTargets {
+    WatchTargets::new(
+        input.to_path_buf(),
+        ResolvedAssets {
+            layouts: None,
+            css: None,
+            syntaxes: None,
+            fonts: None,
+        },
+    )
 }
 
 fn resolve_deck_assets(input: &Path) -> miette::Result<ResolvedAssets> {
@@ -1365,7 +1473,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         return Ok(());
     }
 
-    let server = server::PresentServer::bind(cache.clone(), options.port)?;
+    let server = server::PresentServer::bind(cache.clone(), options.port, "present.html")?;
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
     let browser_plan = if options.no_open {
@@ -1394,6 +1502,155 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         browser::quit_profile_instances();
     }
     result
+}
+
+fn preview(options: PreviewOptions) -> miette::Result<()> {
+    let cache = PathBuf::from(PREVIEW_CACHE);
+    let (watch, root) = run_after_watch_registration(&options.input, prepare_watch_loop, || {
+        emit_initial_preview_root(&options.input, &cache, &mut std::io::stderr())
+    })?;
+
+    let server = server::PresentServer::bind(root, options.port, "index.html")?;
+    let url = server.preview_url();
+    let _watch = spawn_preview_watch(watch, cache, server.clone());
+    println!("serving preview at {url}");
+    std::io::stdout().flush().into_diagnostic()?;
+    if !options.no_open {
+        open_preview_browser_or_warn(&url, &mut std::io::stderr(), open_default_browser)?;
+    }
+    server.serve_forever()
+}
+
+fn spawn_preview_watch(
+    watch: WatchRuntime,
+    cache: PathBuf,
+    server: server::PresentServer,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if let Err(err) = watch_preview(watch, cache, server) {
+            eprintln!("preview watch error: {err}");
+            std::process::exit(1);
+        }
+    })
+}
+
+fn watch_preview(
+    watch: WatchRuntime,
+    cache: PathBuf,
+    server: server::PresentServer,
+) -> miette::Result<()> {
+    let rebuild_input = watch.input.clone();
+    watch_paths_loop(watch, move |stdout, stderr| {
+        rebuild_preview_once_for_watch(&rebuild_input, &cache, &server, stdout, stderr)
+    })
+}
+
+trait PreviewReloadTarget {
+    fn generation(&self) -> u64;
+    fn swap_root(&self, root: PathBuf);
+    fn broadcast_reload(&self) -> u64;
+}
+
+impl PreviewReloadTarget for server::PresentServer {
+    fn generation(&self) -> u64 {
+        server::PresentServer::generation(self)
+    }
+
+    fn swap_root(&self, root: PathBuf) {
+        server::PresentServer::swap_root(self, root);
+    }
+
+    fn broadcast_reload(&self) -> u64 {
+        server::PresentServer::broadcast_reload(self)
+    }
+}
+
+fn emit_initial_preview_root(
+    input: &Path,
+    cache: &Path,
+    stderr: &mut dyn Write,
+) -> miette::Result<PathBuf> {
+    match build_artifacts(input) {
+        Ok(artifacts) => {
+            let root = emit_preview_cache_generation(cache, 0, &artifacts)?;
+            prune_preview_cache_generations(cache, 0)?;
+            Ok(root)
+        }
+        Err(err) => {
+            writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+            stderr.flush().into_diagnostic()?;
+            let root = emit_preview_error_page(cache, 0, &err.to_string())?;
+            prune_preview_cache_generations(cache, 0)?;
+            Ok(root)
+        }
+    }
+}
+
+fn rebuild_preview_once_for_watch(
+    input: &Path,
+    cache: &Path,
+    server: &impl PreviewReloadTarget,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> miette::Result<()> {
+    match build_artifacts(input).and_then(|artifacts| {
+        let generation = server.generation() + 1;
+        let slide_count = artifacts.slide_count;
+        let root = emit_preview_cache_generation(cache, generation, &artifacts)?;
+        server.swap_root(root);
+        server.broadcast_reload();
+        prune_preview_cache_generations(cache, generation)?;
+        Ok(slide_count)
+    }) {
+        Ok(slide_count) => {
+            writeln!(
+                stdout,
+                "rebuilt {slide_count} slide(s) into {}",
+                cache.display()
+            )
+            .into_diagnostic()?;
+            stdout.flush().into_diagnostic()?;
+        }
+        Err(err) => {
+            writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+            stderr.flush().into_diagnostic()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn open_default_browser(url: &str) -> miette::Result<()> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "linux") {
+        "xdg-open"
+    } else {
+        return Err(miette::miette!(
+            "cannot open preview browser on this platform\nhelp: pass --no-open and open {url} manually"
+        ));
+    };
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| {
+            miette::miette!(
+                "failed to open preview browser with {program}\nhelp: pass --no-open and open {url} manually\ncaused by: {err}"
+            )
+        })
+}
+
+fn open_preview_browser_or_warn<F>(url: &str, stderr: &mut dyn Write, open: F) -> miette::Result<()>
+where
+    F: FnOnce(&str) -> miette::Result<()>,
+{
+    if let Err(err) = open(url) {
+        writeln!(stderr, "warning: failed to open preview browser: {err}").into_diagnostic()?;
+        writeln!(stderr, "help: open {url} manually").into_diagnostic()?;
+        stderr.flush().into_diagnostic()?;
+    }
+    Ok(())
 }
 
 fn emit_present_cache(
@@ -1443,6 +1700,80 @@ fn emit_present_cache(
         }
     }
     Ok(())
+}
+
+fn emit_preview_cache_generation(
+    cache: &Path,
+    generation: u64,
+    artifacts: &BuildArtifacts,
+) -> miette::Result<PathBuf> {
+    fs::create_dir_all(cache).into_diagnostic()?;
+    let generation_dir = preview_generation_dir(cache, generation);
+    if generation_dir.exists() {
+        fs::remove_dir_all(&generation_dir).into_diagnostic()?;
+    }
+    fs::create_dir_all(&generation_dir).into_diagnostic()?;
+    write_shared_assets(&generation_dir, artifacts)?;
+    write_slide_fragments(&generation_dir, &artifacts.rendered)?;
+    fs::write(
+        generation_dir.join("manifest.json"),
+        &artifacts.manifest_json,
+    )
+    .into_diagnostic()?;
+    fs::write(
+        generation_dir.join("index.html"),
+        peitho_core::render_preview_index(artifacts.rendered.settings().aspect_ratio()),
+    )
+    .into_diagnostic()?;
+    fs::write(generation_dir.join("preview.js"), BUILTIN_PREVIEW_JS).into_diagnostic()?;
+    Ok(generation_dir)
+}
+
+fn emit_preview_error_page(cache: &Path, generation: u64, error: &str) -> miette::Result<PathBuf> {
+    fs::create_dir_all(cache).into_diagnostic()?;
+    let generation_dir = preview_generation_dir(cache, generation);
+    if generation_dir.exists() {
+        fs::remove_dir_all(&generation_dir).into_diagnostic()?;
+    }
+    fs::create_dir_all(&generation_dir).into_diagnostic()?;
+    fs::write(
+        generation_dir.join("index.html"),
+        peitho_core::render_preview_error_index(generation, error),
+    )
+    .into_diagnostic()?;
+    Ok(generation_dir)
+}
+
+fn preview_generation_dir(cache: &Path, generation: u64) -> PathBuf {
+    cache.join(format!("build-{generation}"))
+}
+
+fn prune_preview_cache_generations(cache: &Path, current_generation: u64) -> miette::Result<()> {
+    let Ok(entries) = fs::read_dir(cache) else {
+        return Ok(());
+    };
+    let keep_previous = current_generation.saturating_sub(1);
+    for entry in entries {
+        let entry = entry.into_diagnostic()?;
+        let path = entry.path();
+        if !entry.file_type().into_diagnostic()?.is_dir() {
+            continue;
+        }
+        let Some(generation) = parse_preview_generation_dir(&path) else {
+            continue;
+        };
+        if generation != current_generation && generation != keep_previous {
+            fs::remove_dir_all(path).into_diagnostic()?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_preview_generation_dir(path: &Path) -> Option<u64> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("build-"))
+        .and_then(|generation| generation.parse().ok())
 }
 
 fn ensure_shell_bundle(shell: &Path) -> miette::Result<()> {
@@ -1623,6 +1954,7 @@ fn layout_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
 ---
@@ -2061,13 +2393,14 @@ contexts:
         rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
         fs::write(&fixture.options.input, "# Intro\n\n---\n# Details\n").unwrap();
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2087,13 +2420,14 @@ contexts:
         let mut stderr = Vec::new();
         let unrelated = fixture._dir.path().join("outside").join("ignored.txt");
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             &[unrelated],
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2113,13 +2447,14 @@ contexts:
         stdout.clear();
         stderr.clear();
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             std::slice::from_ref(&fixture.options.out),
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2138,13 +2473,14 @@ contexts:
         fs::write(&temp, "# Atomic one\n\n---\n# Atomic two\n").unwrap();
         fs::rename(&temp, &fixture.options.input).unwrap();
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2176,13 +2512,14 @@ contexts:
         )
         .unwrap();
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2220,13 +2557,14 @@ contexts:
         )
         .unwrap();
 
-        handle_watch_paths(
-            &fixture.options,
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
             &mut fixture.targets,
             &mut watcher,
             std::slice::from_ref(&fixture.options.input),
             &mut stdout,
             &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
         )
         .unwrap();
 
@@ -2239,6 +2577,120 @@ contexts:
         assert!(stderr.contains("layouts path does not exist"));
         assert!(!stderr.contains("restart --watch"));
         assert!(!stderr.contains("watching new asset paths"));
+    }
+
+    #[test]
+    fn shared_watch_path_handler_invokes_injected_rebuild_action() {
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut calls = 0;
+
+        handle_watch_paths_with_rebuild(
+            &fixture.options.input,
+            &mut fixture.targets,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+            |stdout, _stderr| {
+                calls += 1;
+                writeln!(stdout, "custom rebuild").into_diagnostic()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert_eq!(String::from_utf8(stdout).unwrap(), "custom rebuild\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_target_registration_runs_before_initial_rebuild() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        register_watch_target_dirs(&fixture.targets, &mut watcher).unwrap();
+        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
+
+        assert!(watcher
+            .watched
+            .iter()
+            .any(|path| same_watch_path(path, fixture._dir.path())));
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 1 slide(s)"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_startup_runs_registration_before_initial_action() {
+        let events = RefCell::new(Vec::new());
+        let input = PathBuf::from("deck.md");
+
+        let (watch, value) = run_after_watch_registration(
+            &input,
+            |path| {
+                events
+                    .borrow_mut()
+                    .push(format!("watch:{}", path.display()));
+                Ok("watch-runtime")
+            },
+            || {
+                events.borrow_mut().push("initial-build".to_owned());
+                Ok("initial-root")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(watch, "watch-runtime");
+        assert_eq!(value, "initial-root");
+        assert_eq!(
+            &*events.borrow(),
+            &vec!["watch:deck.md".to_owned(), "initial-build".to_owned()]
+        );
+    }
+
+    #[test]
+    fn watch_target_resolution_falls_back_to_deck_parent_when_initial_assets_are_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "---\nlayouts: ./missing-layouts\n---\n# Intro\n").unwrap();
+
+        let targets = resolve_watch_targets_or_deck_only(&deck);
+
+        assert_eq!(targets.roots.len(), 1);
+        assert_eq!(targets.roots[0].path, deck);
+        assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn watch_event_handler_returns_error_when_watcher_reports_error() {
+        let mut fixture = WatchFixture::new("# Intro\n");
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result: DebounceEventResult = Err(notify::Error::generic("backend stopped"));
+
+        let err = handle_watch_event_result(
+            result,
+            &fixture.options.input,
+            &mut fixture.targets,
+            &mut watcher,
+            &mut stdout,
+            &mut stderr,
+            |_stdout, _stderr| Ok(()),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("watch error"));
+        assert!(message.contains("backend stopped"));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -2260,10 +2712,35 @@ contexts:
                 assert!(presenter_windowed);
             }
             Command::Build { .. }
+            | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
             | Command::Completions { .. } => {
                 panic!("expected present command");
+            }
+        }
+    }
+
+    #[test]
+    fn preview_command_defaults_input_and_accepts_port_and_no_open() {
+        let cli = Cli::parse_from(["peitho", "preview", "--port", "4321", "--no-open"]);
+
+        match cli.command {
+            Command::Preview {
+                input,
+                port,
+                no_open,
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(port, 4321);
+                assert!(no_open);
+            }
+            Command::Build { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected preview command");
             }
         }
     }
@@ -2280,6 +2757,7 @@ contexts:
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
             Command::Build { .. }
+            | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Completions { .. } => {
@@ -2297,6 +2775,7 @@ contexts:
                 assert_eq!(shell, Shell::Bash);
             }
             Command::Build { .. }
+            | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. } => {
@@ -2659,6 +3138,180 @@ printf '0 bytes written to file %s\n' "$out" >&2
     }
 
     #[test]
+    fn emit_preview_cache_writes_preview_only_files_in_generation_dir() {
+        let fixture = WatchFixture::new("# Intro\n\n<!-- speaker note -->\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+
+        let generation_dir = emit_preview_cache_generation(&cache, 0, &artifacts).unwrap();
+
+        assert_eq!(generation_dir, cache.join("build-0"));
+        assert!(generation_dir.join("index.html").is_file());
+        assert!(generation_dir.join("preview.js").is_file());
+        assert!(generation_dir.join("peitho.css").is_file());
+        assert!(generation_dir.join("manifest.json").is_file());
+        assert!(generation_dir.join("slides/000-intro.html").is_file());
+        assert!(!generation_dir.join("notes.json").exists());
+        assert!(!generation_dir.join("present.html").exists());
+        assert!(!generation_dir.join("presenter.html").exists());
+        assert!(!generation_dir.join("present.json").exists());
+        assert!(!generation_dir.join("shell.js").exists());
+
+        let index = fs::read_to_string(generation_dir.join("index.html")).unwrap();
+        assert!(index.contains("./preview.js"));
+        assert!(index.contains("mountPreviewShell"));
+        assert!(index.contains("installPreviewKeyboard"));
+        assert!(index.contains("installPreviewReload"));
+    }
+
+    #[test]
+    fn preview_cache_prune_keeps_current_and_previous_generation() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+
+        emit_preview_cache_generation(&cache, 0, &artifacts).unwrap();
+        emit_preview_cache_generation(&cache, 1, &artifacts).unwrap();
+        emit_preview_cache_generation(&cache, 2, &artifacts).unwrap();
+        prune_preview_cache_generations(&cache, 2).unwrap();
+
+        assert!(!cache.join("build-0").exists());
+        assert!(cache.join("build-1").is_dir());
+        assert!(cache.join("build-2").is_dir());
+    }
+
+    #[test]
+    fn preview_watch_rebuild_success_swaps_broadcasts_and_prunes() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let old_root = cache.join("build-0");
+        let previous_root = cache.join("build-1");
+        fs::create_dir_all(&old_root).unwrap();
+        fs::create_dir_all(&previous_root).unwrap();
+        let server = RecordingPreviewReloadTarget::new(1);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_preview_once_for_watch(
+            &fixture.options.input,
+            &cache,
+            &server,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        let current_root = cache.join("build-2");
+        assert!(current_root.join("index.html").is_file());
+        assert!(current_root.join("manifest.json").is_file());
+        assert_eq!(server.generation(), 2);
+        assert_eq!(
+            &*server.events.borrow(),
+            &vec![
+                PreviewReloadEvent::Swap(current_root.clone()),
+                PreviewReloadEvent::Broadcast
+            ]
+        );
+        assert!(!old_root.exists());
+        assert!(previous_root.is_dir());
+        assert!(current_root.is_dir());
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("rebuilt 1 slide(s)"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn preview_watch_rebuild_failure_keeps_existing_root_and_generation() {
+        let fixture =
+            WatchFixture::new("# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let existing_root = cache.join("build-4");
+        fs::create_dir_all(&existing_root).unwrap();
+        let server = RecordingPreviewReloadTarget::new(4);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_preview_once_for_watch(
+            &fixture.options.input,
+            &cache,
+            &server,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(server.generation(), 4);
+        assert!(server.events.borrow().is_empty());
+        assert!(existing_root.is_dir());
+        assert!(!cache.join("build-5").exists());
+        assert!(stdout.is_empty());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("build failed:"));
+        assert!(stderr.contains("slot 'code' got 2 item(s)"));
+    }
+
+    #[test]
+    fn emit_preview_error_page_escapes_error_and_polls_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join(".peitho/preview-cache");
+
+        let generation_dir = emit_preview_error_page(&cache, 0, "bad <deck> & broken").unwrap();
+
+        let html = fs::read_to_string(generation_dir.join("index.html")).unwrap();
+        assert!(html.contains("bad &lt;deck&gt; &amp; broken"));
+        assert!(html.contains(r#"let seq = null;"#));
+        assert!(html.contains("fetch('/sync')"));
+        assert!(html.contains("fetch(`/sync?seq=${seq}`)"));
+        assert!(html.contains("body.generation !== baselineGeneration"));
+        assert!(!html.contains("seq=now"));
+        assert!(!generation_dir.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn initial_preview_root_uses_error_page_when_first_build_fails() {
+        let fixture =
+            WatchFixture::new("# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let mut stderr = Vec::new();
+
+        let root = emit_initial_preview_root(&fixture.options.input, &cache, &mut stderr).unwrap();
+
+        assert_eq!(root, cache.join("build-0"));
+        let html = fs::read_to_string(root.join("index.html")).unwrap();
+        assert!(html.contains("slot 'code' got 2 item(s)"));
+        assert!(!root.join("manifest.json").exists());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("build failed:"));
+        assert!(stderr.contains("slot 'code' got 2 item(s)"));
+    }
+
+    #[test]
+    fn preview_browser_open_failure_is_reported_without_error() {
+        let mut stderr = Vec::new();
+
+        open_preview_browser_or_warn("http://127.0.0.1:4321/", &mut stderr, |_url| {
+            Err(miette::miette!("open failed"))
+        })
+        .unwrap();
+
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("warning: failed to open preview browser"));
+        assert!(stderr.contains("open failed"));
+        assert!(stderr.contains("help: open http://127.0.0.1:4321/ manually"));
+    }
+
+    #[test]
+    fn builtin_preview_shell_matches_committed_bundle() {
+        let committed = fs::read_to_string(
+            workspace_root_for_tests().join("packages/peitho-present/dist/preview.js"),
+        )
+        .unwrap();
+
+        assert_eq!(BUILTIN_PREVIEW_JS, committed);
+    }
+
+    #[test]
     fn image_resolver_handles_bare_deck_filename() {
         let resolver = ImageResolver::new(Path::new("deck.md"));
 
@@ -2688,6 +3341,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Present { .. }
+            | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
             | Command::Completions { .. } => {
@@ -2705,6 +3359,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
             | Command::Completions { .. } => {
@@ -2724,6 +3379,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Completions { .. } => {
@@ -2757,6 +3413,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(watch);
             }
             Command::Present { .. }
+            | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
             | Command::Completions { .. } => {
@@ -2776,6 +3433,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(!watch);
             }
             Command::Present { .. }
+            | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
             | Command::Completions { .. } => {
@@ -2816,6 +3474,45 @@ printf '0 bytes written to file %s\n' "$out" >&2
         }
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum PreviewReloadEvent {
+        Swap(PathBuf),
+        Broadcast,
+    }
+
+    struct RecordingPreviewReloadTarget {
+        generation: Cell<u64>,
+        events: RefCell<Vec<PreviewReloadEvent>>,
+    }
+
+    impl RecordingPreviewReloadTarget {
+        fn new(generation: u64) -> Self {
+            Self {
+                generation: Cell::new(generation),
+                events: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PreviewReloadTarget for RecordingPreviewReloadTarget {
+        fn generation(&self) -> u64 {
+            self.generation.get()
+        }
+
+        fn swap_root(&self, root: PathBuf) {
+            self.events
+                .borrow_mut()
+                .push(PreviewReloadEvent::Swap(root));
+        }
+
+        fn broadcast_reload(&self) -> u64 {
+            let generation = self.generation.get() + 1;
+            self.generation.set(generation);
+            self.events.borrow_mut().push(PreviewReloadEvent::Broadcast);
+            generation
+        }
+    }
+
     struct WatchFixture {
         _dir: tempfile::TempDir,
         options: BuildOptions,
@@ -2852,5 +3549,13 @@ printf '0 bytes written to file %s\n' "$out" >&2
             syntaxes: None,
             fonts: None,
         }
+    }
+
+    fn workspace_root_for_tests() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .to_path_buf()
     }
 }

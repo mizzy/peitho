@@ -177,7 +177,7 @@ fn present_server_serves_manifest_over_http() {
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
     fs::write(cache.join("manifest.json"), r#"{"version":1}"#).unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
     let mut stream = TcpStream::connect(addr).unwrap();
@@ -194,13 +194,42 @@ fn present_server_serves_manifest_over_http() {
 }
 
 #[test]
+fn present_server_serves_new_root_after_swap_root() {
+    let dir = tempdir().unwrap();
+    let old_root = dir.path().join("old");
+    let new_root = dir.path().join("new");
+    fs::create_dir_all(&old_root).unwrap();
+    fs::create_dir_all(&new_root).unwrap();
+    fs::write(old_root.join("index.html"), "<!doctype html>old root").unwrap();
+    fs::write(new_root.join("index.html"), "<!doctype html>new root").unwrap();
+
+    let server = peitho::server::PresentServer::bind(old_root, 0, "index.html").unwrap();
+    let addr = server.addr();
+    let serving = server.clone();
+    let handle = thread::spawn(move || {
+        serving.handle_one();
+        serving.handle_one();
+    });
+
+    let first = get_http(addr, "/");
+    server.swap_root(new_root);
+    let second = get_http(addr, "/");
+    handle.join().unwrap();
+
+    assert!(first.contains("200 OK"));
+    assert!(first.contains("old root"));
+    assert!(second.contains("200 OK"));
+    assert!(second.contains("new root"));
+}
+
+#[test]
 fn present_server_relays_sync_post_to_long_poll_subscriber() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache");
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
@@ -219,6 +248,7 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
     assert!(event.contains(r#""message":{"index":1}"#));
     assert!(event.contains(r#""index":1"#));
     assert!(event.contains(r#""swapped":false"#));
+    assert!(event.contains(r#""generation":0"#));
 
     drop(poll);
     drop(handle);
@@ -231,7 +261,7 @@ fn present_server_poll_response_includes_current_replay_state() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
@@ -251,6 +281,7 @@ fn present_server_poll_response_includes_current_replay_state() {
     assert!(event.contains(r#""message":{"index":3}"#));
     assert!(event.contains(r#""index":3"#));
     assert!(event.contains(r#""swapped":true"#));
+    assert!(event.contains(r#""generation":0"#));
 
     drop(poll);
     drop(handle);
@@ -263,7 +294,7 @@ fn present_server_relays_swap_sync_post_to_long_poll_subscriber() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
@@ -282,6 +313,7 @@ fn present_server_relays_swap_sync_post_to_long_poll_subscriber() {
     assert!(event.contains(r#""message":{"swapped":true}"#));
     assert!(event.contains(r#""index":null"#));
     assert!(event.contains(r#""swapped":true"#));
+    assert!(event.contains(r#""generation":0"#));
 
     drop(poll);
     drop(handle);
@@ -294,7 +326,7 @@ fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
@@ -310,9 +342,59 @@ fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
     assert!(event.contains("200 OK"));
     assert!(event.contains(r#""seq":1"#));
     assert!(event.contains(r#""message":{"close":true}"#));
+    assert!(event.contains(r#""generation":0"#));
 
     drop(poll);
     drop(handle);
+}
+
+#[test]
+fn present_server_broadcast_reload_reaches_long_poll_subscriber() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
+    let addr = server.addr();
+    let seq = server.broadcast_reload();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = get_http(addr, "/sync?seq=0");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert!(response.contains("200 OK"));
+    assert_eq!(seq, 1);
+    assert_eq!(body["seq"], 1);
+    assert!(body["message"].is_null());
+    assert!(body["index"].is_null());
+    assert_eq!(body["swapped"], false);
+    assert_eq!(body["generation"], 1);
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_reload_does_not_change_handshake_replay_state() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
+    let addr = server.addr();
+    assert_eq!(server.broadcast_reload(), 1);
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = get_http(addr, "/sync");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert!(response.contains("200 OK"));
+    assert_eq!(body["seq"], 1);
+    assert!(body["message"].is_null());
+    assert!(body["index"].is_null());
+    assert_eq!(body["swapped"], false);
+    assert_eq!(body["generation"], 1);
+    handle.join().unwrap();
 }
 
 #[test]
@@ -322,7 +404,7 @@ fn present_server_shuts_down_after_close_sync_post() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
@@ -339,7 +421,7 @@ fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_me
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || {
         server.handle_one();
@@ -361,6 +443,7 @@ fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_me
     assert!(response.contains(r#""message":null"#));
     assert!(response.contains(r#""index":null"#));
     assert!(response.contains(r#""swapped":false"#));
+    assert!(response.contains(r#""generation":0"#));
     assert!(!response.contains(r#""close":true"#));
     handle.join().unwrap();
 }
@@ -372,17 +455,18 @@ fn present_server_sync_initial_handshake_returns_replay_state_defaults() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
-    let response = get_http(addr, "/sync?seq=now");
+    let response = get_http(addr, "/sync");
     let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
 
     assert_eq!(body["seq"], 0);
     assert!(body["message"].is_null());
     assert!(body["index"].is_null());
     assert_eq!(body["swapped"], false);
+    assert_eq!(body["generation"], 0);
     handle.join().unwrap();
 }
 
@@ -393,7 +477,7 @@ fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || {
         server.handle_one();
@@ -410,6 +494,7 @@ fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
     assert!(body["message"].is_null());
     assert_eq!(body["index"], 2);
     assert_eq!(body["swapped"], true);
+    assert_eq!(body["generation"], 0);
     handle.join().unwrap();
 }
 
@@ -420,7 +505,7 @@ fn present_server_sync_close_does_not_clobber_replay_state() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || {
         server.handle_one();
@@ -439,6 +524,7 @@ fn present_server_sync_close_does_not_clobber_replay_state() {
     assert!(body["message"].is_null());
     assert_eq!(body["index"], 2);
     assert_eq!(body["swapped"], true);
+    assert_eq!(body["generation"], 0);
     handle.join().unwrap();
 }
 
@@ -449,11 +535,28 @@ fn present_server_rejects_invalid_sync_post_body() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
     let response = post_sync(addr, r#"{"key":"x"}"#);
+
+    assert!(response.contains("400 Bad Request"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_rejects_reload_sync_post_body() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = post_sync(addr, r#"{"reload":true}"#);
 
     assert!(response.contains("400 Bad Request"));
     handle.join().unwrap();
@@ -466,7 +569,7 @@ fn present_server_rejects_non_boolean_swap_sync_post_body() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
@@ -483,7 +586,7 @@ fn present_server_rejects_swap_sync_post_body_with_extra_fields() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
@@ -500,7 +603,7 @@ fn present_server_rejects_mixed_sync_post_body() {
     fs::create_dir_all(&cache).unwrap();
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
-    let server = peitho::server::PresentServer::bind(cache, 0).unwrap();
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 

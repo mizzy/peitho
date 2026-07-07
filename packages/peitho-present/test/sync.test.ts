@@ -177,6 +177,61 @@ it("server sync channel replays handshake index then swapped through onmessage",
   channel.close();
 });
 
+it("server sync channel forwards generation replay values", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(okJson({ seq: 4, message: null, generation: 8 }));
+    }
+    if (url === "/sync?seq=4") {
+      return Promise.resolve(okJson({ seq: 5, message: null, generation: 9 }));
+    }
+    if (url === "/sync?seq=5") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ generation: 8 }, { generation: 9 }]));
+
+  channel.close();
+});
+
+it("server sync channel re-handshakes after a poll network error", async () => {
+  let handshakes = 0;
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      handshakes += 1;
+      return Promise.resolve(
+        okJson(
+          handshakes === 1
+            ? { seq: 9, message: null, generation: 1 }
+            : { seq: 0, message: null, generation: 2 }
+        )
+      );
+    }
+    if (url === "/sync?seq=9") {
+      return Promise.reject(new Error("connection reset"));
+    }
+    if (url === "/sync?seq=0") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({
+    fetcher,
+    retryMs: 0,
+    setTimeoutFn: ((callback: () => void) => window.setTimeout(callback, 0)) as Window["setTimeout"]
+  })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toContainEqual({ generation: 2 }));
+
+  expect(fetcher).toHaveBeenCalledWith("/sync");
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=9", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  channel.close();
+});
+
 it("server sync channel aborts the active poll on close", async () => {
   const captured: { signal?: AbortSignal } = {};
   const fetcher = vi.fn((url: string, init?: RequestInit) => {
@@ -313,6 +368,17 @@ it("turns remote index messages into navigate requests", () => {
   channel.onmessage?.({ data: { index: 1 } });
 
   expect(requests).toEqual([{ to: { index: 1 } }]);
+});
+
+it("ignores generation sync messages on the present sync bridge", () => {
+  const channel = mockChannel();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(window, () => channel);
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { generation: 3 } });
+
+  expect(error).not.toHaveBeenCalled();
 });
 
 it("navigates to the same-window counterpart when remote swapped state differs", () => {
