@@ -2242,9 +2242,15 @@ contexts:
         let err = write_fonts_assets(&out, Some(&source)).unwrap_err();
         let message = err.to_string();
 
-        assert!(message.contains("unsupported entry in fonts directory"));
-        assert!(message.contains("linked.woff2"));
-        assert!(message.contains("only regular files and subdirectories"));
+        assert!(
+            message.contains("unsupported entry in fonts directory"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("linked.woff2"), "actual error: {message}");
+        assert!(
+            message.contains("only regular files and subdirectories"),
+            "actual error: {message}"
+        );
     }
 
     #[cfg(unix)]
@@ -2262,10 +2268,16 @@ contexts:
         let err = write_fonts_assets(&out, Some(&linked)).unwrap_err();
         let message = err.to_string();
 
-        assert!(message.contains("unsupported fonts: source"));
-        assert!(message.contains("linked.woff2"));
-        assert!(message.contains("symlink"));
-        assert!(message.contains("point fonts: at a regular file or a directory"));
+        assert!(
+            message.contains("unsupported fonts: source"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("linked.woff2"), "actual error: {message}");
+        assert!(message.contains("symlink"), "actual error: {message}");
+        assert!(
+            message.contains("point fonts: at a regular file or a directory"),
+            "actual error: {message}"
+        );
     }
 
     #[cfg(unix)]
@@ -2288,9 +2300,12 @@ contexts:
         let err = write_shared_assets(&out, &artifacts).unwrap_err();
         let message = err.to_string();
 
-        assert!(message.contains("unsupported fonts: source"));
-        assert!(message.contains("theme-fonts"));
-        assert!(message.contains("symlink"));
+        assert!(
+            message.contains("unsupported fonts: source"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("theme-fonts"), "actual error: {message}");
+        assert!(message.contains("symlink"), "actual error: {message}");
         assert!(!out.join("fonts/deck-font.woff2").exists());
     }
 
@@ -2316,7 +2331,11 @@ contexts:
 
         let err = collect_asset_files(dir.path(), "html").unwrap_err();
 
-        assert!(err.to_string().contains("no *.html files"));
+        let message = err.to_string();
+        assert!(
+            message.contains("no *.html files"),
+            "actual error: {message}"
+        );
     }
 
     #[test]
@@ -2362,10 +2381,14 @@ contexts:
 
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"));
-        assert!(stderr.contains("slot 'code' got 2 item(s)"));
+        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
         assert!(
-            stderr.contains("help: use a layout with more code capacity or remove one code block")
+            stderr.contains("slot 'code' got 2 item(s)"),
+            "actual stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("help: use a layout with more code capacity or remove one code block"),
+            "actual stderr: {stderr}"
         );
     }
 
@@ -2380,7 +2403,7 @@ contexts:
 
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"));
+        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
     }
 
     #[test]
@@ -2539,8 +2562,14 @@ contexts:
             .unwrap()
             .contains("built 1 slide(s)"));
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("note: watching new asset paths from frontmatter:"));
-        assert!(!stderr.contains("restart --watch"));
+        assert!(
+            stderr.contains("note: watching new asset paths from frontmatter:"),
+            "actual stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("restart --watch"),
+            "actual stderr: {stderr}"
+        );
     }
 
     #[test]
@@ -2573,10 +2602,19 @@ contexts:
         assert!(watcher.unwatched.is_empty());
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"));
-        assert!(stderr.contains("layouts path does not exist"));
-        assert!(!stderr.contains("restart --watch"));
-        assert!(!stderr.contains("watching new asset paths"));
+        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
+        assert!(
+            stderr.contains("layouts path does not exist"),
+            "actual stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("restart --watch"),
+            "actual stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("watching new asset paths"),
+            "actual stderr: {stderr}"
+        );
     }
 
     #[test]
@@ -2687,8 +2725,11 @@ contexts:
         .unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("watch error"));
-        assert!(message.contains("backend stopped"));
+        assert!(message.contains("watch error"), "actual error: {message}");
+        assert!(
+            message.contains("backend stopped"),
+            "actual error: {message}"
+        );
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
     }
@@ -2844,9 +2885,15 @@ contexts:
         let err = keep_workspace_for_error(tmp, miette::miette!("export failed"));
         let message = err.to_string();
 
-        assert!(message.contains("export failed"));
-        assert!(message.contains("workspace kept at"));
-        assert!(message.contains(&workspace.display().to_string()));
+        assert!(message.contains("export failed"), "actual error: {message}");
+        assert!(
+            message.contains("workspace kept at"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains(&workspace.display().to_string()),
+            "actual error: {message}"
+        );
         assert!(workspace.join("pdf.html").is_file());
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -2920,8 +2967,14 @@ contexts:
         .unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("Chrome not found"));
-        assert!(message.contains("PEITHO_CHROME_PATH=<absolute-path>"));
+        assert!(
+            message.contains("Chrome not found"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("PEITHO_CHROME_PATH=<absolute-path>"),
+            "actual error: {message}"
+        );
     }
 
     #[cfg(unix)]
@@ -2930,7 +2983,7 @@ contexts:
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
         let out = dir.path().join("out.pdf");
-        write_executable_script(
+        write_script(
             &fake_chrome,
             r#"#!/bin/sh
 out="$1"
@@ -2942,8 +2995,11 @@ exec sleep 30
 
         let started = std::time::Instant::now();
         let stdout = run_one_shot_chrome(
-            &fake_chrome,
-            &[out.clone().into_os_string()],
+            Path::new("/bin/sh"),
+            &[
+                fake_chrome.clone().into_os_string(),
+                out.clone().into_os_string(),
+            ],
             ChromeCompletion::PdfWritten {
                 output_path: out.clone(),
             },
@@ -2964,7 +3020,7 @@ exec sleep 30
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
         let out = dir.path().join("out.pdf");
-        write_executable_script(
+        write_script(
             &fake_chrome,
             r#"#!/bin/sh
 out="$1"
@@ -2973,8 +3029,11 @@ printf '%s' '%PDF-test' > "$out"
         );
 
         let stdout = run_one_shot_chrome(
-            &fake_chrome,
-            &[out.clone().into_os_string()],
+            Path::new("/bin/sh"),
+            &[
+                fake_chrome.clone().into_os_string(),
+                out.clone().into_os_string(),
+            ],
             ChromeCompletion::PdfWritten {
                 output_path: out.clone(),
             },
@@ -3013,7 +3072,7 @@ printf '%s' '%PDF-test' > "$out"
     fn one_shot_chrome_runner_times_out_and_reaps_child_without_completion() {
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
-        write_executable_script(
+        write_script(
             &fake_chrome,
             r#"#!/bin/sh
 exec sleep 30
@@ -3023,8 +3082,8 @@ exec sleep 30
         let started = std::time::Instant::now();
         let out = dir.path().join("out.pdf");
         let err = run_one_shot_chrome(
-            &fake_chrome,
-            &[],
+            Path::new("/bin/sh"),
+            &[fake_chrome.clone().into_os_string()],
             ChromeCompletion::PdfWritten { output_path: out },
             Duration::from_millis(100),
         )
@@ -3033,7 +3092,8 @@ exec sleep 30
         // Well below the child's `sleep 30`: proves the deadline killed the
         // child instead of waiting it out, with headroom for loaded CI runners.
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(err.to_string().contains("timed out"));
+        let message = err.to_string();
+        assert!(message.contains("timed out"), "actual error: {message}");
     }
 
     #[cfg(unix)]
@@ -3042,7 +3102,7 @@ exec sleep 30
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
         let out = dir.path().join("out.pdf");
-        write_executable_script(
+        write_script(
             &fake_chrome,
             r#"#!/bin/sh
 out="$1"
@@ -3052,16 +3112,21 @@ printf '0 bytes written to file %s\n' "$out" >&2
         );
 
         let err = run_one_shot_chrome(
-            &fake_chrome,
-            &[out.clone().into_os_string()],
+            Path::new("/bin/sh"),
+            &[
+                fake_chrome.clone().into_os_string(),
+                out.clone().into_os_string(),
+            ],
             ChromeCompletion::PdfWritten { output_path: out },
             CHROME_ONE_SHOT_TIMEOUT,
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("completed before one-shot output was ready"));
+        let message = err.to_string();
+        assert!(
+            message.contains("completed before one-shot output was ready"),
+            "actual error: {message}"
+        );
     }
 
     #[test]
@@ -3247,8 +3312,11 @@ printf '0 bytes written to file %s\n' "$out" >&2
         assert!(!cache.join("build-5").exists());
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"));
-        assert!(stderr.contains("slot 'code' got 2 item(s)"));
+        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
+        assert!(
+            stderr.contains("slot 'code' got 2 item(s)"),
+            "actual stderr: {stderr}"
+        );
     }
 
     #[test]
@@ -3282,8 +3350,11 @@ printf '0 bytes written to file %s\n' "$out" >&2
         assert!(html.contains("slot 'code' got 2 item(s)"));
         assert!(!root.join("manifest.json").exists());
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"));
-        assert!(stderr.contains("slot 'code' got 2 item(s)"));
+        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
+        assert!(
+            stderr.contains("slot 'code' got 2 item(s)"),
+            "actual stderr: {stderr}"
+        );
     }
 
     #[test]
@@ -3296,9 +3367,15 @@ printf '0 bytes written to file %s\n' "$out" >&2
         .unwrap();
 
         let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("warning: failed to open preview browser"));
-        assert!(stderr.contains("open failed"));
-        assert!(stderr.contains("help: open http://127.0.0.1:4321/ manually"));
+        assert!(
+            stderr.contains("warning: failed to open preview browser"),
+            "actual stderr: {stderr}"
+        );
+        assert!(stderr.contains("open failed"), "actual stderr: {stderr}");
+        assert!(
+            stderr.contains("help: open http://127.0.0.1:4321/ manually"),
+            "actual stderr: {stderr}"
+        );
     }
 
     #[test]
@@ -3323,13 +3400,8 @@ printf '0 bytes written to file %s\n' "$out" >&2
     }
 
     #[cfg(unix)]
-    fn write_executable_script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn write_script(path: &Path, body: &str) {
         fs::write(path, body).unwrap();
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
@@ -3399,8 +3471,14 @@ printf '0 bytes written to file %s\n' "$out" >&2
         };
 
         let message = format!("{err:?}");
-        assert!(message.contains("no-such-deck.md"));
-        assert!(message.contains("defaults to deck.md"));
+        assert!(
+            message.contains("no-such-deck.md"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("defaults to deck.md"),
+            "actual error: {message}"
+        );
     }
 
     #[test]
