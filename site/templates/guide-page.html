@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} - {{ config.title }}{% endblock title %}
+
+{% block content %}
+  <article class="doc-page">
+    <header class="page-header">
+      <h1>{{ page.title }}</h1>
+      {% if page.description %}
+        <p class="lead">{{ page.description }}</p>
+      {% endif %}
+    </header>
+
+    {{ page.content | safe }}
+  </article>
+
+  {% set guide = get_section(path="guide/_index.md") %}
+  {% if guide.pages %}
+    <nav class="section-nav" aria-label="Guide pages">
+      {% for guide_page in guide.pages %}
+        <a {% if guide_page.permalink == page.permalink %}aria-current="page"{% endif %} href="{{ guide_page.permalink }}">{{ guide_page.title }}</a>
+      {% endfor %}
+    </nav>
+  {% endif %}
+{% endblock content %}

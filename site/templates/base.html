@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ config.title }}{% endblock title %}</title>
+  <meta name="description" content="{% block description %}{% if page is defined and page.description %}{{ page.description }}{% elif section is defined and section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}">
+  <link rel="stylesheet" href='{{ get_url(path="site.css") }}'>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href='{{ get_url(path="@/_index.md") }}'>Peitho</a>
+    <nav aria-label="Primary">
+      <a href='{{ get_url(path="@/guide/_index.md") }}'>Guide</a>
+      <a href='{{ get_url(path="@/examples/_index.md") }}'>Examples</a>
+      <a href="{{ config.extra.github_url }}">GitHub</a>
+    </nav>
+  </header>
+  <main class="{% block main_class %}page{% endblock main_class %}">
+    {% block content %}{% endblock content %}
+  </main>
+  <footer class="site-footer">
+    <a href="{{ config.extra.github_url }}">github.com/mizzy/peitho</a>
+  </footer>
+</body>
+</html>

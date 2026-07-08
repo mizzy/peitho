@@ -16,11 +16,12 @@ tools, while keeping peitho's own identity.
 Static site generator: [Zola](https://www.getzola.org/). Rationale, driven by
 peitho's own requirements rather than by what similar tools use:
 
-- **Full control over design.** The site inherits the hand-crafted visual
-  identity of the current `demo/index.html` (serif typography, warm paper
-  background, thin rules). Zola templates are plain HTML + CSS (Tera), so the
-  existing page style extends naturally to the whole site. This also matches
-  peitho's own pillars: HTML-native, git-manageable HTML/CSS.
+- **Full control over design.** The site follows the hand-crafted visual
+  identity of https://gosu.ke (author decision on 2026-07-09, changed after
+  this spec was first approved): monochrome palette, Mincho typography, black
+  section rules, and hairline rows. Zola templates are plain HTML + CSS
+  (Tera), so the identity extends naturally to the whole site. This also
+  matches peitho's own pillars: HTML-native, git-manageable HTML/CSS.
 - **Rust toolchain.** Zola is a single Rust binary; CI installs one tool. No
   new package ecosystem is introduced for the site.
 - **syntect built in.** Zola highlights code with syntect — the same
@@ -55,8 +56,8 @@ Japanese can be added later non-destructively by dropping
 1. **Landing page** (`/`) — hero (one-line statement of what peitho is), the
    three pillars (separation of content and design; git-manageable HTML/CSS
    layouts; type-checked slot contracts), install one-liner, and entry points
-   into the guide and examples. Carries over the current `demo/index.html`
-   aesthetic.
+   into the guide and examples. Uses the https://gosu.ke visual identity by
+   author decision on 2026-07-09.
 2. **Guide** (`/guide/…`) — task-oriented documentation, reconstructed from
    README.md and existing design records:
    - Getting Started — install (Homebrew / prebuilt binaries), first deck,
@@ -147,8 +148,8 @@ site/
 
 Notes:
 
-- Templates and CSS are hand-written and carry the current visual identity;
-  no third-party Zola theme is used.
+- Templates and CSS are hand-written and carry the https://gosu.ke visual
+  identity (author decision on 2026-07-09); no third-party Zola theme is used.
 - Deck sources shown on example pages are included from `examples/` at build
   time (Zola `load_data` or a documented copy step) rather than pasted, so
   they cannot drift from the real decks. The exact mechanism is an

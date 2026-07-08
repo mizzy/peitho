@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Page not found{% endblock title %}
+
+{% block content %}
+  <header class="page-header">
+    <h1>Page not found</h1>
+    <p class="lead">The page you asked for is not here.</p>
+    <p><a href='{{ get_url(path="@/_index.md") }}'>Return to the homepage</a></p>
+  </header>
+{% endblock content %}
