@@ -328,6 +328,24 @@ it("grid arrow navigation scrolls the selected tile into view", async () => {
   expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
 });
 
+it("grid mode sets scroll padding and single mode clears it", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+
+  expect(shell.mode).toBe("grid");
+  expect(root.style.scrollPaddingTop).toBe("24px");
+  expect(root.style.scrollPaddingBottom).toBe("24px");
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(root.style.scrollPaddingTop).toBe("");
+  expect(root.style.scrollPaddingBottom).toBe("");
+});
+
 it("entering grid scrolls the current slide tile into view", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
