@@ -1,12 +1,66 @@
 {% extends "base.html" %}
 
-{% block title %}{{ config.title }}{% endblock title %}
-
-{% block main_class %}page{% endblock main_class %}
-
 {% block content %}
+  {% for key, value in section.extra.hero %}
+    {% if key != "lead" %}
+      {# deliberately undefined: referencing it fails the build on a shape violation #}
+      {{ throw_unknown_landing_hero_key }}
+    {% endif %}
+  {% endfor %}
+
   <section class="hero">
     <h1>{{ section.title }}</h1>
+    <p>{{ section.extra.hero.lead }}</p>
     {{ section.content | safe }}
   </section>
+
+  {% for landing_section in section.extra.sections %}
+    {% for key, value in landing_section %}
+      {% if key != "title" and key != "code" and key != "rows" %}
+        {{ throw_unknown_landing_section_key }}
+      {% endif %}
+    {% endfor %}
+
+    <section>
+      <h2>{{ landing_section.title }}</h2>
+
+      {% if landing_section.code and landing_section.rows %}
+        {{ throw_landing_section_has_both_code_and_rows }}
+      {% elif landing_section.code %}
+        <pre><code>{{ landing_section.code }}</code></pre>
+      {% elif landing_section.rows %}
+        <ul class="rows" role="list">
+          {% for row in landing_section.rows %}
+            {% for key, value in row %}
+              {% if key != "title" and key != "meta" and key != "path" and key != "url" %}
+                {{ throw_unknown_landing_row_key }}
+              {% endif %}
+            {% endfor %}
+
+            <li class="row">
+              {% if row.path and row.url %}
+                {{ throw_landing_row_has_both_path_and_url }}
+              {% elif row.path or row.url %}
+                <a class="row-link" href="{% if row.path %}{{ get_url(path=row.path) }}{% else %}{{ row.url }}{% endif %}">
+                  <span class="row-title">{{ row.title }}</span>
+                  {% if row.meta %}
+                    <span class="row-meta">{{ row.meta }}</span>
+                  {% endif %}
+                </a>
+              {% else %}
+                <div class="row-link">
+                  <span class="row-title">{{ row.title }}</span>
+                  {% if row.meta %}
+                    <span class="row-meta">{{ row.meta }}</span>
+                  {% endif %}
+                </div>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        {{ throw_unknown_landing_section_shape }}
+      {% endif %}
+    </section>
+  {% endfor %}
 {% endblock content %}
