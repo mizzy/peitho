@@ -231,7 +231,7 @@ function installPreviewKeyboard(win = window, bus = win) {
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      dispatchOverviewRequest(bus, "exit");
+      dispatchOverviewRequest(bus, "toggle");
       return;
     }
     if (event.key === "Enter") {
@@ -593,6 +593,10 @@ var PreviewShellController = class {
       slide.host.hidden = false;
       this.applyHostFrame(slide.host, 0, 0, scale);
     });
+    this.scrollSelectedTileIntoView();
+  }
+  scrollSelectedTileIntoView() {
+    this.slides[this.selectedIndex]?.tile.scrollIntoView?.({ block: "nearest" });
   }
   applyHostFrame(host, left, top, scale) {
     host.style.position = "absolute";
