@@ -438,7 +438,28 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
         exitToIndex();
       }
     });
+    // Click-selection guard. Kept in sync with
+    // packages/peitho-present/src/clickNavigationGuard.ts.
+    let __clickStart = null;
+    document.addEventListener('mousedown', (event) => {
+      __clickStart = { x: event.clientX, y: event.clientY };
+    });
+    function hasNonCollapsedSelection() {
+      const selection = window.getSelection();
+      return selection !== null && !selection.isCollapsed;
+    }
+    function shouldIgnoreNavigationClick(event) {
+      if (hasNonCollapsedSelection()) {
+        __clickStart = null;
+        return true;
+      }
+      if (__clickStart === null) return false;
+      const moved = Math.hypot(event.clientX - __clickStart.x, event.clientY - __clickStart.y) > 5;
+      __clickStart = null;
+      return moved;
+    }
     document.addEventListener('click', (event) => {
+      if (shouldIgnoreNavigationClick(event)) return;
       navigate(event.clientX < window.innerWidth / 4 ? 'prev' : 'next');
     });
     let __swipeState = null;
@@ -1280,6 +1301,16 @@ Paragraph after heading.
         assert!(!html.contains("shell.js"));
         assert!(!html.contains("installPresentationControls"));
         assert!(!html.contains("data-slide-key="));
+    }
+
+    #[test]
+    fn distribution_index_click_navigation_ignores_selection_gestures() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9);
+
+        assert!(html.contains("window.getSelection()"));
+        assert!(html.contains("__clickStart"));
+        assert!(html.contains("Math.hypot(event.clientX - __clickStart.x"));
+        assert!(html.contains("return selection !== null && !selection.isCollapsed"));
     }
 
     #[test]
