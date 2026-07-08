@@ -1,6 +1,7 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
+import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import {
@@ -163,6 +164,7 @@ class PreviewShellController implements PreviewShell {
   private readonly viewport?: () => CanvasViewport;
   private readonly restoredState: PreviewState | null;
   private readonly slides: PreviewSlideView[] = [];
+  private readonly tileClickGuardCleanups: Array<() => void> = [];
   private dimensions: CanvasDimensions = { width: 1280, height: 720 };
   private readonly onNavigate = (event: Event): void => {
     if (!this.isLoaded()) return;
@@ -270,6 +272,7 @@ class PreviewShellController implements PreviewShell {
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
+    while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
     this.clearCanvasRootProperties();
   }
 
@@ -303,7 +306,10 @@ class PreviewShellController implements PreviewShell {
     tile.classList.add("peitho-preview-tile");
     tile.dataset.slideKey = slide.key;
     tile.dataset.slideIndex = String(slide.index);
-    tile.addEventListener("click", () => {
+    const clickGuard = createClickNavigationGuard({ target: tile, window: this.win });
+    this.tileClickGuardCleanups.push(() => clickGuard.destroy());
+    tile.addEventListener("click", (event) => {
+      if (clickGuard.shouldIgnoreClick(event)) return;
       this.setIndex(slide.index);
       this.exitGrid();
     });

@@ -12,6 +12,34 @@ function calculateCanvasFit(viewport, canvasWidth, canvasHeight) {
   };
 }
 
+// src/clickNavigationGuard.ts
+var DEFAULT_MOVE_THRESHOLD_PX = 5;
+function createClickNavigationGuard(options) {
+  const win = options.window ?? window;
+  const moveThresholdPx = options.moveThresholdPx ?? DEFAULT_MOVE_THRESHOLD_PX;
+  let clickStart = null;
+  const onMouseDown = (event) => {
+    clickStart = { x: event.clientX, y: event.clientY };
+  };
+  options.target.addEventListener("mousedown", onMouseDown);
+  return {
+    shouldIgnoreClick(event) {
+      const start = clickStart;
+      clickStart = null;
+      if (hasNonCollapsedSelection(win)) return true;
+      if (start === null) return false;
+      return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
+    },
+    destroy() {
+      options.target.removeEventListener("mousedown", onMouseDown);
+    }
+  };
+}
+function hasNonCollapsedSelection(win) {
+  const selection = win.getSelection();
+  return selection !== null && !selection.isCollapsed;
+}
+
 // src/keyboard.ts
 var navigationKeyMap = /* @__PURE__ */ new Map([
   ["ArrowRight", "next"],
@@ -267,6 +295,7 @@ var PreviewShellController = class {
   viewport;
   restoredState;
   slides = [];
+  tileClickGuardCleanups = [];
   dimensions = { width: 1280, height: 720 };
   onNavigate = (event) => {
     if (!this.isLoaded()) return;
@@ -368,6 +397,7 @@ var PreviewShellController = class {
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
+    while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
     this.clearCanvasRootProperties();
   }
   async fetchJson(url) {
@@ -396,7 +426,10 @@ var PreviewShellController = class {
     tile.classList.add("peitho-preview-tile");
     tile.dataset.slideKey = slide.key;
     tile.dataset.slideIndex = String(slide.index);
-    tile.addEventListener("click", () => {
+    const clickGuard = createClickNavigationGuard({ target: tile, window: this.win });
+    this.tileClickGuardCleanups.push(() => clickGuard.destroy());
+    tile.addEventListener("click", (event) => {
+      if (clickGuard.shouldIgnoreClick(event)) return;
       this.setIndex(slide.index);
       this.exitGrid();
     });

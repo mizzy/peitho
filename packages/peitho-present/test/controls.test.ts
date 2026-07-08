@@ -31,6 +31,10 @@ function touchEvent(
   return event;
 }
 
+function mockSelection(isCollapsed: boolean): void {
+  vi.spyOn(window, "getSelection").mockReturnValue({ isCollapsed } as Selection);
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
 });
@@ -170,6 +174,7 @@ it("clicks in the left viewport quarter request prev and other canvas clicks req
   const root = document.createElement("main");
   const requests: unknown[] = [];
   vi.spyOn(window, "innerWidth", "get").mockReturnValue(1000);
+  mockSelection(true);
   listenWindow("peitho:navigate", (event) => {
     requests.push((event as CustomEvent).detail);
   });
@@ -183,9 +188,43 @@ it("clicks in the left viewport quarter request prev and other canvas clicks req
   expect(requests).toEqual([{ to: "prev" }, { to: "next" }, { to: "next" }]);
 });
 
+it("does not navigate from a click that ends a drag gesture", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  mockSelection(true);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installCanvasClickNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 100, clientY: 100 }));
+  root.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 112, clientY: 100 }));
+  root.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 112, clientY: 100 }));
+  root.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 112, clientY: 100 }));
+
+  expect(requests).toEqual([]);
+});
+
+it("does not navigate from a click while text selection is non-collapsed", () => {
+  const root = document.createElement("main");
+  const requests: unknown[] = [];
+  mockSelection(false);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installCanvasClickNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  root.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+
+  expect(requests).toEqual([]);
+});
+
 it("does not navigate when a click starts inside the control bar", () => {
   const root = document.createElement("main");
   const requests: unknown[] = [];
+  mockSelection(true);
   listenWindow("peitho:navigate", (event) => {
     requests.push((event as CustomEvent).detail);
   });

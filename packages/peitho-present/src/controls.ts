@@ -1,4 +1,5 @@
 import type { NavigateDetail, SlideChangeDetail } from "./shell";
+import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { hasChordModifier } from "./keyboard";
 import { openPresenterPopup, type OpenPresenterPopupOptions } from "./presentDisplay";
 
@@ -106,13 +107,18 @@ export function installPresentationControls(options: PresentationControlsOptions
 export function installCanvasClickNavigation(options: CanvasClickNavigationOptions): () => void {
   const win = options.window ?? window;
   const bus = options.bus ?? win;
+  const clickGuard = createClickNavigationGuard({ target: options.root, window: win });
   const onClick = (event: MouseEvent): void => {
+    if (clickGuard.shouldIgnoreClick(event)) return;
     if ((event.target as HTMLElement).closest('[data-peitho-control-bar="true"]')) return;
     const to = event.clientX < win.innerWidth / 4 ? "prev" : "next";
     bus.dispatchEvent(new CustomEvent<NavigateDetail>("peitho:navigate", { detail: { to } }));
   };
   options.root.addEventListener("click", onClick);
-  return () => options.root.removeEventListener("click", onClick);
+  return () => {
+    clickGuard.destroy();
+    options.root.removeEventListener("click", onClick);
+  };
 }
 
 export function installSwipeNavigation(options: SwipeNavigationOptions): () => void {

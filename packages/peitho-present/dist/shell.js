@@ -315,6 +315,34 @@ function diffSeconds(actual, planned) {
   return Math.round((actual - planned) / 1e3);
 }
 
+// src/clickNavigationGuard.ts
+var DEFAULT_MOVE_THRESHOLD_PX = 5;
+function createClickNavigationGuard(options) {
+  const win = options.window ?? window;
+  const moveThresholdPx = options.moveThresholdPx ?? DEFAULT_MOVE_THRESHOLD_PX;
+  let clickStart = null;
+  const onMouseDown = (event) => {
+    clickStart = { x: event.clientX, y: event.clientY };
+  };
+  options.target.addEventListener("mousedown", onMouseDown);
+  return {
+    shouldIgnoreClick(event) {
+      const start = clickStart;
+      clickStart = null;
+      if (hasNonCollapsedSelection(win)) return true;
+      if (start === null) return false;
+      return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
+    },
+    destroy() {
+      options.target.removeEventListener("mousedown", onMouseDown);
+    }
+  };
+}
+function hasNonCollapsedSelection(win) {
+  const selection = win.getSelection();
+  return selection !== null && !selection.isCollapsed;
+}
+
 // src/keyboard.ts
 var navigationKeyMap = /* @__PURE__ */ new Map([
   ["ArrowRight", "next"],
@@ -450,13 +478,18 @@ function installPresentationControls(options) {
 function installCanvasClickNavigation(options) {
   const win = options.window ?? window;
   const bus = options.bus ?? win;
+  const clickGuard = createClickNavigationGuard({ target: options.root, window: win });
   const onClick = (event) => {
+    if (clickGuard.shouldIgnoreClick(event)) return;
     if (event.target.closest('[data-peitho-control-bar="true"]')) return;
     const to = event.clientX < win.innerWidth / 4 ? "prev" : "next";
     bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
   };
   options.root.addEventListener("click", onClick);
-  return () => options.root.removeEventListener("click", onClick);
+  return () => {
+    clickGuard.destroy();
+    options.root.removeEventListener("click", onClick);
+  };
 }
 function installSwipeNavigation(options) {
   const win = options.window ?? window;

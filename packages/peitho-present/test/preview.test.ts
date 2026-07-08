@@ -88,6 +88,10 @@ function setRootWidth(root: HTMLElement, width: number): void {
   });
 }
 
+function mockSelection(isCollapsed: boolean): void {
+  vi.spyOn(window, "getSelection").mockReturnValue({ isCollapsed } as Selection);
+}
+
 const shells: PreviewShell[] = [];
 const cleanups: Array<() => void> = [];
 
@@ -366,12 +370,45 @@ it("clicking a grid tile shows that slide in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
+  mockSelection(true);
 
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2].click();
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(2);
+});
+
+it("dragging across a grid tile does not activate it on the follow-up click", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  mockSelection(true);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  const tile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2];
+  tile.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 100, clientY: 100 }));
+  tile.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 112, clientY: 100 }));
+  tile.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 112, clientY: 100 }));
+  tile.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 112, clientY: 100 }));
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentIndex).toBe(0);
+});
+
+it("clicking a grid tile with non-collapsed selection does not activate it", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  mockSelection(false);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  root
+    .querySelectorAll<HTMLElement>(".peitho-preview-tile")[2]
+    .dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentIndex).toBe(0);
 });
 
 it("saves and restores mode and slide index from sessionStorage", async () => {
