@@ -441,6 +441,8 @@ class PreviewShellController implements PreviewShell {
     this.root.style.padding = "0";
     this.root.style.gap = "0";
     this.root.style.gridTemplateColumns = "";
+    this.root.style.removeProperty("scroll-padding-top");
+    this.root.style.removeProperty("scroll-padding-bottom");
 
     this.slides.forEach((slide, index) => {
       const active = index === this.currentIndex;
@@ -471,6 +473,8 @@ class PreviewShellController implements PreviewShell {
     this.root.style.justifyContent = "center";
     this.root.style.overflow = "auto";
     this.root.style.padding = `${GRID_PADDING}px`;
+    this.root.style.setProperty("scroll-padding-top", `${GRID_PADDING}px`);
+    this.root.style.setProperty("scroll-padding-bottom", `${GRID_PADDING}px`);
     this.root.style.boxSizing = "border-box";
 
     this.slides.forEach((slide, index) => {
