@@ -70,7 +70,7 @@ peitho build            # same as: peitho build deck.md
 # Daily editing loop: watch, serve, open, and reload on every successful rebuild
 peitho preview
 
-# Preview controls: o or Enter toggles single-slide and tile overview modes; Esc exits overview; arrows move horizontally and vertically in overview; click opens the selected tile
+# Preview controls: o, Enter, or Esc toggles single-slide and tile overview modes; arrows move horizontally and vertically in overview; click opens the selected tile
 
 # Rebuild on every save for an external server or pipeline
 peitho build --watch

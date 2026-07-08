@@ -212,7 +212,7 @@ it("preview keyboard emits command requests and ignores chord-modified commands"
     window.dispatchEvent(event);
   }
 
-  expect(requests).toEqual([{ action: "exit" }, { action: "activate" }]);
+  expect(requests).toEqual([{ action: "toggle" }, { action: "activate" }]);
   expect(navigations).toEqual([{ to: "next" }, { to: "up" }, { to: "down" }]);
   expect(bareEscape.defaultPrevented).toBe(true);
   expect(chordEscape.defaultPrevented).toBe(false);
@@ -241,7 +241,7 @@ it("overview requests toggle between single and grid mode", async () => {
   expect(root.dataset.peithoPreviewMode).toBe("single");
 });
 
-it("Escape exits grid mode and is a no-op in single mode", async () => {
+it("exit overview requests exit grid mode and are a no-op in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
@@ -253,6 +253,29 @@ it("Escape exits grid mode and is a no-op in single mode", async () => {
   expect(shell.mode).toBe("grid");
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   expect(shell.mode).toBe("single");
+});
+
+it("Escape toggles between single and grid mode with the current slide selected", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
+  const enterGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(enterGrid);
+
+  expect(enterGrid.defaultPrevented).toBe(true);
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentIndex).toBe(2);
+  expect(shell.selectedIndex).toBe(2);
+
+  const exitGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(exitGrid);
+
+  expect(exitGrid.defaultPrevented).toBe(true);
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(2);
 });
 
 it("Enter activate request enters grid from single mode with the current slide selected", async () => {
@@ -286,6 +309,56 @@ it("grid arrow navigation moves selection and Enter shows the selected slide", a
   expect(shell.currentIndex).toBe(1);
   const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-preview-slide")];
   expect(hosts.map((host) => host.hidden)).toEqual([true, false, true]);
+});
+
+it("grid arrow navigation scrolls the selected tile into view", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[1];
+  const scrollIntoView = vi.fn();
+  targetTile.scrollIntoView = scrollIntoView;
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.selectedIndex).toBe(1);
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+});
+
+it("entering grid scrolls the current slide tile into view", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
+  const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2];
+  const scrollIntoView = vi.fn();
+  targetTile.scrollIntoView = scrollIntoView;
+  expect(scrollIntoView).not.toHaveBeenCalled();
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.selectedIndex).toBe(2);
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+});
+
+it("single mode navigation does not scroll preview tiles into view", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[1];
+  const scrollIntoView = vi.fn();
+  targetTile.scrollIntoView = scrollIntoView;
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(1);
+  expect(scrollIntoView).not.toHaveBeenCalled();
 });
 
 it("grid vertical navigation moves by one computed row and stops at row edges", async () => {

@@ -92,7 +92,7 @@ export function installPreviewKeyboard(
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      dispatchOverviewRequest(bus, "exit");
+      dispatchOverviewRequest(bus, "toggle");
       return;
     }
     if (event.key === "Enter") {
@@ -494,6 +494,11 @@ class PreviewShellController implements PreviewShell {
       slide.host.hidden = false;
       this.applyHostFrame(slide.host, 0, 0, scale);
     });
+    this.scrollSelectedTileIntoView();
+  }
+
+  private scrollSelectedTileIntoView(): void {
+    this.slides[this.selectedIndex]?.tile.scrollIntoView?.({ block: "nearest" });
   }
 
   private applyHostFrame(host: HTMLElement, left: number, top: number, scale: number): void {
