@@ -52,6 +52,12 @@ const manifest = {
 };
 
 const cssText = ".slot-title { color: red; }";
+const fontCssText = `
+@import url("fonts/noto-sans-jp/index.css");
+.peitho-preview-slide { color: red; }
+@import url("fonts/late.css");
+@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); }
+`;
 
 function manifestWithSlideCount(slideCount: number): typeof manifest {
   return {
@@ -67,11 +73,11 @@ function manifestWithSlideCount(slideCount: number): typeof manifest {
   };
 }
 
-function fetchForManifest(deck: typeof manifest): typeof fetch {
+function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
     if (url === "manifest.json") return okJson(deck);
-    if (url === "peitho.css") return okText(cssText);
+    if (url === "peitho.css") return okText(css);
     if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   }) as typeof fetch;
@@ -224,6 +230,63 @@ it("preview keyboard emits command requests and ignores chord-modified commands"
   expect(chordUp.defaultPrevented).toBe(false);
   expect(bareDown.defaultPrevented).toBe(false);
   expect(chordDown.defaultPrevented).toBe(false);
+});
+
+it("injects document scoped font css once for preview shells", async () => {
+  const firstRoot = document.createElement("main");
+  const secondRoot = document.createElement("main");
+  const first = await mountPreviewShell({
+    root: firstRoot,
+    fetcher: fetchForManifest(manifest, fontCssText),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  const second = await mountPreviewShell({
+    root: secondRoot,
+    fetcher: fetchForManifest(manifest, fontCssText),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(first, second);
+
+  const styles = document.head.querySelectorAll<HTMLStyleElement>(
+    "style[data-peitho-font-scope]"
+  );
+  expect(styles).toHaveLength(1);
+  expect(styles[0].textContent).toBe(
+    [
+      '@import url("fonts/noto-sans-jp/index.css");',
+      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); }'
+    ].join("\n")
+  );
+});
+
+it("removes document scoped font css when the last preview shell is destroyed", async () => {
+  const firstRoot = document.createElement("main");
+  const secondRoot = document.createElement("main");
+  const first = await mountPreviewShell({
+    root: firstRoot,
+    fetcher: fetchForManifest(manifest, fontCssText),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  const second = await mountPreviewShell({
+    root: secondRoot,
+    fetcher: fetchForManifest(manifest, fontCssText),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(first, second);
+
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(1);
+  first.destroy();
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(1);
+  second.destroy();
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(0);
 });
 
 it("overview requests toggle between single and grid mode", async () => {

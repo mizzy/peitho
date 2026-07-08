@@ -1,6 +1,7 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
+import { installDocumentFontScope } from "./fontscope";
 
 export type NavigateTarget =
   | "next"
@@ -73,6 +74,7 @@ class PresentShellController implements PresentShell {
   private readonly now: () => number;
   private readonly viewport?: () => CanvasViewport;
   private readonly canvasCleanups: Array<() => void> = [];
+  private fontScopeCleanup: (() => void) | null = null;
   private startedAtValue: number | null = null;
   private pausedAtValue: number | null = null;
   private pausedTotalMs = 0;
@@ -126,6 +128,7 @@ class PresentShellController implements PresentShell {
       const cssAspect = manifest.aspectRatio.replace(":", " / ");
       this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
+      this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
       const pending: SlideView[] = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);
@@ -168,6 +171,8 @@ class PresentShellController implements PresentShell {
 
   destroy(): void {
     this.endPresentation();
+    this.fontScopeCleanup?.();
+    this.fontScopeCleanup = null;
     while (this.canvasCleanups.length > 0) this.canvasCleanups.pop()?.();
     this.clearCanvasRootProperties();
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);

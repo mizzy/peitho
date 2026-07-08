@@ -2,6 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
+import { installDocumentFontScope } from "./fontscope";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import {
@@ -165,6 +166,7 @@ class PreviewShellController implements PreviewShell {
   private readonly restoredState: PreviewState | null;
   private readonly slides: PreviewSlideView[] = [];
   private readonly tileClickGuardCleanups: Array<() => void> = [];
+  private fontScopeCleanup: (() => void) | null = null;
   private dimensions: CanvasDimensions = { width: 1280, height: 720 };
   private readonly onNavigate = (event: Event): void => {
     if (!this.isLoaded()) return;
@@ -221,6 +223,7 @@ class PreviewShellController implements PreviewShell {
       const cssAspect = manifest.aspectRatio.replace(":", " / ");
       this.setCanvasRootProperties(this.dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
+      this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
       const pending = await Promise.all(
         manifest.slides.map(async (slide) => {
           const html = await this.fetchText(slide.src);
@@ -273,6 +276,8 @@ class PreviewShellController implements PreviewShell {
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
     while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
+    this.fontScopeCleanup?.();
+    this.fontScopeCleanup = null;
     this.clearCanvasRootProperties();
   }
 
