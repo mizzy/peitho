@@ -346,6 +346,32 @@ it("grid mode sets scroll padding and single mode clears it", async () => {
   expect(root.style.scrollPaddingBottom).toBe("");
 });
 
+it("grid selection styling keeps tile size stable without changing selection classes", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+
+  const [selectedTile, unselectedTile] = root.querySelectorAll<HTMLElement>(
+    ".peitho-preview-tile"
+  );
+  expect(shell.mode).toBe("grid");
+  expect(selectedTile.classList.contains("is-selected")).toBe(true);
+  expect(unselectedTile.classList.contains("is-selected")).toBe(false);
+  expect(selectedTile.style.borderWidth).toBe("1px");
+  expect(unselectedTile.style.borderWidth).toBe("1px");
+  expect(selectedTile.style.outlineWidth).toBe("3px");
+  expect(selectedTile.style.outlineStyle).toBe("solid");
+  expect(unselectedTile.style.outline).toBe("");
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(selectedTile.style.border).toBe("0px");
+  expect(selectedTile.style.outline).toBe("");
+});
+
 it("entering grid scrolls the current slide tile into view", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");

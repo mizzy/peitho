@@ -456,6 +456,10 @@ class PreviewShellController implements PreviewShell {
       slide.tile.style.overflow = "hidden";
       slide.tile.style.border = "0";
       slide.tile.style.borderRadius = "0";
+      slide.tile.style.outlineWidth = "";
+      slide.tile.style.outlineStyle = "";
+      slide.tile.style.outlineColor = "";
+      slide.tile.style.outlineOffset = "";
       slide.tile.style.background = "transparent";
       slide.host.hidden = !active;
       this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
@@ -488,10 +492,12 @@ class PreviewShellController implements PreviewShell {
       slide.tile.style.width = `${GRID_TILE_WIDTH}px`;
       slide.tile.style.height = `${tileHeight}px`;
       slide.tile.style.overflow = "hidden";
-      slide.tile.style.border = selected
-        ? "3px solid #7dd3fc"
-        : "1px solid rgba(255,255,255,0.24)";
+      slide.tile.style.border = "1px solid rgba(255,255,255,0.24)";
       slide.tile.style.borderRadius = "6px";
+      slide.tile.style.outlineWidth = selected ? "3px" : "";
+      slide.tile.style.outlineStyle = selected ? "solid" : "";
+      slide.tile.style.outlineColor = selected ? "#7dd3fc" : "";
+      slide.tile.style.outlineOffset = selected ? "1px" : "";
       slide.tile.style.background = "#000";
       slide.tile.style.cursor = "pointer";
       slide.tile.style.boxSizing = "content-box";
