@@ -1,25 +1,25 @@
-# バイナリリリースの仕組み
+# Binary release pipeline
 
-## ゴール
+## Goal
 
-`git tag vX.Y.Z && git push --tags` で GitHub Release が自動生成され、以下4ターゲットの `peitho` バイナリが tar.gz で添付される状態を作る。
+`git tag vX.Y.Z && git push --tags` auto-creates a GitHub Release with the `peitho` binary attached as a tar.gz for the following four targets.
 
 - `aarch64-apple-darwin` (macOS arm64)
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
-**追記 (2026-07-04)**: `x86_64-apple-darwin` は当初対象に入れていたが、GitHub Actions の `macos-13` runner のキュー待ちがリリースをブロックするため、初回リリースからは外した。必要になったら `macos-latest` (arm64) 上で `--target x86_64-apple-darwin` のクロスビルドとして復活させる (別issue)。
+**Addendum (2026-07-04)**: `x86_64-apple-darwin` was originally on the list, but the queue wait for the `macos-13` runner on GitHub Actions blocks releases, so it is dropped from the first release. Bring it back as a `--target x86_64-apple-darwin` cross build on `macos-latest` (arm64) when needed (separate issue).
 
-## 方針
+## Approach
 
-- **トリガー**: `v*` タグ push のみ (手動起動は当面不要)
-- **配布形態**: 生バイナリを `peitho-vX.Y.Z-<target>.tar.gz` に固めて Release に添付
-- **バージョン整合**: タグ (`vX.Y.Z`) と `workspace.package.version` (`X.Y.Z`) が一致しない場合はワークフローを失敗させる
-- **シェル埋め込み**: バイナリは `include_str!` で `dist/shell.js` と `layouts/base.html` と `base.css` を焼き込むので、リリースビルド前に `packages/peitho-present` の `npm ci && npm run build` を必ず走らせる (CIと同じ順序)
+- **Trigger**: `v*` tag push only (no manual dispatch needed for now)
+- **Distribution shape**: bundle the raw binary into `peitho-vX.Y.Z-<target>.tar.gz` and attach it to the Release
+- **Version consistency**: fail the workflow if the tag (`vX.Y.Z`) does not match `workspace.package.version` (`X.Y.Z`)
+- **Shell embedding**: the binary bakes in `dist/shell.js`, `layouts/base.html`, and `base.css` via `include_str!`, so `npm ci && npm run build` in `packages/peitho-present` must run before the release build (same order as CI)
 
-## 実装ステップ
+## Implementation steps
 
-### 1. `.github/workflows/release.yml` を新設
+### 1. Add `.github/workflows/release.yml`
 
 ```yaml
 name: Release
@@ -117,25 +117,25 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
 ```
 
-### 2. LICENSE を用意するか同梱をやめる
+### 2. Add a LICENSE file or drop the bundling
 
-現状 `LICENSE` ファイルがリポジトリ直下に存在しないので、`cp ... LICENSE` は失敗しないが同梱もされない。既存 `Cargo.toml` の `license = "MIT"` を根拠に、別コミットで `LICENSE` を追加するか、当面は同梱をやめる (`2>/dev/null || true` で許容してある)。
+There is currently no `LICENSE` file at the repository root, so `cp ... LICENSE` neither fails nor bundles anything. Based on the existing `Cargo.toml`'s `license = "MIT"`, either add `LICENSE` in a separate commit or drop the bundling for now (`2>/dev/null || true` already tolerates it).
 
-### 3. CIとの重複を最小化
+### 3. Minimize overlap with CI
 
-`ci.yml` は現状のまま。`release.yml` は build に必要な最低限のみ (test/clippy/fmt/typecheck は タグを打つ前の PR 時点で通ってから main にマージされている前提)。
+Leave `ci.yml` as is. Keep `release.yml` to only what the build needs (test/clippy/fmt/typecheck are assumed to have passed at PR time before merging to main, ahead of tagging).
 
-### 4. ドキュメント
+### 4. Documentation
 
-`README.md` に "Install" セクションを追加し、Release ページの tar.gz を落として展開する手順、および `sha256` の検証手順を書く。
+Add an "Install" section to `README.md` covering the steps to fetch and extract the tar.gz from the Release page, plus the `sha256` verification steps.
 
-## Undecided (この PR では触らない)
+## Undecided (out of scope for this PR)
 
-- Homebrew tap 化
+- Homebrew tap
 - crates.io publish
-- Windows 対応 (現状 chrome の macOS 依存が強く、優先度低)
+- Windows support (currently low priority due to macOS-heavy Chrome dependency)
 
-## 検証
+## Verification
 
-- ドラフトタグ (`v0.1.0-rc1`) で一度発火させて Actions ログを見る (`-` を含むので prerelease として作成される)
-- ローカルで `cargo build --release --locked` と `tar czf` が動くことは事前に確認する
+- Fire once with a draft tag (`v0.1.0-rc1`) and inspect the Actions logs (contains `-`, so it is created as a prerelease)
+- Confirm locally in advance that `cargo build --release --locked` and `tar czf` work

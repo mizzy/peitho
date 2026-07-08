@@ -1,25 +1,25 @@
-# 発表者画面アジェンダ設計 (2026-07-04)
+# Presenter agenda design (2026-07-04)
 
-## ゴール
+## Goal
 
-Claude Designモック(`Presenter.dc.html`)にあるAgendaセクションを実装する。deckを名前付きセクションに分割し、発表者画面のタイマーカード内(トラッカーとcontrolsの間)に、セクションごとの「名前・スライド範囲・実績/計画時間・差分」を表示する。セクションを宣言していないdeckでは何も表示しない(現状表示のまま)。
+Implement the Agenda section from the Claude Design mock (`Presenter.dc.html`). Split the deck into named sections and, in the presenter view's timer card (between the tracker and controls), show each section's "name, slide range, actual/planned time, delta". Decks without declared sections show nothing (current display unchanged).
 
-デザインの出自: https://claude.ai/design/p/73ba6a5b-288b-46f7-a2c3-cb06863e3c5b の `Presenter.dc.html` の `.agenda` 系。反映後は `render_presenter_index()` のCSSが正。
+Design origin: the `.agenda` family in `Presenter.dc.html` at https://claude.ai/design/p/73ba6a5b-288b-46f7-a2c3-cb06863e3c5b. After adoption, the CSS in `render_presenter_index()` is authoritative.
 
-## 採用アプローチと理由
+## Adopted approach and rationale
 
-**Approach A: manifest経由・クライアント側計測**(2026-07-04 著者承認済み)
+**Approach A: manifest-driven with client-side measurement** (approved by author 2026-07-04)
 
-- セクションはページコメントで宣言し、core(Rust)がパース時に解決・検証して `manifest.json` に載せる。manifestは契約の単一ソースであり、セクションはdeck構造の一部なのでここに置く
-- 実績時間はpresenterウィンドウがクライアント側で計測する。メモリ内のみ(リロードで消える)— 既存タイマーがリロードで消えるのと一貫した挙動
+- Sections are declared in a page comment; core (Rust) resolves and validates them at parse time and puts them in `manifest.json`. manifest is the single source of the contract, and sections are part of deck structure, so they belong here
+- Actual time is measured client-side by the presenter window. In-memory only (lost on reload) — consistent with the existing timer that is lost on reload
 
-捨てた代替案:
-- sections.jsonサイドカー方式 — deck構造をmanifestの外に分離する理由がない
-- 実績のshell/サーバー同期永続化 — タイマー自体が永続化されない現状と非対称になる過剰設計
+Rejected alternatives:
+- sections.json sidecar approach — no reason to separate deck structure from the manifest
+- shell/server sync with persisted actuals — over-engineering that would be asymmetric with the timer itself not being persisted
 
-## 記法(著者決定 2026-07-04)
+## Notation (author decision 2026-07-04)
 
-セクションの先頭スライドのページコメントで宣言する。frontmatter方式・見出し自動導出方式は不採用(著者決定)。frontmatterのフラットkey制約(2026-07-03著者判断)は不変。
+Declared in the page comment of the section's first slide. Frontmatter and heading-derivation approaches are not adopted (author decision). The flat-key constraint on frontmatter (2026-07-03 author decision) is preserved.
 
 ```markdown
 ---
@@ -27,102 +27,102 @@ time: 15m
 ---
 
 <!-- {"section": "Setup", "time": "1m"} -->
-# タイトル
+# Title
 
 ---
 
 <!-- {"section": "Why HTML decks", "time": "3m", "layout": "cover"} -->
-# なぜHTMLか
+# Why HTML
 ```
 
-- `section` = セクション名(表示ラベル)。次の`section`マーカーの直前まで(最後はdeck末尾まで)がそのセクションのスライド範囲。範囲はビルド時に自動導出される — スライドの挿入・並べ替えでレンジ宣言がずれる事故が構造的に起きない
-- `time` = そのセクションの計画時間。deck frontmatterの`time`と同じ文法(`15m`/`90s`/`1h30m`/裸整数=分)・同じ`PlannedTime`型・同じ検証(非ゼロ、上限)を再利用する
-- 既存の`key`/`layout`と同じコメント内に同居できる。`PageComment`は`deny_unknown_fields`のまま
+- `section` = section name (display label). The slide range runs to just before the next `section` marker (or to the end of the deck for the last one). The range is derived automatically at build time — no structural accident where inserting or reordering slides misaligns a range declaration
+- `time` = planned time for that section. Reuses the same grammar as the deck frontmatter's `time` (`15m`/`90s`/`1h30m`/bare integer = minutes), the same `PlannedTime` type, and the same validation (non-zero, upper bound)
+- May co-live with existing `key`/`layout` in the same comment. `PageComment` remains `deny_unknown_fields`
 
-## 検証ルール(すべて行番号+help付きビルドエラー。サイレントパスなし)
+## Validation rules (all line-numbered build errors with help. No silent path)
 
-1. `section`には`time`必須(省略を許すと合計導出の意味が壊れる)
-2. `time`だけで`section`が無いページコメントはエラー(deck全体の`time`はfrontmatterに書く旨をhelpに)
-3. `section`が空文字列はエラー
-4. マーカーがひとつでも存在する場合、**先頭スライドにマーカー必須**。無ければエラー(暗黙の無名セクションは作らない — 曖昧さの暗黙解決の禁止)
-5. **合計一致検証**(著者決定 2026-07-04): frontmatter `time`とセクション`time`合計が両方あれば一致必須。不一致は両方の値をメッセージに含めてエラー。frontmatter `time`省略時はセクション合計を総時間として導出する。合計は`checked_add`で計算し、オーバーフローと`PlannedTime`上限超過はエラー
-6. セクション名の重複は許容(キーではなく表示ラベル。位置ベースで状態判定するため一意性は不要)
-7. **同一スライドに2個目のページ設定コメントはエラー**(`key`/`layout`/`section`共通の一律規則)。従来のフィールド単位last-winsマージは2個目のコメントがsectionマーカーを黙って上書きする(=サイレントドロップ)ため、フィールド個別のガードではなくコメント自体の重複を根本で禁止した(実装レビューで確定 2026-07-04)
+1. `time` is required with `section` (allowing omission would break the meaning of derived totals)
+2. A page comment with `time` but no `section` is an error (help: put deck-wide `time` in frontmatter)
+3. `section` as an empty string is an error
+4. If any marker exists, **a marker on the first slide is required**. Otherwise an error (do not synthesize an implicit unnamed section — the prohibition on implicit resolution of ambiguity)
+5. **Total match check** (author decision 2026-07-04): if both frontmatter `time` and the sum of section `time`s are present, they must match. Mismatches error with both values in the message. If frontmatter `time` is omitted, the section sum becomes the total. Sums use `checked_add`; overflow and exceeding the `PlannedTime` upper bound are errors
+6. Duplicate section names are allowed (they are display labels, not keys. Uniqueness is not required because state is determined positionally)
+7. **A second page-settings comment on the same slide is an error** (uniform rule across `key`/`layout`/`section`). The previous field-wise last-wins merge would silently overwrite a section marker with a second comment (= silent drop), so the fix is to forbid duplicate comments at the root rather than guard field-by-field (finalized during implementation review 2026-07-04)
 
-検証はパース終端(`parse_markdown`内、全スライドのマーカーが出揃った時点)で一度だけ行い、解決済みの`Vec<DeckSection>`を`Deck<Parsed>`構築時に確定させる。以降のフェーズは検証済みの値を運ぶだけ(`PlannedTime`と同じ「構築時に一度だけ検証」の方針)。**導出後は`DeckSettings`の`planned_time`が常に総時間を持つ**(省略時はここで合計から埋める)ので、下流(トラッカー・manifest `plannedDurationMs`)は無変更で動く。
+Validation happens once at the end of parsing (inside `parse_markdown`, when all slide markers are known); the resolved `Vec<DeckSection>` is finalized at `Deck<Parsed>` construction. Subsequent phases only carry the validated value (the same "validate once at construction" policy as `PlannedTime`). **After derivation, `DeckSettings`'s `planned_time` always holds the total** (filled in here from the sum when omitted), so downstream (tracker and manifest `plannedDurationMs`) works unchanged.
 
-## 型とデータフロー
+## Types and data flow
 
 ```
-PageComment { key, layout, section, time }        parser.rs(deny_unknown_fields維持)
-  ↓ パース終端で解決・検証
+PageComment { key, layout, section, time }        parser.rs (deny_unknown_fields preserved)
+  ↓ Resolved and validated at parse end
 DeckSection { name: String, planned: PlannedTime, start: usize, end: usize }  phase.rs
-  ↓ DeckSettings { planned_time, sections: Vec<DeckSection> } に格納
-     (Copyが外れる — 機械的変更。Parsed→Mapped→Checked→Renderedを既存のplanned_timeと同経路で通す)
+  ↓ Stored in DeckSettings { planned_time, sections: Vec<DeckSection> }
+     (Copy is removed — mechanical change. Rides Parsed→Mapped→Checked→Rendered on the same path as existing planned_time)
   ↓ build_manifest
 Manifest { ..., sections: Vec<ManifestSection> }   manifest.rs
 ManifestSection { name, startIndex, endIndex, plannedDurationMs }
-  ↓ ts-rs → bindings/Manifest.ts, bindings/ManifestSection.ts(コミット+CI drift検査)
-presenter.ts / agenda.ts(新設)が shell.manifest.sections を消費
+  ↓ ts-rs → bindings/Manifest.ts, bindings/ManifestSection.ts (committed + CI drift check)
+presenter.ts / agenda.ts (new) consume shell.manifest.sections
 ```
 
-- `start`/`end`は`ManifestSlide.index`と同じ0-basedインデックス(表示時に1-based化)。ミリ秒はmanifest境界でのみ出現(既存方針)
-- `sections`はセクション無しdeckでは空配列(フィールド自体は常に存在 — TS側でoptional分岐を作らない)
-- manifest `version`は1のまま(追加的変更。golden test `serializes_manifest_schema_exactly`を更新)
-- dist(publish)のmanifestにも`sections`は載るが、present(聴衆)側shellは読まない。発表シェル/notesをdistに混ぜない方針とは無関係(manifestは元々dist契約の一部)
+- `start`/`end` are 0-based indices, same as `ManifestSlide.index` (1-based-ified at display time). Milliseconds appear only at the manifest boundary (existing policy)
+- `sections` is an empty array for decks without sections (the field itself always exists — no TS-side optional branching)
+- manifest `version` stays 1 (additive change. Update the golden test `serializes_manifest_schema_exactly`)
+- The dist (publish) manifest also carries `sections`, but the present (audience) shell does not read it. Unrelated to the "no presenter shell / notes in dist" policy (the manifest is part of the dist contract to begin with)
 
-## 実績時間の計測(著者決定 2026-07-04: 累積方式)
+## Actual-time measurement (author decision 2026-07-04: cumulative)
 
-- 250ms tickごとに`elapsedMs()`の前回値との差分を「**いま表示中のスライドが属するセクション**」に加算する。戻って再説明した時間もそのセクションの実績に入る。pause中は`elapsedMs`が進まないので自然に除外される
-- `done`/`current`/`upcoming`は現在スライドの位置基準で判定: current = 現在スライドが属するセクション、done = それより前、upcoming = それより後。前のセクションに戻ればそこが再びcurrentになる
-- doneの`under`/`over`はライブ判定。判定源は**秒に丸めた差分** `Math.round((実績−計画)/1000)` の1つだけで、差分表示の符号・色と構造的に矛盾しない(生ミリ秒で判定すると「+0:00がover色」「ちょうど達成が−0:00のunder」という矛盾表示が生じるため。実装レビューで確定 2026-07-04)。丸め差分>0なら`over`、それ以外は`under`
-- タイマー未開始(stopped)時は全セクション実績0。実績表示はモックに従い、done/currentは`実績 / 計画`、upcomingは`— / 計画`、差分はdoneのみ`±M:SS`表示(current/upcomingは`·`)
-- 時間表示フォーマットはトラッカー目盛りと同じ`m:ss`(`timeTracker.ts`の既存フォーマッタを共有)
+- On each 250ms tick, add the delta from the previous `elapsedMs()` to the section that **the currently displayed slide belongs to**. Time spent going back to re-explain also lands in that section's actuals. Pausing halts `elapsedMs` so is naturally excluded
+- `done`/`current`/`upcoming` are decided by the current slide's position: current = the section the current slide belongs to, done = anything before it, upcoming = anything after. Going back to a previous section makes it current again
+- `under`/`over` on done is decided live. The sole judgment source is the **second-rounded difference** `Math.round((actual − planned) / 1000)` — so the sign and color of the delta display are structurally consistent (using raw milliseconds would produce contradictions like "+0:00 shown as over" and "just-on-target shown as −0:00 under"; finalized during implementation review 2026-07-04). Rounded delta > 0 → `over`, otherwise `under`
+- When the timer is not started (stopped), all section actuals are 0. Following the mock, done/current show `actual / planned`, upcoming shows `— / planned`, and delta is shown only for done as `±M:SS` (current/upcoming show `·`)
+- Time display uses the same `m:ss` format as the tracker ticks (shared with the existing formatter in `timeTracker.ts`)
 
-## 実装の配置
+## Implementation placement
 
 **Rust (crates/peitho-core)**
-- `parser.rs`: `PageComment`拡張、`section`/`time`検証、パース終端のセクション解決+検証(エラーは既存の`ErrorKind::Parse`+行番号+help)
-- `phase.rs`: `DeckSection`新設、`DeckSettings`に`sections`追加(`Copy`外し)、アクセサ
-- `manifest.rs`: `ManifestSection`新設、`Manifest.sections`追加、goldenテスト更新、ts-rsテスト追加
-- `render.rs` `render_presenter_index()`: モックの`.agenda`系CSSを移植(セレクタは`data-peitho-*`ベースに書き換え)。renderテスト更新
+- `parser.rs`: extend `PageComment`, add `section`/`time` validation, resolve and validate sections at parse end (errors via existing `ErrorKind::Parse` + line number + help)
+- `phase.rs`: introduce `DeckSection`; add `sections` to `DeckSettings` (remove `Copy`); accessors
+- `manifest.rs`: introduce `ManifestSection`; add `Manifest.sections`; update golden tests; add ts-rs tests
+- `render.rs` `render_presenter_index()`: port the `.agenda` family CSS from the mock (rewrite selectors on a `data-peitho-*` basis). Update render tests
 
 **TS (packages/peitho-present)**
-- `agenda.ts`新設(`timeTracker.ts`と同型の構造): `installAgenda({root, shell, sections})`。`peitho:slidechange`購読+250ms interval。teardown必須(vitestのリスナー汚染対策)。**空チェックは`installAgenda`内の1箇所だけ**: `sections`が空なら何もマウントしないno-opを返し、`presenter.ts`は無条件に呼ぶ(ガードの二重化禁止)
-- スライド遷移時は`slidechange`の`previousIndex`を使い、直前tickからの未計上差分を**遷移前スライドのセクション**にflushしてから表示更新する(tick粒度250msの誤配賦防止)。また`peitho:timercontrol`の`reset`リクエストを購読して実績を即時ゼロにする(reset→即startが250msポーリングの隙間に入ると旧実績が残るため。§16の「shellだけが遷移を実行する」に対しリクエストイベントの観測で代用している点は自覚的な選択 — shellのreset実行を購読可能にする専用イベントは現状過剰と判断。実装レビューで確定 2026-07-04)
-- `presenter.ts`: `.clock`カード内、tracker-slotとcontrolsの間にagenda-slotを追加(slot自体は常に存在)。**`.clock`はflex column+`.controls { margin-top: auto }`を維持**(gridにするとボタンが縦に太るバグが再発する — 実測済み)
-- `bindings/`再生成コミット、`dist/shell.js`再ビルドコミット
+- New `agenda.ts` (same shape as `timeTracker.ts`): `installAgenda({root, shell, sections})`. Subscribes to `peitho:slidechange` + 250ms interval. Teardown required (vitest listener contamination mitigation). **The empty check lives in one place inside `installAgenda`**: if `sections` is empty, return a no-op that mounts nothing; `presenter.ts` calls it unconditionally (do not duplicate the guard)
+- On slide transitions, use `slidechange`'s `previousIndex` to flush the delta since the previous tick to the **section of the pre-transition slide** before updating the display (prevents misattribution at 250ms polling granularity). Also subscribe to `peitho:timercontrol` `reset` requests to zero actuals immediately (if reset → immediate start slips inside the 250ms polling gap, old actuals would linger. This is a conscious tradeoff against §16 "only the shell executes transitions" — we substitute observation of the request event; a dedicated event to observe the shell's reset execution was judged over-engineering for now. Finalized during implementation review 2026-07-04)
+- `presenter.ts`: inside the `.clock` card, add an agenda-slot between tracker-slot and controls (the slot itself always exists). **Keep `.clock` as flex column + `.controls { margin-top: auto }`** (switching to grid regresses buttons growing vertically — measured)
+- Recommit `bindings/`, rebuild and commit `dist/shell.js`
 
 **examples**
-- `examples/lightning-talk/deck.md`にセクションマーカーを追加(E2E確認とドキュメントを兼ねる)
+- Add section markers to `examples/lightning-talk/deck.md` (serves as both E2E confirmation and documentation)
 
-## DOM/CSSの制約
+## DOM/CSS constraints
 
-- DOMフックは`data-peitho-*`属性のみ(クラス依存セレクタ禁止 — 確定済み設計判断)。状態は`data-peitho-agenda-state="done|current|upcoming"`+`data-peitho-agenda-outcome="under|over"`(done行のみ付与)で表現し、CSSはstate+outcomeの複合セレクタで当てる。当初案の`data-peitho-agenda-delta`は差分セルspanのフック名と衝突し、素の`[data-peitho-agenda-delta]`セレクタがdone行全体にマッチしてしまうため`outcome`に改名した(実装レビューで確定 2026-07-04)
-- モックの`.agenda`は`overflow: hidden`(はみ出しは切る)。セクション数が多い場合のスクロール対応は今回スコープ外(必要になったら別Issue)
-- present(聴衆)側の`timeTracker` presentバリアントDOMは**バイト不変**(スナップショットテストで固定)。触らない
+- DOM hooks are `data-peitho-*` attributes only (no class-dependent selectors — established design decision). State is expressed via `data-peitho-agenda-state="done|current|upcoming"` + `data-peitho-agenda-outcome="under|over"` (attached only to done rows), and CSS applies via compound selectors on state + outcome. The initial plan's `data-peitho-agenda-delta` collided with the hook name on the delta cell span — a bare `[data-peitho-agenda-delta]` selector would match the entire done row — so it was renamed to `outcome` (finalized during implementation review 2026-07-04)
+- The mock's `.agenda` is `overflow: hidden` (overflow is clipped). Scroll handling for many sections is out of scope this time (separate issue when needed)
+- The present (audience) `timeTracker` present-variant DOM is **byte-invariant** (fixed by snapshot test). Do not touch
 
-## エッジケース一覧
+## Edge cases
 
-| ケース | 挙動 |
+| Case | Behavior |
 |---|---|
-| セクションマーカー無しdeck | アジェンダ非表示。既存挙動完全不変 |
-| `time`なしの`section` | ビルドエラー(help: timeを書く) |
-| `section`なしの`time` | ビルドエラー(help: deck全体はfrontmatterの`time`) |
-| 空文字列の`section` | ビルドエラー |
-| 先頭スライドにマーカー無し(他にマーカーあり) | ビルドエラー(最初のマーカー行を指す) |
-| frontmatter `time`とセクション合計の不一致 | ビルドエラー(両値をメッセージに) |
-| frontmatter `time`なし+セクションあり | 総時間=合計。トラッカーも出る |
-| セクション合計のオーバーフロー/上限超過 | ビルドエラー |
-| セクション名重複 | 許容(表示ラベル) |
-| 1スライドだけのセクション/セクション1個 | 許容 |
-| 前セクションへ戻る | そこがcurrentに戻り、実績が累積再開 |
-| presenterリロード | 実績消失(タイマーと同じ) |
-| タイマーpause | 実績加算停止(`elapsedMs`準拠) |
+| Deck without section markers | Agenda hidden. Existing behavior fully unchanged |
+| `section` without `time` | Build error (help: write time) |
+| `time` without `section` | Build error (help: deck-wide `time` goes in frontmatter) |
+| Empty-string `section` | Build error |
+| No marker on first slide (with other markers) | Build error (points at the first marker line) |
+| Frontmatter `time` vs section sum mismatch | Build error (both values in message) |
+| No frontmatter `time` + sections present | Total = sum. Tracker still shows |
+| Section sum overflow / exceeds upper bound | Build error |
+| Duplicate section name | Allowed (display label) |
+| Section of one slide / single section | Allowed |
+| Go back to a prior section | It becomes current again; actuals resume accumulating |
+| Presenter reload | Actuals lost (same as timer) |
+| Timer pause | Actual accumulation stops (per `elapsedMs`) |
 
-## スコープ外
+## Out of scope
 
-- アジェンダ行のクリックでのセクションジャンプ(要望が出たら別Issue)
-- 実績の永続化・リロード復元
-- セクション多数時のスクロールUI
-- present(聴衆)側でのセクション表示
+- Clicking an agenda row to jump to that section (separate issue if requested)
+- Persisting actuals / restoring on reload
+- Scrollable UI for many sections
+- Section display on the present (audience) side

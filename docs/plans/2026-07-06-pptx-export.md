@@ -2,147 +2,147 @@
 
 ## Summary
 
-`peitho export pptx <deck.md> -o out.pptx` を追加する。エンジンは**Option B: 完全構造変換**(著者判断 2026-07-06)。スライドのスロット内容をpptxのテキストボックス・画像として構造的にマッピングし、受け取った側がPowerPoint/Keynoteで編集・再利用できるファイルを生成する。ジオメトリとタイポグラフィはヘッドレスChromeで実測する(後述)。pptx生成はライブラリに依存せず手書きzip+XML(著者判断 2026-07-06)。
+Add `peitho export pptx <deck.md> -o out.pptx`. The engine is **Option B: full structural conversion** (author decision 2026-07-06). Slide slot content is structurally mapped to pptx text boxes and images so the recipient can edit and reuse the file in PowerPoint/Keynote. Geometry and typography are measured with headless Chrome (see below). pptx generation does not depend on any library — it uses hand-written zip+XML (author decision 2026-07-06).
 
-著者判断まとめ(2026-07-06、AskUserQuestionで確定):
+Author decisions (2026-07-06, confirmed via AskUserQuestion):
 
-1. エンジン: **Option B(完全構造変換)** — Issue動機「受け取った側が編集・再利用できる」を採る
-2. Keynote: **pptxのみ出荷** — `.key`直接生成はしない。KeynoteのpptxインポートをREADMEで案内。`export keynote`サブコマンドは作らない
-3. Speaker notes: **pptxのノートペインに含める(デフォルト、フラグなし)** — pptxは「視聴者向け配布物」ではなく「編集可能なソース」を渡す用途。「notesはdist/に混ぜない」不変条件は視聴者向け配布物(dist/, PDF)への混入禁止と解釈し、pptxのノートペインはpptxの正規機能として含める
-4. pptx生成: **手書きzip+XML** — 依存は`zip`クレートのみ。ppt-rs(0.2.x、2025-11生まれ)は若く出力品質未検証のため採用しない
+1. Engine: **Option B (full structural conversion)** — adopts the Issue motivation "the recipient should be able to edit and reuse"
+2. Keynote: **ship pptx only** — no direct `.key` generation. Guide users through Keynote's pptx import in the README. No `export keynote` subcommand
+3. Speaker notes: **include in the pptx notes pane (default, no flag)** — pptx is not an "audience-facing distributable" but an "editable source" handed off. The "notes never enter dist/" invariant is interpreted as "must not contaminate audience-facing distributables (dist/, PDF)"; the pptx notes pane is included as a canonical pptx feature
+4. pptx generation: **hand-written zip+XML** — the only dependency is the `zip` crate. ppt-rs (0.2.x, born 2025-11) is too young and output quality is unverified, so it is not adopted
 
 ## Motivation
 
-- 企業環境でPowerPoint納品が必要なケース、Keynoteチームへの共有
-- PDF(#109)と違い、受け取った側がテキストを編集・スライドを再利用できる
-- §13「同じ中間表現に対するemit追加」の2例目。`export`サブグループ(#109で導入)に`pptx`を足す
+- Enterprise environments that require PowerPoint delivery; sharing with Keynote teams
+- Unlike PDF (#109), the recipient can edit text and reuse slides
+- The second instance of §13 "adding an emit for the same intermediate representation". Adds `pptx` to the `export` subgroup (introduced in #109)
 
-## 中心設計: DOM-walk measurement(単一ソース方式)
+## Central design: DOM-walk measurement (single-source approach)
 
-Option Bの最大の課題は「CSSレイアウトとpptxレイアウトのギャップ」。これを**レイアウトが実際に起きる場所=ブラウザ**で解決する:
+Option B's biggest challenge is "the gap between CSS layout and pptx layout". Solve it **where layout actually happens = the browser**:
 
-1. coreが**計測用HTML**(`render_measure_document`)を生成する。全スライドの`<section>`を論理キャンバスサイズ(`aspect_ratio().width() x height()` px)で並べ、計測スクリプト(`measure.js`)を埋め込む
-2. ヘッドレスChromeを`--headless=new --dump-dom --virtual-time-budget=<N>`で起動。`measure.js`が`document.fonts.ready`とcontent image readiness後にDOMを歩き、失敗時は`peitho-measure-error`を出し、成功時はスライドごとに:
-   - `class^="slot-"`要素とその中のブロック要素・テキストラン(text node単位)の**rect + computed style**
-   - `<img>`のrect + src + alt
-   - `<section>`のbackground-color
-   を収集し、JSON化して`<script type="application/json" id="peitho-measure">`としてbodyに追記する
-3. CLIがdump-domの出力からJSONを抽出し、coreのpptx builderに渡す
-4. coreが計測JSON + `Deck<Rendered>`(notes, SlideKey) + `ResolvedImageAsset`(画像バイト)からpptx zipを組み立てる
+1. core generates a **measurement HTML** (`render_measure_document`). All slide `<section>`s are laid out at the logical canvas size (`aspect_ratio().width() x height()` px), and the measurement script (`measure.js`) is embedded
+2. Launch headless Chrome with `--headless=new --dump-dom --virtual-time-budget=<N>`. `measure.js` walks the DOM after `document.fonts.ready` and content image readiness; on failure it emits `peitho-measure-error`, on success it collects, per slide:
+   - **rect + computed style** for `class^="slot-"` elements and the block elements and text runs (per text node) inside them
+   - `<img>` rect + src + alt
+   - `<section>` background-color
+   Then serializes to JSON and appends it to body as `<script type="application/json" id="peitho-measure">`
+3. The CLI extracts the JSON from the dump-dom output and hands it to core's pptx builder
+4. core assembles a pptx zip from the measurement JSON + `Deck<Rendered>` (notes, SlideKey) + `ResolvedImageAsset` (image bytes)
 
-### なぜIR+ジオメトリ突合ではなくDOM-walkか(3レンズ一致 → 著者確認なしで採用)
+### Why DOM-walk instead of IR + geometry reconciliation (adopted without author confirmation, all three lenses aligned)
 
-代替案は「Checked IRのslot→fragment構造を主とし、Chromeはジオメトリだけ測って突合する」だったが:
+The alternative was "keep Checked IR slot→fragment structure as the source of truth, and use Chrome only for geometry that reconciles into it". But:
 
-- **long-term**: DOM-walkはカスタムレイアウト(pillar ②: レイアウト=ユーザーが書くHTML+CSS)に自動追従する。IR突合は「このfragmentはDOMのどの要素か」という対応規則を持ち、レイアウトが増えるたびに突合ルールのcarve-outが増える
-- **type-safety**: 計測JSONスキーマが唯一の契約になり、ts-rsでRust⇔TSを単一ソース化できる(bindings/ドリフトチェックに乗る)。二重ソース(IR構造+計測)は対応ズレがランタイムでしか見えない
-- **root-cause**: 「CSSレイアウトの結果を知らない」ことがOption Bの根本課題であり、ブラウザに計測させるのはその根本の解消。IR側でレイアウトを推測するのは症状対処
+- **long-term**: DOM-walk automatically follows custom layouts (pillar ②: layout = HTML+CSS the user writes). IR reconciliation requires "which DOM element does this fragment correspond to" rules, and every new layout accumulates carve-outs to the reconciliation rules
+- **type-safety**: The measurement JSON schema becomes the sole contract; ts-rs makes Rust⇔TS a single source (rides on `bindings/` drift check). Dual sources (IR structure + measurement) surface correspondence drift only at runtime
+- **root-cause**: "Not knowing the result of CSS layout" is Option B's root problem, and having the browser measure it is the root fix. Guessing layout on the IR side is symptom treatment
 
-DOM(rendered HTML)はRendered IRの決定的射影なので、これは依然として「IRからの構造変換」である。テキストランはtext node単位で取るため、PowerPoint上で再折返し可能(行折返しでrunは分割されない)。
+DOM (rendered HTML) is a deterministic projection of the Rendered IR, so this is still "structural conversion from the IR". Text runs are taken per text node so PowerPoint can re-wrap them (line wraps do not split runs).
 
-### 計測JSONスキーマ(契約、ts-rs対象)
+### Measurement JSON schema (contract, ts-rs target)
 
-peitho-core `domain.rs`(または新モジュール)にserde + ts-rs型として定義し、`bindings/`に生成・コミット(既存ドリフトチェックに乗せる):
+Defined in peitho-core `domain.rs` (or a new module) as serde + ts-rs types, generated into `bindings/` and committed (rides on the existing drift check):
 
 ```
 MeasuredDeck    { canvasWidth, canvasHeight, slides: Vec<MeasuredSlide> }
 MeasuredSlide   { key: String, backgroundColor: String, boxes: Vec<MeasuredBox>, images: Vec<MeasuredImage> }
 MeasuredBox     { slot: String, rect: MeasuredRect, style: MeasuredBoxStyle, paragraphs: Vec<MeasuredParagraph> }
-MeasuredBoxStyle{ backgroundColor, borderColor, borderWidth, borderRadius }   // 視覚chrome再現用
+MeasuredBoxStyle{ backgroundColor, borderColor, borderWidth, borderRadius }   // for visual chrome reproduction
 MeasuredParagraph { align, bulletLevel: Option<u8>, numbered: bool, bulletContinuation: bool, numberingStartAt: Option<u16>, runs: Vec<MeasuredRun> }
 MeasuredRun     { text, color, fontFamily, fontSizePx, bold, italic, underline, breaksBefore }
 MeasuredImage   { src, alt, rect: MeasuredRect }
-MeasuredRect    { x, y, w, h }   // 論理キャンバスpx、section左上原点
+MeasuredRect    { x, y, w, h }   // logical canvas px, section top-left origin
 ```
 
-- rect単位は論理キャンバスpx。EMU変換は`px * 9525`(96dpi)。**16:9キャンバス1280x720 → 12192000x6858000 EMU = PowerPoint標準16:9とexact一致**。4:3の960x720 → 9144000x6858000 = 標準4:3と一致。この一致が「論理キャンバスpxを座標系にする」選択の裏付け
-- `resolution` frontmatterキーは**pptxでは使わない**(PDF専用のraster物理サイズ。pptxはベクター+実測px座標なので不要)。Issueのopen question「resolutionとの関係」への回答
-- codeブロック(`<pre>`)内の`\n`はスクリプト側でparagraph分割する。syntax highlight色は`hl-*` spanのcomputed colorがそのままrunに乗る(theme CSS→ブラウザcascade→実測、CSSパース不要)
-- リストは`<li>`→`bulletLevel`(ネスト深さ)と`numbered`(最寄りlist ancestorが`ol`ならtrue)。各`<ol>`の最初のitem paragraphは`numberingStartAt`で`start`属性または1を持つ。複数paragraphを持つlist itemの2段落目以降は`bulletContinuation`で同じindent・bulletなしになる。`<br>`は次runの`breaksBefore`で連続数を表す。見出し・段落はcomputed font-size/weightがrunに乗る
+- rect unit is logical canvas px. EMU conversion is `px * 9525` (96dpi). **16:9 canvas 1280x720 → 12192000x6858000 EMU = exact match with PowerPoint standard 16:9**. 4:3's 960x720 → 9144000x6858000 = matches standard 4:3. This match backs the "logical canvas px as the coordinate system" choice
+- The `resolution` frontmatter key is **not used by pptx** (PDF-only physical raster size. pptx uses vector + measured px coordinates so it is unnecessary). Answers the Issue's open question "relationship with resolution"
+- `\n` inside code blocks (`<pre>`) is split into paragraphs on the script side. Syntax highlight colors ride on runs directly from the computed color of `hl-*` spans (theme CSS → browser cascade → measurement, no CSS parsing required)
+- Lists become `<li>` → `bulletLevel` (nesting depth) and `numbered` (true if the nearest list ancestor is `ol`). The first item paragraph of each `<ol>` carries `numberingStartAt` from the `start` attribute or 1. Second and later paragraphs of a multi-paragraph list item become `bulletContinuation` with the same indent and no bullet. `<br>` becomes `breaksBefore` on the next run to represent consecutive counts. Headings and paragraphs ride computed font-size/weight on runs
 
-### measure.jsの置き場所と契約チェック
+### measure.js placement and contract check
 
-`packages/peitho-present/src/measure.ts`として書き、`dist/measure.js`にビルドして**コミット**し、coreに`include_str!`で埋め込む — shell.jsと同一パターン(ビルド成果物だがコミット+CIドリフトチェック)。measure.tsは`bindings/MeasuredDeck.ts`等をimportして型チェックされるので、スキーマのRust⇔TSドリフトはコンパイルで落ちる。
+Written as `packages/peitho-present/src/measure.ts`, built into `dist/measure.js` and **committed**, embedded into core via `include_str!` — same pattern as shell.js (build artifact but committed + CI drift check). measure.ts imports `bindings/MeasuredDeck.ts` etc. and is type-checked, so any Rust⇔TS schema drift trips at compile time.
 
-### pptx zip構成(手書きXML)
+### pptx zip layout (hand-written XML)
 
-必要part(最小構成):
+Required parts (minimum):
 
 ```
 [Content_Types].xml
 _rels/.rels
 docProps/core.xml, docProps/app.xml
-ppt/presentation.xml (+ _rels)          … sldSz = キャンバスpx*9525 EMU
+ppt/presentation.xml (+ _rels)          … sldSz = canvas px*9525 EMU
 ppt/slideMasters/slideMaster1.xml (+ _rels)
-ppt/slideLayouts/slideLayout1.xml (+ _rels)   … blankレイアウト1枚
+ppt/slideLayouts/slideLayout1.xml (+ _rels)   … one blank layout
 ppt/theme/theme1.xml
-ppt/slides/slideN.xml (+ _rels)         … 1 IRスライド = 1 slide part
-ppt/notesMasters/notesMaster1.xml (+ _rels)   … notesがあるデッキのみ
-ppt/notesSlides/notesSlideN.xml (+ _rels)     … notesを持つスライドのみ
-ppt/media/*                             … ResolvedImageAsset.source_absから読んだバイト
+ppt/slides/slideN.xml (+ _rels)         … 1 IR slide = 1 slide part
+ppt/notesMasters/notesMaster1.xml (+ _rels)   … only for decks with notes
+ppt/notesSlides/notesSlideN.xml (+ _rels)     … only for slides that have notes
+ppt/media/*                             … bytes read from ResolvedImageAsset.source_abs
 ```
 
-- テキスト: 1スロット = 1 `<p:sp>`テキストボックス(rect位置、autofitなし)。`MeasuredBoxStyle`からsolidFill/線/角丸を再現。paragraph→`<a:p>`(align, buChar+indent)、run→`<a:r><a:rPr sz b i u><a:solidFill>`。フォントサイズは`px * 0.75 * 100`(px→pt→1/100pt)。フォントはfont-family先頭ファミリー名
-- 画像: Markdown由来の解決済みcontent image(`src`が`assets/`で始まるもの)だけを`<p:pic>`化し、rect位置、`ppt/media/`にコピーしrelで参照。altは`<p:nvPicPr>`のdescr
-- notes: `RenderedSlide::notes()`をnotesSlideのbody placeholderにplaintextで
-- スライド背景: sectionのbackground-colorをsolidFillで
-- XML組み立ては既存の`html-escape`等と同様に文字列テンプレート+escape関数。`zip`クレート(workspace依存に追加、core側)でVec<u8>を返す
+- Text: 1 slot = 1 `<p:sp>` text box (rect position, no autofit). Reproduce solidFill / border / rounded corners from `MeasuredBoxStyle`. paragraph→`<a:p>` (align, buChar+indent), run→`<a:r><a:rPr sz b i u><a:solidFill>`. Font size is `px * 0.75 * 100` (px→pt→1/100pt). Font is the first family name from font-family
+- Images: only content images resolved from Markdown (with `src` starting with `assets/`) become `<p:pic>` with rect position, copied to `ppt/media/` and referenced by rel. alt goes into `<p:nvPicPr>` descr
+- notes: put `RenderedSlide::notes()` into the notesSlide body placeholder as plaintext
+- Slide background: solidFill from the section's background-color
+- XML assembly uses string templates + escape functions, like the existing `html-escape`. Return Vec<u8> via the `zip` crate (added to workspace deps, core side)
 
 ### CLI shape
 
 ```
 peitho export pptx <deck.md> -o out.pptx
-peitho export pptx <deck.md>              # -o省略時は<deck>.pptx(deck.mdの隣)
+peitho export pptx <deck.md>              # when -o is omitted, <deck>.pptx (next to deck.md)
 ```
 
-- `ExportCommand`(main.rs)に`Pptx`variantを追加。`export_pdf`と同型の`export_pptx`: `build_artifacts` → tempdirに計測workspace(measure.html + peitho.css + assets/) → `locate_chrome`(既存再利用) → `--dump-dom --virtual-time-budget=20000` → JSON抽出(`id="peitho-measure"`マーカー間) → core pptx builder → 書き出し
-- Chrome不在・dump失敗・JSON抽出失敗はPDFと同水準の明確なエラー
+- Add a `Pptx` variant to `ExportCommand` (main.rs). `export_pptx`, isomorphic to `export_pdf`: `build_artifacts` → measurement workspace in tempdir (measure.html + peitho.css + assets/) → `locate_chrome` (reuse existing) → `--dump-dom --virtual-time-budget=20000` → JSON extraction (between `id="peitho-measure"` markers) → core pptx builder → write out
+- Missing Chrome, dump failure, and JSON extraction failure are clear errors at the same level as PDF
 
 ## Non-goals
 
-- **`.key`直接生成・`export keynote`サブコマンドは作らない**(著者判断)。READMEにKeynoteでpptxを開く案内を書く
-- v1では**ハイパーリンクのhref**は持ち越さない(リンクは実測スタイルの色付きテキストになる)。将来slide relsで非破壊追加可能
-- v1では**グラデーション・背景画像**は非対応(背景はsolid colorのみ)。スロット外の装飾要素(レイアウト固有の飾りdiv等)も持ち越さない
-- v1では**layout-baked/remote `<img>`**はpptxへ持ち越さない。Markdown content imageとして解決され、`assets/`パスになった画像だけを編集可能なpicture partとして出力する
-- v1では**フォント埋め込み**はしない(typeface名の指定のみ。閲覧側で代替される可能性は受容)
-- `resolution`キーはpptxでは消費しない(上記)
+- **No direct `.key` generation and no `export keynote` subcommand** (author decision). The README documents opening pptx in Keynote
+- v1 does **not** carry over **hyperlink hrefs** (links become measured-style colored text). Future non-breaking addition via slide rels is possible
+- v1 does not support **gradients or background images** (background is solid color only). Decorative elements outside slots (layout-specific ornamental divs, etc.) are also not carried over
+- v1 does not carry **layout-baked / remote `<img>`** into pptx. Only Markdown content images resolved to `assets/` paths are output as editable picture parts
+- v1 does not do **font embedding** (typeface name only; substitution on the viewer side is acceptable)
+- The `resolution` key is not consumed by pptx (see above)
 
-## Spike結果(2026-07-06実測、Chrome 149.0.7827.201 / macOS 15.7.7)
+## Spike results (measured 2026-07-06, Chrome 149.0.7827.201 / macOS 15.7.7)
 
-計測パイプラインの成立を実Chromeで検証済み:
+Measurement pipeline viability verified with real Chrome:
 
-- `--headless=new --virtual-time-budget=5000 --dump-dom`で、ページJS(`document.fonts.ready`待ち→DOM歩行→`<script type="application/json" id="peitho-measure">`をbodyへ追記)の**実行後DOMが正しくdumpされる**。所要約3秒。rect(x:96, y:80, w:335.9, h:84)・computed font-size(56px)・color・font-weightすべて期待値と一致。実装は大きな画像/font decode待ちに余裕を持たせるため`--virtual-time-budget=20000`を使う
-- **重大な発見: Chrome 149はワンショット完了後にプロセスが終了しない**。完了直後にmacOSのGoogleUpdater(`--wake-all`)を起こし、それが親プロセスを延命させる。`--disable-background-networking --disable-component-update`でも防げない(実測)
-- この結果、**landed済みの`peitho export pdf`(#109/#139)は現環境でハングする**(実測: PDFは書けるが`.output()`が永遠にブロック)。Chrome自動更新による現場リグレッション
-- 完了シグナルは取れる: `--print-to-pdf`はstderrに`N bytes written to file <path>`、`--dump-dom`はstdoutの`</html>`終端
+- With `--headless=new --virtual-time-budget=5000 --dump-dom`, page JS (wait `document.fonts.ready` → DOM walk → append `<script type="application/json" id="peitho-measure">` to body) **runs and the post-execution DOM is dumped correctly**. Takes about 3 seconds. rect (x:96, y:80, w:335.9, h:84), computed font-size (56px), color, and font-weight all match expected values. The implementation uses `--virtual-time-budget=20000` to leave headroom for large image / font decode waits
+- **Critical finding: Chrome 149 does not exit after one-shot completion**. Right after completion it wakes macOS GoogleUpdater (`--wake-all`), which keeps the parent process alive. `--disable-background-networking --disable-component-update` do not prevent it (measured)
+- As a result, **the already-landed `peitho export pdf` (#109/#139) hangs in the current environment** (measured: PDF is written but `.output()` blocks forever). Field regression caused by Chrome auto-update
+- Completion signals are available: `--print-to-pdf` writes `N bytes written to file <path>` to stderr; `--dump-dom` terminates with `</html>` on stdout
 
-### 根本修正: 共有ワンショットChromeランナー
+### Root fix: shared one-shot Chrome runner
 
-「ワンショットheadless Chromeの実行と終了」が共有シームであり、pdf/pptxの両consumerが同じ壊れ方をするので、ここを1箇所で直す:
+"Running and exiting one-shot headless Chrome" is a shared seam that both pdf/pptx consumers break on identically, so fix it in one place:
 
-- `run_chrome_print`の`.output()`(exit待ち)をやめ、**spawn + stdout/stderrパイプ読み取り + 完了シグナル検知 + タイムアウト(既定60s程度) + 検知後にchildをkill/wait**するランナーに置き換える
-- 完了述語: pdf = stderrの`bytes written to file`(かつ出力ファイル非空)、dump-dom = stdoutの`</html>`終端
-- childは使い捨てtempdirプロファイルなのでkillしてよい(pitfallsの「SIGTERMはクラッシュ扱い」はユーザーの永続プロファイルの話。使い捨てプロファイルにcrash recoveryの害はない)
-- タイムアウトは「壊れたページで永遠に待つ」一般故障モードも同時に塞ぐ
-- `export pdf`をこのランナーに乗せ替える(同一根本原因の同時修正。per-consumerのcarve-outはしない)
-- CLAUDE.md pitfallsにこの実測事実を追記する
+- Replace `run_chrome_print`'s `.output()` (exit wait) with a runner that **spawns + reads stdout/stderr through pipes + detects a completion signal + times out (default around 60s) + kills/waits the child after detection**
+- Completion predicates: pdf = stderr's `bytes written to file` (and non-empty output file); dump-dom = stdout's `</html>` terminator
+- The child uses a throwaway tempdir profile, so killing is fine (the pitfall "SIGTERM registers as a crash" concerns the user's persistent profile. Throwaway profiles suffer no harm from crash recovery)
+- Timeout also closes the general failure mode "waiting forever on a broken page"
+- Migrate `export pdf` onto this runner (fix the same root cause at the same time. No per-consumer carve-out)
+- Add this measured fact to CLAUDE.md pitfalls
 
-jsdomはレイアウトを持たないためrectは常に0 — measure.tsのvitestはDOM構造の歩き方・run抽出・paragraph分割のロジックのみを検証し、ジオメトリはChrome-gated E2E(`#[ignore]`、export_pdf.rs型)で検証する。E2E後、実際にPowerPoint/Keynoteで開く手動確認を1回行う。
+jsdom has no layout so rects are always 0 — measure.ts's vitest verifies only the DOM-walk logic / run extraction / paragraph splitting; geometry is verified with Chrome-gated E2E (`#[ignore]`, export_pdf.rs style). After E2E, do one manual verification of actually opening in PowerPoint/Keynote.
 
 ## Tasks (TDD)
 
-1. ~~**Spike**~~ 完了(上記「Spike結果」)
-2. **共有Chromeランナー**(crates/peitho): spawn+完了シグナル+タイムアウト+kill。`export pdf`を乗せ替え(ハング修正)。unit test(完了述語、タイムアウト、非空チェック)。fake chromeスクリプトでのテストはexport_pdf既存テストの手法に準拠
-3. **計測スキーマ**: core domainに`Measured*`型(serde + ts-rs)、bindings生成・コミット
-4. **`render_measure_document`**(core render.rs): 計測用HTML生成。unit test(キャンバスサイズ、section列挙、measure.js埋め込み、JSON marker要素)
-5. **measure.ts**(packages/peitho-present): DOM-walk実装。vitest(構造歩行・run統合・pre改行分割・liバレルレベル・hl-span色取得のロジック。jsdomはレイアウトを持たないのでrect値は対象外)。dist/measure.jsビルド+コミット+ドリフトチェックをCIに追加
-6. **pptx writer**(core 新モジュール`pptx.rs`): 計測JSON+Rendered+画像→zip bytes。unit testはzipを読み戻してXML断片をassert(slide数、sldSz EMU、run色/サイズ、bullet、notesSlide、media、Content_Types)
-7. **CLI `export pptx`**(main.rs): workspace emit→Chromeランナーでdump-dom→JSON抽出→書き出し。エラーパスのunit test(Chrome不在等はexport_pdfのテストに準拠)
-8. **E2E**(crates/peitho/tests/export_pptx.rs、`#[ignore]` Chrome-gated): サンプルデッキ→pptx→unzipしてテキスト・画像・notes存在をassert。export_pdfのE2Eも現環境で通ることを確認(ランナー修正の回帰確認)
-9. **Docs**: README(export pptx、Keynoteはpptxインポート案内)、CLAUDE.md構造節+pitfalls(Chrome 149非終了の実測)追記
+1. ~~**Spike**~~ Complete (see "Spike results" above)
+2. **Shared Chrome runner** (crates/peitho): spawn + completion signal + timeout + kill. Migrate `export pdf` (hang fix). Unit tests (completion predicate, timeout, non-empty check). Follow the fake-chrome-script approach of existing export_pdf tests
+3. **Measurement schema**: add `Measured*` types (serde + ts-rs) to core domain; generate + commit bindings
+4. **`render_measure_document`** (core render.rs): generate measurement HTML. Unit tests (canvas size, section enumeration, measure.js embedding, JSON marker element)
+5. **measure.ts** (packages/peitho-present): DOM-walk implementation. vitest (structure walking, run integration, pre newline splitting, li bullet levels, hl-span color capture logic. jsdom has no layout so rect values are out of scope). Add dist/measure.js build + commit + drift check to CI
+6. **pptx writer** (new core module `pptx.rs`): measurement JSON + Rendered + images → zip bytes. Unit tests read the zip back and assert on XML fragments (slide count, sldSz EMU, run color/size, bullets, notesSlide, media, Content_Types)
+7. **CLI `export pptx`** (main.rs): workspace emit → dump-dom via Chrome runner → JSON extraction → write out. Unit tests on error paths (missing Chrome etc., follow export_pdf tests)
+8. **E2E** (crates/peitho/tests/export_pptx.rs, `#[ignore]` Chrome-gated): sample deck → pptx → unzip and assert text/images/notes exist. Also verify that export_pdf's E2E passes in the current environment (regression check for the runner fix)
+9. **Docs**: README (export pptx, Keynote via pptx import), CLAUDE.md structure section + pitfalls (Chrome 149 non-exit as measured)
 
 ## Related
 
 - Issue #140 / #109 (PDF export) / #23 (aspect_ratio)
-- `docs/plans/2026-07-05-pdf-export.md`(export サブグループとChrome起動の先行例)
+- `docs/plans/2026-07-05-pdf-export.md` (export subgroup and Chrome launch precedent)
 - §13 of `docs/PEITHO_KICKOFF.md`

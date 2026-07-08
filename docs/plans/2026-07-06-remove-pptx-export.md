@@ -2,7 +2,7 @@
 
 ## Background
 
-`peitho export pptx` produces files that PowerPoint flags as corrupt ("コンテンツに問題が見つかりました"). Quality is insufficient, so the entire feature is removed.
+`peitho export pptx` produces files that PowerPoint flags as corrupt ("problem was found with the content"). Quality is insufficient, so the entire feature is removed.
 
 ## Scope
 

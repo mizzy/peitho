@@ -1,22 +1,22 @@
-# PDF export: Linux headless Chromeでの`image.decode()`無音ハング修正 (Issue #155)
+# PDF export: fix silent `image.decode()` hang in Linux headless Chrome (Issue #155)
 
-## 背景
+## Background
 
-#153 / v0.8.1で修正したはずの#150（Preview.appでbox-shadow周りに黒矩形）が、Linux（decks.gosu.keのCI = ubuntu-latest）でexportしたPDFでは直っていなかった。切り分けの結果、`pdf_flatten.js`の`applyOuterShadow`にある`await image.decode()`が、**Linuxのheadless Chrome + `--virtual-time-budget`環境下でresolveもrejectもされず永遠にハングする**ことが根本原因と確定している（Issue #155にDockerでの計装トレースあり）。
+#150 (black rectangles around box-shadow in Preview.app) was supposed to be fixed in #153 / v0.8.1, but the fix did not take on PDFs exported from Linux (decks.gosu.ke CI = ubuntu-latest). After bisecting, the root cause is confirmed: the `await image.decode()` in `pdf_flatten.js`'s `applyOuterShadow` **never resolves and never rejects under Linux headless Chrome + `--virtual-time-budget`, hanging forever** (Issue #155 has an instrumented Docker trace).
 
-- rejectされないため`catch`も走らず、`console.error`も出ない（サイレント）
-- flatten全体がそこで停止し、仮想時間バジェット切れでChromeが未処理のbox-shadowのままPDFを印刷する
-- macOSでは`decode()`が仮想時間切れより先に完了するため、たまたま動いていただけ
+- No reject means `catch` never runs and no `console.error` is printed (silent)
+- The whole flatten stalls there, and once the virtual time budget expires Chrome prints the PDF with the box-shadow still unhandled
+- On macOS `decode()` just happened to finish before the virtual time ran out, so it worked by accident
 
-## 根本原因の範囲
+## Scope of the root cause
 
-壊れている不変条件は「**`--virtual-time-budget`下のheadless Chromeで実行されるin-pageスクリプトは`image.decode()`に依存してはならない**」。
+The broken invariant is: **in-page scripts run in headless Chrome under `--virtual-time-budget` must not rely on `image.decode()`**.
 
-計画時点では`packages/peitho-present/src/measure.ts`の`waitForImage`（PPTX export計測、`--virtual-time-budget=20000`で実行）にも同一クラスの`decode()`依存があり、本PRで同時に除去した。その後PR #156（Issue #152）でPPTX export自体が削除されたため、rebase後の最終形では`pdf_flatten.js`のみが対象になっている。
+At planning time, `packages/peitho-present/src/measure.ts`'s `waitForImage` (PPTX export measurement, run under `--virtual-time-budget=20000`) had the same class of `decode()` dependency, and this PR removed it in the same pass. PPTX export itself was later removed by PR #156 (Issue #152), so after rebase the only remaining target is `pdf_flatten.js`.
 
-## 修正内容
+## Changes
 
-### 1. `pdf_flatten.js` — `applyOuterShadow`のdecode分岐廃止
+### 1. `pdf_flatten.js` — drop the decode branch in `applyOuterShadow`
 
 ```js
 // before
@@ -32,26 +32,26 @@ if (image.decode) {
 var image = await loadImage(raster.dataUrl);
 ```
 
-既存の`loadImage`（`new Image()` + load/errorイベント待ち）が返すimg要素をそのまま使う。Issueの検証パッチ（`image.src`設定 + 別Imageで`loadImage`待ち）よりさらに一本化した形で、appendする要素自体のloadを待つ。Issue著者がLinuxコンテナで`--print-to-pdf`し`/Luminosity` 8件→0件を確認済みのアプローチと同一の機構（loadイベント待ち）。
+Use the img element returned by the existing `loadImage` (`new Image()` + wait on load/error events) as-is. This is even more unified than the Issue's verification patch (set `image.src`, wait on a separate Image via `loadImage`): wait on the load of the element that will actually be appended. It uses the same mechanism (wait on load event) as the approach the Issue author verified with `--print-to-pdf` in a Linux container, where `/Luminosity` went from 8 hits to 0.
 
-### 2. CI — Linux E2Eジョブ追加（再発防止）
+### 2. CI — add a Linux E2E job (regression guard)
 
-この問題がリリースまで検出されなかったのは、Chrome実行E2E（`export_pdf.rs`の`/Luminosity`アサート含む）が全部`#[ignore]`で、CIは`cargo test --workspace`のみのためLinuxで一度も実行されていないから。
+The reason this defect slipped through to release: the Chrome-executing E2E (including the `/Luminosity` assertion in `export_pdf.rs`) is entirely `#[ignore]`, and CI only runs `cargo test --workspace`, so it has never once run on Linux.
 
-`.github/workflows/ci.yml`に`e2e`ジョブを追加する:
+Add an `e2e` job to `.github/workflows/ci.yml`:
 
-- ubuntu-latest（GitHub hosted runnerはGoogle Chrome stableプリインストール）
-- ジョブ環境変数で`PEITHO_CHROME_PATH: /usr/bin/google-chrome`を明示指定する。テストヘルパは「`PEITHO_CHROME_PATH`が設定されているのに実在しない場合はpanic」に変更（プロジェクトの「明示パスの不存在はエラー、無音フォールバック禁止」の原則）。これによりCIではChrome欠落が必ず音を立てて落ち、E2Eの無音スキップによる空振りgreenは起こらない。env未設定のローカルでは従来どおり自動検出→なければスキップ
-- `google-chrome --version`ステップをコンパイル前の早期ガードとして置く（panicより先に、速く明確に落とすため）
-- `cargo test --workspace -- --ignored --test-threads=1`で`#[ignore]`のE2E（`export_pdf.rs`の4本）を実行。`--test-threads=1`は4-vCPU runnerでheadless Chromeの並列起動が60秒one-shotタイムアウトに触れるflakeを避けるため
-- rust-cacheは`shared-key: tests`で既存`test`ジョブと共有し、workspaceの二重コンパイルを避ける
+- ubuntu-latest (GitHub hosted runners have Google Chrome stable preinstalled)
+- Set `PEITHO_CHROME_PATH: /usr/bin/google-chrome` explicitly as a job env var. The test helper is changed so that "when `PEITHO_CHROME_PATH` is set but the file does not exist, panic" (the project principle "explicit paths that don't exist are errors, no silent fallback"). This means missing Chrome always fails loudly in CI, and there's no such thing as a green run from silent E2E skips. On local machines with the env unset, behavior is as before (auto-detect → skip if not found).
+- Put a `google-chrome --version` step as an early guard before compilation (fail faster and more clearly than a panic)
+- Run the `#[ignore]` E2E (the 4 in `export_pdf.rs`) with `cargo test --workspace -- --ignored --test-threads=1`. `--test-threads=1` avoids a flake where parallel headless Chrome launches on the 4-vCPU runner hit the 60s one-shot timeout
+- rust-cache uses `shared-key: tests` so it shares the cache with the existing `test` job and avoids double-compiling the workspace
 
-テストヘルパ`test_chrome_path`/`find_in_path`は`crates/peitho/tests/util/mod.rs`（サブディレクトリモジュール。tests/直下の.rsは独立バイナリになるため）に置き、panic化はそこ1箇所で行う。
+The test helpers `test_chrome_path` / `find_in_path` live in `crates/peitho/tests/util/mod.rs` (a subdirectory module — `.rs` files directly under tests/ become standalone binaries), and the panic conversion is done in that one place.
 
-レビューで`/S /Luminosity`の否定アサートが空白あり直列化しかマッチしないことが判明したため、`/Luminosity`単独の不在チェックに強化した（将来Chromeが`/S/Luminosity`とコンパクトに直列化してもtripwireがすり抜けない）。
+Review found that the negated `/S /Luminosity` assertion only matches the whitespace-separated serialization, so it was strengthened to check absence of `/Luminosity` alone (so the tripwire doesn't slip past even if a future Chrome serializes it compactly as `/S/Luminosity`).
 
-## 検証
+## Verification
 
-- 全ゲート（cargo test x3 / clippy / fmt / bindings drift / npm build+test+typecheck / dist drift）
-- macOSローカルで`cargo test -- --ignored`（既存E2E、リグレッション確認）
-- Docker（Linuxコンテナ + Playwright chromium）で`cargo test -- --ignored`を実行し、box-shadow E2Eが修正前fail（Issue #155再現）→修正後passになることを確認（Issueの再現手順と同型）
+- All gates (cargo test x3 / clippy / fmt / bindings drift / npm build+test+typecheck / dist drift)
+- `cargo test -- --ignored` on macOS local (existing E2E, regression check)
+- Ran `cargo test -- --ignored` in Docker (Linux container + Playwright chromium) and confirmed the box-shadow E2E fails before the fix (reproducing Issue #155) and passes after (isomorphic to the Issue's repro steps)

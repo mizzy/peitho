@@ -2,6 +2,10 @@
 
 An HTML-native presentation tool with Markdown as the source of truth. The authoritative design reference is `docs/PEITHO_KICKOFF.md` (the kickoff spec). When in doubt about a design decision, check §18 "Undecided Items" in the spec; for new decisions not covered there, check with the author.
 
+## Language
+
+All written artifacts in this project must be in English. This includes: documentation (README, docs/, inline comments, commit messages), GitHub issues (titles and bodies), pull requests (titles, bodies, and review comments), and code identifiers. Do not write these in Japanese or any other language. If the author writes to you in Japanese, still produce artifacts in English.
+
 ## The three pillars (invariants that must not be broken)
 
 1. **Separation of content and design**: Content is Markdown, design is layout HTML+CSS. Do not mix them

@@ -1,80 +1,67 @@
-# feature-tour example実装計画 (2026-07-04)
+# feature-tour example implementation plan (2026-07-04)
 
-## 動機
+## Motivation
 
-既存4例のカバレッジ棚卸しで、どのexampleも使っていない機能が見つかった:
+A coverage inventory of the existing four examples surfaced features that none of them exercise:
 
-1. 明示レイアウト指定 `{"layout":"name"}`（ハイブリッドディスパッチの最優先規則なのに使用例ゼロ）
-2. `accepts="list"` スロット
-3. 1スライド複数ノートコメント（空行連結）
-4. Rust以外のシンタックスハイライト（全コードブロックが `rust`）
-5. インライン装飾（強調・リンク）とネストしたリスト
-6. 3枚以上のレイアウト間ディスパッチ
+1. Explicit layout selection `{"layout":"name"}` (the top-priority rule of hybrid dispatch, yet no example uses it)
+2. `accepts="list"` slots
+3. Multiple note comments per slide (blank-line join)
+4. Syntax highlighting for non-Rust languages (every code block uses `rust`)
+5. Inline decorations (emphasis, links) and nested lists
+6. Dispatch across three or more layouts
 
-これらを1つのデッキで網羅する5つ目のexample `examples/feature-tour/` を追加する。
-題材はpeitho自身の機能紹介（自己言及型・英語）。著者確認済み (2026-07-04)。
+Add a fifth example, `examples/feature-tour/`, that covers all of these in a single deck. The subject is a self-referential tour of peitho's own features, in English. Confirmed with the author (2026-07-04).
 
-なお調査の副産物として、`Accepts::Image`/`Accepts::Text` はパーサがImage/Text
-フラグメントを生成する経路が無く（Markdown画像は `unsupported construct` エラー）、
-現状Markdownから到達不能な語彙であることを確認した。これはexampleでは埋められない
-著者判断マター（画像対応の是非）なので本計画のスコープ外。
+As a side finding from the investigation, `Accepts::Image`/`Accepts::Text` have no path where the parser produces Image/Text fragments (Markdown images fail with `unsupported construct`), so they are currently unreachable vocabulary from Markdown. That is an author-judgment matter (whether to support images) that an example cannot fill, so it is out of scope for this plan.
 
-## デッキ設計（7スライド・4レイアウト）
+## Deck design (7 slides, 4 layouts)
 
-frontmatter `time: 8m`。セクション: Basics 2m（S1-2）/ Contracts 3m（S3-4）/
-Presenting 3m（S5-7）。合計8m = frontmatter値（パース終端の検証を通す）。
+frontmatter `time: 8m`. Sections: Basics 2m (S1-2) / Contracts 3m (S3-4) /
+Presenting 3m (S5-7). Total 8m = frontmatter value (passes the parse-end validation).
 
-レイアウトと契約:
+Layouts and contracts:
 
-| layout | slots | 構造マッチする形 |
+| layout | slots | Structural match shape |
 |---|---|---|
-| `cover` | title inline 1 | 見出しのみ |
-| `topic` | title inline 1, body blocks 1..* | 見出し+段落/リスト |
-| `agenda` | title inline 1, body list 1..* | 見出し+リストのみ |
-| `code-demo` | title inline 1, body blocks 0..*, code code 1..* | コードを含む |
+| `cover` | title inline 1 | heading only |
+| `topic` | title inline 1, body blocks 1..* | heading + paragraph/list |
+| `agenda` | title inline 1, body list 1..* | heading + list only |
+| `code-demo` | title inline 1, body blocks 0..*, code code 1..* | includes code |
 
-**設計の要**: リストのみのスライドは `topic`（blocksはListを受ける）と `agenda` の
-両方に構造マッチして曖昧エラーになる。S3はこれを意図的に踏み、
-`{"layout":"agenda"}` の明示指定で解決する — 「曖昧は黙って解決しない、明示が要る」
-という規則を実デッキで体験させる。
+**Design pivot**: a list-only slide structurally matches both `topic` (blocks accepts List) and `agenda`, hitting the ambiguity error. S3 deliberately steps on this and resolves it with the explicit `{"layout":"agenda"}` selector — showing the "ambiguity is never silently resolved; explicit selection is required" rule in a real deck.
 
-スライド:
+Slides:
 
-1. cover構造マッチ。ノートコメント**2つ**（空行連結の実演）。key+section
-2. topic。**強調**・*イタリック*・[リンク]・ネストリストを本文に使用
-3. agenda明示指定（上記）。checkが捕まえるものの一覧
-4. code-demo。**コードブロック2つ**（rust + typescript）— arity 1..* とts-rs対比の自己言及
-5. code-demo。bashのCLI実演（3コマンド）
-6. topic。時間管理・セクション・ノートの説明（このデッキ自身の設定を引用）
-7. cover。クロージング（ノート無し = presenterのdimmedプレースホルダも見える）
+1. cover structural match. **Two** note comments (blank-line join demo). key+section
+2. topic. Uses **bold**, *italic*, [links], and nested lists in the body
+3. agenda explicit selection (as above). List of what check catches
+4. code-demo. **Two code blocks** (rust + typescript) — self-referential nod to arity 1..* and the ts-rs contrast
+5. code-demo. bash CLI demo (three commands)
+6. topic. Explains time management, sections, and notes (quoting this deck's own settings)
+7. cover. Closing (no notes = presenter's dimmed placeholder is also visible)
 
-シンタックスハイライト言語: rust / typescript / bash（syntect認識トークン。
-未知タグはビルドエラーなので `peitho build` で検証）。
+Syntax highlighting languages: rust / typescript / bash (syntect-recognized tokens; unknown tags are build errors, so `peitho build` is the check).
 
-## テーマ
+## Theme
 
-既存4例（ivoryデフォルト/ダークポスター/ターミナル/クリームセリフ）と被らない
-「ライトなプロダクトツアー」調: 白背景+インディゴアクセント+システムサンセリフ。
-`.peitho-slide` 1280x720規約に従う。
+A "light product tour" tone that does not overlap with the existing four (ivory default / dark poster / terminal / cream serif): white background + indigo accent + system sans-serif. Follows the `.peitho-slide` 1280x720 convention.
 
-CSS検証の実演:
-- `base.css`: bare `.slot-*`（全レイアウトのスロット和集合に対して検証される）
-- `overrides.css`: keyed selector 2つ以上（`[data-slide-key="..."]` はそのスライドの
-  レイアウトのスロットに対して検証される）
+CSS validation demo:
+- `base.css`: bare `.slot-*` (validated against the union of slots across all layouts)
+- `overrides.css`: two or more keyed selectors (`[data-slide-key="..."]` is validated against the slots of that slide's layout)
 
-## 変更ファイル
+## Files changed
 
 - `examples/feature-tour/deck.md`
 - `examples/feature-tour/layouts/{cover,topic,agenda,code-demo}.html`
 - `examples/feature-tour/css/{base,overrides}.css`
-- `crates/peitho/tests/build.rs` — 既存のlightning-talkパターンに倣い、
-  スライド数・sections・notes.jsonを固定する統合テスト
-- `Makefile` — `feature-tour`(+`-windowed`)ターゲット、help、DEMO_DECKS、demo-site
-- `demo/index.html` — デッキカード追加
-- `README.md` — examplesテーブル行 + スクショ1枚
-- `scripts/take-screenshots.sh` — DECKSに追加
+- `crates/peitho/tests/build.rs` — integration test that pins slide count, sections, and notes.json, following the existing lightning-talk pattern
+- `Makefile` — `feature-tour`(+`-windowed`) targets, help, DEMO_DECKS, demo-site
+- `demo/index.html` — add deck card
+- `README.md` — examples table row + one screenshot
+- `scripts/take-screenshots.sh` — add to DECKS
 
-## ゲート
+## Gates
 
-CLAUDE.mdの全ゲート + `peitho build examples/feature-tour/deck.md` 成功 +
-スクショでの目視確認。
+All CLAUDE.md gates + `peitho build examples/feature-tour/deck.md` succeeds + visual confirmation via screenshot.

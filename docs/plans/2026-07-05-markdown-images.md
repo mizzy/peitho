@@ -1,58 +1,58 @@
-# Markdown画像対応計画 (Issue #117 / #106)
+# Markdown image support plan (Issue #117 / #106)
 
-## 決定事項
+## Decisions
 
-- `![alt](path)` の `path` は **デッキファイルからの相対パスのみ**。リモートURL、絶対パス、URL scheme風の値は行番号付きビルドエラー
-- MVPで許可する画像拡張子は **`.png` / `.jpg` / `.jpeg` / `.gif` / `.webp`**。大文字小文字は区別せず小文字化して判定する。拡張子無し、`.exe`、`.md`、`.svg` は parser段階で行番号付きビルドエラー
-- 画像は **`accepts="image"` のスロットにだけ** 割り当てる。画像を受けるスロットが無いレイアウト、または複数あって convention で一意に決められないレイアウトはビルドエラー
-- dist配置は `dist/assets/<hash>-<basename>.<ext>`。コンテンツハッシュで重複除去し、同じ内容は1回だけコピーする
-- #106 は同時解消する。`FragmentKind::Image` / `Accepts::Image` を parser → mapping → check → render の実到達経路に乗せる
-- `Accepts::Text` はこのPRでは触らない。#106 には「Imageは解消、Textは残り」とコメントする
+- The `path` in `![alt](path)` is **relative from the deck file only**. Remote URLs, absolute paths, and URL-scheme-like values are line-numbered build errors
+- Allowed image extensions in the MVP are **`.png` / `.jpg` / `.jpeg` / `.gif` / `.webp`**. Case-insensitive; lowercased before comparison. No extension, `.exe`, `.md`, `.svg` are line-numbered build errors at the parser stage
+- Images are assigned **only to slots with `accepts="image"`**. Layouts with no image-accepting slot, or with multiple such that convention cannot resolve uniquely, are build errors
+- Dist layout is `dist/assets/<hash>-<basename>.<ext>`. Deduplicate by content hash; identical content is copied once
+- #106 is resolved at the same time. Put `FragmentKind::Image` / `Accepts::Image` on the actual parser → mapping → check → render path
+- `Accepts::Text` is untouched in this PR. Comment on #106: "Image is resolved, Text remains"
 
-## 不変条件
+## Invariants
 
-- 画像はMarkdown側のコンテンツ。サイズ、配置、トリミングはレイアウトHTML/CSS側に置く
-- unknown / unsupported / mixed構造を `_ => {}` で握りつぶさない。未定義ケースは line + help 付きエラーにする
-- `Parsed → Mapped → Checked → Rendered` の型境界を守る。`Rendered` へ渡る画像srcは `ResolvedImagePath` だけにし、`RawImagePath` から直接 `<img src>` を生成できない型にする
+- Images are Markdown-side content. Sizing, placement, and cropping sit on the layout HTML/CSS side
+- Do not silently swallow unknown / unsupported / mixed structures with `_ => {}`. Undefined cases become line + help errors
+- Preserve the `Parsed → Mapped → Checked → Rendered` type boundaries. The image src that reaches `Rendered` is only `ResolvedImagePath`, and no type path lets `RawImagePath` generate `<img src>` directly
 
-## 対象コード
+## Target code
 
 - `crates/peitho-core/src/domain.rs`
-  - `FragmentKind` を `Image { alt: String, src: S }` を持てる形に変更し、`RawImagePath` / `ResolvedImagePath` / `ResolvedImageAsset` を追加する
-  - `SourceFragment::image(line, alt, RawImagePath)` と `image()` accessor を追加する
-  - `FragmentKind` は `Copy` を外す。`kind()` は参照返し、`default_accepts()` / `removal_noun()` / `Display` は image payload を無視して動かす
+  - Change `FragmentKind` so it can hold `Image { alt: String, src: S }`; add `RawImagePath` / `ResolvedImagePath` / `ResolvedImageAsset`
+  - Add `SourceFragment::image(line, alt, RawImagePath)` and an `image()` accessor
+  - Drop `Copy` from `FragmentKind`. `kind()` returns a reference; `default_accepts()` / `removal_noun()` / `Display` work regardless of the image payload
 - `crates/peitho-core/src/parser.rs`
-  - `unsupported_tag()` / `unsupported_tag_name()` から `Tag::Image { .. }` を外す
-  - `OpenBlock::Paragraph` に inline状態を持たせ、画像単独段落だけ `SourceFragment::image` に変換する
-  - `RawImagePath::new(raw, line)` を呼び、URL/絶対パス/非許可拡張子を parser段階の行番号付きエラーにする
-  - `list_depth > 0` の丸ごと無視より前に `Tag::Image` を検出し、list内画像は当面エラーにする
+  - Remove `Tag::Image { .. }` from `unsupported_tag()` / `unsupported_tag_name()`
+  - Give `OpenBlock::Paragraph` inline state; only paragraphs that are a single image get converted to `SourceFragment::image`
+  - Call `RawImagePath::new(raw, line)`, and turn URL / absolute path / non-allowed extension into line-numbered parser-stage errors
+  - Detect `Tag::Image` before the whole-item ignore for `list_depth > 0`; images inside lists are errors for now
 - `crates/peitho-core/src/mapping.rs`
-  - `map_slide()` を image slot選択で失敗し得る形にする (`Result<MappedSlide>`)
-  - `FragmentKind::Image { .. }` は `body` に落とさず、`accepts == Accepts::Image` のスロットへだけ割り当てる
+  - Change `map_slide()` to a form that can fail on image slot selection (`Result<MappedSlide>`)
+  - `FragmentKind::Image { .. }` does not fall through to `body`; assign only to a slot where `accepts == Accepts::Image`
 - `crates/peitho-core/src/check.rs`
-  - 既存 `(Accepts::Image, FragmentKind::Image)` アームを、到達するテストで固定する
-  - `FragmentKind` payload化に合わせて全matchを網羅的に更新する
+  - Pin the existing `(Accepts::Image, FragmentKind::Image)` arm with a reachable test
+  - Exhaustively update all matches to accommodate the payloadful `FragmentKind`
 - `crates/peitho-core/src/error.rs`
-  - resolve段階のI/O失敗を parser/layout/manifest と混ぜないため、`ErrorKind::Asset` を追加する
+  - Add `ErrorKind::Asset` so resolve-stage I/O failures don't mix with parser / layout / manifest
 - `crates/peitho-core/src/render.rs`
-  - `render_deck()` は `Deck<Checked<ResolvedImagePath>>` だけを受ける
-  - `render_slot()` / `render_image_fragment()` は `ResolvedImagePath` の `html_src()` だけを使い、altをHTML属性escapeして `<img>` を出す
+  - `render_deck()` accepts only `Deck<Checked<ResolvedImagePath>>`
+  - `render_slot()` / `render_image_fragment()` use only `ResolvedImagePath`'s `html_src()`, HTML-attribute-escape alt, and emit `<img>`
 - `crates/peitho-core/src/manifest.rs`
-  - `ManifestImage { src }` と `images: Vec<ManifestImage>` を追加し、`#[serde(default)]` で既存manifestのpublish validationを壊さない
-  - `build_manifest()` は解決済み画像asset一覧を受け取るか、解決済みChecked deckから `images` を作る
+  - Add `ManifestImage { src }` and `images: Vec<ManifestImage>`; use `#[serde(default)]` so existing manifest publish validation is not broken
+  - `build_manifest()` either takes a list of resolved image assets or derives `images` from a resolved Checked deck
 - `crates/peitho-core/src/lib.rs`
-  - CLIが使う `RawImagePath` / `ResolvedImagePath` / `ResolvedImageAsset` / `ManifestImage` / 画像解決関数を公開する
+  - Publicly expose `RawImagePath` / `ResolvedImagePath` / `ResolvedImageAsset` / `ManifestImage` / image resolution functions used by the CLI
 - `crates/peitho/src/main.rs`
-  - `build_artifacts()` に `resolve_image_paths()` 呼び出しを挟む
-  - CLI側 resolver が deck parent基準で実ファイルを解決し、hashと `assets/...` を決定する
-  - `emit_distribution()` / `emit_present_cache()` で `assets/` を作り直して画像をコピーする
-  - `validate_publish_dist()` / `read_publish_manifest()` で `manifest.images[*].src` の存在とdist内相対パス性を検証する
-- `crates/peitho/tests/{build.rs,publish.rs}`、`crates/peitho-core/src/*` の単体テスト、`examples/`、`bindings/`
-  - 画像入りexample、bindings再生成、publish欠落検出を追加する
+  - Insert a `resolve_image_paths()` call in `build_artifacts()`
+  - The CLI-side resolver resolves real files relative to the deck parent and determines hash and `assets/...`
+  - `emit_distribution()` / `emit_present_cache()` recreates `assets/` and copies images
+  - `validate_publish_dist()` / `read_publish_manifest()` verify existence and dist-relative-ness of `manifest.images[*].src`
+- `crates/peitho/tests/{build.rs,publish.rs}`, unit tests in `crates/peitho-core/src/*`, `examples/`, `bindings/`
+  - Add an image-bearing example, regenerate bindings, add publish-missing detection
 
-## 型設計
+## Type design
 
-`RawImagePath` はMarkdownに書かれた値。構築時に「ローカル相対パス」だけを許可する。
+`RawImagePath` is the value written in Markdown. On construction it allows only "local relative path".
 
 ```rust
 pub struct RawImagePath(String);
@@ -64,9 +64,9 @@ impl RawImagePath {
 }
 ```
 
-拡張子チェックは parser段階で強制する。理由は、`foo.exe` / `notes.md` をresolverでcopyしてからChromeのMIME解釈に任せると、HTML生成までは成功する silent path になるため。SVGは将来扱いを決める余地を残すが、MVPでは `.svg` を明示拒否する。
+Enforce the extension check at the parser stage. Reason: leaving `foo.exe` / `notes.md` to be copied by the resolver and dispatched by Chrome's MIME interpretation gives a silent path where HTML generation succeeds. SVG might get its own policy later; the MVP explicitly rejects `.svg`.
 
-`ResolvedImagePath` はHTMLに書いてよいdist相対srcだけを公開する。source pathはcopy用asset側に分ける。
+`ResolvedImagePath` exposes only the dist-relative src that is safe to write into HTML. The source path lives on the copy-side asset.
 
 ```rust
 pub struct ResolvedImagePath(String); // "assets/<hash>-<basename>.<ext>"
@@ -76,7 +76,7 @@ pub struct ResolvedImageAsset {
 }
 ```
 
-`SourceFragment` / `FragmentKind` は画像src型でgenericにする方針。
+`SourceFragment` / `FragmentKind` are made generic over the image src type.
 
 ```rust
 pub enum FragmentKind<S = RawImagePath> {
@@ -89,7 +89,7 @@ pub enum FragmentKind<S = RawImagePath> {
 }
 ```
 
-Coreの境界:
+Core boundary:
 
 ```rust
 pub fn resolve_image_paths<R>(
@@ -102,17 +102,17 @@ where
 pub fn render_deck(deck: Deck<Checked<ResolvedImagePath>>) -> Result<Deck<Rendered>>;
 ```
 
-これで `<img src>` を生成する `render_image_fragment()` は `ResolvedImagePath` しか受け取れない。CLIはresolverを注入するが、core自身はfilesystemやcopy副作用を持たない。
+This means `render_image_fragment()`, which generates `<img src>`, can only accept `ResolvedImagePath`. The CLI injects the resolver, but core itself has no filesystem or copy side effects.
 
-## エラー流路
+## Error routing
 
-全層で `peitho_core::BuildError` を返し、CLIは既存の `core(result)` で `miette` diagnosticへ統一変換する。
+Every layer returns `peitho_core::BuildError`; the CLI unifies to `miette` diagnostics via the existing `core(result)`.
 
-- parser段階: URL/absolute/非許可拡張子、混在段落、list内画像は `ErrorKind::Parse`
-- mapping段階: image slot無し、複数image slotでconvention不可能、structural match不成立/曖昧は `ErrorKind::Layout`
-- resolve段階: ファイル不在、permission denied、hash計算のread失敗は新設 `ErrorKind::Asset`
+- parser stage: URL / absolute / non-allowed extension, mixed paragraph, list-inner image → `ErrorKind::Parse`
+- mapping stage: no image slot, multiple image slots where convention cannot resolve, structural match fail/ambiguous → `ErrorKind::Layout`
+- resolve stage: file missing, permission denied, read failure during hashing → new `ErrorKind::Asset`
 
-resolverの型は `BuildError` 固定にする。
+The resolver's type is fixed to `BuildError`.
 
 ```rust
 pub struct ImageRequest<'a> {
@@ -128,13 +128,13 @@ where
     R: FnMut(ImageRequest<'_>) -> crate::Result<ResolvedImageAsset>;
 ```
 
-CLI resolverは `fs::metadata` / `fs::read` / `fs::canonicalize` の `io::Error` をその場で `BuildError::new(ErrorKind::Asset, Some(request.line), ..., ...)` に変換する。`resolve_image_paths()` は checked slideを巡回しているので、resolverから返った `BuildError` に slide number/key を付けて返す。`io::Error` や `miette::Report` はcore境界を越えない。
+The CLI resolver converts `io::Error` from `fs::metadata` / `fs::read` / `fs::canonicalize` into `BuildError::new(ErrorKind::Asset, Some(request.line), ..., ...)` in place. `resolve_image_paths()` traverses checked slides, so it appends slide number / key to any `BuildError` returned by the resolver. `io::Error` and `miette::Report` never cross the core boundary.
 
-## parserのイベント処理
+## Parser event handling
 
-pulldown-cmark 0.13 の本文parser (`parser_options`) だけを変更する。frontmatter検出とslide split用grammarは現状どおり分離し、metadata block設定をsplit側へ混ぜない。
+Change only pulldown-cmark 0.13's body parser (`parser_options`). Keep frontmatter detection and slide-split grammar separated as before; don't mix metadata-block settings into the split side.
 
-画像単独段落:
+Standalone image paragraph:
 
 ```text
 Start(Paragraph)
@@ -144,9 +144,9 @@ End(TagEnd::Image)
 End(Paragraph)
 ```
 
-これは `SourceFragment::image(paragraph_start_line, alt, RawImagePath::new(dest_url, line))` にする。Paragraphフラグメントは作らない。
+Turn this into `SourceFragment::image(paragraph_start_line, alt, RawImagePath::new(dest_url, line))`. Don't create a Paragraph fragment.
 
-段落内テキストのみ:
+Text-only paragraph:
 
 ```text
 Start(Paragraph)
@@ -154,9 +154,9 @@ Text(...)
 End(Paragraph)
 ```
 
-現状どおり `SourceFragment::paragraph`。
+Same as today, `SourceFragment::paragraph`.
 
-混在段落:
+Mixed paragraph:
 
 ```text
 Start(Paragraph)
@@ -168,11 +168,11 @@ Text(" after")
 End(Paragraph)
 ```
 
-当面は `unsupported construct 'mixed image paragraph'` でエラー。lineは段落開始または画像開始の早い方、helpは「画像だけの段落に分ける」。複数画像を1段落に並べるケースも同じくエラーにし、複数画像が必要なら別段落で複数Imageフラグメントにする。
+For now, error as `unsupported construct 'mixed image paragraph'`. Line is the earlier of paragraph start or image start; help is "split into image-only paragraphs". Multiple images in one paragraph is also an error; if multiple images are needed, split into separate paragraphs and produce multiple Image fragments.
 
-alt収集は `Text` / `Code` / break を平文に畳む。image内で未対応tagが来たらエラーにし、外側の `Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link)` の既存無視アームで誤って飲み込まない。
+Alt collection collapses `Text` / `Code` / breaks into plain text. If an unsupported tag arrives inside an image, error out — don't let the outer `Event::Start(Tag::Emphasis | Tag::Strong | Tag::Link)` existing ignore arms accidentally swallow it.
 
-list内画像:
+Image inside a list:
 
 ```text
 Start(List)
@@ -182,40 +182,40 @@ Start(Tag::Image { .. })
 ...
 ```
 
-現状のlist処理は `list_depth > 0` で内部イベントを見ず、元Markdownを `SourceFragment::list` として保持する。ここで画像を許すと後段の `html::push_html` が raw path の `<img>` を生成できてしまうため、当面は `unsupported construct 'image inside list'` として明示エラーにする。
+Current list processing does not look at inner events for `list_depth > 0` and keeps the source Markdown as `SourceFragment::list`. Allowing images here would let the later `html::push_html` generate a raw-path `<img>`, so for now explicitly error as `unsupported construct 'image inside list'`.
 
-## ParagraphではなくImageに置き換える理由
+## Why replace with Image rather than Paragraph
 
-段落内inlineとして扱うと `FragmentKind::Paragraph` のまま `blocks/body` に流れ、著者判断の「imageスロットのみ」を型チェックできない。画像単独段落を `FragmentKind::Image { alt, src }` に置き換えることで、mapping/checkが `Accepts::Image` 契約を直接検査できる。混在段落はinline画像の設計が決まるまで明示エラーにする。
+If we handled it as paragraph-inner inline, the fragment would stay as `FragmentKind::Paragraph` and flow into `blocks/body`, so the author-intent "image slot only" cannot be type-checked. Replacing the standalone-image paragraph with `FragmentKind::Image { alt, src }` lets mapping/check inspect the `Accepts::Image` contract directly. Mixed paragraphs are explicit errors until the inline-image design is decided.
 
 ## dispatch / mapping fallout
 
-公開関数 `dispatch_by_convention()` と `map_by_convention()` は現状すでに `Result<Deck<Mapped>>` を返しているため、CLI (`crates/peitho/src/main.rs::build_artifacts`) と外部export (`crates/peitho-core/src/lib.rs`) のシグネチャは変わらない。変更するのは private `map_slide()` の戻り値を `Result<MappedSlide>` にする点と、その呼び出し側だけ。
+The public functions `dispatch_by_convention()` and `map_by_convention()` already return `Result<Deck<Mapped>>` today, so signatures on the CLI (`crates/peitho/src/main.rs::build_artifacts`) and external export (`crates/peitho-core/src/lib.rs`) side are unchanged. What changes is only the return of the private `map_slide()` to `Result<MappedSlide>` and its callers.
 
-影響範囲:
+Impact surface:
 
 - `crates/peitho-core/src/mapping.rs::dispatch_slide`
-  - explicit layout override: `map_slide(&slide, layout)?`。image slotエラーは指定layoutの確定エラーで、他layoutへfallbackしない
-  - single layout: `map_slide(&slide, layout)?`。既存どおり、そのlayoutに対する最短エラーを返す
-  - multi layout structural probe: layoutごとに `map_slide()` を試し、`map_slide` error または `check_slide` error をそのlayoutのrejectionとして扱う
+  - explicit layout override: `map_slide(&slide, layout)?`. An image-slot error is a definitive error for the specified layout; no fallback to other layouts
+  - single layout: `map_slide(&slide, layout)?`. As before, returns the shortest error against that layout
+  - multi layout structural probe: try `map_slide()` per layout; treat `map_slide` errors or `check_slide` errors as rejections for that layout
 - `crates/peitho-core/src/mapping.rs` tests
-  - 既存dispatch testsは公開関数の `unwrap()` 形を維持できる。画像ありの structural match testsを追加する
+  - Existing dispatch tests can keep the `unwrap()` shape at the public function. Add structural-match tests with images
 - `crates/peitho-core/src/check.rs` / `render.rs` / `manifest.rs` tests
-  - `map_by_convention(...).unwrap()` の呼び出しはシグネチャ上そのまま。`FragmentKind` payload化に伴うmatch修正だけが主なfallout
+  - `map_by_convention(...).unwrap()` call sites are signature-compatible. The main fallout is match-arm updates from `FragmentKind` payloadification
 - `crates/peitho/src/main.rs::build_artifacts`
-  - `core(peitho_core::dispatch_by_convention(parsed, &layouts))?` はそのまま。新しいmappingエラーも既存流路でmietteへ出る
+  - `core(peitho_core::dispatch_by_convention(parsed, &layouts))?` stays as-is. New mapping errors surface through miette via the existing route
 
-structural matchへの画像影響:
+Image impact on structural match:
 
-- 画像を含むslide + image slotを持つlayout1つ + 持たないlayout複数 → image layoutだけがmatch
-- 画像を含むslide + image slotを持つlayout複数 → ambiguous layout error
-- 画像を含むslide + image slotを持つlayoutゼロ → no layout matches
-- 画像を含まないslide → 既存の title/body/code/list 判定から変えない
-- explicit layout指定時は structural probeを使わず、指定layoutにimage slotが無ければその場でlayout error
+- Slide with image + one layout with an image slot + multiple without → only the image layout matches
+- Slide with image + multiple layouts with an image slot → ambiguous layout error
+- Slide with image + zero layouts with an image slot → no layout matches
+- Slide without images → title/body/code/list decision unchanged
+- With an explicit layout, don't use the structural probe; if the specified layout has no image slot, layout error right there
 
-## アセット副作用フェーズ
+## Asset side-effect phase
 
-build/present 共通pipeline:
+Shared pipeline for build/present:
 
 ```text
 read markdown
@@ -223,52 +223,52 @@ parse_markdown
 dispatch_by_convention
 check_deck
 resolve_image_paths(core traversal + CLI resolver)
-build_manifest(images付き)
+build_manifest(with images)
 build_theme_css
 render_deck(resolved only)
 emit_distribution / emit_present_cache(copy assets)
 ```
 
-CLI resolverの責務:
+CLI resolver responsibilities:
 
-- `input.parent()` をdeck基準ディレクトリにする
-- `deck_dir.join(raw.as_str())` を実ファイルへ解決し、存在しなければ raw path の行番号付きビルドエラー
-- 拡張子は parserで保証済みなので、resolverは原則再判定しない。ただし `ResolvedImagePath::new` で `assets/` 配下のdist相対パスだけを受け付ける
-- ファイル内容をhashし、`assets/<hash>-<basename>.<ext>` を返す
-- hashごとの `ResolvedImageAsset` を `BTreeMap` 等で重複除去する。違うbasenameでも同一contentなら最初のdist名を再利用する
+- `input.parent()` becomes the deck-base directory
+- Resolve `deck_dir.join(raw.as_str())` to a real file; if missing, line-numbered build error for the raw path
+- Extensions are already enforced at the parser, so the resolver does not re-check by default. But `ResolvedImagePath::new` accepts only dist-relative paths under `assets/`
+- Hash the file contents, return `assets/<hash>-<basename>.<ext>`
+- Deduplicate `ResolvedImageAsset` per hash in a `BTreeMap` etc. If the content is identical, reuse the first dist name even when basenames differ
 
-emit側の責務:
+Emit-side responsibilities:
 
-- `write_slide_fragments()` と同じく、`assets/` は毎回作り直してstale imageを残さない
-- `emit_distribution()` と `emit_present_cache()` の両方で `copy_image_assets(out_or_cache, &artifacts.image_assets)` を呼ぶ
-- `BuildArtifacts` に `image_assets: Vec<ResolvedImageAsset>` を追加する
+- Like `write_slide_fragments()`, recreate `assets/` each time so no stale image survives
+- Both `emit_distribution()` and `emit_present_cache()` call `copy_image_assets(out_or_cache, &artifacts.image_assets)`
+- Add `image_assets: Vec<ResolvedImageAsset>` to `BuildArtifacts`
 
-## TDDタスクリスト
+## TDD task list
 
-| Red test | Green production change | silent-drop対抗 |
+| Red test | Green production change | Silent-drop countermeasure |
 |---|---|---|
-| `parses_standalone_image_paragraph_as_image_fragment` | `domain.rs` に `RawImagePath` / `FragmentKind::Image { alt, src }` / `SourceFragment::image`、`parser.rs` に image単独段落処理 | `Tag::Image` を `unsupported_tag` から外した直後に専用matchを追加し、fallbackの `_` に流さない |
-| `rejects_remote_image_url_with_line` / `rejects_absolute_image_path_with_line` | `RawImagePath::new` で scheme、`//`、absolute/root/prefix componentを拒否 | URLをParagraph markdownとして残さず parse error にする |
-| `rejects_image_without_supported_extension` / `rejects_svg_until_policy_is_decided` | `RawImagePath::new` で許可拡張子 `.png/.jpg/.jpeg/.gif/.webp` を強制 | 非画像ファイルをassetsへcopyしてChrome失敗に遅延させない |
-| `rejects_text_and_image_mixed_in_one_paragraph` / `rejects_two_images_in_one_paragraph_until_inline_design_exists` | `OpenBlock::Paragraph` に inline状態 (`Empty/TextOnly/PendingImage/SingleImage/Mixed`) を持たせる | mixedをParagraph化して `blocks` に流さない |
-| `rejects_image_inside_list_before_markdown_rerender` | `parser.rs` で `list_depth > 0` のignoreより前に `Tag::Image` を検出してエラー | list markdownの後段レンダリングで raw `<img src>` を作らせない |
-| `maps_image_to_unique_image_accepting_slot` | `mapping.rs::map_slide` が layout contractから唯一の `Accepts::Image` slotを選ぶ | `FragmentKind::Image` を `body` armから削除する |
-| `rejects_image_when_layout_has_no_image_slot` / `rejects_image_when_multiple_image_slots_are_ambiguous` | `dispatch_slide` / `map_slide` を `Result` 化し、0件/複数件をline付きLayoutエラーにする | 「missing body」等の誤ったResidualContentにしない |
-| `dispatch_selects_layout_with_image_slot_as_unique_structural_match` / `dispatch_rejects_two_image_layout_matches` | multi layout probeで `map_slide` errorをrejectionに含める | image slot要否を structural match の一意性判定から漏らさない |
-| `check_accepts_image_fragment_in_image_slot` | `check.rs::accepts_fragment` の既存Image armをpayload対応に直す | `Accepts::Blocks` が imageを受けないことも同時にassertする |
-| `render_deck_requires_resolved_image_paths` | `Deck<Checked<RawImagePath>>` から `render_deck` を呼べないcompile_fail doctest、`resolve_image_paths` 追加 | raw pathをrender関数の型引数に通さない |
-| `renders_image_with_resolved_src_and_escaped_alt` | `render.rs::render_slot` に image branch、`render_image_fragment(&FragmentKind<ResolvedImagePath>)` を追加 | Markdown再レンダリングに任せず、`RawImagePath` accessorをrender側へ公開しない |
-| `build_copies_markdown_image_to_dist_assets` | `main.rs::build_artifacts` にCLI resolver注入、`emit_distribution` に `copy_image_assets` | HTML内に元の `images/foo.png` が残っていないこともassertする |
-| `build_fails_for_missing_markdown_image_with_line_and_help` / `build_fails_for_unreadable_markdown_image_with_line_and_help` | CLI resolverがI/Oエラーを `BuildError(ErrorKind::Asset)` に変換し、coreがslide contextを付ける | missing/permission errorをcopy時panicやpublish時欠落に遅延させない |
-| `build_deduplicates_images_by_content_hash` | resolverがcontent hash mapを持ち、同じ内容へ同じ `ResolvedImagePath` を返す | basename違いで二重copyしない |
-| `manifest_serializes_images_array` / `deserializes_manifest_missing_images_as_empty` | `manifest.rs` に `ManifestImage` / `images`、bindings test更新 | 旧manifest publish validationを壊さず、画像ありmanifestは必ず列挙する |
-| `publish_rejects_missing_manifest_image_reference` / `publish_rejects_manifest_image_reference_outside_dist` | `validate_manifest_image_refs` を追加し、slide src検証helperを共有する | publish commandへ欠落distを渡さない |
-| `present_cache_copies_markdown_images` | `emit_present_cache` も `copy_image_assets` を呼ぶ | `peitho present` だけ画像が404になる経路を潰す |
-| `feature_tour_or_markdown_image_example_builds` | `examples/` に image slot layout、PNG fixture、deckを追加 | example HTMLとmanifestで raw path不在・assets存在をassertする |
+| `parses_standalone_image_paragraph_as_image_fragment` | Add `RawImagePath` / `FragmentKind::Image { alt, src }` / `SourceFragment::image` in `domain.rs`, image-only paragraph handling in `parser.rs` | Add a dedicated match right after removing `Tag::Image` from `unsupported_tag`; don't fall through to `_` |
+| `rejects_remote_image_url_with_line` / `rejects_absolute_image_path_with_line` | `RawImagePath::new` rejects scheme, `//`, absolute/root/prefix components | Don't leave the URL as Paragraph markdown; parse error |
+| `rejects_image_without_supported_extension` / `rejects_svg_until_policy_is_decided` | `RawImagePath::new` enforces the allowed extensions `.png/.jpg/.jpeg/.gif/.webp` | Don't defer non-image files to Chrome-failure by copying to assets |
+| `rejects_text_and_image_mixed_in_one_paragraph` / `rejects_two_images_in_one_paragraph_until_inline_design_exists` | Give `OpenBlock::Paragraph` inline state (`Empty/TextOnly/PendingImage/SingleImage/Mixed`) | Don't paragraphify mixed and let it flow into `blocks` |
+| `rejects_image_inside_list_before_markdown_rerender` | In `parser.rs`, detect `Tag::Image` before the `list_depth > 0` ignore and error | Don't let the later list-markdown re-render generate a raw `<img src>` |
+| `maps_image_to_unique_image_accepting_slot` | `mapping.rs::map_slide` picks the unique `Accepts::Image` slot from the layout contract | Remove `FragmentKind::Image` from the `body` arm |
+| `rejects_image_when_layout_has_no_image_slot` / `rejects_image_when_multiple_image_slots_are_ambiguous` | Make `dispatch_slide` / `map_slide` `Result`-typed; 0-match / multi-match become line-numbered Layout errors | Don't turn it into wrong ResidualContent like "missing body" |
+| `dispatch_selects_layout_with_image_slot_as_unique_structural_match` / `dispatch_rejects_two_image_layout_matches` | Include `map_slide` errors as rejections in the multi-layout probe | Don't drop image-slot requirement from structural-match uniqueness decision |
+| `check_accepts_image_fragment_in_image_slot` | Update the existing Image arm of `check.rs::accepts_fragment` to be payload-aware | Assert that `Accepts::Blocks` also does not accept image |
+| `render_deck_requires_resolved_image_paths` | Compile_fail doctest that `render_deck` cannot be called from `Deck<Checked<RawImagePath>>`; add `resolve_image_paths` | Don't let a raw path flow through the render function's type parameter |
+| `renders_image_with_resolved_src_and_escaped_alt` | Add an image branch in `render.rs::render_slot`, add `render_image_fragment(&FragmentKind<ResolvedImagePath>)` | Don't rely on Markdown re-rendering; don't expose `RawImagePath` accessor to render side |
+| `build_copies_markdown_image_to_dist_assets` | Inject CLI resolver in `main.rs::build_artifacts`; call `copy_image_assets` in `emit_distribution` | Also assert the original `images/foo.png` does not remain inside HTML |
+| `build_fails_for_missing_markdown_image_with_line_and_help` / `build_fails_for_unreadable_markdown_image_with_line_and_help` | CLI resolver converts I/O error to `BuildError(ErrorKind::Asset)`; core attaches slide context | Don't defer missing/permission errors to copy-time panic or publish-time drop |
+| `build_deduplicates_images_by_content_hash` | Resolver keeps a content-hash map and returns the same `ResolvedImagePath` for identical contents | Don't double-copy when basenames differ |
+| `manifest_serializes_images_array` / `deserializes_manifest_missing_images_as_empty` | Add `ManifestImage` / `images` in `manifest.rs`; update bindings test | Don't break legacy manifest publish validation; enumerate all images in image-bearing manifests |
+| `publish_rejects_missing_manifest_image_reference` / `publish_rejects_manifest_image_reference_outside_dist` | Add `validate_manifest_image_refs`; share the slide src validation helper | Don't pass a missing-dist to the publish command |
+| `present_cache_copies_markdown_images` | `emit_present_cache` also calls `copy_image_assets` | Close the route where only `peitho present` 404s on images |
+| `feature_tour_or_markdown_image_example_builds` | Add an image slot layout, PNG fixture, and deck to `examples/` | Assert no raw path in example HTML/manifest and that assets exist |
 
 ## manifest / publish
 
-`manifest.json` は additive にする。
+`manifest.json` is additive.
 
 ```json
 {
@@ -278,15 +278,15 @@ emit側の責務:
 }
 ```
 
-- `images` は常にserialize、deserializeは `#[serde(default)]`
-- publish validationは `slides[*].src` と同じ規則で `images[*].src` を検査する: 空文字、absolute、`..`、root/prefix componentはエラー
-- `dist/assets/` 自体は画像が無いdeckでは不要。`images` が非空なら各srcの実ファイル存在を必須にする
+- `images` always serializes; deserialize is `#[serde(default)]`
+- Publish validation checks `images[*].src` by the same rules as `slides[*].src`: empty string, absolute, `..`, root/prefix component are errors
+- `dist/assets/` itself is not required for decks without images. If `images` is non-empty, existence of each src is required
 
 ## bindings / shell / gates
 
-- `Manifest` に `images`、`ManifestImage` を追加するので `bindings/Manifest.ts` と新規 `bindings/ManifestImage.ts` を再生成してコミットする
-- `FragmentKind` は現状TS export対象ではないが、domain generic化でbindings testが壊れないことを確認する
-- present shellはmanifest型を読むので `packages/peitho-present` の typecheck を必ず通す。runtimeで images を使わないなら `shell.js` 差分はゼロ想定だが、drift gateは必須
+- Adding `images` to `Manifest` and adding `ManifestImage` means regenerating and committing `bindings/Manifest.ts` and the new `bindings/ManifestImage.ts`
+- `FragmentKind` is not currently a TS export target, but confirm the bindings test doesn't break under domain genericization
+- The present shell reads manifest types, so `packages/peitho-present`'s typecheck must pass. If runtime doesn't touch images, `shell.js` diff should be zero, but the drift gate is required
 
 Gate:
 
@@ -301,14 +301,14 @@ cd packages/peitho-present && npm run build && npm test && npm run typecheck
 git diff --exit-code packages/peitho-present/dist/shell.js
 ```
 
-画像入りexampleについては `peitho build examples/<image-example>/deck.md` で `dist/assets/`、slide HTML、manifestを確認する。
+For the image-bearing example, run `peitho build examples/<image-example>/deck.md` and inspect `dist/assets/`, slide HTML, and manifest.
 
 ## Undecided
 
-- 混在段落 (`text ![alt](x.png) text`) を将来Paragraph inlineとして扱うか、slot指定記法と一緒に設計するか
-- SVGを将来 `<img>` のopaque assetとして許可するか、sanitize/拒否を続けるか。MVPでは `.svg` は許可リスト外として明示拒否する
-- 画像サイズhint (`![alt](x.png){width=...}` 等) をMarkdown側に置くか、CSSだけに寄せるか
-- 複数 `accepts="image"` slot があるlayoutで、Markdownからどのslotへ入れるかを指定する記法
-- alt内Markdown装飾をどこまで平文化するか
-- hash算出後からemit copyまでに画像ファイルが変わるTOCTOUを、asset bytes保持やopen file handle設計で潰すか
-- `--watch` で参照画像の変更を動的watchする実装方式。最低限、画像変更がsilent staleにならないテストを追加してから判断する
+- Whether mixed paragraphs (`text ![alt](x.png) text`) will one day be handled as Paragraph inline, or designed together with a slot-specification notation
+- Whether SVG will one day be allowed as an opaque `<img>` asset, or if sanitize/reject continues. MVP: `.svg` is off the allow list and explicitly rejected
+- Whether image-size hints (`![alt](x.png){width=...}` etc.) sit on the Markdown side, or are pushed entirely into CSS
+- Notation to pick a specific slot from Markdown when a layout has multiple `accepts="image"` slots
+- How far to plainify Markdown decoration inside alt
+- Whether to close the TOCTOU where an image file changes between hash calculation and emit copy, via retaining asset bytes or an open-file-handle design
+- Implementation approach for dynamic-watching referenced images under `--watch`. At minimum, add a test that guarantees an image change does not go silently stale before deciding

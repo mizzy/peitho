@@ -1,23 +1,23 @@
-# 入力ファイル省略時に deck.md をデフォルトにする (Issue #171)
+# Default input to deck.md when omitted (Issue #171)
 
-## ゴール
+## Goal
 
-`peitho build` / `peitho present` / `peitho export pdf` の入力引数を省略可能にし、省略時はカレントディレクトリの `deck.md` を使う。ファイル名が慣例と違う時だけ明示指定する。
+Make the input argument to `peitho build` / `peitho present` / `peitho export pdf` optional; when omitted, use `deck.md` in the current directory. Explicit specification is only needed when the filename differs from the convention.
 
-## 変更点
+## Changes
 
-1. **clap デフォルト値**: `Command::Build.input` / `Command::Present.input` / `ExportCommand::Pdf.input` に `#[arg(default_value = "deck.md")]` を付ける。`Option<PathBuf>` + 手動 unwrap にはしない — clap レベルのデフォルトなら `--help` にも `[default: deck.md]` と出て自己文書化され、下流の型は `PathBuf` のまま変わらない (呼び出し側に解決の記憶を要求しない)
-2. **読み取りエラーの自己説明化**: `build_artifacts` 冒頭の `fs::read_to_string(input).into_diagnostic()?` を、パスと help 付きのエラーに map する。デフォルト化で「`deck.md` の無いディレクトリで裸の `peitho build`」が増えるが、現状のエラーは `No such file or directory (os error 2)` とパスすら出ない。デフォルト由来か明示指定かで分岐はしない — どちらでもパスと復旧手段を示す 1 つのメッセージで足りる (症状別分岐を作らない)
-3. **README**: Usage の各例に省略形を反映
+1. **clap default value**: attach `#[arg(default_value = "deck.md")]` to `Command::Build.input` / `Command::Present.input` / `ExportCommand::Pdf.input`. Do not use `Option<PathBuf>` + manual unwrap — a clap-level default self-documents by showing `[default: deck.md]` in `--help`, and the downstream type stays `PathBuf` (no resolution logic required at call sites)
+2. **Self-explanatory read errors**: map the `fs::read_to_string(input).into_diagnostic()?` at the top of `build_artifacts` into an error carrying the path and a help. Defaulting will increase "bare `peitho build` in a directory with no `deck.md`", but the current error is `No such file or directory (os error 2)` and does not even show the path. Do not branch on whether the value came from a default or an explicit argument — a single message that shows the path and recovery works for both (do not create per-symptom branches)
+3. **README**: reflect the shorthand form in each Usage example
 
-## テスト (TDD)
+## Tests (TDD)
 
 - `build_command_defaults_input_to_deck_md`: `Cli::parse_from(["peitho","build"])` → `input == "deck.md"`
-- `present_command_defaults_input_to_deck_md`: 同上
-- `export_pdf_command_defaults_input_to_deck_md`: 同上
-- `build_artifacts_missing_input_error_names_path_and_default`: 存在しないパスで `build_artifacts` → エラー文字列にパスと help が含まれる
+- `present_command_defaults_input_to_deck_md`: same
+- `export_pdf_command_defaults_input_to_deck_md`: same
+- `build_artifacts_missing_input_error_names_path_and_default`: `build_artifacts` on a non-existent path → error string contains the path and a help
 
-## スコープ外
+## Out of scope
 
-- `publish` は入力がデッキではなく dist なので対象外
-- deck.md 以外の慣例名 (index.md 等) の探索はしない — 単一のデフォルト + 明示指定のみ
+- `publish` takes dist, not a deck, so it is out of scope
+- No lookup for other convention names besides deck.md (e.g. index.md) — single default + explicit specification only

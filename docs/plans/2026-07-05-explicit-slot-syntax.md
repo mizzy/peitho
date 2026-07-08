@@ -1,58 +1,58 @@
-# 明示的スロット割り当て構文 実装計画 (2026-07-05)
+# Explicit slot assignment syntax — implementation plan (2026-07-05)
 
 Spec: `docs/specs/2026-07-05-explicit-slot-syntax.md`
 Issue: [#21](https://github.com/mizzy/peitho/issues/21)
 
-specで確定した設計を実装可能な粒度に落とし込む。全体をTDDで進める(各ステップにテストを先に書き、次に実装)。
+Break the spec-final design down to implementable steps. Everything is done in TDD (write the test first, then the implementation).
 
-## 三本柱・不変条件との整合
+## Alignment with the three pillars / invariants
 
-- **柱①(内容と設計の分離)**: 新記法はMarkdown側の拡張(`:::` + 属性)。HTML片を著者に書かせない ✅
-- **柱②(Gitで管理できるHTML/CSSレイアウト)**: レイアウト側は無変更。slot契約はレイアウトHTMLの単一ソースのまま ✅
-- **柱③(型チェック済みslot契約、silent drop禁止)**:
-  - `ExplicitSlot(SlotName)` newtypeで慣習指定と明示指定を型で分離
-  - 検証ルール11項目(spec参照)がすべて行番号+help付きビルドエラー
-  - fenced div 内側の未クローズ、未知slot名、ネスト、長フェンス — silent path なし
-- **typestate**: 変更なし。`FragmentKind` に variant を追加するだけで phase 遷移は既存経路
+- **Pillar ① (separation of content and design)**: the new notation is a Markdown-side extension (`:::` + attribute). No HTML fragment is imposed on the author. ✅
+- **Pillar ② (Git-manageable HTML/CSS layouts)**: no layout-side changes. The slot contract stays single-sourced from the layout HTML. ✅
+- **Pillar ③ (type-checked slot contract, no silent drop)**:
+  - `ExplicitSlot(SlotName)` newtype separates convention-driven and explicit routing at the type level
+  - All 11 validation rules (see spec) become line-numbered build errors with help
+  - Unclosed inner region, unknown slot name, nesting, long fence — no silent path
+- **typestate**: unchanged. Only a new variant on `FragmentKind`; phase transitions ride the existing path
 
-## 実装上の設計判断(specでは触れていない実装詳細)
+## Implementation decisions (details not in the spec)
 
-### 判断1: SlotGroupは「マッピング時に展開」する
+### Decision 1: SlotGroup is "expanded at mapping time"
 
-spec中「`SlotGroup { name, children }` をMappedSlotに押し込む」の実装形として、**mapping段階で SlotGroup を子 fragment に展開し、指定slotに個別 fragment として積む**方式を採る。
+For the spec's "push `SlotGroup { name, children }` into MappedSlot", we adopt **expand SlotGroup into child fragments at the mapping stage, and push them as individual fragments into the target slot**.
 
-理由:
-- 既存の check.rs は個別 fragment 単位で `check_accepts`/`check_arity` を回している。SlotGroup をラップしたまま check に渡すには `check_accepts` を fragment ツリーを掘る形に書き換える必要があり、変更が広がる
-- SlotGroup を展開すれば check.rs は完全に無変更。accepts違反(検証ルール#11)は既存路線で自動的にエラー化される
-- SlotGroup が phase を渡り歩く必要がなく、Mapped 以降には従来通り「slot → 個別fragment列」のフラット構造だけが流れる
+Reasons:
+- `check.rs` already runs `check_accepts` / `check_arity` per individual fragment. Passing SlotGroup to check as a wrapper would require rewriting `check_accepts` to descend the fragment tree — the diff would spread
+- Expanding SlotGroup leaves check.rs entirely untouched. Accepts violations (validation rule #11) become errors automatically along the existing route
+- SlotGroup no longer has to traverse phases; from Mapped onward only the flat "slot → sequence of individual fragments" structure flows, as before
 
-代償: `MappedSlot` の fragment には「明示指定で入った」記録が残らない。ただし arity/accepts エラーは行番号(SlotGroup 内側 fragment の行)で十分特定可能なので、実用上問題ない。
+Trade-off: `MappedSlot` fragments no longer carry a record of "entered via explicit assignment". Arity/accepts errors, however, still identify the offending source with a line number (of the fragment inside the SlotGroup), which is sufficient in practice.
 
-### 判断2: ExplicitSlot は `FragmentKind` 内にのみ現れる中間型
+### Decision 2: ExplicitSlot is an intermediate type that only appears inside `FragmentKind`
 
-`ExplicitSlot` は Parsed 段階で SlotGroup fragment に格納される中間型で、Mapped 以降には出てこない。lib.rs で公開はせず crate 内 pub(crate) に留める。
+`ExplicitSlot` is an intermediate type stored on the SlotGroup fragment at the Parsed stage and does not appear after Mapped. It is not exposed through lib.rs and stays `pub(crate)`.
 
-これで CLAUDE.md「long-term view + type safety」を満たす:
-- Parser 内でのみ `ExplicitSlot::new(slot_name)` を生成できる
-- Mapping で SlotGroup を展開する際に `ExplicitSlot` を消費して `SlotName` に落とす
-- 将来 SlotGroup を扱う新caller(たとえばレンダラ拡張)が現れても、`ExplicitSlot` を作れないので silent path が生まれない
+This satisfies CLAUDE.md's "long-term view + type safety":
+- Only the parser can construct an `ExplicitSlot::new(slot_name)`
+- Mapping consumes the `ExplicitSlot` and reduces it to a `SlotName` while expanding SlotGroup
+- Even if a future new caller of SlotGroup appears (e.g. a renderer extension), it cannot fabricate an `ExplicitSlot`, so no silent path opens up
 
-### 判断3: SlotGroup 内は生Markdownの再パースではなく、pulldown-cmark を一度で回してイベント列上で判定
+### Decision 3: Inside SlotGroup, run pulldown-cmark once and decide over the event stream rather than re-parsing raw Markdown
 
-spec 記述では「内側/外側の生Markdownを分離して2回pulldown-cmarkに掛ける」としていたが、実装効率上は **単一パスで pulldown-cmark を走らせつつ、`:::` 行を events の直前に検出して SlotGroup コンテキストを切り替える** ほうが素直。
+The spec described "split inner/outer raw Markdown and run pulldown-cmark twice", but implementation-wise it is more straightforward to **run pulldown-cmark in a single pass while detecting `:::` lines against the events and switching the SlotGroup context**.
 
-理由:
-- pulldown-cmark は `:::` を単なる HTMLブロック(あるいはparagraph)として拾うが、offset-iter で行位置を追跡できるので、`:::` を含む行のイベントは per-line で識別可能
-- 生Markdownの再パースは、コードフェンスの ` ``` ` を跨ぐ範囲切り出しでオフバイワンを起こしやすい
-- 既存の `parse_slide` は event ループなので、SlotGroup コンテキスト用のスタックを1つ足す形で済む
+Reasons:
+- pulldown-cmark picks up `:::` as an HTML block (or paragraph), but with the offset-iter we can track line positions, so events on lines containing `:::` are per-line identifiable
+- Re-parsing raw Markdown is prone to off-by-one errors when carving out a range that crosses ` ``` ` code fences
+- Existing `parse_slide` is an event loop, so it's enough to add a single stack for the SlotGroup context
 
-具体的には `parse_slide` の頭で全ソースを行スキャンして `:::` 行のマップ (`line -> SlotDivMarker`) を作り、event ループ中で「今 line が SlotGroup 開始行のイベントならスタックに push、終了行なら pop」する。fragment を積む際にスタック top を見て、生えた fragment の「所属先」を SlotGroup コンテキストに紐付ける。
+Concretely, at the top of `parse_slide` scan all source lines to build a map of `:::` lines (`line -> SlotDivMarker`); during the event loop, push onto the stack when the current event is on a SlotGroup opening line, pop on a closing line. When pushing a fragment, look at the stack top and tie the fragment's "belongs-to" to the SlotGroup context.
 
-コードフェンス内の `:::` 除外は、行スキャン時に ` ``` ` / `~~~` フェンスを追跡してフェンス内は無視すればよい。
+Exclusion of `:::` inside code fences: while doing the line scan, track ` ``` ` / `~~~` fences and ignore lines inside them.
 
-### 判断4: 「所属先」の表現
+### Decision 4: Representation of "belongs-to"
 
-具体的な fragment 構造は以下:
+Concrete fragment structure:
 
 ```rust
 // domain.rs
@@ -70,22 +70,22 @@ pub enum FragmentKind<S = RawImagePath> {
     Code,
     Image { alt: String, src: S },
     List,
-    // 新規: 内側は 1個以上の子 fragment を持つ。ネストは検証ルール#8で禁止
+    // New: contains one or more child fragments. Nesting is forbidden by validation rule #8
     SlotGroup { name: ExplicitSlot, children: Vec<SourceFragment<S>> },
 }
 ```
 
-SlotGroup fragment 自体は line (`:::` 開始行) を持ち、children は SlotGroup 内で発生した通常 fragment の列。
+The SlotGroup fragment itself carries line (`:::` opening line), and children is the sequence of normal fragments that appeared inside the SlotGroup.
 
-## パーサ側の変更(`crates/peitho-core/src/parser.rs`)
+## Parser-side changes (`crates/peitho-core/src/parser.rs`)
 
-### ステップ 1: `:::` 行スキャナ
+### Step 1: `:::` line scanner
 
-`parse_slide` の先頭で、slide slice (= `source[range.start..range.end]`) を1行ずつスキャンして以下を作る:
+At the top of `parse_slide`, scan the slide slice (= `source[range.start..range.end]`) line by line to build:
 
 ```rust
 struct SlotDivMarker {
-    line: usize,           // ソース全体での行番号
+    line: usize,           // line number in the whole source
     kind: SlotDivKind,
 }
 enum SlotDivKind {
@@ -94,65 +94,65 @@ enum SlotDivKind {
 }
 ```
 
-スキャン規則:
-- 行頭(先頭空白は許さない)から `:::` で始まる行を検出
-- コードフェンス (` ``` ` / `~~~` の開閉ペア) 内は無視
-- ` :::` (前置空白あり)、`::::` (4コロン以上)、`::` (2コロンのみ) は SlotDivMarker にしない
-  - 4コロン以上は spec 検証ルール#9 で明示エラー化するため、別途「4+コロン行」も検出して即エラー
-- 開始行: `:::` の後に空白、`{slot=name}`、空白許容、行末
-  - 属性なし → 検証ルール#1エラー
-  - 属性キーが `slot` でない → 検証ルール#2エラー
-  - 属性形式不正(複数キー、`=`欠落) → 検証ルール#3エラー
-  - slot名不正 → `SlotName::new` の既存エラーを流用(検証ルール#4)
-- 終了行: `:::` 単独(末尾空白のみ許容)
-  - 属性付き `:::` → 検証ルール#6エラー
+Scan rules:
+- Detect lines starting with `:::` from the head (no leading whitespace allowed)
+- Ignore lines inside a code fence pair (` ``` ` / `~~~`)
+- ` :::` (with leading whitespace), `::::` (4+ colons), `::` (only 2 colons) are not SlotDivMarkers
+  - 4+ colons is validation rule #9 (explicit error), so also detect "4+ colon lines" separately and error immediately
+- Opening line: `:::` followed by whitespace, `{slot=name}`, allowed whitespace, then end of line
+  - No attribute → validation rule #1 error
+  - Attribute key is not `slot` → validation rule #2 error
+  - Malformed attribute (multiple keys, missing `=`) → validation rule #3 error
+  - Invalid slot name → reuse existing `SlotName::new` error (validation rule #4)
+- Closing line: `:::` alone (trailing whitespace allowed)
+  - `:::` with attribute → validation rule #6 error
 
-### ステップ 2: event ループ改修
+### Step 2: Event loop changes
 
-`parse_slide` の event ループで:
-- 現在の event の行番号 = `line_for_offset(source, global_start)` から SlotDivMarker map を引く
-- Open マーカー行にヒットしたら **現在のスタック深さが 0** であることを確認(0でなければ検証ルール#8: ネスト禁止エラー)。空の SlotGroup 蓄積用 `Vec<SourceFragment>` を新規作成してスタック push
-- Close マーカー行にヒットしたら:
-  - スタック深さが 0 → 「対応する開始がない `:::`」= 実質検証ルール#5の裏返し(または純粋な構文エラー)
-  - 深さ 1 → pop して SlotGroup fragment を作り、外側 fragment 列に append
-  - 深さ 2 は判定順序上ありえない(判定はOpen時に済んでいる)
-- SlotDivMarker 行では pulldown-cmark の event(HTMLブロック扱いのpush等)を無視して吸収する
+In `parse_slide`'s event loop:
+- Current event's line number = look up `line_for_offset(source, global_start)` against the SlotDivMarker map
+- On hitting an Open marker line, verify **stack depth is 0** (if not, validation rule #8: nesting forbidden error). Create a fresh `Vec<SourceFragment>` to accumulate SlotGroup contents and push it onto the stack
+- On hitting a Close marker line:
+  - Stack depth 0 → "`:::` without matching opener" = essentially the inverse of validation rule #5 (or a pure syntax error)
+  - Depth 1 → pop, construct a SlotGroup fragment, append to the outer fragment sequence
+  - Depth 2 is impossible by ordering (the check happened at Open time)
+- On SlotDivMarker lines, absorb pulldown-cmark's events (HTML-block push etc.)
 
-`Event::Rule` は既存のように「スライド内 thematic break はエラー」の路線を維持。div内で `---` が来たら分割が発生するため、スライド末尾で「未クローズdiv」= 検証ルール#5エラーになる。実際にはこちらは分割器 (`split_slide_ranges`) が既に走った後の話だが、`split_slide_ranges` は `:::` を知らないので同じ結論(未クローズ → エラー)に落ちる。
+`Event::Rule` keeps the existing "thematic break inside a slide is an error" policy. If `---` appears inside a div, splitting kicks in, which surfaces the "unclosed div" (validation rule #5) at slide end. Actually this happens after `split_slide_ranges` has already run, but `split_slide_ranges` does not know about `:::`, so it lands on the same conclusion (unclosed → error).
 
-### ステップ 3: SlotGroup fragment 化
+### Step 3: SlotGroup fragmentization
 
-Close 検出時に:
-- children が空 → 検証ルール#7エラー(空の SlotGroup 禁止)
-- 空でなければ `SourceFragment::slot_group(open_line, ExplicitSlot, children)` を作って外側列へ append
+At Close detection:
+- Empty children → validation rule #7 error (empty SlotGroup forbidden)
+- Non-empty → construct `SourceFragment::slot_group(open_line, ExplicitSlot, children)` and append to the outer sequence
 
-### ステップ 4: 属性パーサ
+### Step 4: Attribute parser
 
-`{slot=name}` の1行パーサをテスト付きで実装。プロトコル:
-- 先頭 `{`、末尾 `}` 必須
-- 中身は `slot=name`。前後の空白は許容
-- `name` は `SlotName::new` に渡す(既存の識別子ルール)
-- それ以外の形式(`=` 欠落、複数キー、値なし)は具体的なメッセージ+helpのビルドエラー
+Implement a single-line parser for `{slot=name}` with tests. Protocol:
+- Leading `{`, trailing `}` required
+- Content is `slot=name`. Surrounding whitespace allowed
+- `name` is passed to `SlotName::new` (existing identifier rule)
+- Any other form (missing `=`, multiple keys, missing value) is a build error with a specific message + help
 
-### テスト(parser.rs 内 `#[cfg(test)]`)
+### Tests (parser.rs `#[cfg(test)]`)
 
-- `slot_group_open_close_produces_fragment`: 単純な1つの div → SlotGroup fragment 1個
-- `slot_group_children_are_parsed`: div 内の見出し・段落・リスト・コードが children に入る
-- `nested_slot_group_is_error`: `::: {slot=a}` の中に `::: {slot=b}` → 検証ルール#8
-- `long_fence_four_colons_is_error`: `::::` → 検証ルール#9
-- `unclosed_slot_group_is_error`: 開始マーカーだけでスライド末尾 → 検証ルール#5
-- `slot_group_missing_attr_is_error`: `:::` 単独開始(閉じ以外) → 検証ルール#1
-- `slot_group_unknown_attr_is_error`: `::: {layout=x}` → 検証ルール#2
-- `slot_group_multi_attr_is_error`: `::: {slot=a slot=b}` → 検証ルール#3
-- `slot_group_invalid_slot_name_is_error`: `::: {slot=Foo}` → SlotName 経由のエラー(検証ルール#4)
-- `close_marker_with_attr_is_error`: `::: {slot=x}` を終了に使う → 検証ルール#6
-- `empty_slot_group_is_error`: 開始と終了の間に fragment 0個 → 検証ルール#7
-- `slot_group_in_code_fence_is_ignored`: ` ``` ` 内の `::: {slot=x}` はマーカー扱いされない
-- `slot_group_across_thematic_break_is_error`: div 内に `---` → 未クローズdivエラー
+- `slot_group_open_close_produces_fragment`: a single simple div → 1 SlotGroup fragment
+- `slot_group_children_are_parsed`: headings, paragraphs, lists, code inside a div land in children
+- `nested_slot_group_is_error`: `::: {slot=b}` inside `::: {slot=a}` → validation rule #8
+- `long_fence_four_colons_is_error`: `::::` → validation rule #9
+- `unclosed_slot_group_is_error`: only opening marker until slide end → validation rule #5
+- `slot_group_missing_attr_is_error`: bare `:::` open (other than a close) → validation rule #1
+- `slot_group_unknown_attr_is_error`: `::: {layout=x}` → validation rule #2
+- `slot_group_multi_attr_is_error`: `::: {slot=a slot=b}` → validation rule #3
+- `slot_group_invalid_slot_name_is_error`: `::: {slot=Foo}` → error via SlotName (validation rule #4)
+- `close_marker_with_attr_is_error`: `::: {slot=x}` used as a close → validation rule #6
+- `empty_slot_group_is_error`: 0 fragments between open and close → validation rule #7
+- `slot_group_in_code_fence_is_ignored`: `::: {slot=x}` inside ` ``` ` is not treated as a marker
+- `slot_group_across_thematic_break_is_error`: `---` inside a div → unclosed div error
 
-## ドメイン側の変更(`crates/peitho-core/src/domain.rs`)
+## Domain-side changes (`crates/peitho-core/src/domain.rs`)
 
-### `ExplicitSlot` newtype 追加
+### Add `ExplicitSlot` newtype
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,9 +165,9 @@ impl ExplicitSlot {
 }
 ```
 
-`pub(crate)` に留めて外部crateから作れないようにする。
+Kept `pub(crate)` so external crates cannot construct one.
 
-### `FragmentKind` に `SlotGroup` variant 追加
+### Add `SlotGroup` variant to `FragmentKind`
 
 ```rust
 pub enum FragmentKind<S = RawImagePath> {
@@ -176,11 +176,11 @@ pub enum FragmentKind<S = RawImagePath> {
 }
 ```
 
-`default_accepts` / `removal_noun` / `Display` を実装(SlotGroup は展開されて Mapped 以降には現れないので、conservativeに `Accepts::Blocks` / `"slot group"` などにしておく。実装上は展開のほうが先に走るのでこの値が使われる経路はないが、`unreachable!` は避ける)。
+Implement `default_accepts` / `removal_noun` / `Display` (SlotGroup is expanded before Mapped, so these are never used on the phased path; set conservative values like `Accepts::Blocks` / `"slot group"`. Since expansion runs first, none of this is reachable in practice, but avoid `unreachable!`).
 
-`try_map_image_src` は SlotGroup の場合 children を再帰的にマップ。
+`try_map_image_src` recursively maps children for SlotGroup.
 
-### `SourceFragment::slot_group` コンストラクタ追加
+### Add `SourceFragment::slot_group` constructor
 
 ```rust
 impl SourceFragment<RawImagePath> {
@@ -192,28 +192,28 @@ impl SourceFragment<RawImagePath> {
 }
 ```
 
-### bindings への影響
+### bindings impact
 
-`Fragment` 系はTS bindingsに露出していない(bindings/はManifest/Notes/PresentConfig系のみ)。`git diff --exit-code bindings/` はゼロのはず。
+The `Fragment` family is not exposed through TS bindings (bindings/ only holds Manifest / Notes / PresentConfig etc.). `git diff --exit-code bindings/` should show zero.
 
-## マッピング側の変更(`crates/peitho-core/src/mapping.rs`)
+## Mapping-side changes (`crates/peitho-core/src/mapping.rs`)
 
-### `map_slide` に SlotGroup 展開ロジック
+### SlotGroup expansion in `map_slide`
 
-現在のループ:
+Current loop:
 ```rust
 for fragment in slide.fragments.iter().cloned() {
     let target = match fragment.kind() { ... };
-    // 目的slotに fragment を積む
+    // push fragment onto target slot
 }
 ```
 
-改修後:
+After the change:
 ```rust
 for fragment in slide.fragments.iter().cloned() {
     if let FragmentKind::SlotGroup { name, children } = fragment.kind() {
         let target = name.as_slot_name().clone();
-        // レイアウトに該当slotが無ければ検証ルール#10エラー(mapping 段階で早期に)
+        // If the layout does not have this slot, error early (validation rule #10)
         let Some(contract) = layout.slot_by_name(&target).cloned() else {
             return Err(unknown_explicit_slot_error(target, fragment.line(), layout));
         };
@@ -224,45 +224,45 @@ for fragment in slide.fragments.iter().cloned() {
         }
         continue;
     }
-    // 既存の慣習マッピング
+    // Existing convention mapping
     let target = match fragment.kind() { ... };
     ...
 }
 ```
 
-`unknown_explicit_slot_error` は「レイアウトのslot一覧」を help に含める(既存の unknown layout エラーと同スタイル)。
+`unknown_explicit_slot_error` includes "layout's slot list" in the help (same style as the existing unknown layout error).
 
-### `shallowest_heading_line` を SlotGroup 除外に
+### Exclude SlotGroup from `shallowest_heading_line`
 
-現状は fragment ツリー最上位のみ走査しているため、SlotGroup 内の見出しは自動的に対象外になる(判断1の展開ロジック上、SlotGroup fragment 自体は Heading ではないので既存のフィルタで自然に落ちる)。
+Currently only the top level of the fragment tree is walked, so headings inside SlotGroup are automatically excluded (by Decision 1's expansion, the SlotGroup fragment itself is not a Heading, so the existing filter naturally rejects it).
 
-明示的なテストで pin する: `title_inferred_from_outside_slot_group` (SlotGroup 内の見出しは title 推定に使われない)。
+Pin with an explicit test: `title_inferred_from_outside_slot_group` (headings inside SlotGroup are not used for title inference).
 
-### テスト(mapping.rs 内 `#[cfg(test)]`)
+### Tests (mapping.rs `#[cfg(test)]`)
 
-- `explicit_slot_routes_fragment_to_named_slot`: two-column レイアウトで `::: {slot=left}` の中身が left slot に入る
-- `unknown_explicit_slot_is_error`: レイアウトに無いslot名 → 検証ルール#10
-- `explicit_slot_body_is_allowed`: 慣習でも拾える名前(body)の明示指定 OK(著者決定#3)
-- `explicit_and_conventional_share_slot_check_arity`: 同じ slot に慣習と明示両方入って arity 超過 → 既存 check エラー
-- `title_inferred_from_outside_slot_group`: SlotGroup 内の見出しは title に昇格しない
-- `accepts_violation_via_explicit_slot`: `accepts=code` の slot に paragraph を明示投入 → 既存 check_accepts エラーに落ちる(検証ルール#11)
+- `explicit_slot_routes_fragment_to_named_slot`: contents of `::: {slot=left}` in a two-column layout land in the left slot
+- `unknown_explicit_slot_is_error`: slot name not in the layout → validation rule #10
+- `explicit_slot_body_is_allowed`: explicit assignment to a name (body) that would also be caught by convention is OK (author decision #3)
+- `explicit_and_conventional_share_slot_check_arity`: mixing convention and explicit into the same slot with arity overflow → existing check error
+- `title_inferred_from_outside_slot_group`: heading inside SlotGroup is not promoted to title
+- `accepts_violation_via_explicit_slot`: explicitly assigning a paragraph to a slot with `accepts=code` → falls through to existing check_accepts error (validation rule #11)
 
-## Dispatch 側の変更(`crates/peitho-core/src/mapping.rs::dispatch_slide`)
+## Dispatch-side changes (`crates/peitho-core/src/mapping.rs::dispatch_slide`)
 
-specの「レイアウトdispatchとの相互作用」の実装:
+Implementation of the spec's "interaction with layout dispatch":
 
-- 現状の構造マッチは「各レイアウトで `map_slide` + `check_slide` を試して matches に集める」路線
-- 判断1でSlotGroupが展開されるため、`map_slide` 内で「レイアウトに無いslot名」→ 即エラーになる。つまり明示slot名を持たないレイアウトは probing 段階で自然に落ちる ✅
-- SlotGroup 中身は展開されて指定slotへ積まれるので、慣習slot(title/body/code)の充足計算に混ざる余地がない(そもそもSlotGroup 自身は既存の慣習分岐に到達しない)✅
+- The current structural match is "for each layout, try `map_slide` + `check_slide`, collect matches"
+- Because of Decision 1, SlotGroup expansion inside `map_slide` immediately fails with "slot name not in layout", so a layout without the explicit slot name is naturally dropped during probing ✅
+- SlotGroup contents are expanded into the assigned slot, so there is no room for them to contaminate satisfaction counts for convention slots (title/body/code) — SlotGroup itself never reaches the existing convention branches ✅
 
-したがって dispatch_slide のロジックは無変更で spec の相互作用が成立する。テストで pin:
+Therefore dispatch_slide logic is unchanged and the spec's interaction holds. Pin with tests:
 
-- `dispatch_prefers_layout_with_explicit_slot_name`: two-column と title-only 2レイアウトの deck で `::: {slot=left}` を含むスライドが two-column に一意マッチ
-- `dispatch_rejects_when_no_layout_has_explicit_slot`: 明示slot名を持つレイアウトがゼロ → 既存の「no layout matches」エラー(rejections に「unknown explicit slot」が並ぶ)
+- `dispatch_prefers_layout_with_explicit_slot_name`: a deck with two-column + title-only layouts; a slide containing `::: {slot=left}` uniquely matches two-column
+- `dispatch_rejects_when_no_layout_has_explicit_slot`: zero layouts have the explicit slot name → existing "no layout matches" error (with "unknown explicit slot" in the rejections)
 
-## 例(`examples/two-column/`)
+## Example (`examples/two-column/`)
 
-新規ディレクトリ:
+New directory:
 
 ```
 examples/two-column/
@@ -273,31 +273,31 @@ examples/two-column/
     └── base.css
 ```
 
-- `layouts/two-column.html`: 単一レイアウトファイル。`title` + `left` (accepts=blocks) + `right` (accepts=blocks)
-- `deck.md`: frontmatter に `time: 5m` などを載せ、複数スライドで `::: {slot=left}` / `::: {slot=right}` を使う
-- `css/base.css`: `.slot-left` / `.slot-right` を display:grid の 1fr 1fr で並べる最小スタイル
+- `layouts/two-column.html`: single layout file. `title` + `left` (accepts=blocks) + `right` (accepts=blocks)
+- `deck.md`: frontmatter with e.g. `time: 5m`; multiple slides using `::: {slot=left}` / `::: {slot=right}`
+- `css/base.css`: minimum style putting `.slot-left` / `.slot-right` side-by-side with display:grid 1fr 1fr
 
-## ゲート
+## Gates
 
-- `cargo test --workspace` を **3回連続** で通す(過去にflaky事故あり、CLAUDE.md指定)
+- `cargo test --workspace` passing **three times in a row** (past flaky incidents, mandated by CLAUDE.md)
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all --check`
-- `git diff --exit-code bindings/` (今回はゼロのはず)
+- `git diff --exit-code bindings/` (expected to be zero this time)
 - `cd packages/peitho-present && npm run build && npm test && npm run typecheck`
-- `git diff --exit-code packages/peitho-present/dist/shell.js` (TS側は変更なしのはず)
-- `examples/two-column/` で `cargo run --bin peitho -- build examples/two-column` を実行し、生成された `dist/index.html` を目視確認(左右2カラムがCSSで並ぶ)
+- `git diff --exit-code packages/peitho-present/dist/shell.js` (TS side should have no changes)
+- Run `cargo run --bin peitho -- build examples/two-column` on `examples/two-column/` and visually verify the generated `dist/index.html` (two columns side-by-side via CSS)
 
-## CLAUDE.md 更新
+## CLAUDE.md update
 
-「Undecided — awaiting author's judgment」節から `Explicit fenced div slot notation ::: {slot=...} (§18)` の行を削除し、確定事項の invariants に「明示スロット割り当ては fenced div `::: {slot=name}` 記法で行う。パーサで `ExplicitSlot` newtype を生成、mapping で展開して指定slotへ直行(採用2026-07-05、spec: `docs/specs/2026-07-05-explicit-slot-syntax.md`)」相当を追加。
+Remove the `Explicit fenced div slot notation ::: {slot=...} (§18)` line from the "Undecided — awaiting author's judgment" section and add an invariant to the confirmed items, roughly: "Explicit slot assignment uses fenced div `::: {slot=name}` notation. The parser produces an `ExplicitSlot` newtype; mapping expands it and routes directly to the named slot (adopted 2026-07-05, spec: `docs/specs/2026-07-05-explicit-slot-syntax.md`)".
 
-## 進行順序(TDD)
+## Order of operations (TDD)
 
-1. domain.rs: `ExplicitSlot` newtype + `FragmentKind::SlotGroup` + テスト(型のみ)
-2. parser.rs: `:::` スキャナ + 属性パーサ + SlotGroup fragment 生成 + テスト(検証ルール#1〜#9)
-3. mapping.rs: SlotGroup 展開 + 未知slot名エラー(#10) + テスト
-4. check.rs: accepts違反(#11)が既存路線で捕捉されることの pin テスト(実装は変更なし)
-5. dispatch: 相互作用の pin テスト(実装は変更なし)
-6. examples/two-column/ 新設
-7. CLAUDE.md 更新
-8. 全ゲート実行
+1. domain.rs: `ExplicitSlot` newtype + `FragmentKind::SlotGroup` + tests (types only)
+2. parser.rs: `:::` scanner + attribute parser + SlotGroup fragmentization + tests (validation rules #1–#9)
+3. mapping.rs: SlotGroup expansion + unknown slot name error (#10) + tests
+4. check.rs: pin test that accepts violation (#11) is captured on the existing route (no implementation change)
+5. dispatch: pin test for the interaction (no implementation change)
+6. Add `examples/two-column/`
+7. Update CLAUDE.md
+8. Run all gates

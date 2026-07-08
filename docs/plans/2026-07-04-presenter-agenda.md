@@ -3,7 +3,7 @@
 <!-- constrained-by ../specs/2026-07-04-presenter-agenda-design.md -->
 <!-- constrained-by ../../CLAUDE.md -->
 
-> **注(2026-07-04、実装完了後)**: 本計画は着手時点のスナップショット(docs/plans/は履歴)。実装レビューで仕様が改訂され、以下は計画記載と最終実装が異なる: 行の状態属性は`data-peitho-agenda-outcome`に改名(Task 8/11の`data-peitho-agenda-delta`表記は旧称)、presenter.tsは`installAgenda`を無条件に呼ぶ(Task 10の三項ガードは廃止)、Task 9には`previousIndex`へのflushと`peitho:timercontrol` reset購読が追加、under/over判定は丸め秒が単一判定源、同一スライドの2個目ページ設定コメントは一律エラー。正は仕様書を参照。
+> **Note (2026-07-04, post-implementation)**: This plan is a snapshot at the start of work (docs/plans/ is history). The spec was revised during implementation review; the following differ from the plan as written vs. the final implementation: the row state attribute was renamed to `data-peitho-agenda-outcome` (the `data-peitho-agenda-delta` naming in Tasks 8/11 is the old name), presenter.ts calls `installAgenda` unconditionally (the ternary guard in Task 10 was dropped), Task 9 gained a flush to `previousIndex` and a `peitho:timercontrol` reset subscription, under/over judgment uses rounded seconds as the single source, and a second page settings comment on the same slide is uniformly an error. See the spec for the canonical version.
 
 ## Premises
 
@@ -1331,22 +1331,22 @@ fn lightning_talk_example_declares_agenda_sections() {
 
 ```markdown
 <!-- {"key":"cover","section":"Setup","time":"1m"} -->
-# スライドはMarkdownで書きたい
+# I want to write slides in Markdown
 ```
 
 ```markdown
 <!-- {"key":"problem","section":"Problem","time":"1m"} -->
-# デザインをいじりだすと準備が終わらない
+# Once you start tweaking the design, prep never ends
 ```
 
 ```markdown
 <!-- {"key":"separation","section":"Approach","time":"2m"} -->
-# コンテンツとデザインを分ける
+# Separate content from design
 ```
 
 ```markdown
 <!-- {"key":"closing","section":"Wrap-up","time":"1m"} -->
-# 書くことに集中する
+# Focus on the writing
 ```
 
 **Verification**:
