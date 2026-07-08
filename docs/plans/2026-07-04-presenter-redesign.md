@@ -1,43 +1,43 @@
 # Presenter view redesign (Claude Design mock reflection)
 
-2026-07-04. Claude Designで作成したモック(project `73ba6a5b`/`Presenter.dc.html`、https://claude.ai/design/p/73ba6a5b-288b-46f7-a2c3-cb06863e3c5b)を発表者画面に反映する。反映後は `render_presenter_index()` のCSSが正。
+2026-07-04. Reflect the mock built in Claude Design (project `73ba6a5b`/`Presenter.dc.html`, https://claude.ai/design/p/73ba6a5b-288b-46f7-a2c3-cb06863e3c5b) into the presenter screen. After the reflection, the CSS in `render_presenter_index()` is the source of truth.
 
-## デザイン概要
+## Design overview
 
-- ダーク基調(oklch)+cyanアクセント、Geist/Geist Monoフォント(Google Fonts、オフライン時はsystem-uiへフォールバック)
-- 左カラム: ステータス行(Now・Slide N of M・デッキタイトル)→ 16:9固定の現在スライド(container query)→ キーボードヒント行 → Notesカード
-- 右カラム: Nextスライドカード(16:9)→ タイマーカード(大型タブラー数値+state pill+新見た目のトラッカー+コントロール)
-- タイマー状態(stopped/running/paused)をstate pill・タイマー色・Playボタンのラベル/色に同期
-- Start/Pause/Resumeを1つのPlayボタンに統合(状態からactionを導出、イベント契約`peitho:timercontrol`は不変)
-- ボタン押下フィードバック: 沈み込み+色反転+クリック位置からのリップル(`prefers-reduced-motion`で無効化)
+- Dark base (oklch) + cyan accent, Geist/Geist Mono fonts (Google Fonts, fall back to system-ui when offline)
+- Left column: status row (Now / Slide N of M / deck title) → 16:9 fixed current slide (container query) → keyboard hint row → Notes card
+- Right column: Next slide card (16:9) → timer card (large tabular numerals + state pill + redesigned tracker + controls)
+- Timer state (stopped/running/paused) drives the state pill, timer color, and the Play button's label/color
+- Merge Start/Pause/Resume into a single Play button (action derived from state; the `peitho:timercontrol` event contract is unchanged)
+- Button press feedback: sink + color invert + ripple from the click position (disabled under `prefers-reduced-motion`)
 
-## スコープ外(保守的判断、報告に明記)
+## Out of scope (conservative call, called out in the report)
 
-- モックにあるAgendaセクション(セクション別実績/計画時間): peithoにセクション概念・区間時間データが存在しないため除外。必要なら別Issueで検討
-- ステータス行の「Section — ...」表示: 同上
-- キーバインド変更: Space=nextの既存マップは不変。UI表記を実挙動に合わせる(PlayボタンにSpaceヒントを付けない)
+- The Agenda section in the mock (per-section actual/planned time): excluded because peitho has no section concept and no section-interval time data. Revisit in a separate Issue if needed
+- The "Section — ..." indicator in the status row: same as above
+- Keybinding changes: the existing Space=next mapping is unchanged. Align UI labels with the actual behavior (do not attach a Space hint to the Play button)
 
-## 変更ファイル
+## Files changed
 
 1. `packages/peitho-present/src/presenter.ts`
-   - DOM構造を新デザインに全面変更(data-peitho-presenter / data-peitho-action フックは維持・拡張)
-   - タイマー状態導出: `startedAt()===null`→stopped、`isPaused()`→paused、他→running
-   - `data-peitho-action="playpause"`ボタン: stateに応じ start/pause/resume をdispatch
-   - tick()でstate pill/playラベル/クロックカードの`data-peitho-state`を更新
-   - タイマー表示をspan分割(planned/overrunの色分け)。textContentは既存フォーマット互換
-   - リップル用pointerdownハンドラ(`--rx`/`--ry`+`.pressed`)
+   - Rewrite the DOM structure to the new design (keep and extend the data-peitho-presenter / data-peitho-action hooks)
+   - Timer state derivation: `startedAt()===null` → stopped, `isPaused()` → paused, otherwise running
+   - `data-peitho-action="playpause"` button: dispatch start/pause/resume based on state
+   - Update the state pill / play label / clock card `data-peitho-state` in tick()
+   - Split the timer display into spans (planned / overrun coloring). textContent remains format-compatible with the existing output
+   - pointerdown handler for the ripple (`--rx`/`--ry` + `.pressed`)
 2. `packages/peitho-present/src/timeTracker.ts`
-   - `variant: "presenter"`のときのみ legend(Slide progress/Time)+`.tracker`ラッパ+`.fill`(時間進捗幅)+scale(計画時間5分点)を生成
-   - presentバリアントのDOMは不変。マーカー移動ロジック(left%+translateX clamp)は共通のまま
+   - Only when `variant: "presenter"`, emit the legend (Slide progress / Time) + `.tracker` wrapper + `.fill` (time-progress width) + scale (planned-time 5-minute ticks)
+   - The DOM for the present variant is unchanged. Marker-move logic (left% + translateX clamp) stays shared
 3. `crates/peitho-core/src/render.rs` `render_presenter_index()`
-   - CSS全面差し替え+Google Fontsリンク。Agenda関連は含めない
-   - `.clock`はflex column+`.controls { margin-top: auto }`(グリッドstretchによるボタン肥大の再発防止)
-4. テスト更新
-   - `packages/peitho-present/test/presenter.test.ts`: playpause統合ボタンの状態遷移、state pill、新フック
-   - `packages/peitho-present/test/timeTracker.test.ts`: presenterバリアントのfill/scale追加分(既存presentテストは不変)
-   - `crates/peitho-core/src/render.rs`のpresenterテスト2件を新CSSアサーションへ
-5. `packages/peitho-present/dist/shell.js` 再ビルド+コミット
+   - Replace CSS wholesale + add a Google Fonts link. Do not include anything Agenda-related
+   - `.clock` is flex column + `.controls { margin-top: auto }` (prevents the grid-stretch button bloat recurrence)
+4. Test updates
+   - `packages/peitho-present/test/presenter.test.ts`: state transitions of the unified playpause button, state pill, new hooks
+   - `packages/peitho-present/test/timeTracker.test.ts`: added fill/scale for the presenter variant (the existing present tests are unchanged)
+   - Update the two presenter tests in `crates/peitho-core/src/render.rs` to assert on the new CSS
+5. Rebuild + commit `packages/peitho-present/dist/shell.js`
 
-## ゲート
+## Gates
 
-CLAUDE.md記載の全ゲート(cargo test×3 / clippy / fmt / bindings drift / npm build+test+typecheck / shell.js drift)+実ブラウザE2E(examplesをbuild→present→スクリーンショット)。
+All CLAUDE.md gates (cargo test x3 / clippy / fmt / bindings drift / npm build+test+typecheck / shell.js drift) + real-browser E2E (build → present → screenshot the examples).

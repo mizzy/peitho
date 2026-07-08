@@ -1,47 +1,47 @@
-# PDF export: 印刷時box-shadowフラット化 (Issue #150)
+# PDF export: flatten box-shadow at print time (Issue #150)
 
 <!-- derived-from ./2026-07-06-pdf-gradient-flatten.md -->
 <!-- constrained-by ../../CLAUDE.md -->
 
 ## Summary
 
-`peitho export pdf` が生成するPDFをmacOS Preview.app / Quick Look / `sips`で開くと、`box-shadow`付き要素の周囲に硬い黒矩形が出る。ブラウザ表示とpoppler/Chrome PDFビューアでは出ない。根本原因はChrome `--print-to-pdf`がぼかし付き`box-shadow`を**黒塗り + `/SMask /S /Luminosity` ExtGState + DeviceGrayマスク画像つきForm XObject**としてPDF化し、Quartz系レンダラがLuminosity SMaskを誤合成するため。Issue #142のグラデーションフラット化と同じく、PDF export専用の`pdf.html`内スクリプトで**box-shadowだけをRGBA PNGへラスタライズして置換**する。本文テキストと通常DOMはベクターのまま維持する。
+PDFs produced by `peitho export pdf`, when opened in macOS Preview.app / Quick Look / `sips`, show hard black rectangles around `box-shadow` elements. They do not appear in browser display, poppler, or Chrome's PDF viewer. The root cause is that Chrome `--print-to-pdf` emits blurred `box-shadow` as **black-fill + `/SMask /S /Luminosity` ExtGState + a Form XObject with a DeviceGray mask image**, and Quartz-family renderers miscomposite the Luminosity SMask. Like Issue #142's gradient flatten, a script inside the PDF-export-only `pdf.html` **rasterizes only box-shadows into RGBA PNGs and replaces them**. Body text and normal DOM stay vector.
 
-## 計測事実 (2026-07-06、再調査不要)
+## Measured facts (2026-07-06, no need to re-investigate)
 
-- デッキCSSから`box-shadow`を外すとPreview.appの黒矩形は消える。HTML表示には最初から出ない
-- Chrome PDFはぼかし影を`/SMask /S /Luminosity`として出し、QuartzレンダラAPIだけがBBox境界まで黒く描く。poppler/Chrome PDFビューアは正しく描く
-- シャドウをcanvasでRGBA PNG化し、要素背面の`<img>`として敷いてからChromeでprintすると、Quartzでも柔らかい影として正しく描画される
-- RGBA PNGのPDF化では画像XObject自身に`/SMask`が付くことがある。テストで禁止するのは`/SMask`全般ではなく、Quartz誤合成の原因である`/S /Luminosity`
-- 既存の`--virtual-time-budget=10000`で`pdf_flatten.js`のasync処理がprint前に収束することはグラデーション対応で確認済み
+- Removing `box-shadow` from the deck CSS eliminates the black rectangles in Preview.app. HTML display never shows them
+- Chrome PDF emits blurred shadows as `/S /Luminosity`, and only Quartz-family renderer APIs paint them fully black up to the BBox. poppler / Chrome's PDF viewer render them correctly
+- Rasterizing the shadow into an RGBA PNG on canvas and laying it behind the element as an `<img>`, then having Chrome print, results in a correct soft shadow even in Quartz
+- When RGBA PNGs are PDF-ized, the image XObject itself sometimes carries an `/SMask`. The test forbids not `/SMask` in general but the `/S /Luminosity` that causes Quartz misrendering
+- The existing `--virtual-time-budget=10000` was already confirmed to converge `pdf_flatten.js`'s async work before print during the gradient work
 
 ## Design decisions
 
-- **既存flattenの拡張にする**。対象は`crates/peitho-core/src/pdf_flatten.js`のみ。`render_pdf_document`が`include_str!`で`pdf.html`に埋め込むPDF export専用JSで、npm package / TS bundleには入れない
-- **実行順は gradient → shadow**。inset shadowは`background-image`の先頭レイヤーへprependするため、グラデーションflatten後のbackgroundを書き換える。top-levelは`waitForStableLayout()`を一度だけ待ち、`flattenGradients()`後に`flattenBoxShadows()`を呼ぶ
-- **computed `boxShadow`を自前で小さく解析する**。Chrome computed形式は例: `rgba(0, 0, 0, 0.45) 0px 18px 48px 0px`。カンマ分割は括弧深度を見る。`inset`を分類し、長さはpxのみサポートする。`rgba()`内カンマ、複数shadow、負のoffset/spreadを扱う。未対応値は要素単位で`console.error`して元の`box-shadow`を残す
-- **複数shadowはCSSの重なり順を守る**。CSSはリスト先頭が最前面。canvasは後から描いたものが上に来るため、同一canvasへ描くときはshadowリストを後ろから先に描く
-- **外側shadowはスライド子の絶対配置PNGにする**。対象要素の`.peitho-slide`を見つけ、`slideRect.width / slide.offsetWidth`をscaleとして、`(elementRect - slideRect) / scale - slide.clientLeft/clientTop`でpadding box基準のローカル座標を得る。`.peitho-slide`の`transform: scale(...)`はstacking contextかつabsolute配置の包含ブロックなので、`position:absolute; z-index:-1; pointer-events:none`の`<img>`をslide直下に挿入し、元要素の`box-shadow`を`none !important`にする
-- **外側shadowの近似限界を受け入れる**。実際のCSS `box-shadow`は要素自身のペイント位置に属するが、置換PNGはslide直下の背面レイヤーになる。通常のカード影では一致するが、兄弟要素の不透明背景や複雑なz-indexが絡むと、兄弟との重なり順が変わり得る。Preview.app黒矩形の除去を優先し、該当ケースはフォールバック対象または既知の近似差分とする
-- **inset shadowは背景最上層PNGにする**。inset shadowは背景の上、コンテンツの下に描かれるため、`background-image: url(data), <old>`としてprependし、`background-size/position/repeat/origin/clip`も同じく先頭レイヤーを追加する。`background-attachment: fixed`、非`normal`の`background-blend-mode`、安全にCSSリスト操作できない値は`console.error`して元のまま残す
-- **シャドウ描画はcanvas APIだけで行う**。外側shadowは`ctx.shadowColor/shadowBlur/shadowOffset*`と「矩形を十分遠くに置き、shadowだけcanvas内へ落とす」トリックを使う。`shadowBlur`/`shadowOffsetX/Y`はcanvas CTMの影響を受けないため、`context.scale(SCALE, SCALE)`には依存せず、矩形座標・radius・blur・offset・farAwayをすべて明示的に`SCALE`倍して描く。`border-radius`はcomputed corner radiusが単一px値のときだけ`roundRect`で反映する。spreadは矩形の外側inflateとradius調整でエミュレートする。canvas余白は軸ごとに`blur * 2 + Math.abs(offset) + Math.max(0, spread)`を確保する。`SCALE = 2`とcanvas上限は既存グラデーションflattenに合わせる
-- **要素単位でall-or-nothing**。outer/insetのどちらか、または複数shadowの一つでも未対応なら、その要素はDOMを書き換えない。適用前にPNGをすべて作り、最後にlayer追加 / background prepend / `box-shadow:none`をまとめて行う。途中失敗時は追加済みnodeを取り除く
-- **スキップ条件は明示ログつきフォールバック**。`getClientRects().length !== 1`、対象要素から`.peitho-slide`直下までの祖先チェーンに`transform !== "none"`がある、`.peitho-slide`が見つからない、サイズ0、px以外のborder radius、canvas上限超過は`console.error("peitho pdf shadow flatten:", describeElement(...), reason)`して現状維持する
+- **Extend the existing flatten**. Target is only `crates/peitho-core/src/pdf_flatten.js`. It is a PDF-export-only JS embedded into `pdf.html` by `render_pdf_document` via `include_str!`; not part of the npm package or TS bundle
+- **Execution order is gradient → shadow**. Inset shadow prepends into the head layer of `background-image`, so it rewrites background after gradient flatten. Top-level awaits `waitForStableLayout()` once, then calls `flattenBoxShadows()` after `flattenGradients()`
+- **Parse computed `boxShadow` in a small custom parser**. Chrome computed form example: `rgba(0, 0, 0, 0.45) 0px 18px 48px 0px`. Comma splitting respects parenthesis depth. Categorize `inset`; support only px lengths. Handles commas inside `rgba()`, multiple shadows, negative offset/spread. Any unsupported value causes per-element `console.error` and leaves the original `box-shadow` in place
+- **Multiple shadows preserve CSS stacking order**. In CSS, list head is frontmost. In canvas, later draws are on top, so when drawing into the same canvas, draw the shadow list back to front
+- **Outer shadow becomes an absolutely-positioned PNG child of the slide**. Find the target element's `.peitho-slide`, use `slideRect.width / slide.offsetWidth` as scale, and derive padding-box local coordinates as `(elementRect - slideRect) / scale - slide.clientLeft/clientTop`. `.peitho-slide`'s `transform: scale(...)` is a stacking context and the containing block for absolute positioning, so insert an `<img>` with `position:absolute; z-index:-1; pointer-events:none` directly under the slide, and set the element's `box-shadow` to `none !important`
+- **Accept the approximation limits of outer shadow**. A real CSS `box-shadow` paints inside the element's paint position; the replacement PNG becomes a back layer directly under the slide. This matches for typical card shadows, but with sibling elements that have opaque backgrounds or complex z-index, the stacking with siblings may change. Prioritize eliminating the Preview.app black rectangles; treat such cases as fallback candidates or known-approximation differences
+- **Inset shadow becomes the topmost background layer PNG**. Inset shadow paints on top of background and beneath content, so prepend as `background-image: url(data), <old>`, and equally prepend the head layer for `background-size/position/repeat/origin/clip`. When `background-attachment: fixed`, non-`normal` `background-blend-mode`, or values that can't be safely list-manipulated appear, `console.error` and leave the original in place
+- **Shadow drawing is canvas API only**. Outer shadows use `ctx.shadowColor/shadowBlur/shadowOffset*` plus the "place the rectangle far away and let only the shadow land inside the canvas" trick. `shadowBlur` / `shadowOffsetX/Y` are unaffected by canvas CTM, so do not depend on `context.scale(SCALE, SCALE)`; explicitly multiply rectangle coordinates, radius, blur, offset, and farAway by `SCALE`. `border-radius` is reflected via `roundRect` only when computed corner radius is a single-px value. Spread is emulated by inflate + radius adjust. Canvas margin reserves `blur * 2 + Math.abs(offset) + Math.max(0, spread)` per axis. `SCALE = 2` and canvas upper bound match the existing gradient flatten
+- **Per-element all-or-nothing**. If any of outer/inset, or any one of multiple shadows, is unsupported, do not rewrite the DOM for that element. Build all PNGs before applying, then perform layer insertion / background prepend / `box-shadow:none` atomically. On mid-flight failure, remove nodes that were already inserted
+- **Skip conditions are explicit-log fallbacks**. `getClientRects().length !== 1`, `transform !== "none"` in the ancestor chain from the target up to (excluding) `.peitho-slide`, `.peitho-slide` not found, zero size, non-px border radius, canvas upper bound exceeded → `console.error("peitho pdf shadow flatten:", describeElement(...), reason)` and leave as-is
 
 ## Non-goals
 
-- `text-shadow`と`filter: drop-shadow(...)`はIssue #150では扱わない。どちらもQuartz系PDF問題の同族だが、フォントグリフや任意アルファシルエットのラスタライズが必要で、矩形box-shadowとは別問題
-- ページ全体ラスタライズや`--rasterize`オプションは導入しない。ベクターテキストを維持する
-- CSS Shadows Level 4相当の全構文互換は目指さない。PDF exportで安全に置換できるpx解決済みcomputed shadowだけを対象にする
+- `text-shadow` and `filter: drop-shadow(...)` are not covered by Issue #150. Both are siblings of the Quartz PDF problem but require rasterizing font glyphs or arbitrary-alpha silhouettes — a different problem from rectangular box-shadow
+- No full-page rasterization or `--rasterize` option. Keep vector text
+- Do not aim for full CSS Shadows Level 4 syntax compatibility. Target only computed shadows with px resolutions that can be safely replaced in PDF export
 
-## 実装タスク (TDD)
+## Implementation tasks (TDD)
 
-### Task 1: Red E2Eを追加
+### Task 1: add red E2E
 
-- 対象: `crates/peitho/tests/export_pdf.rs`
-- 既存`export_pdf_flattens_gradient_backgrounds_to_images`をモデルに、Chrome必須の`#[ignore]`テストを先に追加してredを確認する
-- テスト名: `export_pdf_flattens_box_shadows_without_luminosity_smask_to_images`
-- deck adjacent `css/shadow.css`の最小CSS。生HTMLブロックは`process_html_chunk`で`unsupported html`になるため使わず、既存のMarkdown由来DOMへCSSだけでshadowを当てる:
+- Target: `crates/peitho/tests/export_pdf.rs`
+- Modeled on the existing `export_pdf_flattens_gradient_backgrounds_to_images`, add a Chrome-required `#[ignore]` test first and confirm red
+- Test name: `export_pdf_flattens_box_shadows_without_luminosity_smask_to_images`
+- Minimum CSS in deck-adjacent `css/shadow.css`. Raw HTML blocks turn into `unsupported html` in `process_html_chunk`, so use CSS-only against Markdown-derived DOM:
 
 ```css
 .peitho-slide {
@@ -57,7 +57,7 @@
 }
 ```
 
-- deck本文は通常Markdownだけにする:
+- Deck body is plain Markdown only:
 
 ```markdown
 # Vector Text
@@ -65,7 +65,7 @@
 Box shadow PDF export
 ```
 
-- 実装前redの理由: 現状Chromeは`h1`の`box-shadow`をLuminosity SMaskとして出すため、次のassertが失敗する。`h1`自体をshadow対象にしておくと、誤って要素ごとラスタライズした実装では`/Font` canaryが消えて検知できる
+- Reason for pre-implementation red: currently Chrome emits `h1`'s `box-shadow` as Luminosity SMask, so the following asserts fail. Having the `h1` itself be the shadow target also means an implementation that mistakenly rasterizes the whole element will lose the `/Font` canary and get caught
 
 ```rust
 assert!(!pdf_bytes_contain(&bytes, b"/S /Luminosity"));
@@ -76,13 +76,13 @@ assert!(
 assert!(pdf_bytes_contain(&bytes, b"/Font"));
 ```
 
-- 注意: `assert!(!pdf_bytes_contain(&bytes, b"/SMask"))`は書かない。RGBA画像XObjectのalpha maskまで禁止してしまうため
+- Note: do not write `assert!(!pdf_bytes_contain(&bytes, b"/SMask"))`. It would also forbid the alpha mask of RGBA image XObjects
 
-### Task 2: `pdf_flatten.js`のtop-levelを二段flattenへ整理
+### Task 2: reshape `pdf_flatten.js` top-level into two-stage flatten
 
-- 対象: `crates/peitho-core/src/pdf_flatten.js`
-- `waitForStableLayout()`はtop-level orchestrationに移し、既存gradient処理は待機済み前提の内部関数にする
-- コード断片の形:
+- Target: `crates/peitho-core/src/pdf_flatten.js`
+- Move `waitForStableLayout()` up to top-level orchestration; make the existing gradient handling an internal function that assumes waiting is done
+- Code fragment shape:
 
 ```js
 async function flattenPdfArtifacts() {
@@ -94,16 +94,16 @@ async function flattenPdfArtifacts() {
 }
 ```
 
-- 既存の`try/catch`方針は維持し、top-level failureでも属性を設定する
-- 対象: `crates/peitho-core/src/render.rs`
-  - 既存unit testを`pdf_document_embeds_pdf_flattening_script_after_slides`相当に広げる
-  - assertion例: `assert!(html.contains("flattenGradients")); assert!(html.contains("flattenBoxShadows"));`
-  - `PDF_FLATTEN_JS`が`</script`を含まないテストは維持
+- Keep the existing `try/catch` policy; set attributes even on top-level failure
+- Target: `crates/peitho-core/src/render.rs`
+  - Broaden the existing unit test to be the equivalent of `pdf_document_embeds_pdf_flattening_script_after_slides`
+  - Assertion examples: `assert!(html.contains("flattenGradients")); assert!(html.contains("flattenBoxShadows"));`
+  - Keep the test that `PDF_FLATTEN_JS` does not contain `</script`
 
-### Task 3: `box-shadow` parserと対象収集
+### Task 3: `box-shadow` parser and target collection
 
-- 対象: `crates/peitho-core/src/pdf_flatten.js`
-- 追加する小ヘルパー:
+- Target: `crates/peitho-core/src/pdf_flatten.js`
+- Small helpers to add:
 
 ```js
 function splitCssList(value) { /* comma split with parentheses depth */ }
@@ -112,14 +112,14 @@ function parseShadowList(boxShadow) { /* [{ inset, color, offsetX, offsetY, blur
 function parseCornerRadius(value) { /* "12px" only; reject "12px 8px" and non-px */ }
 ```
 
-- parser policy:
-  - `none`または空文字は対象外
-  - `inset` keywordを外す
-  - Chrome computed前提で先頭の`rgb(...)` / `rgba(...)`を色として扱う
-  - 残りは`offsetX offsetY blur? spread?`。offsetは必須、blur/spread省略時は0
-  - blurは負数不可。spreadは負数可
-  - ひとつでもparse不能なら要素単位でskip
-- `.peitho-slide`解決、skip条件、座標:
+- Parser policy:
+  - `none` or empty string is skipped
+  - Strip `inset` keyword
+  - Assume Chrome computed form; treat the leading `rgb(...)` / `rgba(...)` as the color
+  - Rest is `offsetX offsetY blur? spread?`. Offsets are required; blur/spread default to 0 when omitted
+  - Blur cannot be negative. Spread can be negative
+  - If any part fails to parse, skip the element as a whole
+- `.peitho-slide` resolution, skip conditions, coordinates:
 
 ```js
 var slide = element.closest(".peitho-slide");
@@ -137,7 +137,7 @@ var height = elementRect.height / scale;
 if (width <= 0 || height <= 0) throw new Error("zero-sized element");
 ```
 
-- `hasTransformBeforeSlide`は対象要素自身から親へ歩き、`.peitho-slide`に到達したら止める。slide自身のprint用`transform: scale(...)`は許容するが、中間祖先のtransformはローカル座標を歪めるためskipする:
+- `hasTransformBeforeSlide` walks from the target upward and stops at `.peitho-slide`. The slide's own print-time `transform: scale(...)` is allowed, but a transform on an intermediate ancestor would warp the local coordinates and is skipped:
 
 ```js
 function hasTransformBeforeSlide(element, slide) {
@@ -148,11 +148,11 @@ function hasTransformBeforeSlide(element, slide) {
 }
 ```
 
-### Task 4: 外側shadowをPNG layerへ置換
+### Task 4: replace outer shadow with a PNG layer
 
-- 対象: `crates/peitho-core/src/pdf_flatten.js`
-- outer shadowだけをまとめて1枚のtransparent PNGへ描く。canvas寸法は`(width + padLeft + padRight) * SCALE` / `(height + padTop + padBottom) * SCALE`
-- 描画順とspread/radius調整。`shadowBlur`/`shadowOffsetX/Y`はCTMでscaleされないため、`context.scale(SCALE, SCALE)`は使わず、canvas座標系へ明示変換する:
+- Target: `crates/peitho-core/src/pdf_flatten.js`
+- Draw only outer shadows into one transparent PNG. Canvas size is `(width + padLeft + padRight) * SCALE` / `(height + padTop + padBottom) * SCALE`
+- Drawing order and spread/radius adjustment. Because `shadowBlur` / `shadowOffsetX/Y` are not CTM-scaled, do not use `context.scale(SCALE, SCALE)`; convert to canvas coordinates explicitly:
 
 ```js
 var s = SCALE;
@@ -168,8 +168,8 @@ outerShadows.slice().reverse().forEach(function (shadow) {
 });
 ```
 
-- `roundRect`がないChrome環境に備えて、`ctx.roundRect`がなければ小さなpath helperを使う
-- 適用断片:
+- For Chrome environments without `roundRect`, use a small path helper when `ctx.roundRect` is missing
+- Application fragment:
 
 ```js
 var image = document.createElement("img");
@@ -189,20 +189,20 @@ Object.assign(image.style, {
 target.slide.appendChild(image);
 ```
 
-- `await image.decode()`はDOM挿入前に行う。既存`loadImage` helperを再利用してもよいが、virtual time下のprintタイミングに対して画像decode完了を決定的にする
-  - **【2026-07-06に廃止 — Issue #155】** この`decode()`推奨はLinuxのheadless Chrome + `--virtual-time-budget`でresolveもrejectもされず無音ハングすることが判明し、`loadImage`（loadイベント待ち）へ一本化された。`decode()`を再導入しないこと。詳細: `docs/plans/2026-07-06-pdf-flatten-linux-decode-hang.md`
-- all-or-nothingのため、`box-shadow:none`はこの時点ではまだ設定しない
+- Do `await image.decode()` before inserting into the DOM. Reusing the existing `loadImage` helper is fine too — either way, image decode completion is made deterministic against print timing under virtual time
+  - **[Deprecated 2026-07-06 — Issue #155]** This `decode()` recommendation was found to hang silently under Linux headless Chrome + `--virtual-time-budget` (neither resolves nor rejects), and was unified to `loadImage` (wait on load event). Do not reintroduce `decode()`. Details: `docs/plans/2026-07-06-pdf-flatten-linux-decode-hang.md`
+- Because it is all-or-nothing, do not set `box-shadow:none` at this point yet
 
-### Task 5: inset shadowをbackground先頭レイヤーへ置換
+### Task 5: replace inset shadow with the head background layer
 
-- 対象: `crates/peitho-core/src/pdf_flatten.js`
-- inset shadowだけを要素border boxサイズのtransparent PNGへ描く。ここでも`context.scale(SCALE, SCALE)`には依存せず、clip path、ring path、radius、blur、offsetをすべて明示的に`SCALE`倍する
-- 描画モデルはCSSと同じく「ボックスの外側全体が内側に影を落とす」。offsetの符号は反転しない。手順:
-  - border-boxの角丸矩形でclipする
-  - 「巨大な外周矩形 + spread分deflateした内側角丸穴」のeven-odd中空パスを作る
-  - `ctx.shadowColor/shadowBlur/shadowOffsetX/Y`へ同符号のoffsetを設定してfillする
-  - 中空リングが落とす影だけがclip内へ入り、背景最上層PNGになる
-- 描画断片:
+- Target: `crates/peitho-core/src/pdf_flatten.js`
+- Draw only inset shadows into a transparent PNG sized to the element's border box. Do not depend on `context.scale(SCALE, SCALE)` here either — explicitly multiply clip path, ring path, radius, blur, offset by `SCALE`
+- Drawing model is the same as CSS: "the outside of the box drops a shadow inward". Do not flip the sign of offset. Procedure:
+  - Clip with a border-box rounded rectangle
+  - Build an even-odd hollow path of "huge outer rectangle + inner rounded-hole deflated by spread"
+  - Set `ctx.shadowColor/shadowBlur/shadowOffsetX/Y` with the same-signed offset and fill
+  - Only the shadow cast by the hollow ring enters the clip, becoming the topmost background PNG
+- Drawing fragment:
 
 ```js
 var s = SCALE;
@@ -221,11 +221,11 @@ insetShadows.slice().reverse().forEach(function (shadow) {
 });
 ```
 
-- background list操作は既存computed値をsnapshotしてから行う。安全条件:
-  - `backgroundAttachment`に`fixed`が含まれない
-  - `backgroundBlendMode`は全レイヤー`normal`
-  - `splitCssList`で`backgroundImage/Size/Position/Repeat/Origin/Clip`を分割できる
-- prepend断片:
+- Background list manipulation snapshots existing computed values first. Safety conditions:
+  - `backgroundAttachment` does not contain `fixed`
+  - `backgroundBlendMode` is `normal` on all layers
+  - `splitCssList` can split `backgroundImage/Size/Position/Repeat/Origin/Clip`
+- Prepend fragment:
 
 ```js
 setImportant(style, "background-image", 'url("' + dataUrl + '"), ' + old.backgroundImage);
@@ -236,29 +236,29 @@ setImportant(style, "background-origin", "border-box, " + old.backgroundOrigin);
 setImportant(style, "background-clip", "border-box, " + old.backgroundClip);
 ```
 
-- `old.backgroundImage === "none"`の場合はtailなしの単一レイヤーにする
-- outer/insetの適用がすべて成功した後だけ:
+- When `old.backgroundImage === "none"`, use a single layer with no tail
+- Only after all outer/inset applications succeed:
 
 ```js
 setImportant(target.element.style, "box-shadow", "none");
 ```
 
-### Task 6: ドキュメント更新
+### Task 6: documentation update
 
-- 対象: `CLAUDE.md`
-- Pitfallsに1行追加:
+- Target: `CLAUDE.md`
+- Add one line to Pitfalls:
 
 ```markdown
 - **PDF export flattens box-shadow at print time**: Chrome emits blurred CSS box-shadows as `/S /Luminosity` soft masks that Quartz renders as hard black rectangles, so `pdf_flatten.js` rasterizes supported shadows to RGBA PNGs for PDF export (measured 2026-07-06). Design record: `docs/plans/2026-07-06-pdf-shadow-flatten.md`
 ```
 
-- 本ファイルをIssue #150のdesign recordとする。README更新は不要
+- Treat this file as the design record for Issue #150. No README update needed
 
-## 検証手順 (verify時)
+## Verification steps (at verify time)
 
-1. Red確認: `PEITHO_CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" cargo test -p peitho --test export_pdf export_pdf_flattens_box_shadows_without_luminosity_smask_to_images -- --ignored`
-2. Green後E2E: `cargo test -p peitho --test export_pdf -- --ignored`
-3. 全ゲート:
+1. Confirm red: `PEITHO_CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" cargo test -p peitho --test export_pdf export_pdf_flattens_box_shadows_without_luminosity_smask_to_images -- --ignored`
+2. Post-green E2E: `cargo test -p peitho --test export_pdf -- --ignored`
+3. All gates:
 
 ```bash
 cargo test --workspace
@@ -272,12 +272,12 @@ git diff --exit-code packages/peitho-present/dist/shell.js
 git diff --exit-code packages/peitho-present/dist/measure.js
 ```
 
-4. Quartz視覚A/B確認。popplerではなく`pdfseparate`でページ分割後、`sips`でQuartzレンダリングする:
+4. Quartz visual A/B check. Instead of poppler, split pages with `pdfseparate` and Quartz-render with `sips`:
 
 ```bash
 mkdir -p /tmp/peitho-shadow-ab
 peitho export pdf path/to/shadow-deck.md -o /tmp/peitho-shadow-ab/before.pdf
-# 実装後:
+# After implementation:
 cargo run -p peitho -- export pdf path/to/shadow-deck.md -o /tmp/peitho-shadow-ab/after.pdf
 pdfseparate /tmp/peitho-shadow-ab/before.pdf /tmp/peitho-shadow-ab/before-%02d.pdf
 pdfseparate /tmp/peitho-shadow-ab/after.pdf /tmp/peitho-shadow-ab/after-%02d.pdf
@@ -285,11 +285,11 @@ sips -s format png /tmp/peitho-shadow-ab/before-01.pdf --out /tmp/peitho-shadow-
 sips -s format png /tmp/peitho-shadow-ab/after-01.pdf --out /tmp/peitho-shadow-ab/after-01-quartz.png
 ```
 
-5. PDF byte確認:
+5. PDF byte check:
 
 ```bash
 grep -a "/S /Luminosity" /tmp/peitho-shadow-ab/after.pdf
 grep -a "/Subtype */Image\\|/Subtype/Image" /tmp/peitho-shadow-ab/after.pdf
 ```
 
-期待値: afterでは`/S /Luminosity`が0件、画像XObjectが存在し、Quartz PNGで黒矩形が消えて柔らかい影だけが残る。
+Expected: `after` has 0 hits for `/S /Luminosity`, an image XObject exists, and Quartz PNG loses the black rectangles while keeping soft shadows only.

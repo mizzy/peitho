@@ -4,9 +4,9 @@
 
 ## Scope
 
-`peitho preview` / `peitho build --watch` の watch ループを、監視中ディレクトリの削除・復活・配下ディレクトリ追加で終了させない。採用設計は [`../specs/2026-07-08-watch-error-resilience-design.md`](../specs/2026-07-08-watch-error-resilience-design.md) の §5(C) に固定する。
+Keep the `peitho preview` / `peitho build --watch` watch loop alive across deletions, revivals, and new sub-directories under monitored directories. The adopted design is fixed to §5(C) of [`../specs/2026-07-08-watch-error-resilience-design.md`](../specs/2026-07-08-watch-error-resilience-design.md).
 
-`clippy::too_many_arguments` を避けるため、実 watch 集合と watch 関連状態は `WatchState` に束ねる。
+To avoid `clippy::too_many_arguments`, group the actual watch set and watch-related state into `WatchState`.
 
 ```rust
 struct WatchState {
@@ -41,15 +41,15 @@ fn handle_watch_event_result<F>(
 ) -> miette::Result<()>;
 ```
 
-`reconcile_watched_dirs` の論理戻り値は「集合が変化したか」の `bool`。stderr 書き込み失敗は致命傷のままにするため、Rust の型は `miette::Result<bool>` にする。
+The logical return value of `reconcile_watched_dirs` is a `bool` for "did the set change". stderr write failures stay fatal, so the Rust type is `miette::Result<bool>`.
 
-## Task 1: debouncer-mini の消失イベント形状を計測する
+## Task 1: measure the shape of debouncer-mini's disappearance events
 
 **Goal**  
-設計文書の検証ポイントどおり、登録済みディレクトリ削除時に `Ok(Vec<DebouncedEvent>)` と `Err(notify::Error { paths, .. })` がどう届くかを scratch テストで確認する。成功後に削除して成果物に残さない。
+Per the design's verification points, confirm in a scratch test how `Ok(Vec<DebouncedEvent>)` and `Err(notify::Error { paths, .. })` arrive when a registered directory is deleted. Remove the test after success; do not leave it in the tree.
 
 **Files**  
-`crates/peitho/src/main.rs` (一時変更のみ。タスク終了時に元へ戻す)
+`crates/peitho/src/main.rs` (temporary edit only; revert at task end)
 
 **Test**
 
@@ -107,8 +107,8 @@ fn watch_probe_directory_delete_event_shape() {
 **Implementation**
 
 ```rust
-// #[cfg(test)] mod tests に一時追加する。
-// probe 後、このテスト全体を削除する。
+// Temporarily add under #[cfg(test)] mod tests.
+// After probing, delete this entire test.
 ```
 
 **Verification**
@@ -118,12 +118,12 @@ cargo test -p peitho watch_probe_directory_delete_event_shape -- --nocapture
 git diff -- crates/peitho/src/main.rs
 ```
 
-Red: assertion が設計文書と違う形で失敗した場合、`--nocapture` の出力を記録して設計前提を見直す。Green: `Ok` と `Err` の両方を観測する。Refactor: scratch テストを削除し、2つ目のコマンドで差分が残っていないことを確認する。
+Red: if the assertion fails in a shape different from the design assumption, capture `--nocapture` output and revisit the design premise. Green: observe both `Ok` and `Err`. Refactor: delete the scratch test and confirm the second command shows no residual diff.
 
-## Task 2: WatchState を導入して WatchRuntime に所有させる
+## Task 2: introduce WatchState and let WatchRuntime own it
 
 **Goal**  
-初期登録に成功したディレクトリ集合を `WatchState.watched_dirs` に保持し、`WatchRuntime` は `state + debouncer + rx` だけを持つ形にする。
+Hold the set of directories that were successfully registered at startup in `WatchState.watched_dirs`, and reshape `WatchRuntime` to hold only `state + debouncer + rx`.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -200,12 +200,12 @@ Ok(WatchRuntime { state, debouncer, rx })
 cargo test -p peitho watch_state_owns_registered_dirs_after_registration
 ```
 
-Red: `WatchState` が未定義で失敗する。Green: `WatchRuntime` が `state` を所有して通す。Refactor: `prepare_watch_loop` 内の初期化順を `targets -> watched_dirs -> state` に整え、同じコマンドを再実行する。
+Red: fails because `WatchState` is undefined. Green: passes with `WatchRuntime` owning `state`. Refactor: order initialization inside `prepare_watch_loop` as `targets -> watched_dirs -> state`, and rerun the same command.
 
-## Task 3: reconcile の差分適用を追加する
+## Task 3: add diff application to reconcile
 
 **Goal**  
-`watched_dirs - desired_dirs` を `unwatch`、`desired_dirs - watched_dirs` を `watch` し、成功時に `watched_dirs` を `desired_dirs` へ収束させる。
+`unwatch` for `watched_dirs - desired_dirs`, `watch` for `desired_dirs - watched_dirs`, and converge `watched_dirs` to `desired_dirs` on success.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -282,12 +282,12 @@ fn reconcile_watched_dirs(
 cargo test -p peitho reconcile_watched_dirs_applies_diff_and_updates_owned_set
 ```
 
-Red: `reconcile_watched_dirs` が未定義で失敗する。Green: 差分適用で通す。Refactor: `contains_watch_path` の呼び出し重複を整え、同じコマンドを再実行する。
+Red: fails because `reconcile_watched_dirs` is undefined. Green: passes by applying the diff. Refactor: consolidate duplicate `contains_watch_path` calls and rerun the same command.
 
-## Task 4: reconcile の watch/unwatch 失敗を非致命ノートにする
+## Task 4: turn reconcile's watch/unwatch failures into non-fatal notes
 
 **Goal**  
-`watch_not_found` と `PathNotFound` の登録変更失敗を stderr ノートにして継続し、成功・失敗にかかわらず所有集合を `desired_dirs` に収束させる。
+Convert `watch_not_found` and `PathNotFound` registration change failures into stderr notes and continue, converging the owned set to `desired_dirs` regardless of success or failure.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -372,12 +372,12 @@ Ok(changed)
 cargo test -p peitho reconcile_watched_dirs_notes_failures_and_converges
 ```
 
-Red: Task 3 の実装は watcher エラーを `?` で返すため失敗する。Green: stderr ノート化で通す。Refactor: failure note の文言生成を watch/unwatch で読みやすく分け、同じコマンドを再実行する。
+Red: fails because Task 3's implementation returns watcher errors with `?`. Green: passes by turning them into stderr notes. Refactor: split failure-note wording between watch/unwatch for readability and rerun the same command.
 
-## Task 5: deck 変更時の更新を WatchState ベースに置き換える
+## Task 5: replace deck-change updates with a WatchState-based path
 
 **Goal**  
-`refresh_watch_targets_after_deck_change` が `WatchState.watched_dirs` を実集合として使い、`update_watched_dirs` を削除する。
+Make `refresh_watch_targets_after_deck_change` use `WatchState.watched_dirs` as the actual set and delete `update_watched_dirs`.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -446,7 +446,7 @@ fn refresh_watch_targets_after_deck_change(
     Ok(())
 }
 
-// update_watched_dirs は削除する。
+// Delete update_watched_dirs.
 ```
 
 **Verification**
@@ -455,12 +455,12 @@ fn refresh_watch_targets_after_deck_change(
 cargo test -p peitho deck_refresh_uses_owned_watched_dirs_when_filesystem_state_drifted
 ```
 
-Red: 旧シグネチャと旧差分計算ではコンパイルまたは期待 unwatch で失敗する。Green: `WatchState` を渡して通す。Refactor: `next_targets` と `desired_dirs` の生成順を読みやすく保ち、同じコマンドを再実行する。
+Red: fails to compile or fails on the expected unwatch under the old signature and diff calculation. Green: passes by threading `WatchState` through. Refactor: keep the ordering of `next_targets` and `desired_dirs` readable and rerun the same command.
 
-## Task 6: 通常イベント handler を WatchState 化して新しい fonts サブディレクトリを追従する
+## Task 6: convert the normal event handler to WatchState and follow new fonts subdirectories
 
 **Goal**  
-`handle_watch_paths_with_rebuild` と `handle_watch_event_result` の通常イベント経路を `&mut WatchState` へ移行し、全呼び出し元を同じタスク内で更新する。relevant な通常イベントでリビルドした後、`state.targets.watch_dirs()` を desired として reconcile する。
+Migrate the normal event path in `handle_watch_paths_with_rebuild` and `handle_watch_event_result` to `&mut WatchState` and update every caller in the same task. After rebuild on a relevant normal event, reconcile with `state.targets.watch_dirs()` as desired.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -562,7 +562,7 @@ where
     handle_watch_paths_with_rebuild(state, watcher, &paths, stdout, stderr, rebuild)
 }
 
-// 同じ差分で全呼び出し元を更新する。
+// Update all callers with the same diff.
 handle_watch_paths_with_rebuild(&mut state, &mut watcher, changed_paths, stdout, stderr, rebuild)?;
 handle_watch_event_result(result, &mut runtime.state, &mut watcher, stdout, stderr, &mut rebuild)?;
 ```
@@ -573,12 +573,12 @@ handle_watch_event_result(result, &mut runtime.state, &mut watcher, stdout, stde
 cargo test -p peitho watch_path_handler_reconciles_after_new_fonts_subdir
 ```
 
-Red: 旧 handler は `WatchState` を受け取らず、新サブディレクトリを watch しない。Green: `WatchState` signature とリビルド後 reconcile で通す。Refactor: `handle_watch_paths_with_rebuild` と `handle_watch_event_result` の引数数が6以下であることを確認し、同じコマンドを再実行する。
+Red: the old handler does not take `WatchState` and does not watch the new sub-directory. Green: passes with the `WatchState` signature and post-rebuild reconcile. Refactor: verify `handle_watch_paths_with_rebuild` and `handle_watch_event_result` have at most six arguments and rerun the same command.
 
-## Task 7: 通常イベントで消えた fonts サブディレクトリを unwatch する
+## Task 7: unwatch fonts sub-directories that disappear via normal events
 
 **Goal**  
-remove の通常イベントだけが先に届く順序でも、リビルド後 reconcile によって消えたサブディレクトリを `state.watched_dirs` から外す。
+Even when only the remove normal event arrives first, the post-rebuild reconcile removes the vanished sub-directory from `state.watched_dirs`.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -630,12 +630,12 @@ reconcile_watched_dirs(watcher, &mut state.watched_dirs, &desired_dirs, stderr)?
 cargo test -p peitho watch_path_handler_reconciles_after_removed_fonts_subdir
 ```
 
-Red: stale subdir が `state.watched_dirs` に残る実装なら失敗する。Green: remove イベント後の reconcile で通す。Refactor: add/remove のテストを隣接させ、同じコマンドを再実行する。
+Red: an implementation that leaves the stale subdir in `state.watched_dirs` fails. Green: passes with reconcile after the remove event. Refactor: put the add/remove tests next to each other and rerun the same command.
 
-## Task 8: watch エラーを非致命化して reconcile する
+## Task 8: make watch errors non-fatal and reconcile
 
 **Goal**  
-`DebounceEventResult::Err` を `Err` として返さず、stderr ノート、desired 再計算、reconcile を実行して watch ループを継続させる。このタスクでは `write_watch_error_note` を作らず、素の `writeln!` と `flush` で書く。
+Stop returning `DebounceEventResult::Err` as `Err`; write a stderr note, recompute desired, run reconcile, and keep the watch loop running. This task does not create `write_watch_error_note`; use raw `writeln!` and `flush`.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -698,11 +698,11 @@ fn watch_event_handler_returns_ok_when_watcher_reports_error() {
 }
 ```
 
-既存の `watch_event_handler_returns_error_when_watcher_reports_error`
-(`crates/peitho/src/main.rs` の 2709 行付近)はこのタスク内で削除し、
-上の `watch_event_handler_returns_ok_when_watcher_reports_error` に置き換える。
-旧テストは `handle_watch_event_result(...).unwrap_err()` と `stderr.is_empty()` を
-期待しており、watch エラー非致命化後は必ず失敗するため残さない。
+Delete the existing `watch_event_handler_returns_error_when_watcher_reports_error`
+(around line 2709 in `crates/peitho/src/main.rs`) in this task and replace it with
+`watch_event_handler_returns_ok_when_watcher_reports_error` above.
+The old test expects `handle_watch_event_result(...).unwrap_err()` and `stderr.is_empty()`,
+which will always fail after watch errors become non-fatal, so it must not remain.
 
 **Implementation**
 
@@ -727,7 +727,7 @@ Err(err) => {
 }
 ```
 
-同じタスク内で `watch_paths_loop` の呼び出しも `handle_watch_event_result(result, &mut runtime.state, ...)` に更新して、タスク終了時点でコンパイルを通す。
+Also update the `watch_paths_loop` call within the same task to `handle_watch_event_result(result, &mut runtime.state, ...)` so compilation passes at the end of the task.
 
 **Verification**
 
@@ -736,12 +736,12 @@ cargo test -p peitho watch_event_handler_notes_error_reconciles_and_continues
 cargo test -p peitho watch_event_handler_returns_ok_when_watcher_reports_error
 ```
 
-Red: 旧 handler は `Err` を返す。Green: エラー枝を消費して通す。Refactor: Err branch の早期 return を小さく保ち、2つの cargo test コマンドを再実行する。
+Red: the old handler returns `Err`. Green: passes by consuming the error branch. Refactor: keep the Err branch's early return small and rerun both cargo test commands.
 
-## Task 9: watch エラーのリビルドを「集合変化あり + relevant」に限定する
+## Task 9: gate watch-error rebuilds on "set changed + relevant"
 
 **Goal**  
-権限エラーが同じ集合のまま繰り返す場合に、200ms ごとのリビルドループを起こさない。
+Do not trigger a rebuild loop every 200ms when the same permission error keeps repeating on the same set.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -801,12 +801,12 @@ if changed && relevant_error {
 cargo test -p peitho watch_event_handler_does_not_rebuild_when_error_does_not_change_watch_set
 ```
 
-Red: 無条件 rebuild なら失敗する。Green: `changed && relevant_error` で通す。Refactor: rebuild 条件のローカル変数名を `should_rebuild` にするか判断し、同じコマンドを再実行する。
+Red: unconditional rebuild fails. Green: passes with `changed && relevant_error`. Refactor: decide whether to rename the rebuild-condition local to `should_rebuild` and rerun the same command.
 
-## Task 10: irrelevant な watch エラーではリビルドしない
+## Task 10: do not rebuild on irrelevant watch errors
 
 **Goal**  
-集合が変化しても `err.paths` が `WatchTargets::is_relevant_change` に該当しない場合は、reconcile だけ実行してリビルドしない。
+When the set changes but `err.paths` do not match `WatchTargets::is_relevant_change`, run only reconcile and do not rebuild.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -860,12 +860,12 @@ let relevant_error = err
 cargo test -p peitho watch_event_handler_does_not_rebuild_when_error_path_is_irrelevant
 ```
 
-Red: 集合変化だけで rebuild すると失敗する。Green: relevant 条件を加えて通す。Refactor: stale path の fixture 構築を最小化し、同じコマンドを再実行する。
+Red: rebuilding on set change alone fails. Green: passes by adding the relevant condition. Refactor: minimize the stale-path fixture construction and rerun the same command.
 
-## Task 11: 同一文言 watch エラーノートの連続出力を抑制する
+## Task 11: suppress consecutive duplicate watch-error notes
 
 **Goal**  
-同じ watch エラーが連続して届く場合、2回目以降の同一ノートを出さない。通常イベントを挟んだ後は再度出せるようにする。
+When the same watch error arrives consecutively, do not emit the same note a second time or beyond. After an intervening normal event, allow it again.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -953,12 +953,12 @@ state.last_watch_error_note = None;
 cargo test -p peitho watch_event_handler_suppresses_consecutive_duplicate_error_notes
 ```
 
-Red: 毎回 note を出す実装では count が 3 になる。Green: 連続重複だけ抑制して通す。Refactor: note 文字列の生成を `write_watch_error_note` 内に閉じ、同じコマンドを再実行する。
+Red: an implementation that emits the note every time counts 3. Green: passes by suppressing consecutive duplicates. Refactor: keep the note-string construction inside `write_watch_error_note` and rerun the same command.
 
-## Task 12: watch ループ結線と too_many_arguments を局所確認する
+## Task 12: wire up the watch loop and locally check too_many_arguments
 
 **Goal**  
-`watch_paths_loop` が `runtime.state` を handler に渡し、watch handler 群が clippy の引数数閾値を超えないことを確認する。シグネチャ変更済みの既存 watch テスト呼び出しはこの時点で一括確認する。
+Confirm `watch_paths_loop` passes `runtime.state` to the handlers and that the watch handler family stays under clippy's argument-count threshold. Check the existing watch-test call sites with updated signatures collectively at this point.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -1006,12 +1006,12 @@ cargo test -p peitho watch_loop_function_accepts_runtime_with_watch_state
 cargo clippy -p peitho --all-targets -- -D warnings
 ```
 
-Red: loop が旧フィールドや旧 handler signature を参照していればコンパイルで失敗する。Green: `WatchState` 結線で通す。Refactor: 既存 watch テスト群の arrange 部に `WatchState` 初期化を寄せ、2つのコマンドを再実行する。
+Red: fails to compile if the loop references the old field or the old handler signature. Green: passes with the `WatchState` wiring. Refactor: consolidate `WatchState` initialization in existing watch tests' arrange sections and rerun both commands.
 
-## Task 13: stdout/stderr 書き込み失敗は致命傷のままにする
+## Task 13: keep stdout/stderr write failures fatal
 
 **Goal**  
-watcher ランタイムエラーは非致命化するが、診断を書けない端末 I/O 失敗は `miette::Result::Err` として返す。
+Watcher runtime errors become non-fatal, but terminal I/O failures where diagnostics cannot be written stay `miette::Result::Err`.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -1065,12 +1065,12 @@ stderr.flush().into_diagnostic()?;
 cargo test -p peitho watch_event_handler_keeps_stderr_write_failure_fatal
 ```
 
-Red: stderr 失敗を無視する実装なら失敗する。Green: `into_diagnostic()?` で通す。Refactor: `FailingWriter` を test module の末尾に置き、同じコマンドを再実行する。
+Red: an implementation that ignores stderr failure fails. Green: passes with `into_diagnostic()?`. Refactor: place `FailingWriter` at the end of the test module and rerun the same command.
 
-## Task 14: 最終ゲートと手動 E2E を実行する
+## Task 14: run final gates and manual E2E
 
 **Goal**  
-単体テスト、ワークスペース全体、lint、format、契約ドリフト、実プロセスの preview 復帰を確認する。
+Verify unit tests, the full workspace, lint, format, contract drift, and real-process preview recovery.
 
 **Files**  
 `crates/peitho/src/main.rs`
@@ -1122,7 +1122,7 @@ printf 'font-bytes' > "$tmpdir/fonts/noto/test.woff2"
 cargo run -p peitho -- preview "$tmpdir/deck.md" --port 4321 --no-open
 ```
 
-別シェルで実行する。
+In a separate shell:
 
 ```bash
 tmpdir=$(cat /tmp/peitho-watch-e2e-dir)
@@ -1133,11 +1133,11 @@ touch "$tmpdir/fonts/noto/test.woff2"
 curl -sf http://127.0.0.1:4321/ >/dev/null
 ```
 
-確認する観測結果:
+Observations to confirm:
 
-- rename 後も `cargo run -p peitho -- preview ...` のプロセスが生存している。
-- stderr に `note: watch error:` が出るが `restart the command` は出ない。
-- `fonts` 消失中は stderr に `build failed:` が出て、preview は直前の成功世代を配信し続ける。
-- 実行中のリビルド失敗ではエラーページへ差し替わらない。エラーページは初回ビルド失敗時のみの既存仕様として残る。
-- rename 戻しと `touch` 後に rebuild が走り、preview が成功世代へ復帰する。
-- `cargo run -p peitho -- build "$tmpdir/deck.md" --watch` でも同じ rename / rename 戻しでプロセスが終了しない。
+- The `cargo run -p peitho -- preview ...` process is still alive after the rename.
+- stderr shows `note: watch error:` but not `restart the command`.
+- While `fonts` is missing, stderr shows `build failed:` and preview keeps serving the last successful generation.
+- Runtime rebuild failures do not swap in the error page. The error page remains an existing behavior only on first-build failure.
+- After renaming back and `touch`, a rebuild fires and preview returns to a successful generation.
+- The same rename / rename-back also does not terminate `cargo run -p peitho -- build "$tmpdir/deck.md" --watch`.

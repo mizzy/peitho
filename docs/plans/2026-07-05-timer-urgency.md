@@ -1,33 +1,33 @@
 # Presenter view color signals (Issue #107 +)
 
-## 意図
+## Intent
 
-プレゼンター画面のタイマー系表示で「色シグナル = 残り時間」の意味を一貫させる。当初は Issue #107（timer 色変化）だけを扱う予定だったが、実装レビュー中に pause/urgency の色被り、および agenda セクションの current 経過超過が色に反映されない問題が浮上したため、同じPRで整理する。
+Make the meaning of "color signal = remaining time" consistent across the presenter view's timer surfaces. The original scope was just Issue #107 (timer color change), but during implementation review a pause/urgency color collision and the fact that the agenda section's current-time overrun was not reflected in color surfaced, so this PR cleans up both in the same pass.
 
-### タイマーの残り時間
+### Timer remaining time
 
-- 残り3分〜1分: warning（アンバー = `--pause` を再利用）
-- 残り1分〜0分: urgent（赤 = `--warn`）
-- 経過 ≥ 計画時間: overrun（赤 = `--warn`、state問わず）
-- `plannedDurationMs` 未設定: 中立色（現状維持）
-- 計画時間が短い場合、閾値をスキップし最も強い該当状態から開始（例:2分デックはwarning開始、40秒デックはurgent開始）
+- Remaining 3min–1min: warning (amber = reuse `--pause`)
+- Remaining 1min–0min: urgent (red = `--warn`)
+- Elapsed ≥ planned time: overrun (red = `--warn`, regardless of state)
+- `plannedDurationMs` unset: neutral color (current behavior)
+- If planned time is short, skip thresholds and start from the strongest applicable state (e.g. a 2min deck starts in warning, a 40sec deck starts in urgent)
 
-### pause 時のタイマー色
+### Timer color while paused
 
-pause 時の timer は `--fg-dim`（stopped と同色）にする。以前はアンバー（`--pause`）だったが、これは warning urgency と色が衝突し、「amberが灯った時に一時停止か残り3分か区別できない」問題があった。色チャネルを「残り時間」に一本化し、pause は「進行が止まっている」を dim で表現する。pause と stopped の識別は state pill のドット色（pause=amber, stopped=dim）が担う。
+Timer color while paused becomes `--fg-dim` (same as stopped). Previously it was amber (`--pause`), but that collided with warning urgency: "when amber lights up, is it paused or 3min remaining?" was ambiguous. Unify the color channel on "remaining time" and express pause as "progress has stopped" via dim. The distinction between pause and stopped is carried by the state pill's dot color (pause=amber, stopped=dim).
 
-### agenda セクションタイマー
+### Agenda section timer
 
-- current かつ actual > planned → 行に `outcome="over"` を付け、time/delta を赤（`--warn`）表示
-- done は従来通り under/over 両方の outcome を付ける
-- upcoming は outcome なし
-- CSS の over ルールは `[data-peitho-agenda-state][data-peitho-agenda-outcome="over"]` の compound selector にして、current の青ルール (0,2,0) を specificity (0,3,0) で明示的に上回る
+- current and actual > planned → mark the row with `outcome="over"` and render time/delta in red (`--warn`)
+- done keeps its existing under/over outcomes
+- upcoming has no outcome
+- CSS's over rule uses the compound selector `[data-peitho-agenda-state][data-peitho-agenda-outcome="over"]` so its specificity (0,3,0) explicitly beats the current-row blue rule (0,2,0)
 
-## 設計
+## Design
 
-### 単一の派生関数と単一のDOM属性
+### One derived function and one DOM attribute
 
-タイマーの表示状態を1つの純関数から派生させる。`data-peitho-urgency` 属性を1つだけ切り替える。
+Derive the timer's display state from one pure function. Toggle one `data-peitho-urgency` attribute.
 
 ```ts
 export type TimerUrgency = "normal" | "warning" | "urgent" | "overrun";
@@ -38,31 +38,31 @@ export function urgencyFor(
 ): TimerUrgency;
 ```
 
-閾値:
+Thresholds:
 - `plannedDurationMs == null` → `"normal"`
 - `elapsedMs > plannedDurationMs` → `"overrun"`
-- 残り時間 `remaining = plannedDurationMs - elapsedMs` に対して:
+- For `remaining = plannedDurationMs - elapsedMs`:
   - `remaining ≤ 60_000` → `"urgent"`
   - `remaining ≤ 180_000` → `"warning"`
-  - それ以外 → `"normal"`
+  - otherwise → `"normal"`
 
-境界の閉じ方は `≤`（残り1分ちょうど時点でurgentに切り替わる）。
+Boundary is closed with `≤` (switches to urgent at exactly 1min remaining).
 
-### なぜ単一属性か（3レンズ）
+### Why one attribute (three lenses)
 
-- **long-term**: 将来閾値を増やしても `urgencyFor()` 1関数の変更で済む。CSSも属性値マッチ1箇所で完結。
-- **type-safety**: `type TimerUrgency` union型で網羅性保証。CSSも `[data-peitho-urgency="..."]` 4値をカバー。
-- **root-cause**: 「経過時間と計画時間からの派生値」というただ1つの派生を、ただ1つの純関数から作る。upstream。
+- **long-term**: adding future thresholds only requires changing one function, `urgencyFor()`. CSS is one attribute-value match away.
+- **type-safety**: the `type TimerUrgency` union guarantees exhaustiveness. CSS covers the 4 values of `[data-peitho-urgency="..."]`.
+- **root-cause**: "the derived value from elapsed and planned" — one derivation, one pure function. Upstream.
 
-### 既存の `[data-peitho-overrun]` 属性の扱い
+### Treatment of the existing `[data-peitho-overrun]` attribute
 
-- `[data-peitho-presenter="timer"][data-peitho-overrun]` は既に存在し、色を `var(--warn)` に切り替えている。この属性は `.overrun` span（`+MM:SS` の表示）の可視条件でもあると読めるが、実は `.overrun` span は `.timer` の子要素として直接 `color: var(--warn)` を持つので、属性トグルは色目的専用。
-- `urgencyFor` で `"overrun"` を返せば `data-peitho-urgency="overrun"` が同じ色を実現するため、**`data-peitho-overrun` の切り替えは撤去**する（単一属性に統一）。既存の `[data-peitho-presenter="timer"][data-peitho-overrun]` セレクタも撤去し、`.clock[data-peitho-state][data-peitho-urgency="overrun"] .timer` に置き換える。
-- `.peitho-time-tracker[data-peitho-overrun]` はtracker側の色切替なので**そのまま残す**（別コンポーネント）。
+- `[data-peitho-presenter="timer"][data-peitho-overrun]` already exists and switches color to `var(--warn)`. It reads like it also gates visibility of the `.overrun` span (the `+MM:SS` display), but actually the `.overrun` span is a child of `.timer` with its own direct `color: var(--warn)`, so the attribute toggle is color-only.
+- When `urgencyFor` returns `"overrun"`, `data-peitho-urgency="overrun"` achieves the same color, so **`data-peitho-overrun` toggling is removed** (unified into one attribute). The existing `[data-peitho-presenter="timer"][data-peitho-overrun]` selector is also removed, replaced by `.clock[data-peitho-state][data-peitho-urgency="overrun"] .timer`.
+- `.peitho-time-tracker[data-peitho-overrun]` is on the tracker side and switches its own color, so **leave it as-is** (separate component).
 
-### CSS変更
+### CSS changes
 
-`crates/peitho-core/src/render.rs` の `render_presenter_index()` 内 `<style>` ブロックに追加/変更:
+Add/change in the `<style>` block inside `render_presenter_index()` in `crates/peitho-core/src/render.rs`:
 
 ```css
 .clock[data-peitho-urgency="warning"] .timer,
@@ -73,11 +73,11 @@ export function urgencyFor(
 .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
 ```
 
-既存の `--pause`（アンバー）と `--warn`（赤）を直接参照する。値は「urgency-warning=pause」「urgency-urgent=overrun=warn」と一致するため、独立変数を作らず参照を統一する（overrunルールは元から `--warn` を直接使っていて、独立変数を作ると同PR内で不整合になる）。
+Reference the existing `--pause` (amber) and `--warn` (red) directly. The values line up: "urgency-warning = pause", "urgency-urgent = overrun = warn", so no separate variable is created and the references are unified (the overrun rule already used `--warn` directly, so introducing a separate variable would create in-PR inconsistency).
 
-既存の `.clock[data-peitho-state="paused"] .timer` と `.clock[data-peitho-state="stopped"] .timer` は残す。urgencyより timer state の色（paused=amber, stopped=dim）が優先されると自然（停止中に赤くしても意味がない）。
+Keep the existing `.clock[data-peitho-state="paused"] .timer` and `.clock[data-peitho-state="stopped"] .timer`. It is natural that timer state color (paused=amber, stopped=dim) wins over urgency (making it red while stopped conveys nothing).
 
-**優先順位の実装:** CSSは後勝ちなので、`:root`セレクタで書き終えた後に state セレクタを urgency の後に置く。あるいは `.clock[data-peitho-state="running"][data-peitho-urgency="warning"]` のように running時のみ urgency を適用する形が明示的で安全 → こちらを採用。
+**Priority implementation:** CSS is last-wins, so place state selectors after urgency selectors under the `:root` block. Alternatively, apply urgency only while running, e.g. `.clock[data-peitho-state="running"][data-peitho-urgency="warning"]` — more explicit and safer → adopt this form.
 
 ```css
 .clock[data-peitho-state="running"][data-peitho-urgency="warning"] .timer,
@@ -88,58 +88,58 @@ export function urgencyFor(
 .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
 ```
 
-注: overrunだけは stopped/paused でも赤にしたい（超過してから停止 → 依然として超過を知らせる）。→ overrunに限りstate値を限定しない compound セレクタを追加:
+Note: only overrun should stay red while stopped/paused (once over, stop → still signal over). → For overrun only, add a compound selector that doesn't restrict the state value:
 
 ```css
 .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer,
 .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
 ```
 
-`[data-peitho-state]` も含めて state ルールより specificity を高くし、stopped/paused でも overrun は赤、それ以外は state色（stopped=dim, paused=amber）が勝つ。
+Including `[data-peitho-state]` gives higher specificity than state rules, so overrun stays red even while stopped/paused, and state color (stopped=dim, paused=amber) wins otherwise.
 
-### TypeScript側の統合
+### TypeScript-side integration
 
 `packages/peitho-present/src/presenter.ts`:
 
-- `urgencyFor()` を別モジュール `timerUrgency.ts`（新設）にエクスポートし、presenterから import
-- `tick()` で `data-peitho-urgency` を `clockRoot` に set:
+- Export `urgencyFor()` from a new module `timerUrgency.ts` and import from presenter
+- Set `data-peitho-urgency` on `clockRoot` in `tick()`:
   ```ts
   clockRoot.dataset.peithoUrgency = urgencyFor(elapsedMs, plannedDurationMs);
   ```
-- 既存の `timerRoot.toggleAttribute("data-peitho-overrun", ...)` は撤去
+- Remove the existing `timerRoot.toggleAttribute("data-peitho-overrun", ...)`
 
-### テスト（TDD）
+### Tests (TDD)
 
-`packages/peitho-present/test/timerUrgency.test.ts`（新規）:
+`packages/peitho-present/test/timerUrgency.test.ts` (new):
 - `plannedDurationMs == null` → `"normal"`
-- 残り時間 > 3分 → `"normal"`
-- 残り時間 = 3分ちょうど → `"warning"`
-- 残り時間 = 1分1秒 → `"warning"`
-- 残り時間 = 1分ちょうど → `"urgent"`
-- 残り時間 = 1秒 → `"urgent"`
-- 残り時間 = 0 → `"urgent"`（elapsed == planned はまだoverrunではない、既存 `isOverrun` の `>` 条件と合わせる）
+- remaining > 3min → `"normal"`
+- remaining = exactly 3min → `"warning"`
+- remaining = 1min 1sec → `"warning"`
+- remaining = exactly 1min → `"urgent"`
+- remaining = 1sec → `"urgent"`
+- remaining = 0 → `"urgent"` (elapsed == planned is not yet overrun, aligned with the existing `isOverrun` `>` condition)
 - elapsed > planned → `"overrun"`
-- planned = 2分 → elapsed=0で`"warning"`（3分閾値は範囲外なので skip、warning から開始）
-- planned = 30秒 → elapsed=0で`"urgent"`（両閾値をskip、urgentから開始）
+- planned = 2min → at elapsed=0, `"warning"` (the 3min threshold is out of range, so start at warning)
+- planned = 30sec → at elapsed=0, `"urgent"` (both thresholds skipped, start at urgent)
 
-`packages/peitho-present/test/presenter.test.ts` に追加テスト:
-- presenterでtickすると `clockRoot.dataset.peithoUrgency` が期待値に更新される
-- planned=10分, elapsed=8分1秒 → urgency="warning"
-- planned=10分, elapsed=9分1秒 → urgency="urgent"
-- planned=10分, elapsed=10分1秒 → urgency="overrun"
+Additional tests in `packages/peitho-present/test/presenter.test.ts`:
+- ticking the presenter updates `clockRoot.dataset.peithoUrgency` to the expected value
+- planned=10min, elapsed=8min 1sec → urgency="warning"
+- planned=10min, elapsed=9min 1sec → urgency="urgent"
+- planned=10min, elapsed=10min 1sec → urgency="overrun"
 - planned=null → urgency="normal"
 
-### 影響範囲
+### Impact surface
 
-- `packages/peitho-present/src/timerUrgency.ts`（新規）
-- `packages/peitho-present/src/presenter.ts`（tick更新）
-- `packages/peitho-present/test/timerUrgency.test.ts`（新規）
-- `packages/peitho-present/test/presenter.test.ts`（追加テスト）
-- `crates/peitho-core/src/render.rs`（CSS追加、色変数追加）
-- `crates/peitho/tests/present.rs`（presenter HTMLに新CSSセレクタが含まれるかのアサーション追加、必要に応じ）
-- `packages/peitho-present/dist/shell.js`（`npm run build` で再生成、コミット）
+- `packages/peitho-present/src/timerUrgency.ts` (new)
+- `packages/peitho-present/src/presenter.ts` (tick update)
+- `packages/peitho-present/test/timerUrgency.test.ts` (new)
+- `packages/peitho-present/test/presenter.test.ts` (additional tests)
+- `crates/peitho-core/src/render.rs` (added CSS, added color variables)
+- `crates/peitho/tests/present.rs` (add assertion that the new CSS selector appears in presenter HTML, if needed)
+- `packages/peitho-present/dist/shell.js` (regenerated by `npm run build`, committed)
 
-### 検証
+### Verification
 
-- E2Eは `docs/plans/2026-07-04-presenter-redesign.md` の手順に準ずる
-- `plannedDurationMs = 300_000` の10分デックで、開始→3分経過（残り2分）で黄、4分経過（残り1分）でオレンジ、6分経過で赤を目視確認
+- Follow the E2E procedure in `docs/plans/2026-07-04-presenter-redesign.md`
+- With a 10min deck (`plannedDurationMs = 300_000`), visually confirm: start → 3min elapsed (2min remaining) yellow, 4min elapsed (1min remaining) orange, 6min elapsed red

@@ -8,7 +8,7 @@ Concretely: writing a deck with a `carina` fenced code block plus a `syntaxes/ca
 
 ## The three lenses
 
-Author confirmed **Convention のみ (`syntaxes/` auto-detect)** as the discovery method. Under the three lenses:
+Author confirmed **Convention only (`syntaxes/` auto-detect)** as the discovery method. Under the three lenses:
 
 1. **Long-term** — any DSL (Carina `.crn`, plus a future TypeScript / any language a repo wants to ship its own definition for) gains highlighting without peitho having to know about it. Also resolves Issue #105 (unknown-language help suggests `ts` but syntect defaults don't have it) as a side effect: with a user-supplied TS syntax present, the tag validates; without it, the help text stays honest.
 2. **Type safety** — a `Highlighter` newtype owns the `SyntaxSet`. `validate_language` and `highlight_html` become methods on it, so it is *impossible* to look up a language token against an unconfigured default set from a caller that has one. The old `syntax_set()` global (`OnceLock<SyntaxSet>`) is deleted — there is no surviving path that skips user syntaxes.

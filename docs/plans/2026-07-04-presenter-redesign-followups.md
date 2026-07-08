@@ -1,48 +1,48 @@
 # Presenter redesign follow-up fixes (2026-07-04)
 
-PR #79で反映したpresenterリデザインに対するユーザーからの修正指示を、このセッションで順次取り込む。修正項目は逐次追加される想定なので、本planも項目単位で追記していく。
+Follow-up fixes requested by the user against the presenter redesign landed in PR #79, taken in over this session. More items are expected to be added, so this plan grows item by item.
 
-## 修正1: SpaceキーでタイマーStart/Pause/Resumeを発動
+## Fix 1: Space key triggers timer Start/Pause/Resume
 
-**指示**: StartやPauseはクリックだけでなくスペースキーで発動する。元デザイン(Claude Designモック `Presenter.dc.html`)がそうなっているので、ヒント表記もそれに合わせる。
+**Instruction**: Start and Pause should fire not only on click but also on the Space key. The original design (Claude Design mock `Presenter.dc.html`) works this way, so bring the hint label into line.
 
-PR #79時点では「キーバインド不変(Space=next)、ヒント表記は実挙動準拠」と判断していたが、ユーザー決定により上書きされた。スコープはpresenterウィンドウのみで、スライド側(present index)のSpace=nextは変えない。
+At PR #79 the call was "keybindings unchanged (Space=next), hint labels track actual behavior," but that has been overridden by a user decision. Scope is the presenter window only; Space=next on the slides side (present index) does not change.
 
-### 挙動
+### Behavior
 
-- presenterウィンドウのSpaceキーは、Playボタンのクリックと同一コードパスで `peitho:timercontrol` をdispatchする(stopped→`start` / running→`pause` / paused→`resume`)
-- `event.preventDefault()` により、Playボタンにフォーカスがある状態でもネイティブclickと二重発火しない
-- `event.repeat`(長押し)ではトグルしない
-- ←/→/PageUp/PageDown/Home/Endのナビゲーションは従来通り
-- §16イベント契約は不変: キーボード層はリクエストイベントをdispatchするだけで、状態遷移はshellのみが行う
+- The Space key in the presenter window dispatches `peitho:timercontrol` via the same code path as the Play button click (stopped → `start` / running → `pause` / paused → `resume`)
+- `event.preventDefault()` prevents a double fire alongside the native click when the Play button has focus
+- `event.repeat` (long press) does not toggle
+- Navigation on ←/→/PageUp/PageDown/Home/End is unchanged
+- §16 event contract is unchanged: the keyboard layer only dispatches request events; only the shell performs state transitions
 
-### 変更箇所
+### Changes
 
-- `packages/peitho-present/src/keyboard.ts` — ナビゲーションキーのベースマップを切り出し、`installPresenterKeyboard(win, bus, onPlaypause)` を追加。既存 `installKeyboardNavigation` はAPI・挙動とも不変(埋め込みentryが呼ぶため後方互換必須)
-- `packages/peitho-present/src/presenter.ts` — キーボード設置を `installPresenterKeyboard` に差し替え。kbdbarを「`Space` start / pause」表記に、Playボタンに `<span class="k">Space</span>` ヒントを追加(モック準拠)
-- `crates/peitho-core/src/render.rs` — モックにあったがヒント不在のため落とされていた `.btn.primary .k` / `.btn.primary:active .k` / paused時のPlayボタン `.k` の3ルールを追加
-- テスト: presenter.test.tsのSpaceヒント非存在assertを反転、Space→timercontrol各遷移・repeat抑止・navigate非発火のテストを追加。render.rs側は追加CSSの存在assert
+- `packages/peitho-present/src/keyboard.ts` — factor out the base map of navigation keys and add `installPresenterKeyboard(win, bus, onPlaypause)`. Existing `installKeyboardNavigation` keeps its API and behavior (embedded entry points call it, so backward compatibility is required)
+- `packages/peitho-present/src/presenter.ts` — swap keyboard installation to `installPresenterKeyboard`. Change the kbdbar label to "`Space` start / pause" and add a `<span class="k">Space</span>` hint on the Play button (per the mock)
+- `crates/peitho-core/src/render.rs` — add the three rules that the mock had but were dropped when hints were absent: `.btn.primary .k` / `.btn.primary:active .k` / the paused-state Play button `.k`
+- Tests: flip the "Space hint absent" assertion in presenter.test.ts and add tests for Space → timercontrol on each transition, repeat suppression, and non-firing of navigate. On the render.rs side, assert on the presence of the added CSS
 
-### 検証
+### Verification
 
-通常ゲート(cargo test×3 / clippy / fmt / npmビルド+テスト+typecheck / shell.js drift)に加え、実ブラウザでSpaceキーによるStart→Pause→Resumeの遷移とヒント表記をスクリーンショットで確認する。
+In addition to the standard gates (cargo test x3 / clippy / fmt / npm build + test + typecheck / shell.js drift), verify the Start → Pause → Resume Space-key transitions and the hint label with real-browser screenshots.
 
-**結果**: PR #80(merge commit `f1692d2`, 2026-07-04)としてマージ済み。
+**Result**: Merged as PR #80 (merge commit `f1692d2`, 2026-07-04).
 
-## 修正2: speaker notes欄のサイズ安定化と、スライド幅への揃え(.stage方式)
+## Fix 2: Stabilize the size of the speaker notes panel and align it with the slide width (`.stage` approach)
 
-**指示の変遷**:
-1. 「notes欄が元デザインより上下に狭い。空でも固定の高さで表示してほしい」→ 一度 `min-height: 42vh; max-height: 42vh` 固定で実装(PR #81初版)
-2. 「大きすぎる」で却下。理想スクショ(元モックのプレビュー)の読み取り: notes高さは画面高の約24%で、**notes・kbdbar・ヘッダ行の左右端が16:9スライドの左右端と揃っている**ことが要件に追加された
+**Evolution of the instruction**:
+1. "The notes panel is vertically narrower than the original design. Give it a fixed height even when empty" → first implemented with `min-height: 42vh; max-height: 42vh` fixed (initial PR #81)
+2. Rejected as "too big." Reading the target screenshot (the original mock's preview): notes height is roughly 24% of screen height, and **the left/right edges of the notes, kbdbar, and header row are aligned with the left/right edges of the 16:9 slide** — this was added as a requirement
 
-### 設計
+### Design
 
-左カラムの中身(colhead / slide-frame / kbdbar / notes)を1本の縦flexカラム `.stage` で包み、**stage自体の幅を「利用可能高さから逆算した16:9幅」** `max(280px, min(100%, calc((100cqh − colhead − kbdbar − notes基準高 − gap×3) × 16 / 9)))` にする。スライドペインは `width: 100%` + `aspect-ratio: 16/9` になるので、全要素の幅が構造的に一致し、端が必ず揃う(JSによるレイアウト同期はしない)。
+Wrap the left-column contents (colhead / slide-frame / kbdbar / notes) in a single vertical flex column `.stage`, and set **the stage width itself to "the 16:9 width back-solved from available height"** `max(280px, min(100%, calc((100cqh − colhead − kbdbar − notes baseline − gap×3) × 16 / 9)))`. The slide pane becomes `width: 100%` + `aspect-ratio: 16/9`, so the widths of every element line up structurally and the edges are always aligned (no JS layout syncing).
 
-- notesは `flex: 1 0 24vh; max-height: 42vh`。高さ制約時(横長)はちょうど24vh、幅制約時(縦長)はモック同様に下端まで伸びて42vhでキャップ。**中身の量には依存しない**(空でも同じ高さ、超過はbody内スクロール)
-- colhead/kbdbarは1行バーなので `--colhead-h: 18px` / `--kbdbar-h: 22px` の固定高。stage幅のcalcと同じ変数を使うためドリフトしない
-- `.slide-pane` の container query 幅指定(`min(100cqw, calc(100cqh * 16/9))`)は廃止し、container は `.left` に移る
+- notes are `flex: 1 0 24vh; max-height: 42vh`. Under height constraint (wide) they are exactly 24vh; under width constraint (tall) they stretch to the bottom edge like the mock and cap at 42vh. **Content quantity is irrelevant** (same height when empty, overflow scrolls inside the body)
+- colhead/kbdbar are single-line bars, so `--colhead-h: 18px` / `--kbdbar-h: 22px` fixed heights. They use the same variables as the stage-width calc so they cannot drift
+- The container query width on `.slide-pane` (`min(100cqw, calc(100cqh * 16/9))`) is retired; the container moves to `.left`
 
-### 検証
+### Verification
 
-Rust/TSの通常ゲートに加え、実ブラウザで (1) スライドペインとnotes/kbdbarの左右端が±1px以内で一致、(2) notes空と長文で高さが同一、(3) 狭幅ウィンドウでnotesが下端まで伸びる(幅制約パス)、をJS計測とスクリーンショットで確認する。
+In addition to the standard Rust/TS gates, verify with JS measurements and screenshots in a real browser that (1) the left/right edges of the slide pane and notes/kbdbar align within ±1px, (2) height is identical whether notes are empty or long, and (3) notes stretch to the bottom edge in a narrow window (width-constrained path).

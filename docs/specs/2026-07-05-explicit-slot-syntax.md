@@ -1,33 +1,33 @@
-# 明示的スロット割り当て構文 設計 (2026-07-05)
+# Explicit slot assignment syntax design (2026-07-05)
 
-## ゴール
+## Goal
 
-慣習マッピング(title/code/image/body の4種類)では曖昧になるレイアウト — two-column、left/right、複数code slotなど — に対して、著者がスライド本文内でスロットを明示指定できる構文を導入する。silent drop / silent fallback を作らず、pillar ①「Content(Markdown)と Design(HTML+CSS)の分離」を破らない形で拡張する。
+Introduce a syntax for authors to explicitly designate slots in the slide body for layouts where convention mapping (the four kinds: title/code/image/body) is ambiguous — two-column, left/right, multiple code slots, etc. Do not create silent drop / silent fallback, and do not break pillar ① "Separation of content (Markdown) and design (HTML+CSS)".
 
-対象Issue: [#21](https://github.com/mizzy/peitho/issues/21)。§18「Undecided Items」の1つ。前提となるマルチレイアウト対応(hybrid dispatch)は実装済み。
+Target: Issue [#21](https://github.com/mizzy/peitho/issues/21). One of the §18 "Undecided Items". The prerequisite multi-layout support (hybrid dispatch) is already implemented.
 
-## 採用アプローチと理由
+## Adopted approach and rationale
 
-**Approach A: Pandoc fenced div `::: {slot=name}`**(2026-07-05 著者承認済み)
+**Approach A: Pandoc fenced div `::: {slot=name}`** (approved by author 2026-07-05)
 
-- Markdown記法の延長として設計された構文(Pandoc/MyST/Quarto系)。Markdownパーサの延長で構造化ノードとして扱えるため、パーサから mapping まで型で情報を運べる
-- Markdownの中にHTML片(`<template>`など)を持ち込まない — pillar ①「Content と Design の分離」を破らない
-- `:::` は行頭マーカーなので開始/終了/属性の行番号がpin可能。既存のエラー方針(行番号+help)と一致
-- 属性のパースはfrontmatterの `key: value` パースと同種の1行構造。既存のパーサ規約と揃う
+- Syntax designed as an extension of Markdown notation (Pandoc/MyST/Quarto family). It can be handled as a structured node in an extended Markdown parser, so information rides types all the way from parser to mapping
+- Does not drag HTML fragments (like `<template>`) into Markdown — does not break pillar ① "Separation of content and design"
+- `:::` is a line-head marker so open/close/attribute line numbers can be pinned. Matches the existing error policy (line number + help)
+- Attribute parsing has the same 1-line structure as frontmatter's `key: value` parsing. Aligns with existing parser conventions
 
-捨てた代替案:
+Rejected alternatives:
 
-- **`<template #name>` (Slidev風)**: HTMLパススルー依存でMarkdownパーサから見ると不透明ブロック。属性抽出を自前で書く必要があり、内側のMarkdownが素通しになる。何より`<template>`要素そのものがcontentに露出するのが pillar ① と噛み合わない
-- **属性シンタックスなしのショートハンド `::: name`**: Pandocでは `.name` は class 属性のシンタックスシュガーであり、slot名との衝突が発生しうる。`{slot=name}` の明示形のみ許可
+- **`<template #name>` (Slidev-style)**: relies on HTML passthrough and is an opaque block from the Markdown parser's viewpoint. Attribute extraction has to be written by hand, and the inner Markdown gets passed through untouched. Above all, exposing the `<template>` element itself in content clashes with pillar ①
+- **Attribute-less shorthand `::: name`**: in Pandoc, `.name` is syntactic sugar for a class attribute, and could collide with a slot name. Only the explicit form `{slot=name}` is allowed
 
-## 記法(著者決定 2026-07-05)
+## Notation (author decision 2026-07-05)
 
 ````markdown
-# タイトル
+# Title
 
 ::: {slot=left}
-左カラムの本文。
-- リスト項目もOK
+Left column body.
+- Lists are also OK
 :::
 
 ::: {slot=right}
@@ -39,31 +39,31 @@ fn main() {}
 :::
 ````
 
-- 開始マーカーは行頭の `:::`(ちょうど3コロン)+ 必須の `{slot=name}` 属性。終了マーカーは属性なしの `:::` 単独行
-- 4コロン以上(Pandocではネスト用の長いフェンス)はv1ではエラー。将来ネストを解禁する際の予約とし、silent に3コロン扱いしない
-- 内側のMarkdownはpulldown-cmarkでそのままパースされる(fenced code、リスト、段落、画像すべて許可)
-- 属性は `slot=name` のみ許可。他のキー、複数キー、値なしはすべてビルドエラー
-- 属性値の `name` は既存の `SlotName` バリデーション(識別子ルール)を再利用
-- div内のHTMLコメントは外側と同一規則(JSON→ページ設定コメント、平文→スピーカーノート)。divで囲んでも per-slide のコメント意味論は変わらない
+- The opening marker is `:::` at line head (exactly three colons) + a required `{slot=name}` attribute. The closing marker is a bare `:::` line with no attribute
+- Four or more colons (Pandoc's long fence for nesting) is a v1 error. Reserved for future nesting; never silently treated as three-colon
+- The inner Markdown is parsed as-is by pulldown-cmark (fenced code, lists, paragraphs, images all allowed)
+- Only `slot=name` is allowed as an attribute. Any other key, multiple keys, or missing value is a build error
+- The `name` in the attribute value reuses the existing `SlotName` validation (identifier rules)
+- HTML comments inside a div follow the same rule as outside (JSON → page settings comment, plaintext → speaker note). Wrapping in a div does not change per-slide comment semantics
 
-## パース戦略
+## Parse strategy
 
-### 処理順序(既存実装との整合)
+### Processing order (consistency with existing implementation)
 
-スライド分割が先、fenced divスキャンが後。分割は全ソースに対する pulldown-cmark の `Event::Rule` スキャン(`split_slide_ranges`)で行われ、pulldown-cmark は `:::` を知らないため、**開いたdivの中に `---` があればそこでスライドが割れる**。結果としてそのdivは「終了マーカー未到達のままスライド末尾」となり検証ルール#5のエラーになる(silentに跨がせない)。divはスライド内で完結する構造であり、スライドを跨ぐdivはv1では表現できない — これは制約ではなく仕様。
+Slide splitting happens first; fenced div scanning second. Splitting is done on the whole source via pulldown-cmark's `Event::Rule` scan (`split_slide_ranges`), and pulldown-cmark does not know `:::`, so **if `---` appears inside an open div, that is where the slide splits**. That div ends up "reaching slide end without hitting the closing marker" and errors under validation rule #5 (never silently span slides). A div is a slide-internal structure; div spanning across slides is not expressible in v1 — this is spec, not a limitation.
 
-### スライド内の二段パース
+### Two-pass parse inside a slide
 
-frontmatter/slide-split の「二段パース」パターンを踏襲する。
+Adopt the frontmatter/slide-split "two-pass" pattern.
 
-1. **プリトークナイズ**: スライドごとに `:::` 行を行ベースでスキャンし、開始/終了ペアを行番号付きで抽出。**スキャナはfenced code block(` ``` `/`~~~`)の内側を追跡し、コードフェンス内の `:::` はマーカー扱いしない**(Pandoc記法を解説するスライド等で必須)
-2. **内側のパース**: 抽出した内側Markdownをpulldown-cmarkに渡し、通常の `Fragment` 列を得る
-3. **外側のパース**: divブロックを取り除いた残りをpulldown-cmarkに渡し、通常の `Fragment` 列を得る
-4. **ノード合成**: 行番号順に外側fragment列へ `Fragment::SlotGroup { name, children, line }` を挿入し、1つのfragment列にする
+1. **Pre-tokenize**: line-scan each slide for `:::` lines and extract open/close pairs with line numbers. **The scanner tracks fenced code block (` ``` ` / `~~~`) interiors and does not treat `:::` inside a code fence as a marker** (essential for slides explaining Pandoc syntax, etc.)
+2. **Inner parse**: pass the extracted inner Markdown to pulldown-cmark to get a regular `Fragment` sequence
+3. **Outer parse**: pass the rest with div blocks removed to pulldown-cmark to get a regular `Fragment` sequence
+4. **Node composition**: insert `Fragment::SlotGroup { name, children, line }` into the outer fragment sequence in line-number order to form a single fragment sequence
 
-pulldown-cmarkの `ENABLE_*` に該当フラグはなく、自前トークナイズが唯一の選択肢。frontmatter切り出しと同じ方針で無理はない。
+There is no matching `ENABLE_*` flag in pulldown-cmark, so hand-tokenizing is the only choice. Same policy as frontmatter extraction — not a stretch.
 
-## ドメイン型の変更
+## Domain type changes
 
 ```rust
 pub enum FragmentKind {
@@ -77,81 +77,81 @@ pub enum FragmentKind {
 }
 ```
 
-`ExplicitSlot` は `SlotName` を包む newtype(公開コンストラクタなし、パーサ内でのみ生成)。慣習マッピング側と型で識別できるようにする — CLAUDE.md「long-term view + type safety」ルールに従い、明示指定と慣習指定が同じ型を共有して silent 上書きが起きる余地を残さないため。
+`ExplicitSlot` is a newtype wrapping `SlotName` (no public constructor, produced only inside the parser). It stays type-distinguishable from convention mapping — per the CLAUDE.md "long-term view + type safety" rule, explicit and convention-based designations must not share the same type or a silent override could sneak back in.
 
-`bindings/` への影響はない見込み(TS側に露出しているのはManifest/Notes/PresentConfig系のみで、`Fragment`はRust内部型)。drift check(`git diff --exit-code bindings/`)で無変更を確認する。
+No impact on `bindings/` expected (only Manifest/Notes/PresentConfig-family types are exposed on the TS side; `Fragment` is a Rust-internal type). Confirm no change with the drift check (`git diff --exit-code bindings/`).
 
-## レイアウトdispatchとの相互作用
+## Interaction with layout dispatch
 
-hybrid dispatch(明示`{"layout":…}` > 単一レイアウト無条件 > 一意な構造マッチ)の「構造マッチ」に `SlotGroup` を組み込む:
+Fold `SlotGroup` into the "structural match" of hybrid dispatch (explicit `{"layout":…}` > sole layout unconditionally > unique structural match):
 
-- スライドが `slot=left` を含むなら、`left` という名前のslotを持たないレイアウトは**構造マッチの候補から外れる**(明示slot名は強い構造シグナル)
-- SlotGroupの中身は慣習マッピングの構造判定(title/code/image/bodyの充足)には**数えない** — 中身は指定slotに直行するため、慣習slotの充足計算に混ぜると二重カウントになる
-- これにより「two-columnレイアウトと1カラムレイアウトが併存するdeckで、`slot=left`/`slot=right` を書いたスライドは自動的にtwo-columnへ一意マッチする」という自然な挙動が得られる。曖昧・ゼロマッチが依然エラーであることは不変
+- If a slide contains `slot=left`, a layout without a slot named `left` **drops out of the structural match candidates** (an explicit slot name is a strong structural signal)
+- SlotGroup contents are **not counted** in convention mapping's structural checks (title/code/image/body satisfaction) — the contents go directly to the specified slot, so mixing them into convention-slot satisfaction double-counts them
+- This yields the natural behavior "in a deck where a two-column layout coexists with a one-column layout, a slide that writes `slot=left`/`slot=right` uniquely matches the two-column layout automatically". Ambiguous and zero-match remain errors as before
 
-## title推定との相互作用
+## Interaction with title inference
 
-慣習のtitle推定(`shallowest_heading_line`)は**SlotGroup外のfragmentのみ**を対象とする。SlotGroup内の見出しは指定slotへ直行し、title候補にならない。`::: {slot=title}` と明示すればtitleへの明示投入も可能(accepts/arityは既存検査に従う)。
+Convention title inference (`shallowest_heading_line`) targets **only fragments outside SlotGroups**. Headings inside a SlotGroup go directly to the specified slot and do not become title candidates. Writing `::: {slot=title}` explicitly also allows explicit title injection (accepts/arity follow existing checks).
 
-## マッピングの変更
+## Mapping changes
 
-`mapping.rs::map_slide` に分岐を追加:
+Add a branch to `mapping.rs::map_slide`:
 
-- `FragmentKind::SlotGroup { name, children }` → 指定 `name` の slot に直接投入。`children` は慣習マッピングを**通さず**そのまま `MappedSlot` に押し込む
-- レイアウトに該当slotが存在しない → ビルドエラー(行番号は開始マーカー行、helpにレイアウトのslot一覧)。慣習マッピングの未知slotは `unassigned` 経由でcheck時にエラーになるが、明示指定はマッピング時点で著者の意図(slot名のtypo等)が確定しているため、より早くより具体的なエラーを出す
-- `SlotGroup` の中にネストした `SlotGroup` → v1ではビルドエラー(「ネストは未対応」旨のhelp)
-- それ以外の fragment は従来の慣習マッピングをそのまま適用
+- `FragmentKind::SlotGroup { name, children }` → inject directly into the slot with the given `name`. `children` are pushed into `MappedSlot` as-is **without going through convention mapping**
+- If the layout has no such slot → build error (line number at the opening marker line, help lists the layout's slots). Unknown slots in convention mapping error at check time via `unassigned`, but explicit designation makes the author's intent (e.g. slot-name typo) concrete at mapping time, so we surface a more specific error sooner
+- A `SlotGroup` nested inside a `SlotGroup` → v1 build error (with help saying "nesting is not supported")
+- Everything else applies the existing convention mapping unchanged
 
-**慣習が拾う slot と明示が指定する slot の衝突**は許可 — 同じslotに慣習と明示の両方が入る場合は arity 検査で自然に検出される(silent drop なし)。
+**Collisions between the slot picked up by convention and the slot indicated explicitly** are allowed — if both convention and explicit populate the same slot, arity checking naturally catches it (no silent drop).
 
-## 検証ルール(すべて行番号+help付きビルドエラー。silentパスなし)
+## Validation rules (all line-numbered build errors with help. No silent path)
 
-1. `:::` の開始マーカーに `{slot=…}` 属性が無い → エラー
-2. 属性キーが `slot` 以外 → エラー(「`slot=name` のみ許可」)
-3. 属性の複数指定(例 `{slot=a slot=b}`) → エラー
-4. slot名が `SlotName` の識別子ルールに違反 → 既存の `SlotName` エラーを流用
-5. 開始マーカーに対する終了 `:::` が無いままスライド末尾に達した → エラー(div内の `---` によるスライド分割もこの経路に落ちる。help に「divはスライド内で完結させる」旨を含める)
-6. 終了 `:::` に属性が付いている → エラー
-7. 空の `SlotGroup`(開始と終了の間に fragment が0個) → エラー(明示的に空を書くのは著者のミスであり、arity `0..*` のslotでも「書かない」ことで空を表現できる)
-8. `SlotGroup` の中に `SlotGroup` がネストしている → エラー(v1未対応)
-9. 4コロン以上のフェンス → エラー(将来のネスト用予約)
-10. 指定した slot 名がレイアウトの slot に存在しない → マッピング時エラー(help: レイアウトの slot 名一覧)
-11. `accepts=code` のslotに inline paragraph を明示投入したような accepts 違反 → 既存の check.rs 経路でそのままエラー(検査の重複実装をしない。既存経路で捕捉されることをテストで pin)
+1. `:::` opening marker without `{slot=…}` attribute → error
+2. Attribute key other than `slot` → error ("only `slot=name` allowed")
+3. Multiple attributes (e.g. `{slot=a slot=b}`) → error
+4. Slot name violates `SlotName` identifier rules → reuse the existing `SlotName` error
+5. No closing `:::` before slide end for an opening marker → error (a `---`-based slide split inside a div falls into this path too. help includes "close divs within a slide")
+6. Closing `:::` has an attribute → error
+7. Empty `SlotGroup` (zero fragments between open and close) → error (explicitly writing empty is an author mistake; even a slot with arity `0..*` can express "empty" by simply not writing it)
+8. `SlotGroup` nested inside `SlotGroup` → error (v1 unsupported)
+9. Four-colon or longer fence → error (reserved for future nesting)
+10. Specified slot name does not exist on the layout → mapping-time error (help: list of the layout's slot names)
+11. accepts violations like injecting an inline paragraph explicitly into an `accepts=code` slot → error through the existing check.rs path (do not duplicate check implementation. Pin with a test that the existing path catches it)
 
-## サンプル(examples/ 追加分)
+## Sample (examples/ addition)
 
-`examples/two-column/` を新設予定:
+Plan to add `examples/two-column/`:
 
-- `layouts/two-column.html`: `title` + `left`(accepts=blocks) + `right`(accepts=blocks) の3スロット
-- `deck.md`: 慣習では left/right の判別が付かないことを示すため、`::: {slot=left}` / `::: {slot=right}` を使う実例
-- `css/`: 左右2カラムのCSS
+- `layouts/two-column.html`: 3 slots — `title` + `left` (accepts=blocks) + `right` (accepts=blocks)
+- `deck.md`: uses `::: {slot=left}` / `::: {slot=right}` to show that convention cannot tell left/right apart
+- `css/`: left/right two-column CSS
 
-これにより「新記法を使うと何が可能になるか」がドキュメントとしても機能する。
+That way "what becomes possible with the new syntax" also serves as documentation.
 
-## 実装フェーズ
+## Implementation phases
 
-1. Parser: `:::` プリトークナイズ(コードフェンス追跡込み)+ `FragmentKind::SlotGroup` の生成 + 構文エラー群(#1〜#9)
-2. Mapping/Dispatch: `SlotGroup` 分岐 + 構造マッチへの組み込み + 未知slot名エラー(#10)
-3. Check: 既存経路のまま変更不要(accepts違反が既存路線でエラー化されることをテストで pin)
-4. Examples: `examples/two-column/` 追加
-5. Docs: この spec を保持し、CLAUDE.md の「Undecided」節から確定事項へ移す
+1. Parser: `:::` pre-tokenize (with code-fence tracking) + generate `FragmentKind::SlotGroup` + syntax error family (#1–#9)
+2. Mapping/Dispatch: `SlotGroup` branch + integration into structural match + unknown-slot-name error (#10)
+3. Check: existing path unchanged (pin with a test that accepts violations still error on the existing route)
+4. Examples: add `examples/two-column/`
+5. Docs: keep this spec; move relevant items from CLAUDE.md's "Undecided" section into decided
 
-## v1で意図的に見送るもの
+## Intentionally deferred in v1
 
-- **ネスト**: 将来 grid / tabs / steps を fenced div の入れ子で表現できる素地はあるが、v1はフラット1階層のみ。ネスト(#8)と長フェンス(#9)をエラーにし、将来の解禁時に silent path が生まれないよう seam を塞ぐ
-- **`::: name` ショートハンド**: 属性省略形は導入しない。Pandoc慣習の `.name` は class扱いで衝突するため、明示形 `{slot=name}` のみ
-- **スライドを跨ぐdiv**: 表現不可(処理順序の節を参照)。仕様として明記
+- **Nesting**: there is groundwork for expressing grid / tabs / steps by nesting fenced divs in the future, but v1 is flat, single-level only. Errors on nesting (#8) and long fences (#9) seal seams so a silent path cannot be created when the feature is eventually unlocked
+- **`::: name` shorthand**: no attribute-less form. Pandoc's `.name` is treated as a class and collides, so only the explicit form `{slot=name}`
+- **Divs spanning slides**: not expressible (see processing order). Spec explicitly says so
 
-## 著者決定(2026-07-05)
+## Author decisions (2026-07-05)
 
-1. **構文は案A(fenced div `::: {slot=name}`)で確定**。Slidev風 `<template #name>` は不採用
-2. **`examples/two-column/` を新設**する(既存exampleへの追加ではなく)
-3. **慣習でも拾える名前(title/body/code)の明示指定は許可**。意図の明示は害がなく、arity超過は既存検査で捕捉される。「この段落は確実にbodyへ」という保険的用法も可能になる
-4. 属性区切り文字(カンマ等)の扱いは**v1では発生しない**ため未決のまま先送り — v1の属性は `slot=name` の1個のみで、複数キーはエラー(検証ルール#3)。複数属性を導入する将来拡張の時点で決める
+1. **Syntax is finalized as approach A (fenced div `::: {slot=name}`)**. Slidev-style `<template #name>` is not adopted
+2. **Add `examples/two-column/`** as a new example (rather than adding to an existing example)
+3. **Explicit designation of names that convention could also pick up (title/body/code) is allowed**. Making intent explicit is harmless; arity overflow is caught by existing checks. Enables the "hedge: this paragraph goes to body for sure" use case
+4. Treatment of attribute separators (commas etc.) is **not applicable in v1**, so it is deferred — v1 attributes are a single `slot=name`; multiple keys are an error (validation rule #3). Decide when a future extension introduces multiple attributes
 
-## 関連
+## Related
 
-- pillar ①: Content/Design分離 — HTML片を content に持ち込まない案A採用の主要根拠
-- pillar ③: 型付きslot契約 — `ExplicitSlot` newtype で慣習と明示を型で分離
-- CLAUDE.md「long-term view + type safety」: 型で強制することで将来の新caller(パーサ拡張)が silent path を作れないようにする
-- 前提: マルチレイアウト対応(hybrid dispatch, 2026-07-03採用)は済み
+- pillar ①: Content/Design separation — main rationale for adopting approach A (no HTML fragment in content)
+- pillar ③: typed slot contract — `ExplicitSlot` newtype separates convention and explicit at the type level
+- CLAUDE.md "long-term view + type safety": enforcing at the type level prevents a future new caller (parser extension) from creating a silent path
+- Prerequisite: multi-layout support (hybrid dispatch, adopted 2026-07-03) is done
