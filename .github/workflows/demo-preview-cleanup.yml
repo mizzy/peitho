@@ -1,0 +1,106 @@
+name: Cleanup Demo Preview Deployments
+
+on:
+  pull_request:
+    types: [closed]
+
+# deploy-demo.ymlと同じgroupにして、プレビューデプロイ中ならcleanupを待機させ、完了後にその結果も削除する
+# PR番号でgroup化するのは、github.refはマージされたPRのclosedイベントではbaseブランチに解決され、本番デプロイのgroupと衝突してキャンセルされるため(mizzy/decks#32)
+# cancelは非同期で、一覧取得後にデプロイが作られる可能性があるためキャンセルしない
+concurrency:
+  group: deploy-demo-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  cleanup-preview:
+    # fork PRはSecretsを参照できないため、同一リポジトリからのPRのみクリーンアップする
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Delete Cloudflare Pages preview deployments
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: peitho
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required}"
+          : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID is required}"
+          : "${PROJECT:?PROJECT is required}"
+          : "${BRANCH:?BRANCH is required}"
+
+          api_base="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PROJECT}"
+          per_page=25
+          page=1
+          ids=()
+
+          while :; do
+            if ! response="$(curl -sS --retry 3 \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "${api_base}/deployments?env=preview&page=${page}&per_page=${per_page}")"; then
+              echo "Cloudflare API request failed while listing deployments on page ${page}" >&2
+              exit 1
+            fi
+
+            if ! jq -e '.success == true' >/dev/null <<<"${response}"; then
+              echo "Cloudflare API failed while listing deployments on page ${page}" >&2
+              printf '%s\n' "${response}" >&2
+              exit 1
+            fi
+
+            page_output="$(jq -r --arg branch "${BRANCH}" '.result[]? | select(.environment == "preview") | select(.deployment_trigger.metadata.branch == $branch) | .id' <<<"${response}")"
+            if [ -n "${page_output}" ]; then
+              mapfile -t page_ids <<<"${page_output}"
+              ids+=("${page_ids[@]}")
+            fi
+
+            count="$(jq -r '.result | length' <<<"${response}")"
+            if [ "${count}" -eq 0 ]; then
+              break
+            fi
+
+            page=$((page + 1))
+          done
+
+          if [ "${#ids[@]}" -eq 0 ]; then
+            echo "No preview deployments found for branch ${BRANCH}"
+            exit 0
+          fi
+
+          mapfile -t ids < <(printf '%s\n' "${ids[@]}" | awk '!seen[$0]++')
+
+          failed_ids=()
+          for id in "${ids[@]}"; do
+            if ! response="$(curl -sS --retry 3 -X DELETE \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              "${api_base}/deployments/${id}?force=true")"; then
+              echo "Cloudflare API request failed while deleting deployment ${id}" >&2
+              failed_ids+=("${id}")
+              continue
+            fi
+
+            if ! jq -e '.success == true' >/dev/null <<<"${response}"; then
+              if jq -e '[.errors[]? | ((.message // "") | ascii_downcase | contains("deployment not found"))] | any' >/dev/null <<<"${response}"; then
+                echo "Preview deployment ${id} already deleted"
+                continue
+              fi
+
+              echo "Cloudflare API failed while deleting deployment ${id}" >&2
+              printf '%s\n' "${response}" >&2
+              failed_ids+=("${id}")
+              continue
+            fi
+
+            echo "Deleted preview deployment ${id} for branch ${BRANCH}"
+          done
+
+          if [ "${#failed_ids[@]}" -gt 0 ]; then
+            echo "Failed to delete ${#failed_ids[@]} preview deployment(s)" >&2
+            exit 1
+          fi
