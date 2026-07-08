@@ -33,6 +33,8 @@ layouts/ themes/ examples/  Shared layouts, base theme, samples. The default lay
 docs/plans/           Implementation plans for each milestone (history)
 ```
 
+Demo site https://peitho.gosu.ke/ (Cloudflare Pages project `peitho`): `.github/workflows/deploy-demo.yml` builds `make demo-site` from source and deploys on every `main` push; same-repo PRs get a preview deploy + PR comment, cleaned up on close by `demo-preview-cleanup.yml`. Manual fallback: `envchain peitho make deploy-demo`. Adding an example still requires editing the Makefile `demo-site` target and `demo/index.html` by hand (nothing is auto-listed). Design record: `docs/plans/2026-07-09-demo-site-deploy-flow.md`
+
 ## Gates (all must pass before committing)
 
 ```

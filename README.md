@@ -4,7 +4,7 @@ An HTML-native presentation tool that treats Markdown as the source of truth.
 
 Peitho is the Greek goddess who presides over the power to move people's hearts with words rather than force — a fitting match for the essence of presentation.
 
-Demo: **[peitho.gosu.ke](https://peitho.gosu.ke/)** (builds and serves `examples/` as-is. Deploy with `envchain peitho make deploy-demo`)
+Demo: **[peitho.gosu.ke](https://peitho.gosu.ke/)** (builds and serves `examples/` as-is. Auto-deployed on push to `main`; `envchain peitho make deploy-demo` for manual deploys)
 
 ## Features
 

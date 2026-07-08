@@ -1,0 +1,81 @@
+name: Deploy Demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # PR runはPR番号でgroup化してdemo-preview-cleanup.ymlと同じgroupにし、それ以外はrefでgroup化する
+  group: deploy-demo-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: demo
+
+      # このリポジトリ自身がpeithoなので、リリースバイナリではなく
+      # ソースからビルドした今のpeithoでデモサイトを組む
+      - name: Build demo site
+        run: make demo-site
+
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name != 'pull_request'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy .demo-site --project-name=peitho --branch=main
+
+      # fork PRはSecretsを参照できないため、同一リポジトリからのPRのみプレビューをデプロイする
+      - name: Deploy preview to Cloudflare Pages
+        id: preview
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy .demo-site --project-name=peitho --branch=${{ github.head_ref }}
+
+      - name: Comment preview URL on PR
+        if: steps.preview.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ALIAS_URL: ${{ steps.preview.outputs.pages-deployment-alias-url }}
+          DEPLOYMENT_URL: ${{ steps.preview.outputs.deployment-url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          marker="<!-- peitho-demo-preview-url -->"
+          body="$(printf '%s\n' \
+            "🔍 **Demo preview**: ${ALIAS_URL:-$DEPLOYMENT_URL}" \
+            "" \
+            "| | URL |" \
+            "|---|---|" \
+            "| Branch alias | ${ALIAS_URL:-–} |" \
+            "| This deploy | ${DEPLOYMENT_URL:-–} |" \
+            "" \
+            "commit: ${HEAD_SHA}" \
+            "${marker}")"
+          comment_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | head -n1)"
+          if [ -n "${comment_id}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="${body}" >/dev/null
+          else
+            gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          fi
