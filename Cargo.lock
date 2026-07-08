@@ -790,7 +790,7 @@ checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "peitho"
-version = "1.3.2"
+version = "1.3.3"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "peitho-core"
-version = "1.3.2"
+version = "1.3.3"
 dependencies = [
  "html-escape",
  "lol_html",
