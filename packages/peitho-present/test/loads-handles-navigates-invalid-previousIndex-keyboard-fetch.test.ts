@@ -38,6 +38,12 @@ const manifest = {
   ]
 };
 const cssText = ".slot-title { color: rebeccapurple; }";
+const fontCssText = `
+@import url("fonts/noto-sans-jp/index.css");
+.peitho-slide { color: red; }
+@import url("fonts/late.css");
+@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); }
+`;
 
 const mountedShells: PresentShell[] = [];
 const windowListenerCleanups: Array<() => void> = [];
@@ -65,10 +71,10 @@ function listenWindow(type: string, listener: EventListener): void {
   windowListenerCleanups.push(() => window.removeEventListener(type, listener));
 }
 
-function standardFetch(responseManifest = manifest): typeof fetch {
+function standardFetch(responseManifest = manifest, css = cssText): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(responseManifest);
-    if (url === "peitho.css") return okText(cssText);
+    if (url === "peitho.css") return okText(css);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
     return {
@@ -164,6 +170,46 @@ it("injects peitho css into each shadow root before fragment html", async () => 
     expect(firstChild).toBe(style);
     expect(style?.textContent).toContain(cssText);
   }
+});
+
+it("injects document scoped font css once for present shells", async () => {
+  const firstRoot = document.createElement("main");
+  const secondRoot = document.createElement("main");
+
+  await mountForTest({ root: firstRoot, fetcher: standardFetch(manifest, fontCssText), window });
+  await mountForTest({ root: secondRoot, fetcher: standardFetch(manifest, fontCssText), window });
+
+  const styles = document.head.querySelectorAll<HTMLStyleElement>(
+    "style[data-peitho-font-scope]"
+  );
+  expect(styles).toHaveLength(1);
+  expect(styles[0].textContent).toBe(
+    [
+      '@import url("fonts/noto-sans-jp/index.css");',
+      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); }'
+    ].join("\n")
+  );
+});
+
+it("removes document scoped font css when the last present shell is destroyed", async () => {
+  const firstRoot = document.createElement("main");
+  const secondRoot = document.createElement("main");
+  const first = await mountForTest({
+    root: firstRoot,
+    fetcher: standardFetch(manifest, fontCssText),
+    window
+  });
+  const second = await mountForTest({
+    root: secondRoot,
+    fetcher: standardFetch(manifest, fontCssText),
+    window
+  });
+
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(1);
+  first.destroy();
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(1);
+  second.destroy();
+  expect(document.head.querySelectorAll("style[data-peitho-font-scope]")).toHaveLength(0);
 });
 
 it("puts shell handles on hosts and hides non-current slides", async () => {
