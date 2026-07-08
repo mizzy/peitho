@@ -1,0 +1,21 @@
+base_url = "https://peitho.gosu.ke"
+title = "peitho"
+description = "An HTML-native presentation tool that treats Markdown as the source of truth."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+generate_sitemap = true
+generate_robots_txt = true
+ignored_static = ["giallo.css"]
+
+[markdown]
+smart_punctuation = true
+
+[markdown.highlighting]
+enable = true
+theme = "github-light"
+style = "class"
+
+[extra]
+github_url = "https://github.com/mizzy/peitho"

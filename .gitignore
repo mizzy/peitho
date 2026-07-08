@@ -8,3 +8,4 @@ packages/peitho-present/dist/*
 !packages/peitho-present/dist/preview.js
 /.demo-site
 /.screenshots
+site/static/giallo.css
