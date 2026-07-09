@@ -166,7 +166,7 @@ Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
-| `examples/deck.md` | Minimal demo | Default theme | Works as-is with built-in defaults |
+| `examples/minimal/deck.md` | Minimal demo | Default theme | Works as-is with built-in defaults |
 | `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
 | `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |

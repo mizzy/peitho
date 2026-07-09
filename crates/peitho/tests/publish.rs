@@ -465,7 +465,7 @@ fn workspace_root() -> PathBuf {
 fn write_repository_example_deck_with_assets(dir: &Path) -> PathBuf {
     let root = workspace_root();
     let deck = dir.join("deck.md");
-    let body = fs::read_to_string(root.join("examples/deck.md")).unwrap();
+    let body = fs::read_to_string(root.join("examples/minimal/deck.md")).unwrap();
     fs::write(
         &deck,
         format!(

@@ -56,7 +56,7 @@ shell:
 	cd packages/peitho-present && npm run build
 
 minimal: shell
-	$(PRESENT) examples/deck.md $(PRESENT_FLAGS)
+	$(PRESENT) examples/minimal/deck.md $(PRESENT_FLAGS)
 
 lightning-talk: shell
 	$(PRESENT) examples/lightning-talk/deck.md $(PRESENT_FLAGS)
@@ -72,9 +72,7 @@ feature-tour: shell
 
 docs-sources:
 	rm -rf $(DOCS_SOURCE_DIR)
-	mkdir -p $(DOCS_SOURCE_DIR)/minimal
-	cp examples/deck.md $(DOCS_SOURCE_DIR)/minimal/deck.md
-	for d in $(filter-out minimal,$(DEMO_DECKS)); do \
+	for d in $(DEMO_DECKS); do \
 		mkdir -p $(DOCS_SOURCE_DIR)/$$d; \
 		cp examples/$$d/deck.md $(DOCS_SOURCE_DIR)/$$d/deck.md || exit 1; \
 	done
@@ -88,14 +86,9 @@ demo-site: docs-sources
 	if [ $$zola_status -ne 0 ]; then rm -f $$zola_log; exit $$zola_status; fi; \
 	if grep -Fq 'page(s) ignored' $$zola_log; then rm -f $$zola_log; exit 1; fi; \
 	rm -f $$zola_log
-	$(PEITHO) build examples/deck.md --out $(DEMO_OUT)/demo/minimal
-	$(PEITHO) build examples/lightning-talk/deck.md --out $(DEMO_OUT)/demo/lightning-talk
-	$(PEITHO) build examples/code-walkthrough/deck.md --out $(DEMO_OUT)/demo/code-walkthrough
-	$(PEITHO) build examples/keynote/deck.md --out $(DEMO_OUT)/demo/keynote
-	$(PEITHO) build examples/feature-tour/deck.md --out $(DEMO_OUT)/demo/feature-tour
-	$(PEITHO) build examples/two-column/deck.md --out $(DEMO_OUT)/demo/two-column
-	$(PEITHO) build examples/image-showcase/deck.md --out $(DEMO_OUT)/demo/image-showcase
-	$(PEITHO) build examples/aspect-ratio-4-3/deck.md --out $(DEMO_OUT)/demo/aspect-ratio-4-3
+	for d in $(DEMO_DECKS); do \
+		$(PEITHO) build examples/$$d/deck.md --out $(DEMO_OUT)/demo/$$d || exit 1; \
+	done
 	for d in $(DEMO_DECKS); do \
 		$(PEITHO) publish --dist $(DEMO_OUT)/demo/$$d -- true || exit 1; \
 	done
