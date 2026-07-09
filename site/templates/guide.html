@@ -1,25 +1,26 @@
-{% extends "base.html" %}
+{% extends "docs.html" %}
 
 {% block title %}{{ section.title }} - {{ config.title }}{% endblock title %}
 
-{% block content %}
-  <header class="page-header">
-    <h1>{{ section.title }}</h1>
-    {{ section.content | safe }}
-  </header>
+{% block nav_guide_attrs %} aria-current="page"{% endblock nav_guide_attrs %}
 
+{% block sidebar %}
   {% if section.pages %}
-    <ol class="rows" role="list">
-      {% for page in section.pages %}
-        <li class="row">
-          <a class="row-link" href="{{ page.permalink }}">
-            <span class="row-title">{{ page.title }}</span>
-            {% if page.description %}
-              <span class="row-meta">{{ page.description }}</span>
-            {% endif %}
-          </a>
-        </li>
-      {% endfor %}
-    </ol>
+    <aside class="sidebar">
+      <nav class="sidebar-list" aria-label="{{ section.title }} pages">
+        {% for sidebar_page in section.pages %}
+          <a href="{{ sidebar_page.permalink }}">{{ sidebar_page.title }}</a>
+        {% endfor %}
+      </nav>
+    </aside>
   {% endif %}
-{% endblock content %}
+{% endblock sidebar %}
+
+{% block docs_content %}
+  <section class="doc-body">
+    <header class="page-header">
+      <h1>{{ section.title }}</h1>
+      {{ section.content | safe }}
+    </header>
+  </section>
+{% endblock docs_content %}

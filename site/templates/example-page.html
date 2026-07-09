@@ -1,8 +1,23 @@
-{% extends "base.html" %}
+{% extends "docs.html" %}
 
 {% block title %}{{ page.title }} - {{ config.title }}{% endblock title %}
 
-{% block content %}
+{% block nav_examples_attrs %} aria-current="true"{% endblock nav_examples_attrs %}
+
+{% block sidebar %}
+  {% set examples = get_section(path="examples/_index.md") %}
+  {% if examples.pages %}
+    <aside class="sidebar">
+      <nav class="sidebar-list" aria-label="{{ examples.title }} pages">
+        {% for example_page in examples.pages %}
+          <a{% if example_page.permalink == page.permalink %} aria-current="page"{% endif %} href="{{ example_page.permalink }}">{{ example_page.title }}</a>
+        {% endfor %}
+      </nav>
+    </aside>
+  {% endif %}
+{% endblock sidebar %}
+
+{% block docs_content %}
   {% for key, value in page.extra %}
     {% if key != "demo_path" and key != "source_path" %}
       {{ throw_unknown_example_extra_key }}
@@ -20,7 +35,7 @@
 " %}
   {% set source_block = "````markdown" ~ nl ~ deck_source ~ nl ~ "````" %}
 
-  <article class="doc-page example-page">
+  <article class="doc-page doc-body example-page">
     <header class="page-header">
       <h1>{{ page.title }}</h1>
       {% if page.description %}
@@ -36,4 +51,4 @@
       {{ source_block | markdown | safe }}
     </section>
   </article>
-{% endblock content %}
+{% endblock docs_content %}
