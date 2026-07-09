@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A single-file starter deck that uses built-in defaults for layout, CSS, slide splitting, code, keys, and notes."
 
 [extra]
+deck = "minimal"
 demo_path = "/demo/minimal/"
 source_path = "static/deck-sources/minimal/deck.md"
 +++

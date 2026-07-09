@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A two-column deck that resolves matching block slots with explicit left and right slot fences."
 
 [extra]
+deck = "two-column"
 demo_path = "/demo/two-column/"
 source_path = "static/deck-sources/two-column/deck.md"
 +++

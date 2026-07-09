@@ -38,6 +38,16 @@ jobs:
           sudo install -m 0755 /tmp/zola /usr/local/bin/zola
           zola --version
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Playwright chromium
+        run: |
+          set -euo pipefail
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --no-save --no-package-lock playwright@latest
+          npx playwright@latest install --with-deps chromium
+
       # このリポジトリ自身がpeithoなので、リリースバイナリではなく
       # ソースからビルドした今のpeithoでデモサイトを組む
       - name: Build demo site
@@ -47,9 +57,10 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             alias=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-28 | sed 's/^-*//; s/-*$//')
-            make demo-site ZOLA_BASE_URL="https://${alias}.peitho-4yr.pages.dev"
+            base_url="https://${alias}.peitho-4yr.pages.dev"
+            make demo-site ZOLA_BASE_URL="$base_url" && make demo-screenshots ZOLA_BASE_URL="$base_url"
           else
-            make demo-site
+            make demo-site && make demo-screenshots
           fi
 
       - name: Deploy to Cloudflare Pages

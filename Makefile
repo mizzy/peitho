@@ -10,12 +10,13 @@ ZOLA_BASE_URL ?=
 DEMO_OUT = .demo-site
 DEMO_OUT_ABS := $(abspath $(DEMO_OUT))
 DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour two-column image-showcase aspect-ratio-4-3
+DEMO_SCREENSHOTS_DIR = $(DEMO_OUT)/deck-shots
 DOCS_SOURCE_DIR = site/static/deck-sources
 WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	feature-tour-windowed docs-sources demo-site deploy-demo screenshots
+	feature-tour-windowed docs-sources demo-site demo-screenshots deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -98,6 +99,10 @@ demo-site: docs-sources
 	for d in $(DEMO_DECKS); do \
 		$(PEITHO) publish --dist $(DEMO_OUT)/demo/$$d -- true || exit 1; \
 	done
+
+demo-screenshots: demo-site
+	mkdir -p $(DEMO_SCREENSHOTS_DIR)
+	node scripts/screenshot-decks.mjs $(DEMO_DECKS)
 
 deploy-demo: demo-site
 	$(WRANGLER) pages deploy $(DEMO_OUT) --project-name peitho --branch main

@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A short deck that switches Peitho from widescreen defaults to a 4:3 logical canvas."
 
 [extra]
+deck = "aspect-ratio-4-3"
 demo_path = "/demo/aspect-ratio-4-3/"
 source_path = "static/deck-sources/aspect-ratio-4-3/deck.md"
 +++

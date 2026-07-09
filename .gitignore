@@ -7,6 +7,7 @@ packages/peitho-present/dist/*
 !packages/peitho-present/dist/shell.js
 !packages/peitho-present/dist/preview.js
 /.demo-site
+/.demo-site/deck-shots/
 /.screenshots
 site/static/giallo.css
 site/static/deck-sources/

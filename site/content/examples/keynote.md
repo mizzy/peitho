@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A centered serif keynote deck where slide shape dispatches title-only covers and body statement slides."
 
 [extra]
+deck = "keynote"
 demo_path = "/demo/keynote/"
 source_path = "static/deck-sources/keynote/deck.md"
 +++
