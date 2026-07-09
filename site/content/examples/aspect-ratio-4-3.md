@@ -8,6 +8,7 @@ description = "A short deck that switches Peitho from widescreen defaults to a 4
 deck = "aspect-ratio-4-3"
 demo_path = "/demo/aspect-ratio-4-3/"
 source_path = "static/deck-sources/aspect-ratio-4-3/deck.md"
+github_path = "examples/aspect-ratio-4-3"
 +++
 
 ## What it demonstrates

@@ -8,6 +8,7 @@ description = "A five-minute poster-style talk that uses sections, notes, and a 
 deck = "lightning-talk"
 demo_path = "/demo/lightning-talk/"
 source_path = "static/deck-sources/lightning-talk/deck.md"
+github_path = "examples/lightning-talk"
 +++
 
 ## What it demonstrates

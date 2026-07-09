@@ -8,6 +8,7 @@ description = "A two-column deck that resolves matching block slots with explici
 deck = "two-column"
 demo_path = "/demo/two-column/"
 source_path = "static/deck-sources/two-column/deck.md"
+github_path = "examples/two-column"
 +++
 
 ## What it demonstrates

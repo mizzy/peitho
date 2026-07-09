@@ -8,6 +8,7 @@ description = "A centered serif keynote deck where slide shape dispatches title-
 deck = "keynote"
 demo_path = "/demo/keynote/"
 source_path = "static/deck-sources/keynote/deck.md"
+github_path = "examples/keynote"
 +++
 
 ## What it demonstrates

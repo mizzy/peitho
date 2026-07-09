@@ -19,7 +19,7 @@
 
 {% block docs_content %}
   {% for key, value in page.extra %}
-    {% if key != "demo_path" and key != "source_path" and key != "deck" %}
+    {% if key != "demo_path" and key != "source_path" and key != "deck" and key != "github_path" %}
       {{ throw_unknown_example_extra_key }}
     {% endif %}
   {% endfor %}
@@ -29,6 +29,9 @@
   {% endif %}
   {% if not page.extra.source_path %}
     {{ throw_missing_example_source_path }}
+  {% endif %}
+  {% if not page.extra.github_path %}
+    {{ throw_missing_example_github_path }}
   {% endif %}
   {% set deck_source = load_data(path=page.extra.source_path, format="plain") %}
   {% set nl = "
@@ -51,7 +54,11 @@
       </p>
     {% endif %}
 
-    <p><a href="{{ page.extra.demo_path }}">Open live demo</a></p>
+    <p class="example-links">
+      <a href="{{ page.extra.demo_path | safe }}">Open live demo</a>
+      <span aria-hidden="true"> · </span>
+      <a href="{{ config.extra.github_url | safe }}/tree/main/{{ page.extra.github_path | safe }}">View source on GitHub</a>
+    </p>
     <section class="deck-source">
       <h2>Deck source</h2>
       {{ source_block | markdown | safe }}
