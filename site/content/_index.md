@@ -4,7 +4,7 @@ template = "index.html"
 
 [extra.hero]
 lead = "An HTML-native presentation tool that treats Markdown as the source of truth."
-tagline = "Layouts as types. Broken decks fail at build, not on stage."
+tagline = "The layout is the schema. Broken decks fail at build, not on stage."
 
 [[extra.sections]]
 title = "Pillars"
