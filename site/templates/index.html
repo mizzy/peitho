@@ -2,15 +2,17 @@
 
 {% block content %}
   {% for key, value in section.extra.hero %}
-    {% if key != "lead" %}
+    {% if key != "lead" and key != "tagline" %}
       {# deliberately undefined: referencing it fails the build on a shape violation #}
       {{ throw_unknown_landing_hero_key }}
     {% endif %}
   {% endfor %}
 
   <section class="hero">
-    <h1>{{ section.title }}</h1>
-    <p>{{ section.extra.hero.lead }}</p>
+    <p class="hero-lead">{{ section.extra.hero.lead }}</p>
+    {% if section.extra.hero.tagline %}
+      <p class="hero-tagline">{{ section.extra.hero.tagline }}</p>
+    {% endif %}
     {{ section.content | safe }}
   </section>
 
