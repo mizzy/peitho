@@ -19,7 +19,7 @@ That explicit routing is still checked against the layout schema. A misspelled
 slot name or unsupported fence shape is a build error, as described in
 [Writing Decks](@/guide/writing-decks.md).
 
-## What to inspect
+## What to look at
 
 The source alternates between prose, subheadings, lists, and inline code inside
 the two explicit slots. The CSS labels the columns as `slot=left` and

@@ -19,7 +19,7 @@ That makes it a compact example of hybrid dispatch by content shape. The
 Markdown stays close to the talk outline, and the layout files decide how title
 and body slots render; the mechanism is covered in [Layouts](@/guide/layouts.md).
 
-## What to inspect
+## What to look at
 
 The custom CSS gives the deck a centered, serif keynote style with larger cover
 type and measured statement copy. The body text is Japanese, so the CSS also

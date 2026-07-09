@@ -19,7 +19,7 @@ The image path is deck-relative, and Peitho checks that the referenced local
 asset exists. The convention mapping for image-only paragraphs is covered in
 [Writing Decks](@/guide/writing-decks.md).
 
-## What to inspect
+## What to look at
 
 The CSS frames the diagram in a fixed visual area and uses `object-fit: contain`
 so the asset remains inspectable. The Markdown stays just a heading plus

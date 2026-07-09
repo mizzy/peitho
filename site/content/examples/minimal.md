@@ -20,7 +20,7 @@ plain paragraphs and lists become body content, fenced Rust code maps to the
 code slot, keyed comments can identify slides, and HTML comments become speaker
 notes.
 
-## What to inspect
+## What to look at
 
 Start here when learning the file shape, then move to
 [Getting Started](@/guide/getting-started.md) and

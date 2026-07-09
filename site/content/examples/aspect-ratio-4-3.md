@@ -18,7 +18,7 @@ shape.
 Use this example when you need older projector geometry, embedded documentation
 captures, or a square-ish canvas without changing the authoring model.
 
-## What to inspect
+## What to look at
 
 The source has no custom layout or CSS. The frontmatter alone changes the
 canvas behavior, which is the same `aspect_ratio` key documented in
