@@ -104,7 +104,6 @@ a:hover {
   color: var(--dim);
 }
 
-.hero,
 .page-header {
   padding-top: 20px;
   border-top: 1px solid var(--rule);
@@ -119,7 +118,10 @@ a:hover {
   letter-spacing: -0.01em;
 }
 
-.hero p,
+.hero p {
+  max-width: 42rem;
+}
+
 .lead {
   max-width: 42rem;
   color: var(--dim);
