@@ -16,7 +16,7 @@ WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	feature-tour-windowed docs-sources demo-site demo-screenshots og-brand deploy-demo screenshots
+	feature-tour-windowed docs-sources demo-site demo-screenshots og-cards deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -104,8 +104,8 @@ demo-screenshots:
 	mkdir -p $(DEMO_SCREENSHOTS_DIR)
 	node scripts/screenshot-decks.mjs $(DEMO_DECKS)
 
-og-brand:
-	node scripts/render-og-brand.mjs
+og-cards:
+	node scripts/render-og-cards.mjs
 
 deploy-demo: demo-site
 	$(WRANGLER) pages deploy $(DEMO_OUT) --project-name peitho --branch main

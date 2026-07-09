@@ -25,8 +25,18 @@
   {% else %}
     {% set og_url = config.base_url %}
   {% endif %}
+  {% set og_scope_path = "" %}
+  {% if page is defined and page.path %}
+    {% set og_scope_path = page.path %}
+  {% elif section is defined and section.path %}
+    {% set og_scope_path = section.path %}
+  {% endif %}
   {% if page is defined and page.extra.deck %}
     {% set og_image_url = get_url(path="deck-shots/" ~ page.extra.deck ~ ".png") %}
+  {% elif og_scope_path is starting_with("/guide") %}
+    {% set og_image_url = get_url(path="og/guide.png") %}
+  {% elif og_scope_path is starting_with("/examples") %}
+    {% set og_image_url = get_url(path="og/examples.png") %}
   {% else %}
     {% set og_image_url = get_url(path="og/brand.png") %}
   {% endif %}

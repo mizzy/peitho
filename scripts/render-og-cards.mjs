@@ -9,10 +9,11 @@ import { chromium } from "playwright";
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DEMO_OUT = join(ROOT, ".demo-site");
 const OUT_DIR = join(DEMO_OUT, "og");
-const OUT_PATH = join(OUT_DIR, "brand.png");
 const HOST = "127.0.0.1";
 const PORT = 8766;
 const SETTLE_MS = 300;
+
+const CARDS = ["brand", "guide", "examples"];
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -78,31 +79,41 @@ function closeServer(server) {
   });
 }
 
-async function main() {
-  await mkdir(OUT_DIR, { recursive: true });
-  const server = await startStaticServer();
-  let browser;
+async function renderCard(browser, name) {
+  const context = await browser.newContext({
+    viewport: { width: 1200, height: 630 },
+    deviceScaleFactor: 1,
+  });
+  const page = await context.newPage();
+  const url = `http://${HOST}:${PORT}/og/${name}.html`;
+  const outPath = join(OUT_DIR, `${name}.png`);
   try {
-    browser = await chromium.launch();
-    const context = await browser.newContext({
-      viewport: { width: 1200, height: 630 },
-      deviceScaleFactor: 1,
-    });
-    const page = await context.newPage();
-    const url = `http://${HOST}:${PORT}/og/brand.html`;
-    console.log(`render ${url} -> ${OUT_PATH}`);
+    console.log(`render ${url} -> ${outPath}`);
     const response = await page.goto(url, { waitUntil: "load", timeout: 30_000 });
     if (!response || !response.ok()) {
       throw new Error(`failed to load ${url} (${response?.status() ?? "no response"})`);
     }
     await page.waitForTimeout(SETTLE_MS);
     await page.screenshot({
-      path: OUT_PATH,
+      path: outPath,
       type: "png",
       fullPage: false,
       clip: { x: 0, y: 0, width: 1200, height: 630 },
     });
+  } finally {
     await context.close();
+  }
+}
+
+async function main() {
+  await mkdir(OUT_DIR, { recursive: true });
+  const server = await startStaticServer();
+  let browser;
+  try {
+    browser = await chromium.launch();
+    for (const name of CARDS) {
+      await renderCard(browser, name);
+    }
   } finally {
     if (browser) {
       await browser.close();
