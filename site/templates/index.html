@@ -16,7 +16,7 @@
 
   {% for landing_section in section.extra.sections %}
     {% for key, value in landing_section %}
-      {% if key != "title" and key != "code" and key != "rows" %}
+      {% if key != "title" and key != "code" and key != "rows" and key != "gallery" and key != "gallery_intro" %}
         {{ throw_unknown_landing_section_key }}
       {% endif %}
     {% endfor %}
@@ -24,9 +24,15 @@
     <section>
       <h2>{{ landing_section.title }}</h2>
 
-      {% if landing_section.code and landing_section.rows %}
-        {{ throw_landing_section_has_both_code_and_rows }}
-      {% elif landing_section.code %}
+      {% set shape_flags = [] %}
+      {% if landing_section.code %}{% set_global shape_flags = shape_flags | concat(with="code") %}{% endif %}
+      {% if landing_section.rows %}{% set_global shape_flags = shape_flags | concat(with="rows") %}{% endif %}
+      {% if landing_section.gallery %}{% set_global shape_flags = shape_flags | concat(with="gallery") %}{% endif %}
+      {% if shape_flags | length > 1 %}
+        {{ throw_landing_section_has_multiple_shapes }}
+      {% endif %}
+
+      {% if landing_section.code %}
         <pre><code>{{ landing_section.code }}</code></pre>
       {% elif landing_section.rows %}
         <ul class="rows" role="list">
@@ -55,6 +61,35 @@
                   {% endif %}
                 </div>
               {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% elif landing_section.gallery %}
+        {% if landing_section.gallery_intro %}
+          <p class="gallery-intro">{{ landing_section.gallery_intro }}</p>
+        {% endif %}
+        <ul class="gallery" role="list">
+          {% for tile in landing_section.gallery %}
+            {% for key, value in tile %}
+              {% if key != "title" and key != "path" and key != "image" %}
+                {{ throw_unknown_landing_gallery_key }}
+              {% endif %}
+            {% endfor %}
+            {% if not tile.path %}
+              {{ throw_missing_landing_gallery_path }}
+            {% endif %}
+            {% if not tile.image %}
+              {{ throw_missing_landing_gallery_image }}
+            {% endif %}
+            {% if not tile.title %}
+              {{ throw_missing_landing_gallery_title }}
+            {% endif %}
+
+            <li class="gallery-tile">
+              <a href="{{ get_url(path=tile.path) }}">
+                <img src="{{ tile.image | safe }}" alt="{{ tile.title }} deck screenshot" loading="lazy">
+                <span class="gallery-title">{{ tile.title }}</span>
+              </a>
             </li>
           {% endfor %}
         </ul>
