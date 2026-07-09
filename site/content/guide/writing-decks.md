@@ -85,6 +85,8 @@ Speaker notes ride into the presenter data, but notes never enter `dist/`.
 and the publish contamination check enforces that boundary. Presenter notes are
 rendered as plaintext.
 
+![Notes appear in the presenter view alongside the current and next slides](/guide-shots/presenter-view.png)
+
 ## Page settings comments
 
 JSON HTML comments carry page settings. The supported settings are `key`,

@@ -71,9 +71,14 @@ peitho preview
 
 Preview watches the deck and its assets, serves the deck locally, and reloads
 the browser after each successful rebuild while preserving the current slide
-and overview mode. In preview, `o`, Enter, or Esc toggles single-slide and tile
-overview modes; arrows move through slides and overview tiles, and clicking a
-tile opens it.
+and overview mode.
+
+![peitho preview showing a single slide in the browser](/guide-shots/preview-single.png)
+
+In preview, `o`, Enter, or Esc toggles single-slide and tile overview modes;
+arrows move through slides and overview tiles, and clicking a tile opens it.
+
+![The overview view: every slide as a tile in a scrollable grid](/guide-shots/preview-overview.png)
 
 ## Present
 
@@ -87,8 +92,11 @@ peitho present
 current and next slides, speaker notes, and a timer. The agenda and planned-time
 scale appear when the deck declares sections and time; see
 [Writing Decks](@/guide/writing-decks.md) and
-[Frontmatter](@/guide/frontmatter.md) for those settings. For debugging, open
-the presenter in a normal window instead of full-screen:
+[Frontmatter](@/guide/frontmatter.md) for those settings.
+
+![Presenter view with current and next slides, notes, a timer, and a per-section agenda](/guide-shots/presenter-view.png)
+
+For debugging, open the presenter in a normal window instead of full-screen:
 
 ```sh
 peitho present --presenter-windowed

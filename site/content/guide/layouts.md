@@ -39,6 +39,8 @@ gives a slot too much content, too little content, or the wrong kind of
 content, the build fails with a line-numbered error instead of dropping the
 content.
 
+![peitho build refusing a deck with two code blocks against a slot that allows 0..1](/guide-shots/build-error.png)
+
 ## Hybrid dispatch
 
 When multiple layouts are available, Peitho chooses a layout in this order:
