@@ -8,6 +8,7 @@ description = "A broad tour deck that combines custom layouts, presenter timing,
 deck = "feature-tour"
 demo_path = "/demo/feature-tour/"
 source_path = "static/deck-sources/feature-tour/deck.md"
+github_path = "examples/feature-tour"
 +++
 
 ## What it demonstrates

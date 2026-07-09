@@ -8,6 +8,7 @@ description = "A minimal visual deck that maps one local Markdown image into a r
 deck = "image-showcase"
 demo_path = "/demo/image-showcase/"
 source_path = "static/deck-sources/image-showcase/deck.md"
+github_path = "examples/image-showcase"
 +++
 
 ## What it demonstrates

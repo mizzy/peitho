@@ -8,6 +8,7 @@ description = "A single-file starter deck that uses built-in defaults for layout
 deck = "minimal"
 demo_path = "/demo/minimal/"
 source_path = "static/deck-sources/minimal/deck.md"
+github_path = "examples/minimal"
 +++
 
 ## What it demonstrates

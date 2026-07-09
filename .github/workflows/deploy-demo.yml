@@ -58,9 +58,9 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             alias=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-28 | sed 's/^-*//; s/-*$//')
             base_url="https://${alias}.peitho-4yr.pages.dev"
-            make demo-site ZOLA_BASE_URL="$base_url" && make demo-screenshots ZOLA_BASE_URL="$base_url"
+            make demo-site ZOLA_BASE_URL="$base_url" && make demo-screenshots ZOLA_BASE_URL="$base_url" && make og-cards ZOLA_BASE_URL="$base_url"
           else
-            make demo-site && make demo-screenshots
+            make demo-site && make demo-screenshots && make og-cards
           fi
 
       - name: Deploy to Cloudflare Pages

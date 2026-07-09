@@ -8,6 +8,7 @@ description = "A Rust typestate walkthrough that requires one code block per sli
 deck = "code-walkthrough"
 demo_path = "/demo/code-walkthrough/"
 source_path = "static/deck-sources/code-walkthrough/deck.md"
+github_path = "examples/code-walkthrough"
 +++
 
 ## What it demonstrates

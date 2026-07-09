@@ -23,8 +23,8 @@ embedded, so Node.js and npm are not runtime dependencies.
 ## Create a first deck
 
 Create `deck.md` in an empty directory. This example is adapted from
-`examples/deck.md`: it has a title, body text, a fenced code block, a slide
-separator, and a speaker note written as an HTML comment.
+`examples/minimal/deck.md`: it has a title, body text, a fenced code block, a
+slide separator, and a speaker note written as an HTML comment.
 
 ````markdown
 # Peitho Architecture
