@@ -24,7 +24,7 @@ notes, page settings, and agenda sections.
 
 ## Design with HTML/CSS
 
-[Layouts](@/guide/layouts.md) covers layouts as schemas, slot contracts,
+[Layouts](@/guide/layouts.md) covers the layout as schema, slot contracts,
 hybrid layout dispatch, keyed CSS overrides, and where layout and CSS assets
 belong.
 
