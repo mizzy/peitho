@@ -20,7 +20,7 @@ The custom layout makes that contract explicit with `accepts="code"` and
 slide omits the code block or adds a second one, the deck stops at build time
 rather than silently reshaping the content.
 
-## What to inspect
+## What to look at
 
 The theme is intentionally terminal-like: code owns the left side, annotation
 text owns the right side, and the `payoff` slide gets a keyed CSS override in

@@ -21,7 +21,7 @@ the code-demo layout accepts multiple fenced code blocks for the Rust and JSON
 contract example. See [Writing Decks](@/guide/writing-decks.md) and
 [Layouts](@/guide/layouts.md) for the underlying rules.
 
-## What to inspect
+## What to look at
 
 Look at the page settings comments around `tour-cover`, `checks`, `cli`, and
 `timing`. They carry keys, sections, times, and the explicit layout choice that

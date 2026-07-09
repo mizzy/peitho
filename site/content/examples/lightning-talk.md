@@ -19,7 +19,7 @@ The custom poster layout accepts only title and body content. There is no code
 slot, which keeps the example focused on talk timing, section metadata, and
 large-type Markdown slides.
 
-## What to inspect
+## What to look at
 
 Compare the `time: 5m` frontmatter with the per-section page settings comments.
 Those values drive the agenda and timer behavior described in
