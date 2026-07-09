@@ -1,0 +1,97 @@
++++
+title = "Getting Started"
+weight = 10
+template = "guide-page.html"
+description = "Install Peitho, write a first deck, build it, preview it, and present it."
++++
+
+## Install
+
+Install with Homebrew on macOS or Linux:
+
+```sh
+brew install mizzy/tap/peitho
+```
+
+Homebrew installs shell completions for bash, zsh, and fish automatically.
+
+For a prebuilt binary, download the tarball for your target from GitHub
+Releases, verify the checksum, unpack it, and move the single `peitho` binary
+onto your `PATH`. Layouts, the base theme, and the presentation shell are
+embedded, so Node.js and npm are not runtime dependencies.
+
+## Create a first deck
+
+Create `deck.md` in an empty directory. This example is adapted from
+`examples/deck.md`: it has a title, body text, a fenced code block, a slide
+separator, and a speaker note written as an HTML comment.
+
+````markdown
+# Peitho Architecture
+
+Markdown is the source of truth, while HTML and CSS own layout.
+
+```rust
+enum Phase { Parsed, Mapped, Checked, Rendered }
+```
+
+<!--
+Open with the two-line pitch: separation of content and design,
+then move to the pipeline.
+-->
+
+---
+
+# Convention Mapping
+
+- Shallowest heading maps to title
+- Code blocks map to code
+- Remaining blocks map to body
+````
+
+## Build once
+
+Run a build from the directory that contains `deck.md`:
+
+```sh
+peitho build
+```
+
+The deck argument defaults to `deck.md`, so `peitho build` is the same as
+`peitho build deck.md`. A build writes the distributable `dist/` directory with
+slide fragments, `manifest.json`, `index.html`, and `peitho.css`.
+
+## Preview while editing
+
+Use preview for the daily editing loop:
+
+```sh
+peitho preview
+```
+
+Preview watches the deck and its assets, serves the deck locally, and reloads
+the browser after each successful rebuild while preserving the current slide
+and overview mode. In preview, `o`, Enter, or Esc toggles single-slide and tile
+overview modes; arrows move through slides and overview tiles, and clicking a
+tile opens it.
+
+## Present
+
+Use present when you are ready to speak:
+
+```sh
+peitho present
+```
+
+`peitho present` opens the slides full-screen and opens a presenter view with
+current and next slides, speaker notes, and a timer. The agenda and planned-time
+scale appear when the deck declares sections and time; see
+[Writing Decks](@/guide/writing-decks.md) and
+[Frontmatter](@/guide/frontmatter.md) for those settings. For debugging, open
+the presenter in a normal window instead of full-screen:
+
+```sh
+peitho present --presenter-windowed
+```
+
+Next, learn the deck syntax in [Writing Decks](@/guide/writing-decks.md).
