@@ -327,6 +327,14 @@ ol {
   min-width: 0;
 }
 
+.doc-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 24px 0;
+  border: 1px solid var(--hair);
+}
+
 code {
   padding: 0.1em 0.25em;
   background: var(--code-bg);
