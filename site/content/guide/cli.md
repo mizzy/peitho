@@ -2,33 +2,15 @@
 title = "CLI"
 weight = 50
 template = "guide-page.html"
-description = "Run Peitho commands for building, previewing, presenting, exporting, publishing, and shell completions."
+description = "Preview, present, export, and publish a deck — plus shell completions."
 +++
 
-## Default deck path
-
-Commands default to `deck.md` in the current directory, so the deck argument can
-be omitted when the file follows the convention.
-
-Use an explicit path when the deck has another name:
+Peitho's day-to-day commands are `preview`, `present`, `export`, and `publish`.
+Each command takes a deck path and defaults to `deck.md` in the current
+directory, so the argument can be omitted when the file follows the convention:
 
 ```sh
-peitho build slides.md
-```
-
-## `peitho build`
-
-Build writes the distributable `dist/` directory with slide fragments,
-`manifest.json`, `index.html`, and `peitho.css`.
-
-```sh
-peitho build
-```
-
-Rebuild on every save for an external server or pipeline:
-
-```sh
-peitho build --watch
+peitho preview slides.md
 ```
 
 ## `peitho preview`
@@ -40,8 +22,8 @@ successful rebuild.
 peitho preview
 ```
 
-It watches the same deck and asset roots as `build --watch`, serves locally,
-and reloads while preserving the current slide and overview state.
+It watches the deck and its assets, serves locally, and reloads while
+preserving the current slide and overview state.
 
 ## `peitho present`
 
@@ -81,4 +63,15 @@ Generate shell completion scripts for bash, zsh, fish, powershell, or elvish.
 
 ```sh
 peitho completions zsh
+```
+
+## `peitho build`
+
+`peitho build` is a lower-level command that writes the distributable `dist/`
+directory. The daily commands above invoke it internally, so authors rarely
+call it directly. Use it when you need a one-shot build for an external
+pipeline:
+
+```sh
+peitho build --watch
 ```
