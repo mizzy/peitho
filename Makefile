@@ -4,7 +4,11 @@
 PRESENT_FLAGS ?=
 PRESENT = cargo run -q -p peitho -- present
 PEITHO = cargo run -q -p peitho --
+ZOLA_VERSION = 0.22.1
+ZOLA ?= zola
+ZOLA_BASE_URL ?=
 DEMO_OUT = .demo-site
+DEMO_OUT_ABS := $(abspath $(DEMO_OUT))
 DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour two-column image-showcase aspect-ratio-4-3
 DOCS_SOURCE_DIR = site/static/deck-sources
 WRANGLER ?= npx -y wrangler
@@ -25,7 +29,7 @@ help:
 	@echo "その他の追加フラグ:   make keynote PRESENT_FLAGS=\"--port 8000\""
 	@echo ""
 	@echo "デモサイト:"
-	@echo "  make demo-site    examplesを$(DEMO_OUT)/に組み立てて検査"
+	@echo "  make demo-site    build the docs site plus every demo deck into $(DEMO_OUT)/"
 	@echo "  make deploy-demo  Cloudflare Pagesへデプロイ（要wrangler認証）"
 	@echo ""
 	@echo "README用スクリーンショット:"
@@ -74,21 +78,26 @@ docs-sources:
 		cp examples/$$d/deck.md $(DOCS_SOURCE_DIR)/$$d/deck.md || exit 1; \
 	done
 
-demo-site:
+demo-site: docs-sources
 	rm -rf $(DEMO_OUT)
-	mkdir -p $(DEMO_OUT)
-	$(PEITHO) build examples/deck.md --out $(DEMO_OUT)/minimal
-	$(PEITHO) build examples/lightning-talk/deck.md --out $(DEMO_OUT)/lightning-talk
-	$(PEITHO) build examples/code-walkthrough/deck.md --out $(DEMO_OUT)/code-walkthrough
-	$(PEITHO) build examples/keynote/deck.md --out $(DEMO_OUT)/keynote
-	$(PEITHO) build examples/feature-tour/deck.md --out $(DEMO_OUT)/feature-tour
-	$(PEITHO) build examples/two-column/deck.md --out $(DEMO_OUT)/two-column
-	$(PEITHO) build examples/image-showcase/deck.md --out $(DEMO_OUT)/image-showcase
-	$(PEITHO) build examples/aspect-ratio-4-3/deck.md --out $(DEMO_OUT)/aspect-ratio-4-3
+	zola_log=$$(mktemp); \
+	(cd site && $(ZOLA) build --output-dir $(DEMO_OUT_ABS) $(if $(ZOLA_BASE_URL),--base-url $(ZOLA_BASE_URL))) >$$zola_log 2>&1; \
+	zola_status=$$?; \
+	cat $$zola_log; \
+	if [ $$zola_status -ne 0 ]; then rm -f $$zola_log; exit $$zola_status; fi; \
+	if grep -Fq 'page(s) ignored' $$zola_log; then rm -f $$zola_log; exit 1; fi; \
+	rm -f $$zola_log
+	$(PEITHO) build examples/deck.md --out $(DEMO_OUT)/demo/minimal
+	$(PEITHO) build examples/lightning-talk/deck.md --out $(DEMO_OUT)/demo/lightning-talk
+	$(PEITHO) build examples/code-walkthrough/deck.md --out $(DEMO_OUT)/demo/code-walkthrough
+	$(PEITHO) build examples/keynote/deck.md --out $(DEMO_OUT)/demo/keynote
+	$(PEITHO) build examples/feature-tour/deck.md --out $(DEMO_OUT)/demo/feature-tour
+	$(PEITHO) build examples/two-column/deck.md --out $(DEMO_OUT)/demo/two-column
+	$(PEITHO) build examples/image-showcase/deck.md --out $(DEMO_OUT)/demo/image-showcase
+	$(PEITHO) build examples/aspect-ratio-4-3/deck.md --out $(DEMO_OUT)/demo/aspect-ratio-4-3
 	for d in $(DEMO_DECKS); do \
-		$(PEITHO) publish --dist $(DEMO_OUT)/$$d -- true || exit 1; \
+		$(PEITHO) publish --dist $(DEMO_OUT)/demo/$$d -- true || exit 1; \
 	done
-	cp demo/index.html $(DEMO_OUT)/index.html
 
 deploy-demo: demo-site
 	$(WRANGLER) pages deploy $(DEMO_OUT) --project-name peitho --branch main

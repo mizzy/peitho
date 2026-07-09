@@ -28,10 +28,29 @@ jobs:
         with:
           shared-key: demo
 
+      - name: Install Zola
+        env:
+          ZOLA_VERSION: 0.22.1
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/zola.tar.gz
+          tar -xzf /tmp/zola.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/zola /usr/local/bin/zola
+          zola --version
+
       # このリポジトリ自身がpeithoなので、リリースバイナリではなく
       # ソースからビルドした今のpeithoでデモサイトを組む
       - name: Build demo site
-        run: make demo-site
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            alias=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-28 | sed 's/^-*//; s/-*$//')
+            make demo-site ZOLA_BASE_URL="https://${alias}.peitho-4yr.pages.dev"
+          else
+            make demo-site
+          fi
 
       - name: Deploy to Cloudflare Pages
         if: github.event_name != 'pull_request'
