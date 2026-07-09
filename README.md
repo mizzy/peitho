@@ -30,7 +30,7 @@ error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'ti
 - **Time tracking with agenda sections** — declare a planned time in frontmatter (`time: 15m`) and, optionally, per-section budgets on page-settings comments (`{"section":"Setup","time":"1m"}`). The presenter agenda shows planned vs. actual per section in real time. Section totals must equal the deck's planned time — mismatches are build errors with line numbers
 - **Speaker notes as HTML comments** — non-JSON HTML comments in a slide body become that slide's speaker note (Marp / k1LoW/deck-style). Notes ride only into the presenter view; `dist/` never contains them (the publish contamination check enforces this)
 - **One-command preview loop** — `peitho preview` watches the deck and assets, rebuilds into a volatile preview cache, serves it locally, and reloads the browser while preserving the current slide and overview mode
-- **Keynote-style presenting** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Space starts/pauses the timer; arrows navigate; Esc closes everything
+- **Dual-display presenter mode** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Space starts/pauses the timer; arrows navigate; Esc closes everything
 
 ![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
 
