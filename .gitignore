@@ -9,3 +9,5 @@ packages/peitho-present/dist/*
 /.demo-site
 /.screenshots
 site/static/giallo.css
+site/static/deck-sources/
+.zola-examples/

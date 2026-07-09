@@ -6,11 +6,12 @@ PRESENT = cargo run -q -p peitho -- present
 PEITHO = cargo run -q -p peitho --
 DEMO_OUT = .demo-site
 DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour two-column image-showcase aspect-ratio-4-3
+DOCS_SOURCE_DIR = site/static/deck-sources
 WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	feature-tour-windowed demo-site deploy-demo screenshots
+	feature-tour-windowed docs-sources demo-site deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -63,6 +64,15 @@ keynote: shell
 
 feature-tour: shell
 	$(PRESENT) examples/feature-tour/deck.md $(PRESENT_FLAGS)
+
+docs-sources:
+	rm -rf $(DOCS_SOURCE_DIR)
+	mkdir -p $(DOCS_SOURCE_DIR)/minimal
+	cp examples/deck.md $(DOCS_SOURCE_DIR)/minimal/deck.md
+	for d in $(filter-out minimal,$(DEMO_DECKS)); do \
+		mkdir -p $(DOCS_SOURCE_DIR)/$$d; \
+		cp examples/$$d/deck.md $(DOCS_SOURCE_DIR)/$$d/deck.md || exit 1; \
+	done
 
 demo-site:
 	rm -rf $(DEMO_OUT)
