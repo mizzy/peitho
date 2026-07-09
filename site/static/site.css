@@ -212,7 +212,10 @@ table {
 .gallery-tile img {
   display: block;
   width: 100%;
+  aspect-ratio: 16 / 9;
   height: auto;
+  object-fit: contain;
+  background: #fff;
 }
 
 .gallery-title {
