@@ -25,6 +25,8 @@ peitho preview
 It watches the deck and its assets, serves locally, and reloads while
 preserving the current slide and overview state.
 
+![peitho preview prints the URL it is serving on, plus a rebuild line on every save](/guide-shots/cli-preview.png)
+
 ## `peitho present`
 
 Present generates a volatile cache, starts a local server, launches the browser,
@@ -33,6 +35,8 @@ and places full-screen slides plus the presenter view across displays.
 ```sh
 peitho present
 ```
+
+![peitho present prints the URL its local server is serving the presentation on](/guide-shots/cli-present.png)
 
 Use windowed presenter mode while debugging:
 
@@ -56,6 +60,12 @@ already use.
 ```sh
 peitho publish -- aws s3 sync dist/ s3://your-bucket/
 ```
+
+`peitho publish` itself prints nothing on success — the output you see comes
+from the deploy command you passed after `--`, so you keep whatever progress
+reporting that command already gives you.
+
+![peitho publish stays silent and lets the aws s3 sync output through unchanged](/guide-shots/cli-publish.png)
 
 ## `peitho completions`
 
