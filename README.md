@@ -4,7 +4,7 @@ An HTML-native presentation tool that treats Markdown as the source of truth.
 
 Peitho is the Greek goddess who presides over the power to move people's hearts with words rather than force — a fitting match for the essence of presentation.
 
-Demo: **[peitho.gosu.ke](https://peitho.gosu.ke/)** (builds and serves `examples/` as-is. Auto-deployed on push to `main`; `envchain peitho make deploy-demo` for manual deploys)
+Docs & demos: **[peitho.gosu.ke](https://peitho.gosu.ke/)** — a guide, an examples gallery, and the example decks built and served under `/demo/<name>/`. Auto-deployed on push to `main`; `envchain peitho make deploy-demo` for manual deploys.
 
 ## Features
 
@@ -94,7 +94,7 @@ peitho publish -- aws s3 sync dist/ s3://your-bucket/
 peitho completions zsh
 ```
 
-Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`) or drop `layouts/`, `css/`, and `syntaxes/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
+Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
 When developing the presentation shell (TS), rebuild `dist/shell.js` and `dist/preview.js` with `cd packages/peitho-present && npm ci && npm run build` (both are committed; CI checks for drift).
 
@@ -142,11 +142,14 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | Key | Purpose | Value |
 |---|---|---|
 | `time` | Planned presentation time | `15m` / `90s` / `1h30m` / bare integer (minutes) |
+| `aspect_ratio` | Slide canvas aspect ratio | `16:9` (default) / `4:3` |
+| `resolution` | PDF-only physical page size | `WxH` CSS px, e.g. `1920x1080` (must match `aspect_ratio`) |
 | `layouts` | Layout HTML file or directory | Deck-relative path, e.g. `./layouts` |
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
+| `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
 
-Absent keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default. A key that points at a non-existent path is a build error with the frontmatter line number.
+Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
 ## Custom syntaxes
 
@@ -162,23 +165,26 @@ Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.
 
 ## Examples
 
-`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained with `deck.md` + `layouts/` + `css/`.
+`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
-| `examples/minimal/deck.md` | Minimal demo | Default theme | Works as-is with built-in defaults |
-| `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
+| `examples/minimal/` | Minimal demo | Default theme | Works as-is with built-in defaults |
+| `examples/lightning-talk/` | Five-minute LT on decks-as-code | Dark, poster-style with large type | No code slot — writing code is a build error |
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
-| `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
+| `examples/keynote/` | Product keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
 | `examples/peitho-tour/` | Peitho's own product tour | Dark space theme with cyan/purple accents | Four layouts (`cover`, `topic`, `code`, `shot`), a full six-section agenda, an image slide that lands on the `shot` layout by type-driven dispatch, and multi-comment speaker notes throughout |
+| `examples/two-column/` | Explicit slot syntax demo | Two-column layout | `::: {slot=left}` / `::: {slot=right}` route content where convention mapping can't decide between two `accepts="blocks"` slots |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
+| `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |
+| `examples/pdf-export/` | PDF export fixture | Default theme | `aspect_ratio` + `resolution` frontmatter set the PDF page size; speaker notes stay out of the exported PDF |
 
 Same tool, same Markdown conventions — entirely different decks:
 
 | | |
 |---|---|
-| ![Minimal demo with the default theme](docs/images/example-minimal.png) | ![Japanese lightning talk: dark poster-style with large type](docs/images/example-lightning-talk.png) |
-| ![Rust typestate walkthrough: terminal-style two-column](docs/images/example-code-walkthrough.png) | ![Japanese keynote: cream background, serif, centered](docs/images/example-keynote.png) |
+| ![Minimal demo with the default theme](docs/images/example-minimal.png) | ![Lightning talk: dark poster-style with large type](docs/images/example-lightning-talk.png) |
+| ![Rust typestate walkthrough: terminal-style two-column](docs/images/example-code-walkthrough.png) | ![Keynote: cream background, serif, centered](docs/images/example-keynote.png) |
 
 The Peitho tour turns the tool on itself — one deck walking through the concept, three pillars, and the write/preview/present loop across four custom layouts, type-driven dispatch, agenda sections, and speaker notes:
 
