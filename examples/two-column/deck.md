@@ -2,71 +2,71 @@
 time: 3m
 ---
 
-# 明示スロットで左右2カラム
+# Two columns via explicit slots
 
 ::: {slot=left}
 
-慣習マッピングだけでは`left`と`right`を判別できない。
+Convention mapping alone cannot pick between `left` and `right`.
 
-同じ`accepts=blocks`が2つあると、どちらに入れるべきかが決められない。
+When two `accepts=blocks` slots exist, there is no way to decide where content belongs.
 
 :::
 
 ::: {slot=right}
 
-`::: {slot=name}`で著者が明示指定する。
+`::: {slot=name}` lets the author declare it.
 
-- Markdownネイティブな拡張(HTMLタグを持ち込まない)
-- パーサから型で運ばれる
-- silent dropは発生しない
+- A Markdown-native extension (no HTML tags leaked in)
+- Carried by types out of the parser
+- No silent drops
 
 :::
 
 ---
 
-# 比較: 慣習 vs 明示
+# Compare: convention vs explicit
 
 ::: {slot=left}
 
-## 慣習マッピング
+## Convention mapping
 
-見出しは`title`、コードは`code`、それ以外はまとめて`body`。単一slotで済むレイアウトなら1行も余計な記述はいらない。
+Headings go to `title`, code goes to `code`, everything else goes to `body`. A layout with a single slot needs no extra notation at all.
 
 :::
 
 ::: {slot=right}
 
-## 明示指定
+## Explicit selection
 
-著者が `::: {slot=name}` で意図をコードとして示す。開閉は3コロン、属性は`{slot=name}`だけ。
+The author writes `::: {slot=name}` to encode intent. Three colons open and close, and the only attribute is `{slot=name}`.
 
-複数の`blocks` slotを持つレイアウトで、慣習では判別できない曖昧さを著者側から解消する。
+Use it when a layout has multiple `blocks` slots and convention cannot resolve the ambiguity.
 
 :::
 
 ---
 
-# エラーは行番号+ヘルプで返る
+# Errors come back with a line number and help
 
 ::: {slot=left}
 
-## パース段
+## Parse stage
 
-- 開閉不一致
-- 属性の不正
-- ネスト(v1未対応)
-- 空の`:::`ブロック
-- 4コロン以上のフェンス(将来予約)
+- Unclosed fence
+- Malformed attribute
+- Nested divs (not supported in v1)
+- Empty `:::` block
+- Four-or-more-colon fence (reserved)
 
 :::
 
 ::: {slot=right}
 
-## マッピング段
+## Mapping stage
 
-レイアウトに存在しないslot名を明示すると、その場でエラーになる。
+Naming a slot that the layout does not declare is an immediate error.
 
-- 「unknown slot 'middle' in explicit `::: {slot=...}` for layout 'two-column'」
-- help: 「use one of: left, right, title」
+- "unknown slot 'middle' in explicit `::: {slot=...}` for layout 'two-column'"
+- help: "use one of: left, right, title"
 
 :::

@@ -3,24 +3,24 @@
 
 ---
 <!-- {"key":"what"} -->
-# Markdownがsource of truth
+# Markdown as the source of truth
 
-Markdownをsource of truthにする、HTMLネイティブなプレゼンテーションツール。タイトルだけのスライドはcoverレイアウトに、本文のあるスライドはstatementレイアウトに、内容の形から自動で振り分けられる。
+An HTML-native presentation tool that treats Markdown as the source of truth. Title-only slides dispatch to the cover layout, slides with body content dispatch to the statement layout — the shape of the content chooses.
 
 ---
 <!-- {"key":"separation"} -->
-# コンテンツとデザインを分ける
+# Separate content and design
 
-内容はMarkdownに、見た目はレイアウトとCSSに。書いている間、装飾のことは考えない。
+Content in Markdown, look and feel in layouts and CSS. While you write, you never think about decoration.
 
 ---
 <!-- {"key":"contract"} -->
-# レイアウトはスキーマ
+# The layout is the schema
 
-スロットの過不足も、型の不整合も、参照切れも、ビルドが行番号付きで止める。黙って落ちるものは何もない。
+Slot excess and deficiency, type mismatches, broken references — the build stops with line numbers. Nothing is dropped silently.
 
 ---
 <!-- {"key":"closing"} -->
-# 書くことに、戻る
+# Back to writing
 
-デザインは一度だけ。それ以外の時間は、すべて内容のために。
+Design once. Every other minute goes to the content.

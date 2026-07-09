@@ -3,38 +3,38 @@ time: 5m
 ---
 
 <!-- {"key":"cover","section":"Setup","time":"1m"} -->
-# スライドはMarkdownで書きたい
+# I want to write slides in Markdown
 
-5分でわかる、発表資料をコードとして扱う話。
+Five minutes on treating decks as code.
 
-<!-- 自己紹介は10秒で切り上げる。「スライド作りで消耗した経験、ありますよね」と会場に問いかけてから本題へ。 -->
+<!-- Keep the self-intro to ten seconds. Ask the room "you've all burned time on slide design, right?" then move on. -->
 
 ---
 <!-- {"key":"problem","section":"Problem","time":"1m"} -->
-# デザインをいじりだすと準備が終わらない
+# Once you start tweaking design, prep never ends
 
-- 内容よりフォントサイズを触っている時間のほうが長い
-- 「あとで整える」は発表当日まで残り続ける
-- 前回のスライドから使い回せるのは見た目だけ
+- More time spent on font sizes than on content
+- "I'll polish it later" survives all the way to the day of the talk
+- The only thing reusable from last time is the look
 
 ---
 <!-- {"key":"separation","section":"Approach","time":"2m"} -->
-# コンテンツとデザインを分ける
+# Separate content and design
 
-- 内容はMarkdown、見た目はテンプレートとCSS
-- 書いている間、デザインのことは考えなくていい
-- デザインは一度作れば次の発表でも使える
+- Content in Markdown, look and feel in templates and CSS
+- While writing, you don't think about design
+- Design once — reuse across the next talk
 
 ---
 <!-- {"key":"review"} -->
-# スライドがdiffに出る
+# The deck shows up in the diff
 
-- 発表資料もプルリクエストでレビューできる
-- 手直しの履歴が残る
-- タイポの修正がワンライナーになる
+- Slides get reviewed in pull requests
+- The edit history stays
+- Fixing a typo is a one-liner
 
 ---
 <!-- {"key":"closing","section":"Wrap-up","time":"1m"} -->
-# 書くことに集中する
+# Focus on writing
 
-道具の話はここまで。次の5分はあなたの内容の話をしてください。
+Tool talk stops here. Spend the next five minutes on your content.

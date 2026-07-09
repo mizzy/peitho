@@ -22,6 +22,6 @@ and body slots render; the mechanism is covered in [Layouts](@/guide/layouts.md)
 ## What to look at
 
 The custom CSS gives the deck a centered, serif keynote style with larger cover
-type and measured statement copy. The body text is Japanese, so the CSS also
-sets line breaking for that writing system while leaving the Markdown itself
+type and measured statement copy. Line-breaking rules in the CSS keep the text
+from breaking awkwardly at narrow widths, while the Markdown itself stays
 plain.
