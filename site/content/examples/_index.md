@@ -11,7 +11,7 @@ timing, explicit slot routing, and image handling.
 
 Follow the gallery from smallest to broadest: start with
 [Minimal](@/examples/minimal.md), move through focused examples that isolate one
-contract at a time, and finish with the [Feature Tour](@/examples/feature-tour.md)
+contract at a time, and finish with the [Peitho Tour](@/examples/peitho-tour.md)
 when you want the full breadth in one place.
 
 The examples connect back to Peitho's [pillars](@/_index.md), the deck authoring

@@ -904,7 +904,7 @@ fn lightning_talk_example_declares_agenda_sections() {
 }
 
 #[test]
-fn feature_tour_example_exercises_dispatch_sections_and_list_slot() {
+fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
     let out = tempdir().unwrap();
 
     Command::cargo_bin("peitho")
@@ -912,23 +912,26 @@ fn feature_tour_example_exercises_dispatch_sections_and_list_slot() {
         .current_dir(workspace_root())
         .args([
             "build",
-            "examples/feature-tour/deck.md",
+            "examples/peitho-tour/deck.md",
             "--out",
             out.path().to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("built 7 slide(s)"));
+        .stdout(predicate::str::contains("built 20 slide(s)"));
 
     let manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
             .unwrap();
-    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(480_000));
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(1_200_000));
     let sections = manifest["sections"].as_array().unwrap();
     let expected = [
-        ("Basics", 0, 1, 120_000),
-        ("Contracts", 2, 3, 180_000),
-        ("Presenting", 4, 6, 180_000),
+        ("Intro", 0, 3, 180_000),
+        ("Install", 4, 4, 60_000),
+        ("Write", 5, 10, 360_000),
+        ("Design", 11, 14, 300_000),
+        ("Run", 15, 18, 240_000),
+        ("Close", 19, 19, 60_000),
     ];
     assert_eq!(sections.len(), expected.len());
     for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
@@ -938,14 +941,15 @@ fn feature_tour_example_exercises_dispatch_sections_and_list_slot() {
         assert_eq!(section["plannedDurationMs"].as_u64(), Some(planned));
     }
 
-    // The checks slide is list-only, which structurally matches both `topic`
-    // and `agenda`; its explicit {"layout":"agenda"} request must win.
-    let checks = fs::read_to_string(out.path().join("slides/002-checks.html")).unwrap();
-    assert!(checks.contains("tour-agenda"));
+    // The preview slide holds only text + a single image; type-driven dispatch
+    // must land it on the `shot` layout (with the image slot) instead of
+    // `topic`, without any explicit `layout` pin.
+    let preview = fs::read_to_string(out.path().join("slides/015-preview.html")).unwrap();
+    assert!(preview.contains("guide-shot"));
 }
 
 #[test]
-fn feature_tour_or_new_image_example_builds() {
+fn peitho_tour_or_new_image_example_builds() {
     let out = tempdir().unwrap();
 
     Command::cargo_bin("peitho")

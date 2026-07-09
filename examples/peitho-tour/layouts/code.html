@@ -1,9 +1,10 @@
-<section class="tour tour-code-demo">
+<section class="guide guide-code">
   <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
-  <div class="tour-body">
+  <div class="code-body">
     <slot name="body" accepts="blocks" arity="0..*"></slot>
   </div>
-  <div class="tour-code">
+  <div class="code-panel">
     <slot name="code" accepts="code" arity="1..*"></slot>
+    <slot name="code-2" accepts="code" arity="0..1"></slot>
   </div>
 </section>
