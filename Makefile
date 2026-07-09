@@ -100,11 +100,11 @@ demo-site: docs-sources
 		$(PEITHO) publish --dist $(DEMO_OUT)/demo/$$d -- true || exit 1; \
 	done
 
-demo-screenshots: demo-site
+demo-screenshots:
 	mkdir -p $(DEMO_SCREENSHOTS_DIR)
 	node scripts/screenshot-decks.mjs $(DEMO_DECKS)
 
-og-brand: demo-site
+og-brand:
 	node scripts/render-og-brand.mjs
 
 deploy-demo: demo-site
