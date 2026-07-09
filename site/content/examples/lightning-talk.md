@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A five-minute poster-style talk that uses sections, notes, and a title/body layout with no code slot."
 
 [extra]
+deck = "lightning-talk"
 demo_path = "/demo/lightning-talk/"
 source_path = "static/deck-sources/lightning-talk/deck.md"
 +++

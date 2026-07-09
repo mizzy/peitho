@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A broad tour deck that combines custom layouts, presenter timing, notes, list slots, code slots, and keyed CSS."
 
 [extra]
+deck = "feature-tour"
 demo_path = "/demo/feature-tour/"
 source_path = "static/deck-sources/feature-tour/deck.md"
 +++

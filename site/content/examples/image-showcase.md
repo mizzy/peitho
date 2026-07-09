@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A minimal visual deck that maps one local Markdown image into a required image slot."
 
 [extra]
+deck = "image-showcase"
 demo_path = "/demo/image-showcase/"
 source_path = "static/deck-sources/image-showcase/deck.md"
 +++

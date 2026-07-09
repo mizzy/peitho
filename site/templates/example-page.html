@@ -19,7 +19,7 @@
 
 {% block docs_content %}
   {% for key, value in page.extra %}
-    {% if key != "demo_path" and key != "source_path" %}
+    {% if key != "demo_path" and key != "source_path" and key != "deck" %}
       {{ throw_unknown_example_extra_key }}
     {% endif %}
   {% endfor %}
@@ -44,6 +44,12 @@
     </header>
 
     {{ page.content | safe }}
+
+    {% if page.extra.deck %}
+      <p class="deck-shot">
+        <a href="{{ page.extra.demo_path }}"><img src="/deck-shots/{{ page.extra.deck }}.png" alt="{{ page.title }} deck screenshot"></a>
+      </p>
+    {% endif %}
 
     <p><a href="{{ page.extra.demo_path }}">Open live demo</a></p>
     <section class="deck-source">

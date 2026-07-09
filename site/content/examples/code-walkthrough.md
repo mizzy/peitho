@@ -5,6 +5,7 @@ template = "example-page.html"
 description = "A Rust typestate walkthrough that requires one code block per slide and styles annotation text beside it like a terminal."
 
 [extra]
+deck = "code-walkthrough"
 demo_path = "/demo/code-walkthrough/"
 source_path = "static/deck-sources/code-walkthrough/deck.md"
 +++
