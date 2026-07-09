@@ -849,11 +849,21 @@ fn two_column_example_preserves_blocks_slot_paragraph_after_heading() {
         .success()
         .stdout(predicate::str::contains("built 3 slide(s)"));
 
-    let html = fs::read_to_string(out.path().join("slides/001-vs.html")).unwrap();
-    assert!(html.contains("<h2>慣習マッピング</h2>"));
-    assert!(html.contains("見出しは<code>title</code>、コードは<code>code</code>、それ以外はまとめて<code>body</code>。"));
-    assert!(html.contains("<h2>明示指定</h2>"));
-    assert!(html.contains("複数の<code>blocks</code> slotを持つレイアウト"));
+    let html = fs::read_to_string(
+        out.path()
+            .join("slides/001-compare-convention-vs-explicit.html"),
+    )
+    .unwrap();
+    assert!(html.contains("<h2>Convention mapping</h2>"));
+    assert!(html.contains(
+        "Headings go to <code>title</code>, code goes to <code>code</code>, \
+         everything else goes to <code>body</code>."
+    ));
+    assert!(html.contains("<h2>Explicit selection</h2>"));
+    assert!(html.contains(
+        "Use it when a layout has multiple <code>blocks</code> slots and \
+         convention cannot resolve the ambiguity."
+    ));
 }
 
 #[test]
