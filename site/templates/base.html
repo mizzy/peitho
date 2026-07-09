@@ -4,7 +4,43 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ config.title }}{% endblock title %}</title>
-  <meta name="description" content="{% block description %}{% if page is defined and page.description %}{{ page.description }}{% elif section is defined and section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}">
+  {% if page is defined and page.title %}
+    {% set og_title = page.title ~ " - " ~ config.title %}
+  {% elif section is defined and section.title and section.title != config.title %}
+    {% set og_title = section.title ~ " - " ~ config.title %}
+  {% else %}
+    {% set og_title = config.title %}
+  {% endif %}
+  {% if page is defined and page.description %}
+    {% set og_description = page.description %}
+  {% elif section is defined and section.description %}
+    {% set og_description = section.description %}
+  {% else %}
+    {% set og_description = config.description %}
+  {% endif %}
+  {% if page is defined and page.permalink %}
+    {% set og_url = page.permalink %}
+  {% elif section is defined and section.permalink %}
+    {% set og_url = section.permalink %}
+  {% else %}
+    {% set og_url = config.base_url %}
+  {% endif %}
+  {% if page is defined and page.extra.deck %}
+    {% set og_image_url = get_url(path="deck-shots/" ~ page.extra.deck ~ ".png") %}
+  {% else %}
+    {% set og_image_url = get_url(path="og/brand.png") %}
+  {% endif %}
+  <meta name="description" content="{{ og_description }}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.title }}">
+  <meta property="og:title" content="{{ og_title }}">
+  <meta property="og:description" content="{{ og_description }}">
+  <meta property="og:url" content="{{ og_url | safe }}">
+  <meta property="og:image" content="{{ og_image_url | safe }}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ og_title }}">
+  <meta name="twitter:description" content="{{ og_description }}">
+  <meta name="twitter:image" content="{{ og_image_url | safe }}">
   <link rel="stylesheet" href='{{ get_url(path="site.css") }}'>
 </head>
 <body>
