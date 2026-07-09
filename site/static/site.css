@@ -335,6 +335,11 @@ ol {
   border: 1px solid var(--hair);
 }
 
+.doc-body .gallery-tile img {
+  margin: 0;
+  border: 0;
+}
+
 code {
   padding: 0.1em 0.25em;
   background: var(--code-bg);
