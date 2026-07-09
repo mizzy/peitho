@@ -1,0 +1,225 @@
+.peitho-slide {
+  width: 1280px;
+  height: 720px;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 56px 84px;
+  background:
+    radial-gradient(1100px 560px at 88% -12%, rgba(56, 189, 248, 0.14), transparent 62%),
+    radial-gradient(900px 520px at -8% 112%, rgba(139, 92, 246, 0.12), transparent 60%),
+    #0b1020;
+  color: #dce4f2;
+  font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+pre,
+code,
+kbd,
+samp {
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+}
+
+.guide h1 {
+  margin: 0;
+  font-size: 44px;
+  line-height: 1.3;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: #f2f6fd;
+  line-break: strict;
+  word-break: auto-phrase;
+}
+
+.guide h1 .slot-title::after {
+  content: "";
+  display: block;
+  width: 72px;
+  height: 4px;
+  margin-top: 20px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #38bdf8, #8b5cf6);
+}
+
+/* --- cover --- */
+
+.guide-cover {
+  justify-content: center;
+  align-items: center;
+}
+
+.cover-inner {
+  max-width: 1112px;
+  text-align: center;
+}
+
+.cover-inner::before {
+  content: "PEITHO TOUR";
+  display: block;
+  margin-bottom: 30px;
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0.48em;
+  color: #38bdf8;
+}
+
+.guide-cover h1 {
+  font-size: 80px;
+  letter-spacing: 0.01em;
+}
+
+.guide-cover h1 .slot-title::after {
+  margin: 38px auto 0;
+}
+
+/* --- shared body --- */
+
+.topic-body {
+  margin-top: 36px;
+}
+
+.slot-body {
+  font-size: 25px;
+  line-height: 1.85;
+  color: #aebbd2;
+  line-break: strict;
+  word-break: auto-phrase;
+}
+
+.slot-body p {
+  margin: 0 0 20px;
+  max-width: 38em;
+}
+
+.slot-body a {
+  color: #7dd3fc;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.slot-body strong {
+  color: #f2f6fd;
+  font-weight: 700;
+}
+
+.slot-body code {
+  font-size: 0.88em;
+  color: #a5ddff;
+  background: #17233e;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.slot-body ul {
+  margin: 0;
+  padding-left: 1.1em;
+}
+
+.slot-body li {
+  margin-bottom: 16px;
+}
+
+.slot-body li::marker {
+  color: #38bdf8;
+}
+
+/* --- code --- */
+
+.code-body {
+  margin-top: 28px;
+}
+
+.guide-code .slot-body p {
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.code-panel {
+  margin-top: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.code-panel pre {
+  display: block;
+  margin: 0;
+  padding: 24px 30px;
+  background: rgba(9, 14, 28, 0.85);
+  border: 1px solid #223052;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.code-panel pre code {
+  font-size: 19px;
+  line-height: 1.6;
+  color: #dbe5f5;
+}
+
+.code-panel .hl-comment {
+  color: #5d6d8c;
+}
+
+.code-panel .hl-string {
+  color: #8fe3b0;
+}
+
+.code-panel .hl-keyword,
+.code-panel .hl-storage {
+  color: #c4b5fd;
+}
+
+.code-panel .hl-constant {
+  color: #fda4af;
+}
+
+.code-panel .hl-function {
+  color: #93c5fd;
+}
+
+.code-panel .hl-type,
+.code-panel .hl-entity {
+  color: #5eead4;
+}
+
+/* --- shot --- */
+
+.guide-shot h1 {
+  font-size: 38px;
+}
+
+.shot-body {
+  margin-top: 18px;
+}
+
+.guide-shot .slot-body {
+  font-size: 22px;
+  line-height: 1.7;
+}
+
+.guide-shot .slot-body p {
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.shot-frame {
+  flex: 1;
+  min-height: 0;
+  margin: 24px 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shot-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border: 1px solid #263756;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}

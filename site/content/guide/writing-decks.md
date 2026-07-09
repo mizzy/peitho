@@ -11,26 +11,26 @@ A deck is one Markdown file. A deck may start with YAML frontmatter. Slides are
 split by `---`. A page settings comment belongs before the slide content when
 the slide needs a stable key, an explicit layout, or an agenda marker.
 
-This shape is adapted from `examples/feature-tour/deck.md`:
+This shape is adapted from `examples/peitho-tour/deck.md`:
 
 ````markdown
 ---
 time: 5m
 ---
 
-<!-- {"key":"tour-cover","section":"Basics","time":"2m"} -->
-# The Peitho Feature Tour
+<!-- {"key":"cover","section":"Intro","time":"2m"} -->
+# A Peitho Tour
 
 <!-- Welcome! This deck is plain Markdown. -->
 
 ---
 
-<!-- {"key":"checks","section":"Contracts","time":"3m"} -->
-# Everything the build catches
+<!-- {"key":"pillars","section":"Design","time":"3m"} -->
+# Three design pillars
 
-- A slot with too much or too little content
-- Content the layout has no slot for
-- A keyed CSS override pointing at a key that no longer exists
+- Content and design stay separate
+- Design that fits in git
+- Type-checked slot contracts
 ````
 
 ## Convention mapping

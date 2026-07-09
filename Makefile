@@ -9,14 +9,14 @@ ZOLA ?= zola
 ZOLA_BASE_URL ?=
 DEMO_OUT = .demo-site
 DEMO_OUT_ABS := $(abspath $(DEMO_OUT))
-DEMO_DECKS = minimal lightning-talk code-walkthrough keynote feature-tour two-column image-showcase aspect-ratio-4-3
+DEMO_DECKS = minimal lightning-talk code-walkthrough keynote peitho-tour two-column image-showcase aspect-ratio-4-3
 DEMO_SCREENSHOTS_DIR = $(DEMO_OUT)/deck-shots
 DOCS_SOURCE_DIR = site/static/deck-sources
 WRANGLER ?= npx -y wrangler
 
-.PHONY: help minimal lightning-talk code-walkthrough keynote feature-tour shell \
+.PHONY: help minimal lightning-talk code-walkthrough keynote peitho-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
-	feature-tour-windowed docs-sources demo-site demo-screenshots og-cards deploy-demo screenshots
+	peitho-tour-windowed docs-sources demo-site demo-screenshots og-cards deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -24,7 +24,7 @@ help:
 	@echo "  make lightning-talk    日本語LT（ダーク+大型タイポ）"
 	@echo "  make code-walkthrough  typestate解説（ターミナル風2カラム）"
 	@echo "  make keynote           キーノート（セリフ体中央寄せ）"
-	@echo "  make feature-tour      機能総ざらい（明示layout・listスロット・複数ノート）"
+	@echo "  make peitho-tour      Peithoの機能ツアー（4レイアウト・画像スロット・複数ノート）"
 	@echo ""
 	@echo "発表者画面を窓で開く: make keynote-windowed など <target>-windowed"
 	@echo "その他の追加フラグ:   make keynote PRESENT_FLAGS=\"--port 8000\""
@@ -48,8 +48,8 @@ code-walkthrough-windowed: code-walkthrough
 keynote-windowed: PRESENT_FLAGS += --presenter-windowed
 keynote-windowed: keynote
 
-feature-tour-windowed: PRESENT_FLAGS += --presenter-windowed
-feature-tour-windowed: feature-tour
+peitho-tour-windowed: PRESENT_FLAGS += --presenter-windowed
+peitho-tour-windowed: peitho-tour
 
 shell:
 	cd packages/peitho-present && [ -d node_modules ] || npm ci
@@ -67,8 +67,8 @@ code-walkthrough: shell
 keynote: shell
 	$(PRESENT) examples/keynote/deck.md $(PRESENT_FLAGS)
 
-feature-tour: shell
-	$(PRESENT) examples/feature-tour/deck.md $(PRESENT_FLAGS)
+peitho-tour: shell
+	$(PRESENT) examples/peitho-tour/deck.md $(PRESENT_FLAGS)
 
 docs-sources:
 	rm -rf $(DOCS_SOURCE_DIR)

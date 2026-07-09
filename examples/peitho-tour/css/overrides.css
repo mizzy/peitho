@@ -1,0 +1,25 @@
+/* Keyed overrides: each selector is validated against the deck at build
+   time — a key that no longer exists is a build error, not a stale rule. */
+
+/* The install command is the only line on the slide — let it breathe. */
+[data-slide-key="install"] .slot-code code {
+  font-size: 26px;
+}
+
+/* The sections example is a whole two-section deck — shrink it to fit. */
+[data-slide-key="sections"] .slot-code {
+  padding: 18px 24px;
+}
+
+[data-slide-key="sections"] .slot-code code {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* The closing statement gets the accent gradient itself. */
+[data-slide-key="closing"] .slot-title {
+  background: linear-gradient(90deg, #38bdf8, #a78bfa);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

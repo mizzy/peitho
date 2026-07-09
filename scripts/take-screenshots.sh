@@ -32,11 +32,11 @@ trap cleanup EXIT
 
 # --- examples ---
 declare -a DECKS=(
-  "minimal:examples/deck.md"
+  "minimal:examples/minimal/deck.md"
   "lightning-talk:examples/lightning-talk/deck.md"
   "code-walkthrough:examples/code-walkthrough/deck.md"
   "keynote:examples/keynote/deck.md"
-  "feature-tour:examples/feature-tour/deck.md"
+  "peitho-tour:examples/peitho-tour/deck.md"
 )
 
 for entry in "${DECKS[@]}"; do

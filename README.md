@@ -170,7 +170,7 @@ Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.
 | `examples/lightning-talk/` | Japanese LT | Dark, poster-style with large type | No code slot — writing code is a build error |
 | `examples/code-walkthrough/` | Rust typestate walkthrough | Terminal-style two-column | `code` has `arity="1"` — every slide requires code. A practical keyed-override example |
 | `examples/keynote/` | Japanese keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
-| `examples/feature-tour/` | Peitho's own feature tour | Light product-tour style, indigo accents | Four layouts. One slide is deliberately ambiguous between two of them and resolves it with an explicit `{"layout":"agenda"}`; also exercises the `list` slot type, multi-language highlighting, sections, and multi-comment speaker notes |
+| `examples/peitho-tour/` | Peitho's own product tour | Dark space theme with cyan/purple accents | Four layouts (`cover`, `topic`, `code`, `shot`), a full six-section agenda, an image slide that lands on the `shot` layout by type-driven dispatch, and multi-comment speaker notes throughout |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
 
 Same tool, same Markdown conventions — entirely different decks:
@@ -180,9 +180,9 @@ Same tool, same Markdown conventions — entirely different decks:
 | ![Minimal demo with the default theme](docs/images/example-minimal.png) | ![Japanese lightning talk: dark poster-style with large type](docs/images/example-lightning-talk.png) |
 | ![Rust typestate walkthrough: terminal-style two-column](docs/images/example-code-walkthrough.png) | ![Japanese keynote: cream background, serif, centered](docs/images/example-keynote.png) |
 
-The feature tour turns the tool on itself — one deck exercising explicit layout requests, the `list` slot type, multi-language highlighting, sections, and speaker notes:
+The Peitho tour turns the tool on itself — one deck walking through the concept, three pillars, and the write/preview/present loop across four custom layouts, type-driven dispatch, agenda sections, and speaker notes:
 
-![Peitho feature tour: light product-tour style with indigo accents](docs/images/example-feature-tour.png)
+![Peitho tour: dark space theme with cyan and purple accents](docs/images/example-peitho-tour.png)
 
 ```sh
 # Each sample has its layouts/ and css/ alongside it, so no flags are needed by convention

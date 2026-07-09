@@ -2,7 +2,7 @@
 /lightning-talk/* /demo/lightning-talk/:splat 301
 /code-walkthrough/* /demo/code-walkthrough/:splat 301
 /keynote/* /demo/keynote/:splat 301
-/feature-tour/* /demo/feature-tour/:splat 301
+/feature-tour/* /demo/peitho-tour/:splat 301
 /two-column/* /demo/two-column/:splat 301
 /image-showcase/* /demo/image-showcase/:splat 301
 /aspect-ratio-4-3/* /demo/aspect-ratio-4-3/:splat 301
