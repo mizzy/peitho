@@ -22,5 +22,21 @@
       <h1>{{ section.title }}</h1>
       {{ section.content | safe }}
     </header>
+
+    {% if section.pages %}
+      <ul class="gallery" role="list">
+        {% for example_page in section.pages %}
+          {% if not example_page.extra.deck %}
+            {{ throw_missing_example_deck_on_index }}
+          {% endif %}
+          <li class="gallery-tile">
+            <a href="{{ example_page.permalink }}">
+              <img src="/deck-shots/{{ example_page.extra.deck }}.png" alt="{{ example_page.title }} deck screenshot" loading="lazy">
+              <span class="gallery-title">{{ example_page.title }}</span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   </section>
 {% endblock docs_content %}

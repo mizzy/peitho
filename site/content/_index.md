@@ -25,6 +25,50 @@ title = "Install"
 code = "brew install mizzy/tap/peitho"
 
 [[extra.sections]]
+title = "Examples"
+gallery_intro = "Same tool, same Markdown conventions — different decks."
+
+[[extra.sections.gallery]]
+path = "@/examples/peitho-tour.md"
+title = "Peitho Tour"
+image = "/deck-shots/peitho-tour.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/minimal.md"
+title = "Minimal"
+image = "/deck-shots/minimal.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/lightning-talk.md"
+title = "Lightning Talk"
+image = "/deck-shots/lightning-talk.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/keynote.md"
+title = "Keynote"
+image = "/deck-shots/keynote.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/code-walkthrough.md"
+title = "Code Walkthrough"
+image = "/deck-shots/code-walkthrough.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/two-column.md"
+title = "Two Column"
+image = "/deck-shots/two-column.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/image-showcase.md"
+title = "Image Showcase"
+image = "/deck-shots/image-showcase.png"
+
+[[extra.sections.gallery]]
+path = "@/examples/aspect-ratio-4-3.md"
+title = "Aspect Ratio 4:3"
+image = "/deck-shots/aspect-ratio-4-3.png"
+
+[[extra.sections]]
 title = "Start"
 
 [[extra.sections.rows]]
