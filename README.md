@@ -6,101 +6,39 @@ Peitho is the Greek goddess who presides over the power to move people's hearts 
 
 Docs & demos: **[peitho.gosu.ke](https://peitho.gosu.ke/)** — a guide, an examples gallery, and the example decks built and served under `/demo/<name>/`. Auto-deployed on push to `main`; `envchain peitho make deploy-demo` for manual deploys.
 
-## Features
+## How it works
 
-- **Separation of content and design** — content is Markdown, design is layout HTML and CSS. The two are never mixed
-- **Git-manageable layouts** — design artifacts are just HTML/CSS. They diff and review cleanly
-- **Type-checked slot contracts** — the layout itself is the schema. Missing or extra slots, type mismatches, dangling references, and leftover content become build errors with line numbers and hints instead of being silently dropped
+Content is Markdown. Design is layout HTML plus theme CSS, versioned in git right next to the content. The two never mix — and the layout itself is the schema: each `<slot>` declares what it accepts and how many, and peitho type-checks every slide against its layout at build time. This is the built-in default layout, in its entirety:
 
-```
-error: slide 2 ('code-slide'), line 7: slot 'code' got 2 item(s), but layout 'title-body-code' allows 0..1
-  = help: use a layout with more code capacity or remove one code block
-```
-
-- **Per-slide tweaks anchored on stable keys** — pin a key with `<!-- {"key":"arch-1"} -->` and target it from CSS. Edit the title and the CSS still holds; target a key that doesn't exist and the build stops
-
-```css
-[data-slide-key="arch-1"] .slot-code {
-  grid-column: 2 / 3;
-  width: 60%;
-}
+```html
+<section class="peitho-slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body">
+    <slot name="body" accepts="blocks" arity="0..*"></slot>
+  </div>
+  <figure class="code">
+    <slot name="code" accepts="code" arity="0..1"></slot>
+  </figure>
+</section>
 ```
 
-- **Build-time syntax highlighting** — code blocks with a language tag are turned into `hl-*` class spans by syntect at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering)
-- **Time tracking with agenda sections** — declare a planned time in frontmatter (`time: 15m`) and, optionally, per-section budgets on page-settings comments (`{"section":"Setup","time":"1m"}`). The presenter agenda shows planned vs. actual per section in real time. Section totals must equal the deck's planned time — mismatches are build errors with line numbers
-- **Speaker notes as HTML comments** — non-JSON HTML comments in a slide body become that slide's speaker note (Marp / k1LoW/deck-style). Notes ride only into the presenter view; `dist/` never contains them (the publish contamination check enforces this)
-- **One-command preview loop** — `peitho preview` watches the deck and assets, rebuilds into a volatile preview cache, serves it locally, and reloads the browser while preserving the current slide and overview mode
-- **Dual-display presenter mode** — `peitho present` puts the slides full-screen on an external display and automatically places a presenter view (current/next slide, notes, timer) on your machine. Space starts/pauses the timer; arrows navigate; Esc closes everything
+Content that doesn't fit the contract — missing or extra slots, type mismatches, dangling references, leftover content — stops the build with a line number and a hint. Nothing is ever silently dropped:
 
-![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
+![peitho build refusing a deck whose slide has two code blocks against a slot that allows 0..1](site/static/guide-shots/build-error.png)
 
-## Install
+The three pillars, in short:
 
-### Homebrew (macOS / Linux)
+- **Separation of content and design** — content is Markdown, design is layout HTML and CSS. While writing, you never think about design; the design carries over to your next deck
+- **Git-manageable layouts** — design artifacts are plain HTML/CSS. They diff and review cleanly
+- **Type-checked slot contracts** — the layout is the schema. Violations are build errors with line numbers and hints, never silent drops
+
+## Quick start
 
 ```sh
-brew install mizzy/tap/peitho
+brew install mizzy/tap/peitho    # prebuilt binaries and cargo: see Install below
 ```
 
-Shell completions for bash/zsh/fish are installed automatically.
-
-### Prebuilt binaries
-
-Grab a prebuilt binary from the [Releases page](https://github.com/mizzy/peitho/releases). Each release ships a tarball per target with a single `peitho` binary — everything (layouts, base theme, presentation shell) is embedded, so Node.js and npm are not needed at runtime.
-
-```sh
-# macOS arm64 (Apple Silicon) — replace vX.Y.Z with the version you want
-curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
-curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
-shasum -a 256 -c peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
-tar xzf peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
-mv peitho-vX.Y.Z-aarch64-apple-darwin/peitho /usr/local/bin/
-```
-
-Available targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (Intel Mac is currently not supported because the GitHub Actions macos-13 runner queue wait times are too long). Or build from source with `cargo install --path crates/peitho` after cloning (run `cd packages/peitho-present && npm ci && npm run build` first so the shell is up to date).
-
-## Usage
-
-The deck argument defaults to `deck.md` in the current directory, so it can be omitted when the file follows the convention.
-
-```sh
-# Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
-peitho build            # same as: peitho build deck.md
-
-# Daily editing loop: watch, serve, open, and reload on every successful rebuild
-peitho preview
-
-# Preview controls: o, Enter, or Esc toggles single-slide and tile overview modes; arrows move horizontally and vertically in overview; click opens the selected tile
-
-# Rebuild on every save for an external server or pipeline
-peitho build --watch
-
-# Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
-peitho present
-
-# Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
-peitho present --presenter-windowed
-
-# Export a PDF
-peitho export pdf -o deck.pdf
-
-# A deck with a non-default name is passed explicitly
-peitho build slides.md
-
-# Publish (inspects, then delegates to your existing deploy command. Don't reinvent the deploy)
-peitho publish -- aws s3 sync dist/ s3://your-bucket/
-
-# Generate a shell completion script (bash / zsh / fish / powershell / elvish)
-peitho completions zsh
-```
-
-Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
-
-When developing the presentation shell (TS), rebuild `dist/shell.js` and `dist/preview.js` with `cd packages/peitho-present && npm ci && npm run build` (both are committed; CI checks for drift).
-
-## Writing a deck
-
-Convention mapping turns plain Markdown into slides as-is. Slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest goes to the body. Deck-level settings live in YAML frontmatter at the top; per-slide settings live in a `<!-- { ... } -->` JSON comment; non-JSON HTML comments become speaker notes.
+Write `deck.md`. Convention mapping turns plain Markdown into slides as-is: slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest becomes the body. Deck-level settings live in YAML frontmatter, per-slide settings in a `<!-- { ... } -->` JSON comment, and non-JSON HTML comments become speaker notes:
 
 ````markdown
 ---
@@ -127,6 +65,57 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 ```
 ````
 
+### Preview while you write
+
+`peitho preview` watches the deck and its assets, rebuilds on every save, and reloads the browser — keeping the slide you were on and the overview mode across reloads:
+
+![peitho preview prints the URL it is serving on, plus a rebuild line on every save](site/static/guide-shots/cli-preview.png)
+
+Press `o`, `Enter`, or `Esc` to flip between the single-slide view and a tile overview of the whole deck; arrows walk the grid, and clicking (or `Enter`) opens the selected tile:
+
+![The preview overview: every slide as a tile in a scrollable grid](site/static/guide-shots/preview-overview.png)
+
+### Present
+
+`peitho present` puts the slides full-screen on an external display and automatically places a presenter view — current and next slide, speaker notes, and a timer with a per-section agenda — on your machine:
+
+![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
+
+`Space` starts/pauses the timer, arrows navigate, `S` swaps the two windows if the displays were misidentified, and `Esc` closes everything. For debugging (or a single display), `--presenter-windowed` opens normal windows instead of full screen.
+
+### Ship it
+
+```sh
+peitho export pdf -o deck.pdf                     # print-quality PDF
+peitho publish -- aws s3 sync dist/ s3://bucket/  # inspect dist/, then hand off to your deploy command
+```
+
+`publish` gatekeeps `dist/` — the presentation shell and speaker notes are never mixed into distributed artifacts — and then delegates to whatever deploy command follows `--`. Don't reinvent the deploy.
+
+## Writing decks
+
+### Per-slide settings
+
+A slide's page settings are one `<!-- { ... } -->` JSON comment (at most one per slide):
+
+- `key` — a stable handle for per-slide CSS. Edit the title and the CSS still holds; target a key that doesn't exist and the build stops:
+
+  ```css
+  [data-slide-key="arch-1"] .slot-code {
+    grid-column: 2 / 3;
+    width: 60%;
+  }
+  ```
+
+- `layout` — pin a layout by name, e.g. `{"layout":"cover"}`. An unknown name is a build error with a candidate list
+- `section` + `time` — the marked slide starts an agenda section that runs until the next marker. Section budgets must add up to the deck's `time` frontmatter (when present) — mismatches are build errors with line numbers. During the talk, the presenter agenda shows planned vs. actual per section in real time
+
+### Speaker notes
+
+Any non-JSON HTML comment in a slide body becomes that slide's speaker note (Marp / [k1LoW/deck](https://github.com/k1LoW/deck)-style); multiple comments are joined with a blank line. Notes ride only into the presenter view — `dist/` never contains them (the publish contamination check enforces this).
+
+### Images
+
 Markdown images are local files written as an image-only paragraph:
 
 ```markdown
@@ -135,7 +124,25 @@ Markdown images are local files written as an image-only paragraph:
 
 Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
 
-## Deck frontmatter
+### Explicit slots
+
+When convention mapping can't tell where content belongs — two-column layouts, multiple `blocks` slots — route it explicitly with `::: {slot=name}` fenced blocks:
+
+```markdown
+# Two columns
+
+::: {slot=left}
+Everything here goes to the `left` slot.
+:::
+
+::: {slot=right}
+And this to `right`.
+:::
+```
+
+Unclosed or nested blocks, unknown slot names, and contract violations inside the routed content are all build errors with line numbers.
+
+### Deck frontmatter
 
 All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Supported keys:
 
@@ -151,17 +158,79 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 
 Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
-## Custom syntaxes
-
-Point `syntaxes:` in the deck's frontmatter at a `.sublime-syntax` file or a directory of `*.sublime-syntax` files, or drop a `syntaxes/` directory next to the deck for zero-config pickup. Both augment the built-in set, so built-in tags like `rust` and `js` still work. Unknown language tags remain build errors with line numbers.
-
-## Multiple layouts
+## Layouts and themes
 
 Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.html` files; a directory turns every `*.html` inside it into a layout (name is the file stem, order is deterministic by filename). Zero-config: a `layouts/` directory next to the deck is picked up automatically. Each slide's layout is chosen in the following order (a hybrid approach inspired by the page settings in [k1LoW/deck](https://github.com/k1LoW/deck)):
 
 1. **Explicit** — if a page-settings comment `<!-- {"layout":"cover"} -->` is present, use that layout (an unknown name is a build error with a candidate list)
 2. **Single layout, unconditional** — if there is only one layout, always use it (contract violations still error with line numbers, as usual)
 3. **Type-driven dispatch** — with multiple layouts, each slide is routed to the layout whose slot contract matches the shape of its content (title only / has body / has code, etc.). Exactly one match is required; **multiple matches (ambiguous) and zero matches are both build errors** rather than silently resolved, prompting an explicit choice
+
+### Syntax highlighting
+
+Code blocks with a language tag are turned into `hl-*` class spans by [syntect](https://github.com/trishume/syntect) at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering).
+
+To add languages, point `syntaxes:` in the frontmatter at a `.sublime-syntax` file or a directory of `*.sublime-syntax` files, or drop a `syntaxes/` directory next to the deck. Both augment the built-in set, so built-in tags like `rust` and `js` still work.
+
+## Install
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew install mizzy/tap/peitho
+```
+
+Shell completions for bash/zsh/fish are installed automatically.
+
+### Prebuilt binaries
+
+Grab a prebuilt binary from the [Releases page](https://github.com/mizzy/peitho/releases). Each release ships a tarball per target with a single `peitho` binary — everything (layouts, base theme, presentation shell) is embedded, so Node.js and npm are not needed at runtime.
+
+```sh
+# macOS arm64 (Apple Silicon) — replace vX.Y.Z with the version you want
+curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/mizzy/peitho/releases/download/vX.Y.Z/peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz.sha256
+tar xzf peitho-vX.Y.Z-aarch64-apple-darwin.tar.gz
+mv peitho-vX.Y.Z-aarch64-apple-darwin/peitho /usr/local/bin/
+```
+
+Available targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (Intel Mac is currently not supported because the GitHub Actions macos-13 runner queue wait times are too long). Or build from source with `cargo install --path crates/peitho` after cloning (run `cd packages/peitho-present && npm ci && npm run build` first so the shell is up to date).
+
+## CLI reference
+
+The deck argument defaults to `deck.md` in the current directory, so it can be omitted when the file follows the convention.
+
+```sh
+# Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
+peitho build            # same as: peitho build deck.md
+
+# Daily editing loop: watch, serve, open, and reload on every successful rebuild
+peitho preview
+
+# Rebuild on every save for an external server or pipeline
+peitho build --watch
+
+# Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
+peitho present
+
+# Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
+peitho present --presenter-windowed
+
+# Export a PDF
+peitho export pdf -o deck.pdf
+
+# A deck with a non-default name is passed explicitly
+peitho build slides.md
+
+# Publish (inspects, then delegates to your existing deploy command. Don't reinvent the deploy)
+peitho publish -- aws s3 sync dist/ s3://your-bucket/
+
+# Generate a shell completion script (bash / zsh / fish / powershell / elvish)
+peitho completions zsh
+```
+
+Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
 ## Examples
 
@@ -208,6 +277,7 @@ Markdown ─→ peitho build (parse, map, 4-stage check. Deterministic, pure fun
 
 - The build core is Rust (typestate: `Parsed→Mapped→Checked→Rendered`. Unchecked slides can't reach the renderer)
 - The presentation shell is TypeScript. The contract (domain types like the manifest) has Rust as its single source; TS types are generated into `bindings/` and CI checks for drift
+- When developing the presentation shell, rebuild `dist/shell.js` and `dist/preview.js` with `cd packages/peitho-present && npm ci && npm run build` (both are committed; CI checks for drift)
 - See `docs/PEITHO_KICKOFF.md` for the detailed design
 
 ## License
