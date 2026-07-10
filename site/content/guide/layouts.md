@@ -54,6 +54,19 @@ An unknown explicit layout name is a build error. With structural dispatch,
 zero matches and multiple matches are also build errors; Peitho does not pick a
 layout silently.
 
+## Inspecting layouts
+
+Use `peitho layouts deck.md` to print the resolved layout source and each
+slot contract. Add `--json` when another tool needs the same information.
+
+When dispatch is unclear, use `peitho layouts deck.md --explain <slide-key>`.
+The trace shows the resolved layout source, the addressed slide, each structural
+candidate, and the final dispatch result. A missing slide key exits with status
+2 and prints the known keys; a dispatch failure trace exits with status 1.
+Explicit and sole-layout no-match failures include a `reason:` line, such as
+`reason: no slot accepts image in layout 'cover'`, with the underlying mapping
+error.
+
 ## Keyed CSS overrides
 
 Give a slide a stable key in its page settings comment:

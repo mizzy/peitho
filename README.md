@@ -205,6 +205,9 @@ The deck argument defaults to `deck.md` in the current directory, so it can be o
 # Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
 peitho build            # same as: peitho build deck.md
 
+# Inspect layout slot contracts and explain dispatch for a slide key
+peitho layouts --explain intro
+
 # Daily editing loop: watch, serve, open, and reload on every successful rebuild
 peitho preview
 

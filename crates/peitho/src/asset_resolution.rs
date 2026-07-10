@@ -8,10 +8,26 @@ use peitho_core::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAssets {
-    pub layouts: Option<PathBuf>,
-    pub css: Option<PathBuf>,
-    pub syntaxes: Option<PathBuf>,
-    pub fonts: Option<PathBuf>,
+    pub layouts: Provenance,
+    pub css: Provenance,
+    pub syntaxes: Provenance,
+    pub fonts: Provenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provenance {
+    Explicit(PathBuf),
+    DeckAdjacent(PathBuf),
+    Builtin,
+}
+
+impl Provenance {
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Explicit(path) | Self::DeckAdjacent(path) => Some(path),
+            Self::Builtin => None,
+        }
+    }
 }
 
 pub fn resolve_assets(
@@ -32,7 +48,7 @@ fn resolve_asset(
     frontmatter: &ParsedFrontmatter,
     key: &'static str,
     value: Option<&AssetPath>,
-) -> miette::Result<Option<PathBuf>> {
+) -> miette::Result<Provenance> {
     if let Some(value) = value {
         let path = resolve_against_deck(deck, value);
         if !path.try_exists().into_diagnostic()? {
@@ -48,11 +64,15 @@ fn resolve_asset(
                 ),
             )));
         }
-        return Ok(Some(path));
+        return Ok(Provenance::Explicit(path));
     }
 
     let conventional = deck_parent(deck).join(key);
-    Ok(conventional.is_dir().then_some(conventional))
+    if conventional.is_dir() {
+        Ok(Provenance::DeckAdjacent(conventional))
+    } else {
+        Ok(Provenance::Builtin)
+    }
 }
 
 fn resolve_against_deck(deck: &Path, value: &AssetPath) -> PathBuf {
@@ -92,7 +112,20 @@ mod tests {
 
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.layouts, Some(layouts));
+        assert_eq!(assets.layouts, Provenance::Explicit(layouts));
+    }
+
+    #[test]
+    fn explicit_layouts_path_records_explicit_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("theme").join("layouts");
+        std::fs::create_dir_all(&layouts).unwrap();
+        let frontmatter = parse("---\nlayouts: ./theme/layouts\n---\n# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.layouts, Provenance::Explicit(layouts));
     }
 
     #[test]
@@ -105,7 +138,7 @@ mod tests {
 
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.fonts, Some(fonts));
+        assert_eq!(assets.fonts, Provenance::Explicit(fonts));
     }
 
     #[test]
@@ -139,7 +172,46 @@ mod tests {
     }
 
     #[test]
-    fn deck_adjacent_directory_is_used_without_frontmatter_key() {
+    fn explicit_css_path_records_explicit_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let css = dir.path().join("theme").join("css");
+        std::fs::create_dir_all(&css).unwrap();
+        let frontmatter = parse("---\ncss: ./theme/css\n---\n# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.css, Provenance::Explicit(css));
+    }
+
+    #[test]
+    fn explicit_syntaxes_path_records_explicit_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let syntaxes = dir.path().join("theme").join("syntaxes");
+        std::fs::create_dir_all(&syntaxes).unwrap();
+        let frontmatter = parse("---\nsyntaxes: ./theme/syntaxes\n---\n# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.syntaxes, Provenance::Explicit(syntaxes));
+    }
+
+    #[test]
+    fn deck_adjacent_layouts_directory_records_deck_adjacent_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        std::fs::create_dir_all(&layouts).unwrap();
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.layouts, Provenance::DeckAdjacent(layouts));
+    }
+
+    #[test]
+    fn deck_adjacent_css_directory_records_deck_adjacent_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let css = dir.path().join("css");
@@ -148,11 +220,24 @@ mod tests {
 
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.css, Some(css));
+        assert_eq!(assets.css, Provenance::DeckAdjacent(css));
     }
 
     #[test]
-    fn deck_adjacent_fonts_directory_is_used_without_frontmatter_key() {
+    fn deck_adjacent_syntaxes_directory_records_deck_adjacent_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let syntaxes = dir.path().join("syntaxes");
+        std::fs::create_dir_all(&syntaxes).unwrap();
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.syntaxes, Provenance::DeckAdjacent(syntaxes));
+    }
+
+    #[test]
+    fn deck_adjacent_fonts_directory_records_deck_adjacent_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let fonts = dir.path().join("fonts");
@@ -161,6 +246,50 @@ mod tests {
 
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.fonts, Some(fonts));
+        assert_eq!(assets.fonts, Provenance::DeckAdjacent(fonts));
+    }
+
+    #[test]
+    fn missing_layouts_directory_records_builtin_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.layouts, Provenance::Builtin);
+    }
+
+    #[test]
+    fn missing_css_directory_records_builtin_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.css, Provenance::Builtin);
+    }
+
+    #[test]
+    fn missing_syntaxes_directory_records_builtin_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.syntaxes, Provenance::Builtin);
+    }
+
+    #[test]
+    fn missing_fonts_directory_records_builtin_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.fonts, Provenance::Builtin);
     }
 }

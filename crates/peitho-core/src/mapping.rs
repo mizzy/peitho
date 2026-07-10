@@ -8,6 +8,53 @@ use crate::{
     phase::{Deck, Mapped, MappedSlide, MappedSlot, Parsed, ParsedSlide, UnassignedFragment},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchTrace {
+    Explicit {
+        layout: String,
+        line: usize,
+        result: DispatchResult,
+    },
+    SoleLayout {
+        layout: String,
+        result: DispatchResult,
+    },
+    StructuralMatch {
+        candidates: Vec<Candidate>,
+        result: DispatchResult,
+    },
+}
+
+impl DispatchTrace {
+    pub fn result(&self) -> &DispatchResult {
+        match self {
+            Self::Explicit { result, .. }
+            | Self::SoleLayout { result, .. }
+            | Self::StructuralMatch { result, .. } => result,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchResult {
+    Matched(String),
+    NoMatch { reason: Option<String> },
+    Ambiguous(Vec<String>),
+    UnknownLayout(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub layout: String,
+    pub outcome: CandidateOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateOutcome {
+    Matched,
+    Rejected { reason: String },
+}
+
 /// Dispatch every slide to a layout, then map its fragments by convention.
 ///
 /// The rules, in order and deterministic:
@@ -36,63 +83,190 @@ pub fn map_by_convention(deck: Deck<Parsed>, layout: &Layout) -> Result<Deck<Map
     dispatch_by_convention(deck, &Layouts::single(layout.clone()))
 }
 
+pub fn explain_dispatch(slide: &ParsedSlide, layouts: &Layouts) -> DispatchTrace {
+    try_dispatch(slide, layouts).trace
+}
+
+struct DispatchAttempt {
+    trace: DispatchTrace,
+    mapped: Option<MappedSlide>,
+    error: Option<BuildError>,
+}
+
+impl DispatchAttempt {
+    fn matched(trace: DispatchTrace, mapped: MappedSlide) -> Self {
+        Self {
+            trace,
+            mapped: Some(mapped),
+            error: None,
+        }
+    }
+
+    fn failed(trace: DispatchTrace, error: BuildError) -> Self {
+        Self {
+            trace,
+            mapped: None,
+            error: Some(error),
+        }
+    }
+}
+
 fn dispatch_slide(slide: ParsedSlide, layouts: &Layouts) -> Result<MappedSlide> {
+    let attempt = try_dispatch(&slide, layouts);
+    match (attempt.mapped, attempt.error) {
+        (Some(mapped), None) => Ok(mapped),
+        (None, Some(err)) => Err(err),
+        _ => unreachable!("dispatch attempts are either matched or failed"),
+    }
+}
+
+fn try_dispatch(slide: &ParsedSlide, layouts: &Layouts) -> DispatchAttempt {
     if let Some(request) = &slide.layout_request {
         let Some(layout) = layouts.get(&request.name) else {
-            return Err(BuildError::new(
-                ErrorKind::Layout,
-                Some(request.line),
-                format!("unknown layout '{}'", request.name),
-                format!("use one of: {}", layouts.names().join(", ")),
-            ));
+            let trace = DispatchTrace::Explicit {
+                layout: request.name.clone(),
+                line: request.line,
+                result: DispatchResult::UnknownLayout(request.name.clone()),
+            };
+            return DispatchAttempt::failed(trace, unknown_layout_error(request, layouts));
         };
-        return map_slide(&slide, layout);
+        return match map_slide(slide, layout) {
+            Ok(mapped) => {
+                let trace = DispatchTrace::Explicit {
+                    layout: request.name.clone(),
+                    line: request.line,
+                    result: DispatchResult::Matched(layout.name().to_owned()),
+                };
+                DispatchAttempt::matched(trace, mapped)
+            }
+            Err(err) => {
+                let reason = err.message.clone();
+                let trace = DispatchTrace::Explicit {
+                    layout: request.name.clone(),
+                    line: request.line,
+                    result: DispatchResult::NoMatch {
+                        reason: Some(reason),
+                    },
+                };
+                DispatchAttempt::failed(trace, err)
+            }
+        };
     }
 
     if layouts.len() == 1 {
         let layout = layouts.iter().next().expect("single layout exists");
-        return map_slide(&slide, layout);
+        return match map_slide(slide, layout) {
+            Ok(mapped) => {
+                let trace = DispatchTrace::SoleLayout {
+                    layout: layout.name().to_owned(),
+                    result: DispatchResult::Matched(layout.name().to_owned()),
+                };
+                DispatchAttempt::matched(trace, mapped)
+            }
+            Err(err) => {
+                let reason = err.message.clone();
+                let trace = DispatchTrace::SoleLayout {
+                    layout: layout.name().to_owned(),
+                    result: DispatchResult::NoMatch {
+                        reason: Some(reason),
+                    },
+                };
+                DispatchAttempt::failed(trace, err)
+            }
+        };
     }
 
     let mut matches = Vec::new();
     let mut rejections = Vec::new();
+    let mut candidates = Vec::new();
     for layout in layouts.iter() {
-        let mapped = match map_slide(&slide, layout) {
+        let mapped = match map_slide(slide, layout) {
             Ok(mapped) => mapped,
             Err(err) => {
+                candidates.push(Candidate {
+                    layout: layout.name().to_owned(),
+                    outcome: CandidateOutcome::Rejected {
+                        reason: err.message.clone(),
+                    },
+                });
                 rejections.push(format!("{}: {}", layout.name(), err.message));
                 continue;
             }
         };
         match check_slide(&mapped) {
-            Ok(()) => matches.push(mapped),
-            Err(err) => rejections.push(format!("{}: {}", layout.name(), err.message)),
+            Ok(()) => {
+                candidates.push(Candidate {
+                    layout: layout.name().to_owned(),
+                    outcome: CandidateOutcome::Matched,
+                });
+                matches.push(mapped);
+            }
+            Err(err) => {
+                candidates.push(Candidate {
+                    layout: layout.name().to_owned(),
+                    outcome: CandidateOutcome::Rejected {
+                        reason: err.message.clone(),
+                    },
+                });
+                rejections.push(format!("{}: {}", layout.name(), err.message));
+            }
         }
     }
 
     let line = slide.fragments.first().map(SourceFragment::line);
     match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(BuildError::new(
-            ErrorKind::Layout,
-            line,
-            format!("no layout matches this slide\n{}", rejections.join("\n")),
-            r#"adjust the slide content or pick a layout explicitly with <!-- {"layout":"…"} -->"#,
-        )),
+        1 => {
+            let mapped = matches.remove(0);
+            let trace = DispatchTrace::StructuralMatch {
+                candidates,
+                result: DispatchResult::Matched(mapped.layout.name().to_owned()),
+            };
+            DispatchAttempt::matched(trace, mapped)
+        }
+        0 => {
+            let trace = DispatchTrace::StructuralMatch {
+                candidates,
+                result: DispatchResult::NoMatch { reason: None },
+            };
+            DispatchAttempt::failed(
+                trace,
+                BuildError::new(
+                    ErrorKind::Layout,
+                    line,
+                    format!("no layout matches this slide\n{}", rejections.join("\n")),
+                    r#"adjust the slide content or pick a layout explicitly with <!-- {"layout":"…"} -->"#,
+                ),
+            )
+        }
         _ => {
             let names = matches
                 .iter()
                 .map(|mapped| mapped.layout.name().to_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(BuildError::new(
-                ErrorKind::Layout,
-                line,
-                format!("slide matches multiple layouts: {names}"),
-                r#"pick one explicitly with <!-- {"layout":"…"} -->"#,
-            ))
+                .collect::<Vec<_>>();
+            let trace = DispatchTrace::StructuralMatch {
+                candidates,
+                result: DispatchResult::Ambiguous(names.clone()),
+            };
+            DispatchAttempt::failed(
+                trace,
+                BuildError::new(
+                    ErrorKind::Layout,
+                    line,
+                    format!("slide matches multiple layouts: {}", names.join(", ")),
+                    r#"pick one explicitly with <!-- {"layout":"…"} -->"#,
+                ),
+            )
         }
     }
+}
+
+fn unknown_layout_error(request: &crate::phase::LayoutRequest, layouts: &Layouts) -> BuildError {
+    BuildError::new(
+        ErrorKind::Layout,
+        Some(request.line),
+        format!("unknown layout '{}'", request.name),
+        format!("use one of: {}", layouts.names().join(", ")),
+    )
 }
 
 fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
@@ -279,6 +453,236 @@ mod tests {
         .unwrap();
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "statement");
+    }
+
+    #[test]
+    fn explain_dispatch_records_explicit_layout_match() {
+        let deck = parse_markdown(
+            "<!-- {\"layout\":\"statement\"} -->\n# Title\n\nBody",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &cover_and_statement());
+
+        assert_eq!(
+            trace,
+            DispatchTrace::Explicit {
+                layout: "statement".to_owned(),
+                line: 1,
+                result: DispatchResult::Matched("statement".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_records_unknown_explicit_layout() {
+        let deck = parse_markdown(
+            "<!-- {\"layout\":\"missing\"} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &cover_and_statement());
+
+        assert_eq!(
+            trace,
+            DispatchTrace::Explicit {
+                layout: "missing".to_owned(),
+                line: 1,
+                result: DispatchResult::UnknownLayout("missing".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_records_explicit_map_failure_reason() {
+        let deck = parse_markdown(
+            "<!-- {\"layout\":\"cover\"} -->\n# Hello\n\n![alt](pic.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &cover_and_statement());
+
+        match trace {
+            DispatchTrace::Explicit {
+                layout,
+                line,
+                result:
+                    DispatchResult::NoMatch {
+                        reason: Some(reason),
+                    },
+            } => {
+                assert_eq!(layout, "cover");
+                assert_eq!(line, 1);
+                assert!(reason.contains("no slot accepts image in layout 'cover'"));
+            }
+            other => panic!("expected explicit no-match trace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_dispatch_records_sole_layout_match() {
+        let deck = parse_markdown(
+            "# Title\n\nBody",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let layout = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::single(layout);
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &layouts);
+
+        assert_eq!(
+            trace,
+            DispatchTrace::SoleLayout {
+                layout: "cover".to_owned(),
+                result: DispatchResult::Matched("cover".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_records_sole_layout_map_failure_reason() {
+        let deck = parse_markdown(
+            "# Hello\n\n![alt](pic.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let layout = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::single(layout);
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &layouts);
+
+        match trace {
+            DispatchTrace::SoleLayout {
+                layout,
+                result:
+                    DispatchResult::NoMatch {
+                        reason: Some(reason),
+                    },
+            } => {
+                assert_eq!(layout, "cover");
+                assert!(reason.contains("no slot accepts image in layout 'cover'"));
+            }
+            other => panic!("expected sole-layout no-match trace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_dispatch_records_unique_structural_match() {
+        let deck = parse_markdown(
+            "# Statement\n\nBody paragraph",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &cover_and_statement());
+
+        assert_eq!(
+            trace,
+            DispatchTrace::StructuralMatch {
+                candidates: vec![
+                    Candidate {
+                        layout: "cover".to_owned(),
+                        outcome: CandidateOutcome::Rejected {
+                            reason: "unassigned content remains for missing 'body' slot".to_owned()
+                        }
+                    },
+                    Candidate {
+                        layout: "statement".to_owned(),
+                        outcome: CandidateOutcome::Matched
+                    }
+                ],
+                result: DispatchResult::Matched("statement".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_records_structural_no_match_with_candidate_reasons() {
+        let deck = parse_markdown(
+            "# Title\n\n```rust\nfn main() {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &cover_and_statement());
+
+        assert_eq!(
+            trace,
+            DispatchTrace::StructuralMatch {
+                candidates: vec![
+                    Candidate {
+                        layout: "cover".to_owned(),
+                        outcome: CandidateOutcome::Rejected {
+                            reason: "unassigned content remains for missing 'code' slot".to_owned()
+                        }
+                    },
+                    Candidate {
+                        layout: "statement".to_owned(),
+                        outcome: CandidateOutcome::Rejected {
+                            reason: "slot 'body' got 0 item(s), but layout 'statement' allows 1..*"
+                                .to_owned()
+                        }
+                    }
+                ],
+                result: DispatchResult::NoMatch { reason: None }
+            }
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_records_structural_ambiguity() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let closing = parse_layout(
+            "closing",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, closing]).unwrap();
+        let deck =
+            parse_markdown("# Title Only", &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        let trace = explain_dispatch(slide, &layouts);
+
+        assert_eq!(
+            trace,
+            DispatchTrace::StructuralMatch {
+                candidates: vec![
+                    Candidate {
+                        layout: "cover".to_owned(),
+                        outcome: CandidateOutcome::Matched
+                    },
+                    Candidate {
+                        layout: "closing".to_owned(),
+                        outcome: CandidateOutcome::Matched
+                    }
+                ],
+                result: DispatchResult::Ambiguous(vec!["cover".to_owned(), "closing".to_owned()])
+            }
+        );
     }
 
     #[test]
