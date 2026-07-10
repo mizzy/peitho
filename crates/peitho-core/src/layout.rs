@@ -45,6 +45,19 @@ pub struct Layouts {
     layouts: Vec<Layout>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutSummary {
+    pub name: String,
+    pub slots: Vec<SlotSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotSummary {
+    pub name: String,
+    pub accepts: String,
+    pub arity: String,
+}
+
 impl Layouts {
     pub fn new(layouts: Vec<Layout>) -> Result<Self> {
         if layouts.is_empty() {
@@ -102,6 +115,24 @@ impl Layouts {
             .flat_map(|layout| layout.slots().keys().map(SlotName::class_name))
             .collect()
     }
+}
+
+pub fn describe_layouts(layouts: &Layouts) -> Vec<LayoutSummary> {
+    layouts
+        .iter()
+        .map(|layout| LayoutSummary {
+            name: layout.name().to_owned(),
+            slots: layout
+                .slots()
+                .values()
+                .map(|slot| SlotSummary {
+                    name: slot.name.as_str().to_owned(),
+                    accepts: slot.accepts.to_string(),
+                    arity: slot.arity.to_string(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
@@ -305,6 +336,59 @@ mod tests {
         assert_eq!(
             err.help,
             "wrap each slide layout in one slide host <section> element"
+        );
+    }
+
+    #[test]
+    fn describes_layouts_in_cli_order_with_sorted_slots() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let statement = parse_layout(
+            "statement",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="1..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let title_body_code = parse_layout(
+            "title-body-code",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, statement, title_body_code]).unwrap();
+
+        let summaries = describe_layouts(&layouts);
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cover", "statement", "title-body-code"]
+        );
+        assert_eq!(
+            summaries[2]
+                .slots
+                .iter()
+                .map(|slot| (
+                    slot.name.as_str(),
+                    slot.accepts.as_str(),
+                    slot.arity.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("body", "blocks", "0..*"),
+                ("code", "code", "0..1"),
+                ("title", "inline", "1")
+            ]
         );
     }
 }

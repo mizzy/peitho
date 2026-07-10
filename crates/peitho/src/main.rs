@@ -18,11 +18,12 @@ use notify::{PollWatcher, RecursiveMode};
 use notify_debouncer_mini::{
     new_debouncer_opt, Config as DebounceConfig, DebounceEventResult, Debouncer,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 mod asset_resolution;
 
-use asset_resolution::{resolve_assets, ResolvedAssets};
+use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
 use peitho::{browser, server};
 
 struct BuildArtifacts {
@@ -132,27 +133,27 @@ impl WatchTargets {
             path: input,
             ext: Some("md"),
         }];
-        if let Some(path) = &assets.layouts {
+        if let Some(path) = assets.layouts.path() {
             roots.push(WatchRoot {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 ext: Some("html"),
             });
         }
-        if let Some(path) = &assets.css {
+        if let Some(path) = assets.css.path() {
             roots.push(WatchRoot {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 ext: Some("css"),
             });
         }
-        if let Some(path) = &assets.syntaxes {
+        if let Some(path) = assets.syntaxes.path() {
             roots.push(WatchRoot {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 ext: Some("sublime-syntax"),
             });
         }
-        if let Some(path) = &assets.fonts {
+        if let Some(path) = assets.fonts.path() {
             roots.push(WatchRoot {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 ext: None,
             });
         }
@@ -313,6 +314,14 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+    Layouts {
+        #[arg(default_value = "deck.md")]
+        input: PathBuf,
+        #[arg(long)]
+        explain: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Preview {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
@@ -390,6 +399,11 @@ fn main() -> miette::Result<()> {
                 build(&options)
             }
         }
+        Command::Layouts {
+            input,
+            explain,
+            json,
+        } => cmd_layouts(input, explain, json),
         Command::Preview {
             input,
             port,
@@ -461,6 +475,409 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
         out.display()
     );
     Ok(())
+}
+
+fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::Result<()> {
+    let markdown = fs::read_to_string(&input).map_err(|err| {
+        miette::miette!(
+            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
+            input.display()
+        )
+    })?;
+    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
+    let assets = resolve_assets(&input, &frontmatter)?;
+    let layouts = load_layouts(assets.layouts.path())?;
+
+    let Some(key) = explain else {
+        if json {
+            print_layouts_json(&assets.layouts, &layouts)?;
+        } else {
+            print_layouts_human(&assets.layouts, &layouts);
+        }
+        return Ok(());
+    };
+
+    let highlighter = load_highlighter(assets.syntaxes.path())?;
+    let parsed = core(peitho_core::parse_markdown(
+        &markdown,
+        frontmatter,
+        &highlighter,
+    ))?;
+    let Some(slide) = parsed
+        .parsed_slides()
+        .iter()
+        .find(|slide| slide.key.as_str() == key)
+    else {
+        let known_keys = parsed
+            .parsed_slides()
+            .iter()
+            .map(|slide| slide.key.as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let message = format!("slide key '{key}' not found in {}", input.display());
+        if json {
+            let payload = UnknownSlideKeyJson {
+                error: "slide-key-not-found",
+                key: key.clone(),
+                known_keys,
+                message,
+            };
+            eprintln!(
+                "{}",
+                serde_json::to_string_pretty(&payload).into_diagnostic()?
+            );
+            std::process::exit(2);
+        }
+        let err = peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Parse,
+            None,
+            message,
+            format!("known keys: {}", known_keys.join(", ")),
+        );
+        eprintln!("{err}");
+        std::process::exit(2);
+    };
+    let trace = peitho_core::explain_dispatch(slide, &layouts);
+    if json {
+        print_explain_json(&assets.layouts, slide, &trace)?;
+    } else {
+        print_explain_human(&assets.layouts, slide, &trace);
+    }
+    if matches!(trace.result(), peitho_core::DispatchResult::Matched(_)) {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+#[derive(Serialize)]
+struct SourceJson {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LayoutsJson {
+    source: SourceJson,
+    layouts: Vec<LayoutJson>,
+}
+
+#[derive(Serialize)]
+struct LayoutJson {
+    name: String,
+    slots: Vec<SlotJson>,
+}
+
+#[derive(Serialize)]
+struct SlotJson {
+    name: String,
+    accepts: String,
+    arity: String,
+}
+
+#[derive(Serialize)]
+struct ExplainJson {
+    source: SourceJson,
+    slide: SlideJson,
+    dispatch: DispatchJson,
+}
+
+#[derive(Serialize)]
+struct SlideJson {
+    key: String,
+    index: usize,
+}
+
+#[derive(Serialize)]
+struct UnknownSlideKeyJson {
+    error: &'static str,
+    key: String,
+    known_keys: Vec<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum DispatchJson {
+    Explicit {
+        layout: String,
+        line: usize,
+        result: DispatchResultJson,
+    },
+    SoleLayout {
+        layout: String,
+        result: DispatchResultJson,
+    },
+    StructuralMatch {
+        candidates: Vec<CandidateJson>,
+        result: DispatchResultJson,
+    },
+}
+
+#[derive(Serialize)]
+struct CandidateJson {
+    layout: String,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DispatchResultJson {
+    Matched(String),
+    Failure(DispatchFailureJson),
+}
+
+#[derive(Serialize)]
+struct DispatchFailureJson {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layouts: Option<Vec<String>>,
+}
+
+fn print_layouts_human(source: &Provenance, layouts: &peitho_core::Layouts) {
+    println!("layouts source: {}", provenance_human(source));
+    for summary in peitho_core::describe_layouts(layouts) {
+        println!();
+        println!("{}", summary.name);
+        println!("  slots:");
+        let width = summary
+            .slots
+            .iter()
+            .map(|slot| slot.name.len())
+            .max()
+            .unwrap_or(0);
+        for slot in summary.slots {
+            println!(
+                "    - {:width$}  accepts={} arity={}",
+                slot.name,
+                slot.accepts,
+                slot.arity,
+                width = width
+            );
+        }
+    }
+}
+
+fn print_layouts_json(source: &Provenance, layouts: &peitho_core::Layouts) -> miette::Result<()> {
+    let payload = LayoutsJson {
+        source: source_json(source),
+        layouts: peitho_core::describe_layouts(layouts)
+            .into_iter()
+            .map(layout_json)
+            .collect(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload).into_diagnostic()?
+    );
+    Ok(())
+}
+
+fn print_explain_human(
+    source: &Provenance,
+    slide: &peitho_core::phase::ParsedSlide,
+    trace: &peitho_core::DispatchTrace,
+) {
+    println!("layouts source: {}", provenance_human(source));
+    println!("slide: {} (index {})", slide.key.as_str(), slide.index);
+    println!();
+    match trace {
+        peitho_core::DispatchTrace::Explicit {
+            layout,
+            line,
+            result,
+        } => {
+            println!("dispatch: explicit layout request");
+            println!("  requested: {layout} (line {line})");
+            println!("  result: {}", dispatch_result_human(result));
+            print_no_match_reason(result);
+        }
+        peitho_core::DispatchTrace::SoleLayout { layout, result } => {
+            println!("dispatch: sole layout");
+            println!("  layout: {layout}");
+            println!("  result: {}", dispatch_result_human(result));
+            print_no_match_reason(result);
+        }
+        peitho_core::DispatchTrace::StructuralMatch { candidates, result } => {
+            println!("dispatch: structural match");
+            println!("  candidates:");
+            let width = candidates
+                .iter()
+                .map(|candidate| candidate.layout.len())
+                .max()
+                .unwrap_or(0);
+            for candidate in candidates {
+                match &candidate.outcome {
+                    peitho_core::CandidateOutcome::Matched => {
+                        println!("    - {:width$}  matched", candidate.layout, width = width);
+                    }
+                    peitho_core::CandidateOutcome::Rejected { reason } => {
+                        println!(
+                            "    - {:width$}  rejected: {reason}",
+                            candidate.layout,
+                            width = width
+                        );
+                    }
+                }
+            }
+            println!("  result: {}", dispatch_result_human(result));
+        }
+    }
+}
+
+fn print_explain_json(
+    source: &Provenance,
+    slide: &peitho_core::phase::ParsedSlide,
+    trace: &peitho_core::DispatchTrace,
+) -> miette::Result<()> {
+    let payload = ExplainJson {
+        source: source_json(source),
+        slide: SlideJson {
+            key: slide.key.as_str().to_owned(),
+            index: slide.index,
+        },
+        dispatch: dispatch_json(trace),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload).into_diagnostic()?
+    );
+    Ok(())
+}
+
+fn source_json(source: &Provenance) -> SourceJson {
+    SourceJson {
+        kind: provenance_kind(source).to_owned(),
+        path: source.path().map(|path| path.display().to_string()),
+    }
+}
+
+fn layout_json(summary: peitho_core::LayoutSummary) -> LayoutJson {
+    LayoutJson {
+        name: summary.name,
+        slots: summary
+            .slots
+            .into_iter()
+            .map(|slot| SlotJson {
+                name: slot.name,
+                accepts: slot.accepts,
+                arity: slot.arity,
+            })
+            .collect(),
+    }
+}
+
+fn dispatch_json(trace: &peitho_core::DispatchTrace) -> DispatchJson {
+    match trace {
+        peitho_core::DispatchTrace::Explicit {
+            layout,
+            line,
+            result,
+        } => DispatchJson::Explicit {
+            layout: layout.clone(),
+            line: *line,
+            result: dispatch_result_json(result),
+        },
+        peitho_core::DispatchTrace::SoleLayout { layout, result } => DispatchJson::SoleLayout {
+            layout: layout.clone(),
+            result: dispatch_result_json(result),
+        },
+        peitho_core::DispatchTrace::StructuralMatch { candidates, result } => {
+            DispatchJson::StructuralMatch {
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| match &candidate.outcome {
+                        peitho_core::CandidateOutcome::Matched => CandidateJson {
+                            layout: candidate.layout.clone(),
+                            outcome: "matched".to_owned(),
+                            reason: None,
+                        },
+                        peitho_core::CandidateOutcome::Rejected { reason } => CandidateJson {
+                            layout: candidate.layout.clone(),
+                            outcome: "rejected".to_owned(),
+                            reason: Some(reason.clone()),
+                        },
+                    })
+                    .collect(),
+                result: dispatch_result_json(result),
+            }
+        }
+    }
+}
+
+fn dispatch_result_json(result: &peitho_core::DispatchResult) -> DispatchResultJson {
+    match result {
+        peitho_core::DispatchResult::Matched(layout) => DispatchResultJson::Matched(layout.clone()),
+        peitho_core::DispatchResult::NoMatch { reason } => {
+            DispatchResultJson::Failure(DispatchFailureJson {
+                kind: "no-match".to_owned(),
+                reason: reason.clone(),
+                layout: None,
+                layouts: None,
+            })
+        }
+        peitho_core::DispatchResult::Ambiguous(layouts) => {
+            DispatchResultJson::Failure(DispatchFailureJson {
+                kind: "ambiguous".to_owned(),
+                reason: None,
+                layout: None,
+                layouts: Some(layouts.clone()),
+            })
+        }
+        peitho_core::DispatchResult::UnknownLayout(layout) => {
+            DispatchResultJson::Failure(DispatchFailureJson {
+                kind: "unknown-layout".to_owned(),
+                reason: None,
+                layout: Some(layout.clone()),
+                layouts: None,
+            })
+        }
+    }
+}
+
+fn dispatch_result_human(result: &peitho_core::DispatchResult) -> String {
+    match result {
+        peitho_core::DispatchResult::Matched(layout) => layout.clone(),
+        peitho_core::DispatchResult::NoMatch { .. } => "no match".to_owned(),
+        peitho_core::DispatchResult::Ambiguous(layouts) => {
+            format!("ambiguous: {}", layouts.join(", "))
+        }
+        peitho_core::DispatchResult::UnknownLayout(layout) => {
+            format!("unknown layout: {layout}")
+        }
+    }
+}
+
+fn print_no_match_reason(result: &peitho_core::DispatchResult) {
+    if let peitho_core::DispatchResult::NoMatch {
+        reason: Some(reason),
+    } = result
+    {
+        println!("  reason: {reason}");
+    }
+}
+
+fn provenance_human(source: &Provenance) -> String {
+    match source {
+        Provenance::Explicit(path) => format!("explicit ({})", path.display()),
+        Provenance::DeckAdjacent(path) => format!("deck-adjacent ({})", path.display()),
+        Provenance::Builtin => "built-in".to_owned(),
+    }
+}
+
+fn provenance_kind(source: &Provenance) -> &'static str {
+    match source {
+        Provenance::Explicit(_) => "explicit",
+        Provenance::DeckAdjacent(_) => "deck-adjacent",
+        Provenance::Builtin => "built-in",
+    }
 }
 
 fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
@@ -651,10 +1068,10 @@ fn deck_only_watch_targets(input: &Path) -> WatchTargets {
     WatchTargets::new(
         input.to_path_buf(),
         ResolvedAssets {
-            layouts: None,
-            css: None,
-            syntaxes: None,
-            fonts: None,
+            layouts: Provenance::Builtin,
+            css: Provenance::Builtin,
+            syntaxes: Provenance::Builtin,
+            fonts: Provenance::Builtin,
         },
     )
 }
@@ -675,12 +1092,12 @@ fn refresh_watch_targets_after_deck_change(
             return Ok(());
         }
     };
-    if state.targets.assets == current_assets {
-        return Ok(());
-    }
-
+    let paths_changed = resolved_asset_paths_changed(&state.targets.assets, &current_assets);
     let next_targets = WatchTargets::new(state.input.clone(), current_assets);
     state.targets = next_targets;
+    if !paths_changed {
+        return Ok(());
+    }
     writeln!(
         stderr,
         "note: watching new asset paths from frontmatter: {}",
@@ -689,6 +1106,13 @@ fn refresh_watch_targets_after_deck_change(
     .into_diagnostic()?;
     stderr.flush().into_diagnostic()?;
     Ok(())
+}
+
+fn resolved_asset_paths_changed(old: &ResolvedAssets, new: &ResolvedAssets) -> bool {
+    old.layouts.path() != new.layouts.path()
+        || old.css.path() != new.css.path()
+        || old.syntaxes.path() != new.syntaxes.path()
+        || old.fonts.path() != new.fonts.path()
 }
 
 fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette::Result<()> {
@@ -788,17 +1212,33 @@ fn write_suppressed_watch_note(
 
 fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     let mut parts = Vec::new();
-    if let Some(path) = &assets.layouts {
-        parts.push(format!("layouts={}", path.display()));
+    if let Some(path) = assets.layouts.path() {
+        parts.push(format!(
+            "layouts={}({})",
+            provenance_kind(&assets.layouts),
+            path.display()
+        ));
     }
-    if let Some(path) = &assets.css {
-        parts.push(format!("css={}", path.display()));
+    if let Some(path) = assets.css.path() {
+        parts.push(format!(
+            "css={}({})",
+            provenance_kind(&assets.css),
+            path.display()
+        ));
     }
-    if let Some(path) = &assets.syntaxes {
-        parts.push(format!("syntaxes={}", path.display()));
+    if let Some(path) = assets.syntaxes.path() {
+        parts.push(format!(
+            "syntaxes={}({})",
+            provenance_kind(&assets.syntaxes),
+            path.display()
+        ));
     }
-    if let Some(path) = &assets.fonts {
-        parts.push(format!("fonts={}", path.display()));
+    if let Some(path) = assets.fonts.path() {
+        parts.push(format!(
+            "fonts={}({})",
+            provenance_kind(&assets.fonts),
+            path.display()
+        ));
     }
     if parts.is_empty() {
         "none".to_owned()
@@ -857,6 +1297,18 @@ fn collect_asset_files(path: &Path, ext: &str) -> miette::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn load_highlighter(
+    syntaxes_path: Option<&Path>,
+) -> miette::Result<peitho_core::highlight::Highlighter> {
+    match syntaxes_path {
+        Some(path) => {
+            let files = collect_asset_files(path, "sublime-syntax")?;
+            core(peitho_core::highlight::Highlighter::with_user_files(&files))
+        }
+        None => Ok(peitho_core::highlight::Highlighter::defaults()),
+    }
+}
+
 fn load_layouts(layouts_path: Option<&Path>) -> miette::Result<peitho_core::Layouts> {
     let Some(path) = layouts_path else {
         let layout = core(peitho_core::parse_layout(
@@ -902,15 +1354,9 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     })?;
     let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
     let assets = resolve_assets(input, &frontmatter)?;
-    let highlighter = match assets.syntaxes.as_deref() {
-        Some(path) => {
-            let files = collect_asset_files(path, "sublime-syntax")?;
-            core(peitho_core::highlight::Highlighter::with_user_files(&files))?
-        }
-        None => peitho_core::highlight::Highlighter::defaults(),
-    };
-    let layouts = load_layouts(assets.layouts.as_deref())?;
-    let css_files = load_css(assets.css.as_deref())?;
+    let highlighter = load_highlighter(assets.syntaxes.path())?;
+    let layouts = load_layouts(assets.layouts.path())?;
+    let css_files = load_css(assets.css.path())?;
     let parsed = core(peitho_core::parse_markdown(
         &markdown,
         frontmatter,
@@ -938,7 +1384,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         manifest_json,
         css,
         image_assets,
-        fonts_source: assets.fonts,
+        fonts_source: assets.fonts.path().map(Path::to_path_buf),
     })
 }
 
@@ -2114,6 +2560,7 @@ fn layout_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_cmd::Command as AssertCommand;
     use std::cell::{Cell, RefCell};
 
     const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
@@ -2150,10 +2597,10 @@ contexts:
         let targets = WatchTargets::new(
             dir.path().join("deck.md"),
             ResolvedAssets {
-                layouts: Some(layouts.clone()),
-                css: Some(css.clone()),
-                syntaxes: Some(syntaxes.clone()),
-                fonts: None,
+                layouts: Provenance::Explicit(layouts.clone()),
+                css: Provenance::Explicit(css.clone()),
+                syntaxes: Provenance::Explicit(syntaxes.clone()),
+                fonts: Provenance::Builtin,
             },
         );
 
@@ -2179,10 +2626,10 @@ contexts:
         let targets = WatchTargets::new(
             dir.path().join("deck.md"),
             ResolvedAssets {
-                layouts: None,
-                css: None,
-                syntaxes: None,
-                fonts: Some(fonts.clone()),
+                layouts: Provenance::Builtin,
+                css: Provenance::Builtin,
+                syntaxes: Provenance::Builtin,
+                fonts: Provenance::Explicit(fonts.clone()),
             },
         );
 
@@ -2203,10 +2650,10 @@ contexts:
         let targets = WatchTargets::new(
             dir.path().join("deck.md"),
             ResolvedAssets {
-                layouts: None,
-                css: None,
-                syntaxes: None,
-                fonts: Some(fonts.clone()),
+                layouts: Provenance::Builtin,
+                css: Provenance::Builtin,
+                syntaxes: Provenance::Builtin,
+                fonts: Provenance::Explicit(fonts.clone()),
             },
         );
 
@@ -2224,10 +2671,10 @@ contexts:
         let targets = WatchTargets::new(
             dir.path().join("deck.md"),
             ResolvedAssets {
-                layouts: None,
-                css: None,
-                syntaxes: None,
-                fonts: Some(fonts.clone()),
+                layouts: Provenance::Builtin,
+                css: Provenance::Builtin,
+                syntaxes: Provenance::Builtin,
+                fonts: Provenance::Explicit(fonts.clone()),
             },
         );
 
@@ -2250,10 +2697,10 @@ contexts:
         let targets = WatchTargets::new(
             deck,
             ResolvedAssets {
-                layouts: None,
-                css: None,
-                syntaxes: None,
-                fonts: Some(missing_fonts.clone()),
+                layouts: Provenance::Builtin,
+                css: Provenance::Builtin,
+                syntaxes: Provenance::Builtin,
+                fonts: Provenance::Explicit(missing_fonts.clone()),
             },
         );
 
@@ -2328,8 +2775,11 @@ contexts:
         let frontmatter = peitho_core::parse_frontmatter("# Intro\n").unwrap();
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.layouts, Some(dir.path().join("layouts")));
-        assert_eq!(assets.css, Some(dir.path().join("css")));
+        assert_eq!(
+            assets.layouts,
+            Provenance::DeckAdjacent(dir.path().join("layouts"))
+        );
+        assert_eq!(assets.css, Provenance::DeckAdjacent(dir.path().join("css")));
     }
 
     #[test]
@@ -2345,7 +2795,7 @@ contexts:
                 .unwrap();
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.layouts, Some(explicit));
+        assert_eq!(assets.layouts, Provenance::Explicit(explicit));
     }
 
     #[test]
@@ -2356,8 +2806,8 @@ contexts:
         let frontmatter = peitho_core::parse_frontmatter("# Intro\n").unwrap();
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.layouts, None);
-        assert_eq!(assets.css, None);
+        assert_eq!(assets.layouts, Provenance::Builtin);
+        assert_eq!(assets.css, Provenance::Builtin);
     }
 
     #[test]
@@ -2539,10 +2989,10 @@ contexts:
         let targets = WatchTargets::new(
             dir.path().join("deck.md"),
             ResolvedAssets {
-                layouts: Some(dir.path().join("title-body-code.html")),
-                css: Some(dir.path().join("base.css")),
-                syntaxes: None,
-                fonts: None,
+                layouts: Provenance::Explicit(dir.path().join("title-body-code.html")),
+                css: Provenance::Explicit(dir.path().join("base.css")),
+                syntaxes: Provenance::Builtin,
+                fonts: Provenance::Builtin,
             },
         );
 
@@ -2743,7 +3193,7 @@ contexts:
 
         assert_eq!(
             state.targets.assets.layouts,
-            Some(alternate_layouts.clone())
+            Provenance::Explicit(alternate_layouts.clone())
         );
         assert!(watcher
             .watched
@@ -2794,9 +3244,85 @@ contexts:
         refresh_watch_targets_after_deck_change(&mut state, &mut stderr).unwrap();
 
         assert!(state.watched_dirs.iter().any(|path| path == &old_layouts));
-        assert_eq!(state.targets.assets.layouts, Some(alternate_layouts));
+        assert_eq!(
+            state.targets.assets.layouts,
+            Provenance::Explicit(alternate_layouts)
+        );
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("note: watching new asset paths from frontmatter:"));
+    }
+
+    #[test]
+    fn refresh_watch_targets_does_not_note_when_only_provenance_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let deck = root.join("deck.md");
+        let layouts = root.join("layouts");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::write(layouts.join("title-body-code.html"), TEST_LAYOUT_HTML).unwrap();
+        fs::write(&deck, "# Intro\n").unwrap();
+        let targets = resolve_watch_targets(&deck).unwrap();
+        assert_eq!(
+            targets.assets.layouts,
+            Provenance::DeckAdjacent(layouts.clone())
+        );
+        let watched_dirs = targets.watch_dirs();
+        let mut state = WatchState::new(deck.clone(), targets, watched_dirs);
+        fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Intro\n").unwrap();
+        let mut stderr = Vec::new();
+
+        refresh_watch_targets_after_deck_change(&mut state, &mut stderr).unwrap();
+
+        assert!(
+            stderr.is_empty(),
+            "actual stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(state.targets.assets.layouts, Provenance::Explicit(layouts));
+    }
+
+    #[test]
+    fn deck_refresh_updates_targets_when_frontmatter_asset_removed_and_no_deck_adjacent_dir_exists()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let deck = root.join("deck.md");
+        let explicit_layouts = root.join("x").join("layouts");
+        fs::create_dir_all(&explicit_layouts).unwrap();
+        fs::write(
+            explicit_layouts.join("title-body-code.html"),
+            TEST_LAYOUT_HTML,
+        )
+        .unwrap();
+        fs::write(&deck, "---\nlayouts: ./x/layouts\n---\n# Intro\n").unwrap();
+        let targets = resolve_watch_targets(&deck).unwrap();
+        assert_eq!(
+            targets.assets.layouts,
+            Provenance::Explicit(explicit_layouts.clone())
+        );
+        let watched_dirs = targets.watch_dirs();
+        assert!(watched_dirs.iter().any(|path| path == &explicit_layouts));
+        let mut state = WatchState::new(deck.clone(), targets, watched_dirs);
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        fs::write(&deck, "# Intro\n").unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&deck),
+            &mut stdout,
+            &mut stderr,
+            |_stdout, _stderr| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(state.targets.assets.layouts, Provenance::Builtin);
+        assert!(!state
+            .watched_dirs
+            .iter()
+            .any(|path| path == &explicit_layouts));
     }
 
     #[test]
@@ -3775,6 +4301,7 @@ contexts:
                 assert!(presenter_windowed);
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -3799,6 +4326,7 @@ contexts:
                 assert!(no_open);
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -3820,6 +4348,7 @@ contexts:
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -3838,11 +4367,37 @@ contexts:
                 assert_eq!(shell, Shell::Bash);
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. } => {
                 panic!("expected completions command");
+            }
+        }
+    }
+
+    #[test]
+    fn layouts_command_defaults_input_and_accepts_explain_and_json() {
+        let cli = Cli::parse_from(["peitho", "layouts", "--explain", "intro", "--json"]);
+
+        match cli.command {
+            Command::Layouts {
+                input,
+                explain,
+                json,
+            } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(explain, Some("intro".to_owned()));
+                assert!(json);
+            }
+            Command::Build { .. }
+            | Command::Preview { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected layouts command");
             }
         }
     }
@@ -4435,6 +4990,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Present { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4453,6 +5009,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4473,6 +5030,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -4513,6 +5071,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(watch);
             }
             Command::Present { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4533,6 +5092,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(!watch);
             }
             Command::Present { .. }
+            | Command::Layouts { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4554,6 +5114,308 @@ printf '0 bytes written to file %s\n' "$out" >&2
 
             assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         }
+    }
+
+    #[test]
+    fn layouts_command_prints_builtin_layout_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Intro\n\nBody\n").unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("layouts source: built-in"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("title-body-code"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("- title") && stdout.contains("accepts=inline arity=1"),
+            "actual stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn layouts_command_json_prints_expected_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Intro\n\nBody\n").unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--json")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["source"]["kind"], "built-in");
+        assert!(json["source"].get("path").is_none());
+        assert_eq!(json["layouts"][0]["name"], "title-body-code");
+        assert_eq!(json["layouts"][0]["slots"][0]["name"], "body");
+    }
+
+    #[test]
+    fn layouts_explain_matching_slide_exits_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "<!-- {\"key\":\"intro\"} -->\n# Intro\n\nBody\n").unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("intro")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("slide: intro (index 0)"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("dispatch: sole layout"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("result: title-body-code"),
+            "actual stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn layouts_explain_unknown_slide_key_exits_two_with_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "<!-- {\"key\":\"intro\"} -->\n# Intro\n").unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("missing")
+            .assert()
+            .code(2);
+
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        assert!(
+            stderr.contains("slide key 'missing' not found"),
+            "actual stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("help: known keys: intro"),
+            "actual stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn layouts_explain_unknown_slide_key_with_json_emits_structured_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "<!-- {\"key\":\"intro\"} -->\n# Intro\n\nBody\n").unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("missing")
+            .arg("--json")
+            .assert()
+            .code(2);
+
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+        assert_eq!(json["error"], "slide-key-not-found");
+        assert_eq!(json["key"], "missing");
+        assert!(json["known_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key.as_str() == Some("intro")));
+        assert!(json["message"]
+            .as_str()
+            .unwrap()
+            .contains("slide key 'missing' not found"));
+    }
+
+    #[test]
+    fn layouts_explain_unknown_explicit_layout_prints_trace_and_exits_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"bad\",\"layout\":\"missing\"} -->\n# Hi\n",
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("bad")
+            .assert()
+            .code(1);
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("result: unknown layout: missing"),
+            "actual stdout: {stdout}"
+        );
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("bad")
+            .arg("--json")
+            .assert()
+            .code(1);
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["dispatch"]["kind"], "explicit");
+        assert_eq!(json["dispatch"]["result"]["kind"], "unknown-layout");
+        assert_eq!(json["dispatch"]["result"]["layout"], "missing");
+    }
+
+    #[test]
+    fn layouts_explain_dispatch_failure_exits_one_and_prints_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::write(
+            layouts.join("cover.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            layouts.join("statement.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"bad\"} -->\n# Intro\n\n```rust\nfn main() {}\n```\n",
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("bad")
+            .assert()
+            .code(1);
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("layouts source: deck-adjacent"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("dispatch: structural match"),
+            "actual stdout: {stdout}"
+        );
+        assert!(stdout.contains("rejected:"), "actual stdout: {stdout}");
+        assert!(
+            stdout.contains("result: no match"),
+            "actual stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn layouts_explain_json_includes_reason_for_sole_layout_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::write(
+            layouts.join("cover.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"bad\"} -->\n# Hi\n\n![alt](pic.png)\n",
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("bad")
+            .arg("--json")
+            .assert()
+            .code(1);
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["dispatch"]["kind"], "sole-layout");
+        assert_eq!(json["dispatch"]["result"]["kind"], "no-match");
+        assert_eq!(json["slide"]["key"], "bad");
+        let reason = json["dispatch"]["result"]["reason"].as_str().unwrap();
+        assert!(!reason.is_empty());
+        assert!(reason.contains("image"), "actual reason: {reason}");
+    }
+
+    #[test]
+    fn layouts_explain_sole_layout_failure_prints_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::write(
+            layouts.join("cover.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"hello\"} -->\n# Hello\n\n![alt](pic.png)\n",
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("hello")
+            .assert()
+            .code(1);
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(
+            stdout.contains("dispatch: sole layout"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("result: no match"),
+            "actual stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("reason: no slot accepts image in layout 'cover'"),
+            "actual stdout: {stdout}"
+        );
     }
 
     fn contains_watch_path(paths: &[PathBuf], path: &Path) -> bool {
@@ -4685,10 +5547,10 @@ printf '0 bytes written to file %s\n' "$out" >&2
 
     fn empty_assets() -> ResolvedAssets {
         ResolvedAssets {
-            layouts: None,
-            css: None,
-            syntaxes: None,
-            fonts: None,
+            layouts: Provenance::Builtin,
+            css: Provenance::Builtin,
+            syntaxes: Provenance::Builtin,
+            fonts: Provenance::Builtin,
         }
     }
 

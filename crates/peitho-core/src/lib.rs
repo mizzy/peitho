@@ -17,12 +17,15 @@ pub mod theme;
 pub use check::check_deck;
 pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
 pub use error::{BuildError, Result};
-pub use layout::{parse_layout, Layout, Layouts};
+pub use layout::{describe_layouts, parse_layout, Layout, LayoutSummary, Layouts, SlotSummary};
 pub use manifest::{
     build_manifest, fragment_src, manifest_json, Manifest, ManifestImage, ManifestSection,
     ManifestSlide, ManifestSlideText,
 };
-pub use mapping::{dispatch_by_convention, map_by_convention};
+pub use mapping::{
+    dispatch_by_convention, explain_dispatch, map_by_convention, Candidate, CandidateOutcome,
+    DispatchResult, DispatchTrace,
+};
 pub use notes::{notes_json, Notes};
 pub use parser::{parse_frontmatter, parse_markdown, ParsedFrontmatter};
 pub use phase::{
