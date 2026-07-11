@@ -88,6 +88,7 @@ pub struct DeckSettings {
     planned_time: Option<PlannedTime>,
     aspect_ratio: AspectRatio,
     resolution: Resolution,
+    breaks: bool,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -107,6 +108,7 @@ impl DeckSettings {
         planned_time: Option<PlannedTime>,
         aspect_ratio: AspectRatio,
         resolution: Option<Resolution>,
+        breaks: bool,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
@@ -121,6 +123,7 @@ impl DeckSettings {
             planned_time,
             aspect_ratio,
             resolution,
+            breaks,
             sections,
             layouts,
             css,
@@ -139,6 +142,10 @@ impl DeckSettings {
 
     pub fn resolution(&self) -> Resolution {
         self.resolution
+    }
+
+    pub fn breaks(&self) -> bool {
+        self.breaks
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -626,6 +633,7 @@ mod tests {
             Some(setup.planned()),
             AspectRatio::default(),
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
+            false,
             vec![setup.clone()],
             None,
             None,
@@ -653,6 +661,7 @@ mod tests {
             None,
             AspectRatio::default(),
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
+            false,
             vec![setup.clone()],
             None,
             None,
@@ -672,6 +681,7 @@ mod tests {
             None,
             AspectRatio::Ratio4To3,
             None,
+            false,
             Vec::new(),
             None,
             None,
@@ -690,6 +700,7 @@ mod tests {
             None,
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("1024x768").unwrap()),
+            false,
             Vec::new(),
             None,
             None,
@@ -707,6 +718,7 @@ mod tests {
             None,
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("16x9").unwrap()),
+            false,
             Vec::new(),
             None,
             None,
