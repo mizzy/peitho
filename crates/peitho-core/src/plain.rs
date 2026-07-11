@@ -173,6 +173,13 @@ mod tests {
     }
 
     #[test]
+    fn manifest_body_text_unaffected_by_breaks() {
+        let text = checked_slide_text("---\nbreaks: true\n---\n# Title\n\nfirst\nsecond");
+
+        assert_eq!(text.body(), "first second");
+    }
+
+    #[test]
     fn body_slot_image_markdown_produces_no_text() {
         let layout = all_slots_layout();
         let body = SlotName::new("body").unwrap();

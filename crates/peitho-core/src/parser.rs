@@ -50,6 +50,8 @@ struct DeckFrontmatter {
     #[serde(default)]
     resolution: Option<String>,
     #[serde(default)]
+    breaks: bool,
+    #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
     css: Option<AssetPath>,
@@ -501,6 +503,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.time,
         aspect_ratio,
         resolution,
+        parsed.breaks,
         Vec::new(),
         parsed.layouts,
         parsed.css,
@@ -537,6 +540,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "time",
             "aspect_ratio",
             "resolution",
+            "breaks",
             "layouts",
             "css",
             "syntaxes",
@@ -660,11 +664,13 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
         "set resolution to WxH pixels, like 1920x1080"
+    } else if frontmatter_message_mentions_key(message, "breaks") {
+        "set breaks to true or false"
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -2043,11 +2049,42 @@ mod tests {
         let frontmatter = parse_frontmatter("# Intro").unwrap();
 
         assert!(frontmatter.settings().planned_time().is_none());
+        assert!(!frontmatter.settings().breaks());
         assert!(frontmatter.settings().layouts().is_none());
         assert!(frontmatter.settings().css().is_none());
         assert!(frontmatter.settings().syntaxes().is_none());
         assert!(frontmatter.settings().fonts().is_none());
         assert_eq!(frontmatter.body_start, 0);
+    }
+
+    #[test]
+    fn breaks_frontmatter_true_flips_setting() {
+        let frontmatter = parse_frontmatter("---\nbreaks: true\n---\n# Intro").unwrap();
+
+        assert!(frontmatter.settings().breaks());
+    }
+
+    #[test]
+    fn breaks_frontmatter_false_or_missing_defaults_to_false() {
+        let explicit_false = parse_frontmatter("---\nbreaks: false\n---\n# Intro").unwrap();
+        let missing = parse_frontmatter("# Intro").unwrap();
+
+        assert!(!explicit_false.settings().breaks());
+        assert!(!missing.settings().breaks());
+    }
+
+    #[test]
+    fn breaks_frontmatter_invalid_value_is_line_numbered_error() {
+        let err = parse_markdown(
+            "---\nbreaks: not-a-bool\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("invalid deck frontmatter"));
+        assert_eq!(err.help, "set breaks to true or false");
     }
 
     #[test]
@@ -2105,6 +2142,13 @@ mod tests {
             parse_frontmatter("---\ntime: 15m\nresolution: 1920x1080\n---\n# Intro").unwrap();
 
         assert_eq!(frontmatter.key_line("resolution"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_breaks() {
+        let frontmatter = parse_frontmatter("---\ntime: 15m\nbreaks: true\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("breaks"), Some(3));
     }
 
     #[test]
@@ -3148,6 +3192,17 @@ After list
     }
 
     #[test]
+    fn breaks_does_not_affect_slide_splitting() {
+        for breaks in [true, false] {
+            let markdown = format!("---\nbreaks: {breaks}\n---\n\nfirst\nsecond\n\n---\n\n# Next");
+            let deck =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+
+            assert_eq!(deck.parsed_slides().len(), 2, "breaks: {breaks}");
+        }
+    }
+
+    #[test]
     fn rejects_leading_dense_rule_pair_as_invalid_frontmatter_not_dropped_slide() {
         let err = parse_markdown(
             "---\n# Title\n---\n# Next",
@@ -3197,7 +3252,7 @@ After list
     }
 
     #[test]
-    fn unknown_key_help_mentions_all_supported_keys() {
+    fn unknown_key_help_mentions_breaks() {
         let err = parse_markdown(
             "---\ntime: 15m\nunknown: true\n---\n# Intro",
             &crate::highlight::Highlighter::defaults(),
@@ -3209,7 +3264,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
         );
     }
 
@@ -3320,6 +3375,10 @@ After list
                 "provide a path (relative to the deck file), or remove the fonts: key",
             ),
             (
+                "---\nbreaks: not-a-bool\n---\n# Intro",
+                "set breaks to true or false",
+            ),
+            (
                 "---\ntime: bad-value\n---\n# Intro",
                 "set time to 15m, 90s, 1h, 1h30m, or an integer minute count",
             ),
@@ -3331,6 +3390,14 @@ After list
 
             assert_eq!(err.help, help);
         }
+    }
+
+    #[test]
+    fn frontmatter_help_boolean_error_without_breaks_key_falls_through() {
+        assert_eq!(
+            frontmatter_help("invalid deck frontmatter: expected a boolean"),
+            "write valid YAML frontmatter before the first slide"
+        );
     }
 
     #[test]
@@ -3398,7 +3465,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
         );
     }
 
@@ -3454,7 +3521,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
         );
     }
 

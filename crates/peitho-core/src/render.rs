@@ -29,9 +29,16 @@ pub fn render_deck(
     highlighter: &Highlighter,
 ) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
+    let breaks = settings.breaks();
     let mut slides = Vec::new();
     for slide in checked_slides {
-        let html = render_slide(slide.key(), slide.slots(), slide.layout(), highlighter)?;
+        let html = render_slide(
+            slide.key(),
+            slide.slots(),
+            slide.layout(),
+            breaks,
+            highlighter,
+        )?;
         let notes = slide.notes().map(|s| s.to_owned());
         slides.push(RenderedSlide::new(
             slide.index(),
@@ -47,6 +54,7 @@ fn render_slide(
     key: &SlideKey,
     slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
     layout: &Layout,
+    breaks: bool,
     highlighter: &Highlighter,
 ) -> Result<String> {
     let mut output = Vec::new();
@@ -100,6 +108,7 @@ fn render_slide(
                         &slot,
                         checked_slot.contract().accepts,
                         checked_slot.fragments(),
+                        breaks,
                         highlighter,
                     )
                     .map_err(box_build_error)?;
@@ -129,6 +138,7 @@ fn render_slot(
     slot: &SlotName,
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
+    breaks: bool,
     highlighter: &Highlighter,
 ) -> Result<String> {
     if fragments.is_empty() {
@@ -159,7 +169,7 @@ fn render_slot(
             .collect::<Result<Vec<_>>>()?
             .join("\n"),
         Accepts::Blocks | Accepts::Text | Accepts::List => {
-            render_block_slot(&class_name, accepts, fragments)?
+            render_block_slot(&class_name, accepts, fragments, breaks)?
         }
     })
 }
@@ -168,6 +178,7 @@ fn render_block_slot(
     class_name: &str,
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
+    breaks: bool,
 ) -> Result<String> {
     for fragment in fragments {
         ensure_fragment_matches_contract(accepts, fragment)?;
@@ -178,7 +189,11 @@ fn render_block_slot(
         .collect::<Vec<_>>()
         .join("\n\n");
     let mut body = String::new();
-    html::push_html(&mut body, Parser::new_ext(&markdown, Options::empty()));
+    let events = Parser::new_ext(&markdown, Options::empty()).map(|event| match (breaks, event) {
+        (true, Event::SoftBreak) => Event::HardBreak,
+        (_, event) => event,
+    });
+    html::push_html(&mut body, events);
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
 }
 
@@ -974,7 +989,7 @@ mod tests {
     use crate::{
         check::check_deck,
         domain::AspectRatio,
-        layout::parse_layout,
+        layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
@@ -1021,6 +1036,29 @@ mod tests {
         // The tagged rust block is highlighted into hl-* classed spans.
         assert!(html.contains("hl-"));
         assert!(html.contains("main"));
+    }
+
+    #[test]
+    fn breaks_true_renders_hard_break() {
+        let rendered = render_checked_deck_with_layout(
+            "---\nbreaks: true\n---\n# Intro\n\nfirst\nsecond",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains("<p>first<br />\nsecond</p>"), "{html}");
+    }
+
+    #[test]
+    fn breaks_false_renders_soft_break_as_space() {
+        let rendered = render_checked_deck_with_layout(
+            "---\nbreaks: false\n---\n# Intro\n\nfirst\nsecond",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(!html.contains("<br"), "{html}");
+        assert!(html.contains("<p>first\nsecond</p>"), "{html}");
     }
 
     #[test]
@@ -1794,6 +1832,10 @@ Paragraph after heading.
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
         )
         .unwrap();
+        render_checked_deck_with_layout(markdown, layout)
+    }
+
+    fn render_checked_deck_with_layout(markdown: &str, layout: Layout) -> Deck<Rendered> {
         let checked = check_deck(
             map_by_convention(
                 parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
@@ -1803,6 +1845,14 @@ Paragraph after heading.
         )
         .unwrap();
         render_checked(checked)
+    }
+
+    fn title_body_layout() -> Layout {
+        parse_layout(
+            "title-body",
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
     }
 
     fn render_checked(checked: Deck<Checked>) -> Deck<Rendered> {

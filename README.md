@@ -151,6 +151,7 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | `time` | Planned presentation time | `15m` / `90s` / `1h30m` / bare integer (minutes) |
 | `aspect_ratio` | Slide canvas aspect ratio | `16:9` (default) / `4:3` |
 | `resolution` | PDF-only physical page size | `WxH` CSS px, e.g. `1920x1080` (must match `aspect_ratio`) |
+| `breaks` | Render single newlines in slide body Markdown as hard line breaks | `true` / `false` (default) |
 | `layouts` | Layout HTML file or directory | Deck-relative path, e.g. `./layouts` |
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
