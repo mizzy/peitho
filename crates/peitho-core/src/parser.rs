@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, ExplicitSlot, FragmentKind, RawImagePath, Resolution, SlideKey, SlotName,
-        SourceFragment,
+        AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FragmentKind, RawImagePath,
+        Resolution, SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -59,6 +59,8 @@ struct DeckFrontmatter {
     syntaxes: Option<AssetPath>,
     #[serde(default)]
     fonts: Option<AssetPath>,
+    #[serde(default)]
+    code_images: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -174,7 +176,13 @@ pub fn parse_markdown(
 
     let mut drafts = Vec::new();
     for (index, range) in ranges.into_iter().enumerate() {
-        drafts.push(parse_slide(source, range, index, highlighter)?);
+        drafts.push(parse_slide(
+            source,
+            range,
+            index,
+            highlighter,
+            settings.code_images(),
+        )?);
     }
     let resolved_sections = resolve_deck_sections(&drafts)?;
     let settings = finalize_section_settings(settings, resolved_sections)?;
@@ -498,6 +506,8 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
     )?;
     let resolution =
         parse_frontmatter_resolution(parsed.resolution, key_lines.get("resolution").copied())?;
+    let code_images =
+        parse_code_images_config(parsed.code_images, key_lines.get("code_images").copied())?;
 
     DeckSettings::new(
         parsed.time,
@@ -509,6 +519,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.css,
         parsed.syntaxes,
         parsed.fonts,
+        code_images,
     )
     .map_err(|message| {
         let help = deck_settings_resolution_error_help(&message);
@@ -518,6 +529,37 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
             message,
             help,
         )
+    })
+}
+
+fn parse_code_images_config(
+    entries: Option<HashMap<String, String>>,
+    key_line: Option<usize>,
+) -> Result<CodeImagesConfig> {
+    let mut parsed_entries = BTreeMap::new();
+    for (tag, command) in entries.unwrap_or_default() {
+        let argv = shlex::split(&command).ok_or_else(|| {
+            BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' has invalid command string"),
+                "quote the command using shell-like syntax or remove the unmatched quote",
+            )
+        })?;
+        if argv.is_empty() {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' has empty command"),
+                format!("set code_images.{tag} to a command, like mmdc -i - -o - -e svg"),
+            ));
+        }
+        parsed_entries.insert(tag, CodeImageCommand { argv });
+    }
+
+    Ok(CodeImagesConfig {
+        entries: parsed_entries,
+        key_line,
     })
 }
 
@@ -545,6 +587,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "css",
             "syntaxes",
             "fonts",
+            "code_images",
         ] {
             if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
                 key_lines.entry(key).or_insert(raw.line + index + 1);
@@ -623,8 +666,20 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
         .map(|index| index + 1)
         .unwrap_or(0);
 
+    let mut nested_mapping_parent = None;
     for (index, line) in lines[..content_len].iter().enumerate() {
-        if !starts_with_flat_yaml_key(line) {
+        if line.starts_with(char::is_whitespace) {
+            if nested_mapping_parent.is_some() && is_nested_frontmatter_mapping_entry(line) {
+                continue;
+            }
+            if nested_mapping_parent.is_some() && line.trim_start().contains(':') {
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(raw.line + index + 1),
+                    "unsupported nested mapping in code_images frontmatter",
+                    "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
+                ));
+            }
             return Err(BuildError::new(
                 ErrorKind::Parse,
                 Some(raw.line + index + 1),
@@ -632,20 +687,48 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
                 "keep only key: value settings (like time: 15m) between the --- markers",
             ));
         }
+
+        let Some((key, has_value)) = flat_yaml_key_and_value_presence(line) else {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(raw.line + index + 1),
+                "unexpected line in deck frontmatter (missing closing ---?)",
+                "keep only key: value settings (like time: 15m) between the --- markers",
+            ));
+        };
+        nested_mapping_parent =
+            (!has_value && allows_nested_frontmatter_mapping(key)).then_some(key);
     }
 
     Ok(())
 }
 
 fn starts_with_flat_yaml_key(line: &str) -> bool {
+    flat_yaml_key_and_value_presence(line).is_some()
+}
+
+fn flat_yaml_key_and_value_presence(line: &str) -> Option<(&str, bool)> {
     let Some(colon_index) = line.find(':') else {
-        return false;
+        return None;
     };
     let key = &line[..colon_index];
-    !key.is_empty()
+    let valid = !key.is_empty()
         && key
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    valid.then(|| {
+        let value = &line[colon_index + 1..];
+        (key, !value.trim().is_empty())
+    })
+}
+
+fn allows_nested_frontmatter_mapping(key: &str) -> bool {
+    matches!(key, "code_images")
+}
+
+fn is_nested_frontmatter_mapping_entry(line: &str) -> bool {
+    let indent = line.len() - line.trim_start().len();
+    indent == 2 && starts_with_flat_yaml_key(line.trim_start())
 }
 
 fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
@@ -948,6 +1031,7 @@ fn parse_slide(
     range: SlideRange,
     index: usize,
     highlighter: &Highlighter,
+    code_images: &CodeImagesConfig,
 ) -> Result<ParsedSlideDraft> {
     let slice = &source[range.start..range.end];
     let markers = scan_slot_div_markers(slice, range.start, source)?;
@@ -1248,11 +1332,18 @@ fn parse_slide(
                     };
                     let code_line = line_for_offset(source, start);
                     if let Some(language) = &language {
-                        highlighter
-                            .validate_language(language, code_line)
-                            .map_err(|err| {
-                                attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
-                            })?;
+                        if !code_images.entries.contains_key(language) {
+                            highlighter
+                                .validate_language(language, code_line)
+                                .map_err(|err| {
+                                    attach_slide_context(
+                                        err,
+                                        index,
+                                        explicit_key.as_ref(),
+                                        &fragments,
+                                    )
+                                })?;
+                        }
                     }
                     push_fragment(
                         &mut fragments,
@@ -1855,6 +1946,76 @@ mod tests {
         assert_eq!(
             settings.planned_time().map(PlannedTime::as_millis),
             Some(900_000)
+        );
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_to_shlex_argv() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images: { mermaid: mmdc -i - -o - -e svg }\n---\n# Intro")
+                .unwrap();
+        let config = frontmatter.settings().code_images();
+        let command = config.entries.get("mermaid").unwrap();
+
+        assert_eq!(config.key_line, Some(2));
+        assert_eq!(command.argv, ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]);
+    }
+
+    #[test]
+    fn rejects_empty_code_images_command_with_line_and_help() {
+        let err = match parse_frontmatter("---\ncode_images: { mermaid: \"\" }\n---\n# Intro") {
+            Ok(_) => panic!("expected empty code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.message, "code_images entry 'mermaid' has empty command");
+        assert_eq!(
+            err.help,
+            "set code_images.mermaid to a command, like mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_shlex_invalid_code_images_command_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images: { mermaid: \"mmdc 'unterminated\" }\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected invalid code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid' has invalid command string"
+        );
+        assert_eq!(
+            err.help,
+            "quote the command using shell-like syntax or remove the unmatched quote"
+        );
+    }
+
+    #[test]
+    fn rejects_three_level_code_images_nesting_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid:\n    command: mmdc\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected three-level code_images nesting to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(
+            err.message,
+            "unsupported nested mapping in code_images frontmatter"
+        );
+        assert_eq!(
+            err.help,
+            "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
         );
     }
 
@@ -2876,6 +3037,17 @@ After list
     }
 
     #[test]
+    fn accepts_code_images_language_tag_unknown_to_highlighter() {
+        let markdown = "---\ncode_images:\n  mermaid: mmdc -i - -o - -e svg\n---\n# Intro\n\n```mermaid\ngraph TD\n```";
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::Code);
+        assert_eq!(fragment.language(), Some("mermaid"));
+    }
+
+    #[test]
     fn untagged_code_block_needs_no_language() {
         let deck = parse_markdown(
             "# Title\n\n```\nplain\n```",
@@ -3498,6 +3670,7 @@ After list
             },
             1,
             &crate::highlight::Highlighter::defaults(),
+            &crate::domain::CodeImagesConfig::default(),
         )
         .unwrap_err();
 

@@ -14,6 +14,7 @@ pulldown-cmark.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
 serde_json.workspace = true
+shlex.workspace = true
 syntect.workspace = true
 ts-rs = { workspace = true, optional = true }
 

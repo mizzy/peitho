@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Component, Path, PathBuf},
     str::FromStr,
@@ -177,6 +178,17 @@ fn parse_resolution_dimension(label: &str, raw: &str) -> Result<u32, String> {
         return Err(format!("resolution {label} must be greater than zero"));
     }
     Ok(value)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CodeImagesConfig {
+    pub entries: BTreeMap<String, CodeImageCommand>,
+    pub key_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeImageCommand {
+    pub argv: Vec<String>,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
