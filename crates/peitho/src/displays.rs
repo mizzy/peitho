@@ -204,7 +204,7 @@ pub fn layout_from_jxa_output(
     plan_presentation_layout(&displays, presenter_mode)
 }
 
-pub fn detect_presentation_layout(presenter_mode: PresenterMode) -> Option<PresentationLayout> {
+pub fn detect_nsscreen_json() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -215,7 +215,11 @@ pub fn detect_presentation_layout(presenter_mode: PresenterMode) -> Option<Prese
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    String::from_utf8(output.stdout).ok()
+}
+
+pub fn detect_presentation_layout(presenter_mode: PresenterMode) -> Option<PresentationLayout> {
+    let stdout = detect_nsscreen_json()?;
     layout_from_jxa_output(&stdout, presenter_mode)
 }
 
