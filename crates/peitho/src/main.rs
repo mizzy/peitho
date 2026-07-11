@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Child, Stdio},
     sync::mpsc,
@@ -22,6 +22,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 mod asset_resolution;
+mod doctor;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
 use peitho::{browser, server};
@@ -322,6 +323,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    Doctor {
+        #[arg(default_value = "deck.md")]
+        input: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     Preview {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
@@ -404,6 +411,16 @@ fn main() -> miette::Result<()> {
             explain,
             json,
         } => cmd_layouts(input, explain, json),
+        Command::Doctor { input, json } => {
+            let env = doctor::DoctorEnv::from_process_env();
+            let mut stdout = std::io::stdout();
+            let is_terminal = stdout.is_terminal();
+            let code = doctor::dispatch(input, json, &env, &mut stdout, is_terminal)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Command::Preview {
             input,
             port,
@@ -754,7 +771,7 @@ fn print_explain_json(
 
 fn source_json(source: &Provenance) -> SourceJson {
     SourceJson {
-        kind: provenance_kind(source).to_owned(),
+        kind: source.kind().to_owned(),
         path: source.path().map(|path| path.display().to_string()),
     }
 }
@@ -869,14 +886,6 @@ fn provenance_human(source: &Provenance) -> String {
         Provenance::Explicit(path) => format!("explicit ({})", path.display()),
         Provenance::DeckAdjacent(path) => format!("deck-adjacent ({})", path.display()),
         Provenance::Builtin => "built-in".to_owned(),
-    }
-}
-
-fn provenance_kind(source: &Provenance) -> &'static str {
-    match source {
-        Provenance::Explicit(_) => "explicit",
-        Provenance::DeckAdjacent(_) => "deck-adjacent",
-        Provenance::Builtin => "built-in",
     }
 }
 
@@ -1215,30 +1224,22 @@ fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     if let Some(path) = assets.layouts.path() {
         parts.push(format!(
             "layouts={}({})",
-            provenance_kind(&assets.layouts),
+            assets.layouts.kind(),
             path.display()
         ));
     }
     if let Some(path) = assets.css.path() {
-        parts.push(format!(
-            "css={}({})",
-            provenance_kind(&assets.css),
-            path.display()
-        ));
+        parts.push(format!("css={}({})", assets.css.kind(), path.display()));
     }
     if let Some(path) = assets.syntaxes.path() {
         parts.push(format!(
             "syntaxes={}({})",
-            provenance_kind(&assets.syntaxes),
+            assets.syntaxes.kind(),
             path.display()
         ));
     }
     if let Some(path) = assets.fonts.path() {
-        parts.push(format!(
-            "fonts={}({})",
-            provenance_kind(&assets.fonts),
-            path.display()
-        ));
+        parts.push(format!("fonts={}({})", assets.fonts.kind(), path.display()));
     }
     if parts.is_empty() {
         "none".to_owned()
@@ -1485,10 +1486,10 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> miette::Result<()> {
 }
 
 #[derive(Debug, Clone)]
-struct ChromeLookupEnv {
-    env_path: Option<PathBuf>,
-    mac_chrome: PathBuf,
-    path_dirs: Vec<PathBuf>,
+pub(crate) struct ChromeLookupEnv {
+    pub(crate) env_path: Option<PathBuf>,
+    pub(crate) mac_chrome: PathBuf,
+    pub(crate) path_dirs: Vec<PathBuf>,
 }
 
 fn locate_chrome() -> miette::Result<PathBuf> {
@@ -1502,7 +1503,7 @@ fn locate_chrome() -> miette::Result<PathBuf> {
     })
 }
 
-fn locate_chrome_with_env(lookup: &ChromeLookupEnv) -> miette::Result<PathBuf> {
+pub(crate) fn locate_chrome_with_env(lookup: &ChromeLookupEnv) -> miette::Result<PathBuf> {
     if let Some(path) = &lookup.env_path {
         if path.is_file() {
             return Ok(path.clone());
@@ -2465,7 +2466,7 @@ impl ImageResolver {
             ));
         }
         let bytes = fs::read(&source_abs).map_err(|err| image_read_error(display_path, err))?;
-        let hash = short_sha256_hex(&bytes);
+        let hash = short_sha256_hex(&bytes, 16);
         if let Some(asset) = self.by_hash.get(&hash) {
             return Ok(asset.clone());
         }
@@ -2533,16 +2534,18 @@ fn image_read_error(path: &str, err: std::io::Error) -> peitho_core::BuildError 
     }
 }
 
-fn short_sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn short_sha256_hex(bytes: &[u8], hex_chars: usize) -> String {
     use std::fmt::Write as _;
 
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let hash: [u8; 32] = hasher.finalize().into();
-    let mut hex = String::with_capacity(16);
-    for byte in &hash[..8] {
+    let byte_count = hex_chars.div_ceil(2).min(hash.len());
+    let mut hex = String::with_capacity(byte_count * 2);
+    for byte in &hash[..byte_count] {
         write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
     }
+    hex.truncate(hex_chars);
     hex
 }
 
@@ -4302,6 +4305,7 @@ contexts:
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4327,6 +4331,7 @@ contexts:
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -4349,6 +4354,7 @@ contexts:
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -4368,6 +4374,7 @@ contexts:
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -4392,6 +4399,7 @@ contexts:
                 assert!(json);
             }
             Command::Build { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -4991,6 +4999,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             }
             Command::Present { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -5010,6 +5019,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -5031,6 +5041,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             }
             Command::Build { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
@@ -5072,6 +5083,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             }
             Command::Present { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
@@ -5093,6 +5105,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
             }
             Command::Present { .. }
             | Command::Layouts { .. }
+            | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use miette::IntoDiagnostic;
 use peitho_core::{
     error::{BuildError, ErrorKind},
     AssetPath, ParsedFrontmatter,
@@ -21,11 +20,40 @@ pub enum Provenance {
     Builtin,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetKey {
+    Layouts,
+    Css,
+    Syntaxes,
+    Fonts,
+}
+
+impl AssetKey {
+    pub(crate) const ALL: [Self; 4] = [Self::Layouts, Self::Css, Self::Syntaxes, Self::Fonts];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Layouts => "layouts",
+            Self::Css => "css",
+            Self::Syntaxes => "syntaxes",
+            Self::Fonts => "fonts",
+        }
+    }
+}
+
 impl Provenance {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Explicit(path) | Self::DeckAdjacent(path) => Some(path),
             Self::Builtin => None,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Explicit(_) => "explicit",
+            Self::DeckAdjacent(_) => "deck-adjacent",
+            Self::Builtin => "built-in",
         }
     }
 }
@@ -34,40 +62,68 @@ pub fn resolve_assets(
     deck: &Path,
     frontmatter: &ParsedFrontmatter,
 ) -> miette::Result<ResolvedAssets> {
-    let settings = frontmatter.settings();
     Ok(ResolvedAssets {
-        layouts: resolve_asset(deck, frontmatter, "layouts", settings.layouts())?,
-        css: resolve_asset(deck, frontmatter, "css", settings.css())?,
-        syntaxes: resolve_asset(deck, frontmatter, "syntaxes", settings.syntaxes())?,
-        fonts: resolve_asset(deck, frontmatter, "fonts", settings.fonts())?,
+        layouts: core(resolve_asset(deck, frontmatter, AssetKey::Layouts))?,
+        css: core(resolve_asset(deck, frontmatter, AssetKey::Css))?,
+        syntaxes: core(resolve_asset(deck, frontmatter, AssetKey::Syntaxes))?,
+        fonts: core(resolve_asset(deck, frontmatter, AssetKey::Fonts))?,
     })
 }
 
-fn resolve_asset(
+pub(crate) fn resolve_asset(
     deck: &Path,
     frontmatter: &ParsedFrontmatter,
-    key: &'static str,
+    key: AssetKey,
+) -> peitho_core::Result<Provenance> {
+    let settings = frontmatter.settings();
+    let value = match key {
+        AssetKey::Layouts => settings.layouts(),
+        AssetKey::Css => settings.css(),
+        AssetKey::Syntaxes => settings.syntaxes(),
+        AssetKey::Fonts => settings.fonts(),
+    };
+    resolve_asset_value(deck, frontmatter, key, value)
+}
+
+fn resolve_asset_value(
+    deck: &Path,
+    frontmatter: &ParsedFrontmatter,
+    key: AssetKey,
     value: Option<&AssetPath>,
-) -> miette::Result<Provenance> {
+) -> peitho_core::Result<Provenance> {
+    let key_name = key.as_str();
     if let Some(value) = value {
         let path = resolve_against_deck(deck, value);
-        if !path.try_exists().into_diagnostic()? {
+        let exists = path.try_exists().map_err(|err| {
+            BuildError::new(
+                ErrorKind::Parse,
+                frontmatter.key_line(key_name),
+                format!(
+                    "{key_name} path could not be checked: {} ({err})",
+                    path.display()
+                ),
+                format!(
+                    "check filesystem permissions for the {key_name}: value in the frontmatter"
+                ),
+            )
+        })?;
+        if !exists {
             let line = frontmatter
-                .key_line(key)
+                .key_line(key_name)
                 .expect("explicit frontmatter asset keys are recorded with line numbers");
-            return core(Err(BuildError::new(
+            return Err(BuildError::new(
                 ErrorKind::Parse,
                 Some(line),
-                format!("{key} path does not exist: {}", path.display()),
+                format!("{key_name} path does not exist: {}", path.display()),
                 format!(
-                    "check the {key}: value in the frontmatter, or remove the key to use deck-adjacent {key}/"
+                    "check the {key_name}: value in the frontmatter, or remove the key to use deck-adjacent {key_name}/"
                 ),
-            )));
+            ));
         }
         return Ok(Provenance::Explicit(path));
     }
 
-    let conventional = deck_parent(deck).join(key);
+    let conventional = deck_parent(deck).join(key_name);
     if conventional.is_dir() {
         Ok(Provenance::DeckAdjacent(conventional))
     } else {
