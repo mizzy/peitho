@@ -83,25 +83,25 @@ impl DoctorEnv {
     }
 }
 
-pub(crate) fn run_doctor(deck: Option<&Path>, env: &DoctorEnv) -> DoctorReport {
+pub(crate) fn run_doctor(deck: &Path, env: &DoctorEnv) -> DoctorReport {
     let mut checks = Vec::new();
     push_chrome_checks(&mut checks, env);
     push_display_checks(&mut checks, env);
     push_embedded_shell_checks(&mut checks);
-    if let Some(deck) = deck {
+    if deck.is_file() {
         push_asset_checks(&mut checks, deck);
     }
     DoctorReport { checks }
 }
 
 pub(crate) fn dispatch(
-    input: Option<PathBuf>,
+    input: PathBuf,
     json: bool,
     env: &DoctorEnv,
     writer: &mut dyn Write,
     is_terminal: bool,
 ) -> miette::Result<i32> {
-    let report = run_doctor(input.as_deref(), env);
+    let report = run_doctor(&input, env);
     if json {
         print_json(&report, writer)?;
     } else {
@@ -666,7 +666,7 @@ mod tests {
         let crate::Command::Doctor { input, json } = cli.command else {
             panic!("expected doctor command");
         };
-        assert_eq!(input, None);
+        assert_eq!(input, PathBuf::from("deck.md"));
         assert!(json);
 
         let passing_dir = tempfile::tempdir().unwrap();
@@ -692,7 +692,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "binary-discovered");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -707,7 +707,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "binary-discovered");
         assert_eq!(check.status, DoctorStatus::Fail);
@@ -729,7 +729,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "binary-discovered");
         assert_eq!(check.status, DoctorStatus::Fail);
@@ -741,7 +741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -755,7 +755,7 @@ mod tests {
         let env = passing_env(dir.path());
         assert!(!root.exists());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -796,7 +796,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
 
         assert!(probe_create_remove_dir(&root).is_ok());
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -812,7 +812,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
         assert_eq!(check.status, DoctorStatus::Warn);
@@ -828,7 +828,7 @@ mod tests {
                 ..passing_env(dir.path())
             };
 
-            let report = run_doctor(None, &env);
+            let report = run_doctor(&dir.path().join("deck.md"), &env);
 
             let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
             assert_eq!(check.status, DoctorStatus::Warn);
@@ -852,7 +852,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         fs::set_permissions(&home, original).unwrap();
         let check = find_check(&report, DoctorCategory::Chrome, "profiles-writable");
@@ -864,7 +864,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Displays, "enumeration");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -883,7 +883,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Displays, "enumeration");
         assert_eq!(check.status, DoctorStatus::Warn);
@@ -902,7 +902,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Displays, "enumeration");
         assert_eq!(check.status, DoctorStatus::Warn);
@@ -920,7 +920,7 @@ mod tests {
             ..passing_env(dir.path())
         };
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::Displays, "enumeration");
         assert_eq!(check.status, DoctorStatus::Warn);
@@ -932,7 +932,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::EmbeddedShells, "present-shell");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -946,7 +946,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let check = find_check(&report, DoctorCategory::EmbeddedShells, "preview-shell");
         assert_eq!(check.status, DoctorStatus::Pass);
@@ -956,11 +956,11 @@ mod tests {
     }
 
     #[test]
-    fn assets_report_skipped_when_no_deck_path() {
+    fn assets_report_skipped_when_deck_does_not_exist() {
         let dir = tempfile::tempdir().unwrap();
         let env = passing_env(dir.path());
 
-        let report = run_doctor(None, &env);
+        let report = run_doctor(&dir.path().join("deck.md"), &env);
 
         let categories = report
             .checks
@@ -991,7 +991,7 @@ mod tests {
         fs::write(&deck, "# Intro\n").unwrap();
         fs::create_dir_all(dir.path().join("layouts")).unwrap();
 
-        let report = run_doctor(Some(&deck), &env);
+        let report = run_doctor(&deck, &env);
 
         let layouts = find_check(&report, DoctorCategory::Assets, "layouts");
         let css = find_check(&report, DoctorCategory::Assets, "css");
@@ -1021,7 +1021,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("syntaxes")).unwrap();
         fs::create_dir_all(dir.path().join("fonts")).unwrap();
 
-        let report = run_doctor(Some(&deck), &env);
+        let report = run_doctor(&deck, &env);
 
         let categories = report
             .checks

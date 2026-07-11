@@ -324,7 +324,8 @@ enum Command {
         json: bool,
     },
     Doctor {
-        input: Option<PathBuf>,
+        #[arg(default_value = "deck.md")]
+        input: PathBuf,
         #[arg(long)]
         json: bool,
     },

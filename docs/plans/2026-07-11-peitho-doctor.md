@@ -8,9 +8,10 @@ lore in CLAUDE.md.
 
 ## Design decisions
 
-- **Positional arg**: `peitho doctor [<deck.md>]`. No-arg runs
+- **Positional arg**: `peitho doctor [<deck.md>]`, defaulting to
+  `deck.md` when omitted. If the deck file does not exist, doctor runs
   environment-only checks (Chrome, displays, embedded shells present).
-  With a deck path, adds deck-specific asset resolution checks.
+  When the deck file exists, it adds deck-specific asset resolution checks.
   Consistent with the shape of `peitho layouts` (Issue #243 / PR #247).
 - **Exit code**: non-zero (2) on any `fail`. `warn` does not fail the
   exit code (so single-display laptops still exit 0). This matches the
@@ -25,7 +26,7 @@ lore in CLAUDE.md.
   3. `embedded shells` — bundled `shell.js` / `preview.js` present at
      compile time (satisfied by construction of the binary itself, but
      surfaced so the user sees they exist and how big they are)
-  4. `assets` — deck-specific; only present when a deck path is given
+  4. `assets` — deck-specific; only present when the deck file exists
 - **Statuses**: `pass` / `warn` / `fail`. Rules:
   - `warn` = things that reduce peitho functionality but do not break
     the golden path (e.g., only one display, no Chrome on Linux path
@@ -195,13 +196,13 @@ pub struct DoctorCheck {
 pub enum DoctorCategory { Chrome, Displays, EmbeddedShells, Assets }
 pub enum DoctorStatus { Pass, Warn, Fail }
 
-pub fn run_doctor(deck: Option<&Path>, env: &DoctorEnv) -> DoctorReport;
+pub fn run_doctor(deck: &Path, env: &DoctorEnv) -> DoctorReport;
 ```
 
 Wire-up in `main.rs`:
 
-- Add `Command::Doctor { input: Option<PathBuf>, json: bool }` to the
-  `Command` enum.
+- Add `Command::Doctor { input: PathBuf, json: bool }` to the
+  `Command` enum, with `input` defaulting to `deck.md`.
 - Add `mod doctor;` and dispatch from `main`.
 - Print the report via `doctor::print_human` or `doctor::print_json`
   and return the correct exit code.
@@ -238,8 +239,8 @@ Red-Green-Refactor cycles:
    `BUILTIN_SHELL_JS.len()`.
 10. `embedded_shells_report_preview_shell_with_byte_count` — same
     for preview.
-11. `assets_report_skipped_when_no_deck_path` — no `Assets` category
-    lines.
+11. `assets_report_skipped_when_deck_does_not_exist` — no `Assets`
+    category lines.
 12. `assets_report_provenance_for_each_asset` — synthesize a tempdir
     deck with a `layouts/` sibling and no others; assert deck-adjacent
     / built-in provenance is reported per asset.
