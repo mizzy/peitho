@@ -353,6 +353,15 @@ Following the repo TDD skill (Red → Green → Refactor for each file):
 lives in the Rust side; the browser never sees it (diagrams are
 already-rendered assets by the time HTML ships).
 
+## Example deck
+
+The repository includes `examples/code-images/` as the end-to-end
+demonstration deck for this feature. It shows Mermaid and Graphviz
+fences transformed into cached SVG image fragments, a before/after
+slide that contrasts ordinary highlighted Markdown source with the
+transformed image, and a source slide displaying the `code_images:`
+frontmatter that powers the build.
+
 ## Rollout order (for Codex)
 
 1. Domain: add `CodeImagesConfig` + `CodeImageCommand` to
