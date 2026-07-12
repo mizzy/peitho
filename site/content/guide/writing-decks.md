@@ -43,8 +43,8 @@ Convention mapping turns Markdown into slots without extra notation:
 - All other blocks map to `body`.
 
 Markdown images are deck-relative local files. They must use supported local
-image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`) and must map to a layout
-with exactly one unambiguous `accepts="image"` slot.
+image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`) and must map to a
+layout with exactly one unambiguous `accepts="image"` slot.
 
 ## Explicit slot syntax
 

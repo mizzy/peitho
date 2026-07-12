@@ -2,14 +2,15 @@
 title = "Frontmatter"
 weight = 40
 template = "guide-page.html"
-description = "Use deck frontmatter for time, canvas, PDF, layout, CSS, syntax, and font settings."
+description = "Use deck frontmatter for time, canvas, PDF, layout, CSS, syntax, font, and code image settings."
 +++
 
 ## Frontmatter belongs at the top
 
 Deck-level settings live in YAML frontmatter at the top of the deck. The body
-is restricted to flat `key:` lines, with trailing stylistic blank lines allowed.
-Settings anywhere but the top are not accepted as deck settings.
+is restricted to flat `key:` lines, plus one nested `code_images:` mapping
+level, with trailing stylistic blank lines allowed. Settings anywhere but the
+top are not accepted as deck settings.
 
 Invalid or misplaced settings are line-numbered build errors with help. A
 leading `---` without valid frontmatter, malformed YAML, and Markdown swallowed
@@ -18,7 +19,7 @@ by a missing closing `---` all stop the build.
 ## Keys
 
 Supported keys are `time`, `aspect_ratio`, `resolution`, `layouts`, `css`,
-`syntaxes`, and `fonts`.
+`syntaxes`, `fonts`, and `code_images`.
 
 | Key | Purpose |
 | --- | --- |
@@ -29,6 +30,7 @@ Supported keys are `time`, `aspect_ratio`, `resolution`, `layouts`, `css`,
 | `css` | Theme CSS file or directory. |
 | `syntaxes` | Custom syntect syntax file or directory. |
 | `fonts` | Font asset file or directory. |
+| `code_images` | Commands that turn matching fenced code blocks into SVG images. |
 
 Examples in the repository include:
 
@@ -40,6 +42,36 @@ time: 8m
 aspect_ratio: 16:9
 resolution: 1920x1080
 ```
+
+## Code images
+
+Use `code_images` when a fenced code block should be rendered by an external
+command at build time and then treated as an image. Each entry maps a language
+tag to a command string. Peitho shell-splits the string into argv and executes
+the program directly; it does not run the command through `sh -c`.
+
+````markdown
+---
+code_images:
+  mermaid: mmdc -i - -o - -e svg
+---
+
+# Flow
+
+```mermaid
+graph TD
+  A[Write Markdown] --> B[Build SVG]
+```
+````
+
+The command receives the code block text on stdin and must write an SVG document
+to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
+then flows through the normal image resolver, so layouts should provide an
+`accepts="image"` slot.
+
+Preview watches the deck, layout, CSS, syntax, and font roots. It does not watch
+files read by the command itself, such as Mermaid theme files or config JSON.
+Restart preview or touch the deck after changing those command inputs.
 
 ## Asset resolution order
 

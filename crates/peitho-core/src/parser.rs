@@ -747,7 +747,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -2628,9 +2628,9 @@ enum Phase { Parsed, Mapped, Checked }
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
-        assert!(err
-            .to_string()
-            .contains("unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"));
+        assert!(err.to_string().contains(
+            "unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp, svg"
+        ));
     }
 
     #[test]
@@ -2643,24 +2643,27 @@ enum Phase { Parsed, Mapped, Checked }
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
-        assert!(err
-            .to_string()
-            .contains("unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp"));
+        assert!(err.to_string().contains(
+            "unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp, svg"
+        ));
     }
 
     #[test]
-    fn rejects_svg_until_policy_is_decided() {
-        let err = parse_markdown(
+    fn accepts_svg_image_extension() {
+        let deck = parse_markdown(
             "# Title\n\n![Icon](icon.svg)",
             &crate::highlight::Highlighter::defaults(),
         )
-        .unwrap_err();
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
 
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(3));
-        assert!(err
-            .to_string()
-            .contains("unsupported image extension 'svg'; supported: png, jpg, jpeg, gif, webp"));
+        match slide.fragments[1].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "Icon");
+                assert_eq!(src.as_str(), "icon.svg");
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3436,7 +3439,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -3637,7 +3640,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -3694,7 +3697,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 

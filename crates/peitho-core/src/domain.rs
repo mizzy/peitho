@@ -408,8 +408,8 @@ pub struct ResolvedImageAsset {
     pub dist_rel: ResolvedImagePath,
 }
 
-const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
-const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp, svg";
 
 impl RawImagePath {
     /// Image extensions accepted by Markdown parsing.

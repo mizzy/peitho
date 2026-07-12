@@ -1,4 +1,5 @@
 pub mod check;
+pub mod code_images;
 pub mod domain;
 pub mod error;
 pub mod highlight;

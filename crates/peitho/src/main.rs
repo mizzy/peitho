@@ -36,6 +36,28 @@ struct BuildArtifacts {
     fonts_source: Option<PathBuf>,
 }
 
+struct CliSvgRunner {
+    timeout: Duration,
+}
+
+impl Default for CliSvgRunner {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl peitho_core::code_images::SvgRunner for CliSvgRunner {
+    fn run(
+        &self,
+        command: &peitho_core::domain::CodeImageCommand,
+        stdin: &str,
+    ) -> peitho_core::Result<Vec<u8>> {
+        run_code_image_command(command, stdin, self.timeout)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
@@ -1354,6 +1376,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         )
     })?;
     let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
+    let code_images = frontmatter.settings().code_images().clone();
     let assets = resolve_assets(input, &frontmatter)?;
     let highlighter = load_highlighter(assets.syntaxes.path())?;
     let layouts = load_layouts(assets.layouts.path())?;
@@ -1362,6 +1385,12 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &markdown,
         frontmatter,
         &highlighter,
+    ))?;
+    let parsed = core(peitho_core::code_images::transform_code_images(
+        parsed,
+        &code_images,
+        &CliSvgRunner::default(),
+        &code_images_cache_dir(input),
     ))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
@@ -1387,6 +1416,10 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
     })
+}
+
+fn code_images_cache_dir(input: &Path) -> PathBuf {
+    asset_resolution::deck_parent(input).join(".peitho/code-images-cache")
 }
 
 fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
@@ -1789,6 +1822,234 @@ fn kill_and_reap_child(child: &mut Child) -> miette::Result<()> {
 
 fn output_file_is_nonempty(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+
+#[derive(Debug)]
+enum CodeImagePipeEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CodeImagePipe {
+    Stdout,
+    Stderr,
+}
+
+fn run_code_image_command(
+    command: &peitho_core::domain::CodeImageCommand,
+    stdin: &str,
+    timeout: Duration,
+) -> peitho_core::Result<Vec<u8>> {
+    let Some(program) = command.argv.first() else {
+        return Err(code_image_runner_error(
+            "code_images command has empty argv",
+            "set the code_images entry to a command",
+        ));
+    };
+    let mut child = std::process::Command::new(program)
+        .args(&command.argv[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            code_image_runner_error(
+                format!("failed to start command '{program}': {err}"),
+                "install the command or fix the code_images frontmatter",
+            )
+        })?;
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
+        code_image_runner_error(
+            "failed to capture command stdout",
+            "retry the build; this is an internal process setup error",
+        )
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        code_image_runner_error(
+            "failed to capture command stderr",
+            "retry the build; this is an internal process setup error",
+        )
+    })?;
+    let (tx, rx) = mpsc::channel();
+    let _stdout_reader =
+        spawn_code_image_pipe_reader(stdout_pipe, CodeImagePipe::Stdout, tx.clone());
+    let _stderr_reader = spawn_code_image_pipe_reader(stderr_pipe, CodeImagePipe::Stderr, tx);
+    if let Some(mut stdin_pipe) = child.stdin.take() {
+        let input = stdin.as_bytes().to_vec();
+        let _stdin_writer = thread::spawn(move || {
+            let _ = stdin_pipe.write_all(&input);
+        });
+    }
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child.try_wait().map_err(|err| {
+            code_image_runner_error(
+                format!("failed to wait for command '{program}': {err}"),
+                "retry the build or check the code_images command",
+            )
+        })? {
+            drain_code_image_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
+            if status.success() {
+                return Ok(stdout);
+            }
+            return Err(code_image_runner_error(
+                format!(
+                    "command exited with status {status}; stderr: {}",
+                    stderr_excerpt(&stderr)
+                ),
+                "fix the code_images command or the fenced code block input",
+            ));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            kill_and_reap_code_image_child(&mut child).map_err(|err| {
+                code_image_runner_error(
+                    format!("failed to kill timed-out command '{program}': {err}"),
+                    "stop the hung code_images command and retry the build",
+                )
+            })?;
+            drain_code_image_events(&rx, &mut stdout, &mut stderr);
+            return Err(code_image_runner_error(
+                format!(
+                    "command timed out after {}s; stderr: {}",
+                    timeout.as_secs(),
+                    stderr_excerpt(&stderr)
+                ),
+                "make the code_images command finish within 30 seconds",
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(25));
+        let _ = receive_code_image_event_until(&rx, &mut stdout, &mut stderr, poll);
+    }
+}
+
+fn spawn_code_image_pipe_reader<R>(
+    mut pipe: R,
+    pipe_name: CodeImagePipe,
+    tx: mpsc::Sender<CodeImagePipeEvent>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let bytes = buffer[..n].to_vec();
+                    let event = match pipe_name {
+                        CodeImagePipe::Stdout => CodeImagePipeEvent::Stdout(bytes),
+                        CodeImagePipe::Stderr => CodeImagePipeEvent::Stderr(bytes),
+                    };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn append_code_image_event(event: CodeImagePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+    match event {
+        CodeImagePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        CodeImagePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+    }
+}
+
+fn drain_code_image_events(
+    rx: &mpsc::Receiver<CodeImagePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) {
+    while let Ok(event) = rx.try_recv() {
+        append_code_image_event(event, stdout, stderr);
+    }
+}
+
+fn drain_code_image_events_for(
+    rx: &mpsc::Receiver<CodeImagePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    duration: Duration,
+) {
+    let deadline = Instant::now() + duration;
+    loop {
+        drain_code_image_events(rx, stdout, stderr);
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let poll = remaining.min(Duration::from_millis(10));
+        match receive_code_image_event_until(rx, stdout, stderr, poll) {
+            CodeImageReceive::Event | CodeImageReceive::Timeout => {}
+            CodeImageReceive::Disconnected => return,
+        }
+    }
+}
+
+enum CodeImageReceive {
+    Event,
+    Timeout,
+    Disconnected,
+}
+
+fn receive_code_image_event_until(
+    rx: &mpsc::Receiver<CodeImagePipeEvent>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    poll: Duration,
+) -> CodeImageReceive {
+    match rx.recv_timeout(poll) {
+        Ok(event) => {
+            append_code_image_event(event, stdout, stderr);
+            CodeImageReceive::Event
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => CodeImageReceive::Timeout,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            thread::sleep(poll);
+            CodeImageReceive::Disconnected
+        }
+    }
+}
+
+fn kill_and_reap_code_image_child(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    let excerpt = String::from_utf8_lossy(stderr)
+        .trim()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if excerpt.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        excerpt
+    }
+}
+
+fn code_image_runner_error(
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> peitho_core::BuildError {
+    peitho_core::BuildError::new(peitho_core::error::ErrorKind::Asset, None, message, help)
 }
 
 fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
