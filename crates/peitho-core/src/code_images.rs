@@ -25,12 +25,12 @@ pub fn parse_deck_and_transform<R: SvgRunner>(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
-    config: &CodeImagesConfig,
     runner: &R,
     cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
+    let config = frontmatter.settings().code_images().clone();
     let parsed = parse_markdown(source, frontmatter, highlighter)?;
-    transform_code_images(parsed, config, runner, cache_dir)
+    transform_code_images(parsed, &config, runner, cache_dir)
 }
 
 pub fn transform_code_images<R: SvgRunner>(

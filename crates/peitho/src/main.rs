@@ -537,12 +537,10 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
     };
 
     let highlighter = load_highlighter(assets.syntaxes.path())?;
-    let code_images = frontmatter.settings().code_images().clone();
     let parsed = core(peitho_core::code_images::parse_deck_and_transform(
         &markdown,
         frontmatter,
         &highlighter,
-        &code_images,
         &CliSvgRunner::default(),
         &code_images_cache_dir(&input),
     ))?;
@@ -1380,7 +1378,6 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         )
     })?;
     let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
-    let code_images = frontmatter.settings().code_images().clone();
     let assets = resolve_assets(input, &frontmatter)?;
     let highlighter = load_highlighter(assets.syntaxes.path())?;
     let layouts = load_layouts(assets.layouts.path())?;
@@ -1389,7 +1386,6 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &markdown,
         frontmatter,
         &highlighter,
-        &code_images,
         &CliSvgRunner::default(),
         &code_images_cache_dir(input),
     ))?;
