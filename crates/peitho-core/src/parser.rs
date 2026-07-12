@@ -560,6 +560,7 @@ fn parse_code_images_config(
 ) -> Result<CodeImagesConfig> {
     let mut parsed_entries = BTreeMap::new();
     for (tag, command) in entries.unwrap_or_default() {
+        validate_code_images_tag(&tag, key_line)?;
         let argv = shlex::split(&command).ok_or_else(|| {
             BuildError::new(
                 ErrorKind::Parse,
@@ -583,6 +584,26 @@ fn parse_code_images_config(
         entries: parsed_entries,
         key_line,
     })
+}
+
+fn validate_code_images_tag(tag: &str, line: Option<usize>) -> Result<()> {
+    if tag.trim().is_empty() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            line,
+            "code_images entry has empty language tag",
+            "give the code_images entry a non-empty language tag like 'mermaid'",
+        ));
+    }
+    if tag.trim() != tag || tag.chars().any(char::is_whitespace) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            line,
+            format!("code_images entry '{tag}' has invalid language tag"),
+            "use a code_images language tag without whitespace, like 'mermaid'",
+        ));
+    }
+    Ok(())
 }
 
 fn deck_settings_resolution_error_help(message: &str) -> &'static str {
@@ -2097,6 +2118,43 @@ mod tests {
         assert_eq!(
             err.help,
             "set code_images.mermaid to a command, like mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_code_images_tag_with_line_and_help() {
+        let err = match parse_frontmatter("---\ncode_images: { \"\": mmdc }\n---\n# Intro") {
+            Ok(_) => panic!("expected empty code_images tag to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.message, "code_images entry has empty language tag");
+        assert_eq!(
+            err.help,
+            "give the code_images entry a non-empty language tag like 'mermaid'"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_code_images_tag_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images: { \"mermaid diagram\": mmdc }\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected whitespace code_images tag to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid diagram' has invalid language tag"
+        );
+        assert_eq!(
+            err.help,
+            "use a code_images language tag without whitespace, like 'mermaid'"
         );
     }
 
