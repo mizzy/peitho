@@ -787,10 +787,8 @@ fn nested_frontmatter_mapping_entry(line: &str) -> Option<NestedFrontmatterMappi
     if indent.is_empty() {
         return None;
     }
-    flat_yaml_key_and_value_presence(trimmed).map(|(_, has_value)| NestedFrontmatterMappingEntry {
-        indent,
-        has_value,
-    })
+    flat_yaml_key_and_value_presence(trimmed)
+        .map(|(_, has_value)| NestedFrontmatterMappingEntry { indent, has_value })
 }
 
 fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
@@ -2753,9 +2751,9 @@ enum Phase { Parsed, Mapped, Checked }
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
-        assert!(err.to_string().contains(
-            "unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"
-        ));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"));
     }
 
     #[test]
@@ -2768,9 +2766,9 @@ enum Phase { Parsed, Mapped, Checked }
 
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
-        assert!(err.to_string().contains(
-            "unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp"
-        ));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp"));
     }
 
     #[test]
