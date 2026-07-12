@@ -73,6 +73,9 @@ Preview watches the deck, layout, CSS, syntax, and font roots. It does not watch
 files read by the command itself, such as Mermaid theme files or config JSON.
 Restart preview or touch the deck after changing those command inputs.
 
+See [Code Images](@/examples/code-images.md) for a complete Mermaid and
+Graphviz example deck.
+
 ## Asset resolution order
 
 For asset keys, Peitho resolves assets in this order:

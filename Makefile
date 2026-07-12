@@ -9,13 +9,13 @@ ZOLA ?= zola
 ZOLA_BASE_URL ?=
 DEMO_OUT = .demo-site
 DEMO_OUT_ABS := $(abspath $(DEMO_OUT))
-DEMO_DECKS = minimal lightning-talk code-walkthrough keynote peitho-tour two-column image-showcase aspect-ratio-4-3
+DEMO_DECKS = minimal lightning-talk code-walkthrough code-images keynote peitho-tour two-column image-showcase aspect-ratio-4-3
 DEMO_SCREENSHOTS_DIR = $(DEMO_OUT)/deck-shots
 DOCS_SOURCE_DIR = site/static/deck-sources
 WRANGLER ?= npx -y wrangler
 
-.PHONY: help minimal lightning-talk code-walkthrough keynote peitho-tour shell \
-	minimal-windowed lightning-talk-windowed code-walkthrough-windowed keynote-windowed \
+.PHONY: help minimal lightning-talk code-walkthrough code-images keynote peitho-tour shell \
+	minimal-windowed lightning-talk-windowed code-walkthrough-windowed code-images-windowed keynote-windowed \
 	peitho-tour-windowed docs-sources demo-site demo-screenshots og-cards deploy-demo screenshots
 
 help:
@@ -23,6 +23,7 @@ help:
 	@echo "  make minimal           最小デッキ（内蔵デフォルトテーマ）"
 	@echo "  make lightning-talk    日本語LT（ダーク+大型タイポ）"
 	@echo "  make code-walkthrough  typestate解説（ターミナル風2カラム）"
+	@echo "  make code-images       code_images図解（Mermaid/GraphvizをSVG化）"
 	@echo "  make keynote           キーノート（セリフ体中央寄せ）"
 	@echo "  make peitho-tour      Peithoの機能ツアー（4レイアウト・画像スロット・複数ノート）"
 	@echo ""
@@ -45,6 +46,9 @@ lightning-talk-windowed: lightning-talk
 code-walkthrough-windowed: PRESENT_FLAGS += --presenter-windowed
 code-walkthrough-windowed: code-walkthrough
 
+code-images-windowed: PRESENT_FLAGS += --presenter-windowed
+code-images-windowed: code-images
+
 keynote-windowed: PRESENT_FLAGS += --presenter-windowed
 keynote-windowed: keynote
 
@@ -63,6 +67,9 @@ lightning-talk: shell
 
 code-walkthrough: shell
 	$(PRESENT) examples/code-walkthrough/deck.md $(PRESENT_FLAGS)
+
+code-images: shell
+	$(PRESENT) examples/code-images/deck.md $(PRESENT_FLAGS)
 
 keynote: shell
 	$(PRESENT) examples/keynote/deck.md $(PRESENT_FLAGS)
