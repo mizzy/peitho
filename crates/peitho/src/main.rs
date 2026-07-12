@@ -1892,12 +1892,16 @@ fn chrome_process_error(chrome: &Path, err: ProcessRunError) -> miette::Error {
         ProcessRunError::CaptureStdin => miette::miette!(
             "failed to capture Chrome stdin\nhelp: retry export; this is an internal process setup error"
         ),
-        ProcessRunError::Spawn(err) | ProcessRunError::Wait(err) | ProcessRunError::Kill(err) => {
-            miette::miette!(
-                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
-                chrome.display()
-            )
+        ProcessRunError::Spawn(err) => miette::miette!(
+            "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+            chrome.display()
+        ),
+        ProcessRunError::Wait(err) => {
+            miette::miette!("failed to wait on Chrome: {err}\nhelp: retry export")
         }
+        ProcessRunError::Kill(err) => miette::miette!(
+            "failed to terminate Chrome: {err}\nhelp: report the underlying io error"
+        ),
     }
 }
 
@@ -4771,6 +4775,50 @@ contexts:
         );
         assert!(
             message.contains("PEITHO_CHROME_PATH=<absolute-path>"),
+            "actual error: {message}"
+        );
+    }
+
+    #[test]
+    fn chrome_process_wait_error_does_not_use_install_hint() {
+        let err = chrome_process_error(
+            Path::new("/tmp/chrome"),
+            ProcessRunError::Wait(std::io::Error::other("wait failed")),
+        );
+        let message = err.to_string();
+
+        assert!(
+            message.contains("failed to wait on Chrome: wait failed"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("help: retry export"),
+            "actual error: {message}"
+        );
+        assert!(
+            !message.contains("install Google Chrome"),
+            "actual error: {message}"
+        );
+    }
+
+    #[test]
+    fn chrome_process_kill_error_does_not_use_install_hint() {
+        let err = chrome_process_error(
+            Path::new("/tmp/chrome"),
+            ProcessRunError::Kill(std::io::Error::other("kill failed")),
+        );
+        let message = err.to_string();
+
+        assert!(
+            message.contains("failed to terminate Chrome: kill failed"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("help: report the underlying io error"),
+            "actual error: {message}"
+        );
+        assert!(
+            !message.contains("install Google Chrome"),
             "actual error: {message}"
         );
     }
