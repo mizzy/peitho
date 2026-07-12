@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use peitho_core::{
     check_deck,
@@ -44,7 +44,7 @@ fn renders_code_image_as_resolved_svg_img() {
         let source_abs = temp.path().join(request.raw.as_str());
         assert!(fs::metadata(&source_abs).unwrap().is_file());
         Ok(ResolvedImageAsset {
-            source_abs: PathBuf::from(source_abs),
+            source_abs,
             dist_rel: dist_rel.clone(),
         })
     })

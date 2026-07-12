@@ -708,9 +708,7 @@ fn starts_with_flat_yaml_key(line: &str) -> bool {
 }
 
 fn flat_yaml_key_and_value_presence(line: &str) -> Option<(&str, bool)> {
-    let Some(colon_index) = line.find(':') else {
-        return None;
-    };
+    let colon_index = line.find(':')?;
     let key = &line[..colon_index];
     let valid = !key.is_empty()
         && key
