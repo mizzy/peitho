@@ -4963,14 +4963,15 @@ contexts:
             argv: vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
-                "test -f ./puppeteer-config.json && printf '<svg></svg>'".to_owned(),
+                "test -f ./puppeteer-config.json && printf '<svg viewBox=\"0 0 10 10\"></svg>'"
+                    .to_owned(),
             ],
         };
         let runner = CliSvgRunner::for_deck(&dir.path().join("deck.md"));
 
         let stdout = peitho_core::code_images::SvgRunner::run(&runner, &command, "").unwrap();
 
-        assert_eq!(stdout, b"<svg></svg>");
+        assert_eq!(stdout, br#"<svg viewBox="0 0 10 10"></svg>"#);
     }
 
     #[cfg(unix)]
@@ -5630,7 +5631,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
         fs::create_dir_all(&layouts).unwrap();
         write_script(
             &command,
-            "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"></svg>'\n",
         );
         fs::write(
             layouts.join("code.html"),

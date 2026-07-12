@@ -116,7 +116,7 @@ fn build_with_code_images_writes_svg_asset_and_references_it() {
     let out = dir.path().join("dist");
     fs::write(
         &command,
-        "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>'\n",
+        "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"></svg>'\n",
     )
     .unwrap();
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
@@ -156,7 +156,7 @@ fn build_with_code_images_writes_svg_asset_and_references_it() {
     );
     assert_eq!(
         fs::read(&assets[0]).unwrap(),
-        b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+        br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10"></svg>"#
     );
     let slide = fs::read_to_string(out.join("slides/000-diagram.html")).unwrap();
     let asset_name = assets[0].file_name().unwrap().to_string_lossy();
