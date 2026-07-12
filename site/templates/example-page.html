@@ -34,9 +34,6 @@
     {{ throw_missing_example_github_path }}
   {% endif %}
   {% set deck_source = load_data(path=page.extra.source_path, format="plain") %}
-  {% set nl = "
-" %}
-  {% set source_block = "````markdown" ~ nl ~ deck_source ~ nl ~ "````" %}
 
   <article class="doc-page doc-body example-page">
     <header class="page-header">
@@ -61,7 +58,11 @@
     </p>
     <section class="deck-source">
       <h2>Deck source</h2>
-      {{ source_block | markdown | safe }}
+      {# Rendered as a plain escaped code block, not via a Markdown fence: a
+         deck that itself contains a four-backtick fence (e.g. code-images'
+         before/after slide) would terminate any fixed-length wrapper fence
+         early and leak the rest of the deck into the page. #}
+      <pre><code>{{ deck_source }}</code></pre>
     </section>
   </article>
 {% endblock docs_content %}
