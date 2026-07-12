@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -58,6 +59,58 @@ fn build_writes_index_html_and_css() {
     assert!(fs::read_to_string(out.join("peitho.css"))
         .unwrap()
         .contains(r#"[data-slide-key="arch-1"] .slot-code"#));
+}
+
+#[test]
+fn build_fails_for_root_class_width_override_with_line_and_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layout = dir.path().join("title-body.html");
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    let out = dir.path().join("dist");
+
+    fs::write(
+        &deck,
+        deck_with_assets("./title-body.html", "# Architecture\n\nBody"),
+    )
+    .unwrap();
+    fs::write(
+        &layout,
+        r#"<section class="code-images"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+    )
+    .unwrap();
+    fs::write(
+        css_dir.join("base.css"),
+        ".peitho-slide { width: var(--peitho-canvas-width, 1280px); height: var(--peitho-canvas-height, 720px); }",
+    )
+    .unwrap();
+    fs::write(
+        css_dir.join("overrides.css"),
+        "/* reintroduced root sizing collision */\n.code-images { width: 100%; }",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("line 2"))
+        .stderr(predicate::str::contains(
+            "overrides.css: root class '.code-images' sets width",
+        ))
+        .stderr(predicate::str::contains("root <section>"))
+        .stderr(predicate::str::contains("help: remove width"))
+        .stderr(predicate::str::contains("match .peitho-slide's width"))
+        .stderr(predicate::str::contains(
+            "var(--peitho-canvas-width, 1280px)",
+        ));
 }
 
 #[test]
@@ -1006,6 +1059,44 @@ fn repository_example_builds_three_slide_distribution() {
 }
 
 #[test]
+fn repository_example_css_is_root_size_lint_clean() {
+    let root = workspace_root();
+    let mut examples = fs::read_dir(root.join("examples"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .filter(|path| path.join("deck.md").is_file())
+        .collect::<Vec<_>>();
+    examples.sort();
+    assert!(!examples.is_empty(), "expected at least one example deck");
+
+    let mut linted_examples = 0;
+    for example_dir in examples {
+        let example = example_dir.file_name().unwrap().to_string_lossy();
+        if !example_uses_lintable_conventional_assets(&example_dir) {
+            continue;
+        }
+        linted_examples += 1;
+        let layouts = read_example_layouts(&example_dir.join("layouts"));
+        let css_files = read_example_css_files(&example_dir.join("css"));
+        let layout_slots = layouts.slot_classes();
+        let slide_slots = broad_slide_slots_for_css_keys(&css_files, &layout_slots);
+
+        peitho_core::build_theme_css(
+            &css_files,
+            &slide_slots,
+            &layout_slots,
+            &layouts.root_classes(),
+        )
+        .unwrap_or_else(|err| panic!("{example} CSS should be lint-clean: {err}"));
+    }
+    assert!(
+        linted_examples > 0,
+        "expected at least one example with deck CSS to lint"
+    );
+}
+
+#[test]
 fn lightning_talk_example_declares_five_minute_planned_duration() {
     let out = tempdir().unwrap();
 
@@ -1490,6 +1581,143 @@ fn workspace_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_owned()
+}
+
+fn example_uses_lintable_conventional_assets(example_dir: &Path) -> bool {
+    let example = example_dir.file_name().unwrap().to_string_lossy();
+    let has_layouts_dir = example_dir.join("layouts").is_dir();
+    let has_css_dir = example_dir.join("css").is_dir();
+    let (layouts_key, css_key) = example_frontmatter_asset_values(example_dir);
+    let has_asset_keys = layouts_key.is_some() || css_key.is_some();
+
+    if !has_asset_keys && !has_layouts_dir && !has_css_dir {
+        return false;
+    }
+
+    assert!(
+        has_layouts_dir,
+        "{example} has deck asset configuration but no layouts/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+    );
+    assert!(
+        has_css_dir,
+        "{example} has deck asset configuration but no css/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+    );
+
+    if let Some(value) = layouts_key.as_deref() {
+        assert_conventional_frontmatter_asset(&example, "layouts", value, "./layouts");
+    }
+    if let Some(value) = css_key.as_deref() {
+        assert_conventional_frontmatter_asset(&example, "css", value, "./css");
+    }
+
+    true
+}
+
+fn example_frontmatter_asset_values(example_dir: &Path) -> (Option<String>, Option<String>) {
+    let deck = fs::read_to_string(example_dir.join("deck.md")).unwrap();
+    let mut lines = deck.lines();
+    if lines.next() != Some("---") {
+        return (None, None);
+    }
+
+    let mut layouts = None;
+    let mut css = None;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(value) = frontmatter_asset_value(line, "layouts") {
+            layouts = Some(value);
+        } else if let Some(value) = frontmatter_asset_value(line, "css") {
+            css = Some(value);
+        }
+    }
+
+    (layouts, css)
+}
+
+fn frontmatter_asset_value(line: &str, key: &str) -> Option<String> {
+    let (name, value) = line.trim_start().split_once(':')?;
+    (name == key).then(|| value.split('#').next().unwrap_or(value).trim().to_owned())
+}
+
+fn assert_conventional_frontmatter_asset(example: &str, key: &str, value: &str, expected: &str) {
+    assert_eq!(
+        value, expected,
+        "{example} frontmatter {key}: must point at {expected}; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+    );
+}
+
+fn read_example_layouts(layouts_dir: &Path) -> peitho_core::Layouts {
+    let mut files = fs::read_dir(layouts_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("html"))
+        .collect::<Vec<_>>();
+    files.sort();
+    let layouts = files
+        .into_iter()
+        .map(|path| {
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let html = fs::read_to_string(path).unwrap();
+            peitho_core::parse_layout(name, &html).unwrap()
+        })
+        .collect();
+    peitho_core::Layouts::new(layouts).unwrap()
+}
+
+fn read_example_css_files(css_dir: &Path) -> Vec<peitho_core::CssFile> {
+    let mut files = fs::read_dir(css_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("css"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| peitho_core::CssFile {
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            content: fs::read_to_string(path).unwrap(),
+        })
+        .collect()
+}
+
+fn broad_slide_slots_for_css_keys(
+    css_files: &[peitho_core::CssFile],
+    layout_slots: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    css_files
+        .iter()
+        .flat_map(|file| extract_data_slide_keys(&file.content))
+        .map(|key| (key, layout_slots.clone()))
+        .collect()
+}
+
+fn extract_data_slide_keys(css: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut offset = 0;
+    const ATTR: &str = "[data-slide-key";
+
+    while let Some(relative_start) = css[offset..].find(ATTR) {
+        let attr_start = offset + relative_start;
+        let Some(close_relative) = css[attr_start..].find(']') else {
+            break;
+        };
+        let close_index = attr_start + close_relative;
+        let body = &css[attr_start + ATTR.len()..close_index];
+        if let Some((_, value)) = body.split_once('=') {
+            let value = value
+                .trim()
+                .trim_matches(|ch| matches!(ch, '"' | '\''))
+                .to_owned();
+            if !value.is_empty() {
+                keys.push(value);
+            }
+        }
+        offset = close_index + 1;
+    }
+
+    keys
 }
 
 fn deck_with_assets(layouts: &str, body: &str) -> String {
