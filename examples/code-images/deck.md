@@ -13,7 +13,7 @@ Peitho's code image cache, then enters the normal image pipeline.
 
 ```mermaid
 flowchart LR
-  Source["deck.md"] --> Fence["```mermaid"]
+  Source["deck.md"] --> Fence["Mermaid fence"]
   Fence --> Runner["mmdc stdin"]
   Runner --> Cache[".peitho/code-images-cache"]
   Cache --> Slot["image slot"]
@@ -29,7 +29,7 @@ preamble.
 
 ```dot
 digraph Peitho {
-  graph [rankdir=LR, bgcolor="transparent", pad="0.2"];
+  graph [rankdir=TB, bgcolor="transparent", pad="0.2", nodesep="0.45", ranksep="0.55"];
   node [
     shape=box,
     style="rounded,filled",
@@ -39,7 +39,7 @@ digraph Peitho {
     fontsize=18,
     margin="0.18,0.12"
   ];
-  edge [color="#0f766e", penwidth=2, arrowsize=0.8];
+  edge [color="#0f766e", penwidth=2, arrowsize=0.75];
 
   code [label="dot fence"];
   stdout [label="dot -Tsvg stdout"];
