@@ -163,11 +163,14 @@ fn render_slot(
                 .join("\n");
             format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
         }
-        Accepts::Image => fragments
-            .iter()
-            .map(render_image_fragment)
-            .collect::<Result<Vec<_>>>()?
-            .join("\n"),
+        Accepts::Image => {
+            let body = fragments
+                .iter()
+                .map(render_image_fragment)
+                .collect::<Result<Vec<_>>>()?
+                .join("\n");
+            format!(r#"<div class="{class_name}">{body}</div>"#)
+        }
         Accepts::Blocks | Accepts::Text | Accepts::List => {
             render_block_slot(&class_name, accepts, fragments, breaks)?
         }
@@ -1003,6 +1006,36 @@ mod tests {
         parse_markdown_impl(source, frontmatter, highlighter)
     }
 
+    fn render_image_slot_html(
+        slot_name: &str,
+        fragments: Vec<SourceFragment<ResolvedImagePath>>,
+    ) -> String {
+        let layout_html = format!(
+            r#"<section><figure><slot name="{slot_name}" accepts="image" arity="0..*"></slot></figure></section>"#
+        );
+        let layout = parse_layout("visual", &layout_html).unwrap();
+        let slot = SlotName::new(slot_name).unwrap();
+        let contract = layout.slot(slot_name).unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(slot, CheckedSlot::new(contract, fragments));
+        let checked = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                SlideKey::new("visual").unwrap(),
+                layout,
+                slots,
+                None,
+            )],
+        );
+
+        render_deck(checked, &crate::highlight::Highlighter::defaults())
+            .unwrap()
+            .slides()[0]
+            .html()
+            .to_owned()
+    }
+
     #[test]
     fn renders_checked_slide_with_key_and_slot_classes() {
         let markdown = "<!-- {\"key\":\"arch-1\"} -->\n# **Architecture** `Phase`\n\nBody\n\n```rust\nfn main() {}\n```";
@@ -1141,42 +1174,69 @@ mod tests {
 
     #[test]
     fn renders_image_with_resolved_src_and_escaped_alt() {
-        let layout = parse_layout(
-            "visual",
-            r#"<section><figure><slot name="hero" accepts="image" arity="1"></slot></figure></section>"#,
-        )
-        .unwrap();
-        let hero = SlotName::new("hero").unwrap();
-        let contract = layout.slot("hero").unwrap().clone();
-        let mut slots = BTreeMap::new();
-        slots.insert(
-            hero,
-            CheckedSlot::new(
-                contract,
-                vec![SourceFragment::image(
-                    3,
-                    "<Diagram>, \"Notes\" & emoji 🎉",
-                    ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
-                )],
-            ),
-        );
-        let checked = Deck::checked(
-            DeckSettings::default(),
-            vec![CheckedSlide::new(
-                0,
-                SlideKey::new("visual").unwrap(),
-                layout,
-                slots,
-                None,
+        let html = render_image_slot_html(
+            "image",
+            vec![SourceFragment::image(
+                3,
+                "<Diagram>, \"Notes\" & emoji 🎉",
+                ResolvedImagePath::from_string("assets/xxx.png".to_owned()),
             )],
         );
 
-        let rendered = render_deck(checked, &crate::highlight::Highlighter::defaults()).unwrap();
-        let html = rendered.slides()[0].html();
+        assert!(html.contains(
+            r#"<div class="slot-image"><img src="assets/xxx.png" alt="&lt;Diagram&gt;, &quot;Notes&quot; &amp; emoji 🎉"></div>"#
+        ));
+    }
+
+    #[test]
+    fn renders_image_slot_class_matches_slot_name() {
+        let html = render_image_slot_html(
+            "hero",
+            vec![SourceFragment::image(
+                3,
+                "Hero image",
+                ResolvedImagePath::from_string("assets/hero.png".to_owned()),
+            )],
+        );
 
         assert!(html.contains(
-            r#"<img src="assets/xxx.png" alt="&lt;Diagram&gt;, &quot;Notes&quot; &amp; emoji 🎉">"#
+            r#"<div class="slot-hero"><img src="assets/hero.png" alt="Hero image"></div>"#
         ));
+        assert!(!html.contains(r#"<div class="slot-image">"#));
+    }
+
+    #[test]
+    fn renders_multiple_images_in_single_image_slot_wrapper() {
+        let html = render_image_slot_html(
+            "image",
+            vec![
+                SourceFragment::image(
+                    3,
+                    "First image",
+                    ResolvedImagePath::from_string("assets/first.png".to_owned()),
+                ),
+                SourceFragment::image(
+                    4,
+                    "Second image",
+                    ResolvedImagePath::from_string("assets/second.png".to_owned()),
+                ),
+            ],
+        );
+
+        assert_eq!(html.matches(r#"<div class="slot-image">"#).count(), 1);
+        assert_eq!(html.matches("<img ").count(), 2);
+        assert!(html.contains(
+            r#"<div class="slot-image"><img src="assets/first.png" alt="First image">
+<img src="assets/second.png" alt="Second image"></div>"#
+        ));
+    }
+
+    #[test]
+    fn renders_empty_image_slot_without_slot_image_wrapper() {
+        let html = render_image_slot_html("image", Vec::new());
+
+        assert!(!html.contains(r#"class="slot-image""#));
+        assert!(!html.contains("<img "));
     }
 
     #[test]
