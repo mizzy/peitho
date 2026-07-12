@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, HashSet},
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
-    io::{IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Child, Stdio},
+    process::{Child, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -1626,66 +1626,26 @@ fn scan_for_needle(buffer: &[u8], scanned: &mut usize, needle: &[u8]) -> bool {
     found
 }
 
-#[derive(Debug)]
-enum ChromePipeEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ChromePipe {
-    Stdout,
-    Stderr,
-}
-
 fn run_one_shot_chrome(
     chrome: &Path,
     args: &[OsString],
     completion: ChromeCompletion,
     timeout: Duration,
 ) -> miette::Result<Vec<u8>> {
-    let mut child = std::process::Command::new(chrome)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            miette::miette!(
-                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
-                chrome.display()
-            )
-        })?;
-    let stdout_pipe = child.stdout.take().ok_or_else(|| {
-        miette::miette!(
-            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
-        )
-    })?;
-    let stderr_pipe = child.stderr.take().ok_or_else(|| {
-        miette::miette!(
-            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
-        )
-    })?;
-    let (tx, rx) = mpsc::channel();
-    // Intentionally do not join these readers: lingering Chrome grandchildren can hold pipes open forever; threads exit with this process.
-    let _stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
-    let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
     let mut completion_state = ChromeCompletionState::default();
-    let deadline = Instant::now() + timeout;
+    let outcome = run_child_with_timeout(chrome, args, None, timeout, |stdout, stderr| {
+        completion.is_ready(stdout, stderr, &mut completion_state)
+    })
+    .map_err(|err| chrome_process_error(chrome, err))?;
 
-    loop {
-        if completion.is_ready(&stdout, &stderr, &mut completion_state) {
-            kill_and_reap_child(&mut child)?;
-            drain_chrome_events(&rx, &mut stdout, &mut stderr);
-            return Ok(stdout);
-        }
-
-        if let Some(status) = child.try_wait().into_diagnostic()? {
-            drain_chrome_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
-            if completion.is_ready(&stdout, &stderr, &mut completion_state)
-                || (status.success() && completion.is_ready_after_successful_exit())
-            {
+    match outcome {
+        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+        } => {
+            if status.success() && completion.is_ready_after_successful_exit() {
                 return Ok(stdout);
             }
             if !status.success() {
@@ -1695,35 +1655,144 @@ fn run_one_shot_chrome(
                     String::from_utf8_lossy(&stderr).trim()
                 ));
             }
-            return Err(miette::miette!(
+            Err(miette::miette!(
                 "Chrome completed before one-shot output was ready\nhelp: expected {} before Chrome exited\nstderr: {}",
                 completion.description(),
                 String::from_utf8_lossy(&stderr).trim()
-            ));
+            ))
+        }
+        ProcessOutcome::TimedOut { stderr } => Err(miette::miette!(
+            "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
+            timeout.as_secs(),
+            completion.description(),
+            String::from_utf8_lossy(&stderr).trim()
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum ProcessOutcome {
+    Ready {
+        stdout: Vec<u8>,
+    },
+    Exited {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    TimedOut {
+        stderr: Vec<u8>,
+    },
+}
+
+#[derive(Debug)]
+enum ProcessPipeEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessPipe {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+enum ProcessRunError {
+    Spawn(io::Error),
+    CaptureStdout,
+    CaptureStderr,
+    CaptureStdin,
+    Wait(io::Error),
+    Kill(io::Error),
+}
+
+fn run_child_with_timeout<P, A, F>(
+    program: P,
+    args: &[A],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    mut is_complete: F,
+) -> Result<ProcessOutcome, ProcessRunError>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+    F: FnMut(&[u8], &[u8]) -> bool,
+{
+    let mut command = std::process::Command::new(program.as_ref());
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(ProcessRunError::Spawn)?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or(ProcessRunError::CaptureStdout)?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or(ProcessRunError::CaptureStderr)?;
+    let (tx, rx) = mpsc::channel();
+    // Intentionally do not join these readers: lingering grandchildren can hold pipes open forever; threads exit with this process.
+    let _stdout_reader = spawn_process_pipe_reader(stdout_pipe, ProcessPipe::Stdout, tx.clone());
+    let _stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, tx);
+
+    if let Some(input) = stdin {
+        let mut stdin_pipe = child
+            .stdin
+            .take()
+            .ok_or(ProcessRunError::CaptureStdin)?;
+        let input = input.to_vec();
+        let _stdin_writer = thread::spawn(move || {
+            let _ = stdin_pipe.write_all(&input);
+        });
+    }
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if is_complete(&stdout, &stderr) {
+            kill_and_reap_process_child(&mut child).map_err(ProcessRunError::Kill)?;
+            drain_process_events(&rx, &mut stdout, &mut stderr);
+            return Ok(ProcessOutcome::Ready { stdout });
+        }
+
+        if let Some(status) = child.try_wait().map_err(ProcessRunError::Wait)? {
+            drain_process_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
+            if is_complete(&stdout, &stderr) {
+                return Ok(ProcessOutcome::Ready { stdout });
+            }
+            return Ok(ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            });
         }
 
         let now = Instant::now();
         if now >= deadline {
-            kill_and_reap_child(&mut child)?;
-            drain_chrome_events(&rx, &mut stdout, &mut stderr);
-            return Err(miette::miette!(
-                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
-                timeout.as_secs(),
-                completion.description(),
-                String::from_utf8_lossy(&stderr).trim()
-            ));
+            kill_and_reap_process_child(&mut child).map_err(ProcessRunError::Kill)?;
+            drain_process_events(&rx, &mut stdout, &mut stderr);
+            return Ok(ProcessOutcome::TimedOut { stderr });
         }
 
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(25));
-        let _ = receive_chrome_event_until(&rx, &mut stdout, &mut stderr, poll);
+        let _ = receive_process_event_until(&rx, &mut stdout, &mut stderr, poll);
     }
 }
 
-fn spawn_chrome_pipe_reader<R>(
+fn spawn_process_pipe_reader<R>(
     mut pipe: R,
-    pipe_name: ChromePipe,
-    tx: mpsc::Sender<ChromePipeEvent>,
+    pipe_name: ProcessPipe,
+    tx: mpsc::Sender<ProcessPipeEvent>,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -1736,8 +1805,8 @@ where
                 Ok(n) => {
                     let bytes = buffer[..n].to_vec();
                     let event = match pipe_name {
-                        ChromePipe::Stdout => ChromePipeEvent::Stdout(bytes),
-                        ChromePipe::Stderr => ChromePipeEvent::Stderr(bytes),
+                        ProcessPipe::Stdout => ProcessPipeEvent::Stdout(bytes),
+                        ProcessPipe::Stderr => ProcessPipeEvent::Stderr(bytes),
                     };
                     if tx.send(event).is_err() {
                         break;
@@ -1749,92 +1818,100 @@ where
     })
 }
 
-fn append_chrome_event(event: ChromePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+fn append_process_event(event: ProcessPipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
     match event {
-        ChromePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
-        ChromePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+        ProcessPipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        ProcessPipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
     }
 }
 
-fn drain_chrome_events(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn drain_process_events(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
 ) {
     while let Ok(event) = rx.try_recv() {
-        append_chrome_event(event, stdout, stderr);
+        append_process_event(event, stdout, stderr);
     }
 }
 
-fn drain_chrome_events_for(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn drain_process_events_for(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
     duration: Duration,
 ) {
     let deadline = Instant::now() + duration;
     loop {
-        drain_chrome_events(rx, stdout, stderr);
+        drain_process_events(rx, stdout, stderr);
         let now = Instant::now();
         if now >= deadline {
             return;
         }
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(10));
-        match receive_chrome_event_until(rx, stdout, stderr, poll) {
-            ChromeReceive::Event | ChromeReceive::Timeout => {}
-            ChromeReceive::Disconnected => return,
+        match receive_process_event_until(rx, stdout, stderr, poll) {
+            ProcessReceive::Event | ProcessReceive::Timeout => {}
+            ProcessReceive::Disconnected => return,
         }
     }
 }
 
-enum ChromeReceive {
+enum ProcessReceive {
     Event,
     Timeout,
     Disconnected,
 }
 
-fn receive_chrome_event_until(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn receive_process_event_until(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
     poll: Duration,
-) -> ChromeReceive {
+) -> ProcessReceive {
     match rx.recv_timeout(poll) {
         Ok(event) => {
-            append_chrome_event(event, stdout, stderr);
-            ChromeReceive::Event
+            append_process_event(event, stdout, stderr);
+            ProcessReceive::Event
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => ChromeReceive::Timeout,
+        Err(mpsc::RecvTimeoutError::Timeout) => ProcessReceive::Timeout,
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             thread::sleep(poll);
-            ChromeReceive::Disconnected
+            ProcessReceive::Disconnected
         }
     }
 }
 
-fn kill_and_reap_child(child: &mut Child) -> miette::Result<()> {
-    if child.try_wait().into_diagnostic()?.is_none() {
-        child.kill().into_diagnostic()?;
+fn kill_and_reap_process_child(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill()?;
     }
-    child.wait().into_diagnostic()?;
+    child.wait()?;
     Ok(())
+}
+
+fn chrome_process_error(chrome: &Path, err: ProcessRunError) -> miette::Error {
+    match err {
+        ProcessRunError::CaptureStdout => miette::miette!(
+            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::CaptureStderr => miette::miette!(
+            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::CaptureStdin => miette::miette!(
+            "failed to capture Chrome stdin\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::Spawn(err) | ProcessRunError::Wait(err) | ProcessRunError::Kill(err) => {
+            miette::miette!(
+                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+                chrome.display()
+            )
+        }
+    }
 }
 
 fn output_file_is_nonempty(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-}
-
-#[derive(Debug)]
-enum CodeImagePipeEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum CodeImagePipe {
-    Stdout,
-    Stderr,
 }
 
 fn run_code_image_command(
@@ -1848,189 +1925,43 @@ fn run_code_image_command(
             "set the code_images entry to a command",
         ));
     };
-    let mut child = std::process::Command::new(program)
-        .args(&command.argv[1..])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            code_image_runner_error(
-                format!("failed to start command '{program}': {err}"),
-                "install the command or fix the code_images frontmatter",
-            )
-        })?;
-    let stdout_pipe = child.stdout.take().ok_or_else(|| {
-        code_image_runner_error(
-            "failed to capture command stdout",
-            "retry the build; this is an internal process setup error",
-        )
-    })?;
-    let stderr_pipe = child.stderr.take().ok_or_else(|| {
-        code_image_runner_error(
-            "failed to capture command stderr",
-            "retry the build; this is an internal process setup error",
-        )
-    })?;
-    let (tx, rx) = mpsc::channel();
-    let _stdout_reader =
-        spawn_code_image_pipe_reader(stdout_pipe, CodeImagePipe::Stdout, tx.clone());
-    let _stderr_reader = spawn_code_image_pipe_reader(stderr_pipe, CodeImagePipe::Stderr, tx);
-    if let Some(mut stdin_pipe) = child.stdin.take() {
-        let input = stdin.as_bytes().to_vec();
-        let _stdin_writer = thread::spawn(move || {
-            let _ = stdin_pipe.write_all(&input);
-        });
-    }
 
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let deadline = Instant::now() + timeout;
+    let outcome = run_child_with_timeout(
+        program,
+        &command.argv[1..],
+        Some(stdin.as_bytes()),
+        timeout,
+        |_, _| false,
+    )
+    .map_err(|err| code_image_process_error(program, err))?;
 
-    loop {
-        if let Some(status) = child.try_wait().map_err(|err| {
-            code_image_runner_error(
-                format!("failed to wait for command '{program}': {err}"),
-                "retry the build or check the code_images command",
-            )
-        })? {
-            drain_code_image_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
+    match outcome {
+        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+        } => {
             if status.success() {
                 return Ok(stdout);
             }
-            return Err(code_image_runner_error(
+            Err(code_image_runner_error(
                 format!(
                     "command exited with status {status}; stderr: {}",
                     stderr_excerpt(&stderr)
                 ),
                 "fix the code_images command or the fenced code block input",
-            ));
+            ))
         }
-
-        let now = Instant::now();
-        if now >= deadline {
-            kill_and_reap_code_image_child(&mut child).map_err(|err| {
-                code_image_runner_error(
-                    format!("failed to kill timed-out command '{program}': {err}"),
-                    "stop the hung code_images command and retry the build",
-                )
-            })?;
-            drain_code_image_events(&rx, &mut stdout, &mut stderr);
-            return Err(code_image_runner_error(
-                format!(
-                    "command timed out after {}s; stderr: {}",
-                    timeout.as_secs(),
-                    stderr_excerpt(&stderr)
-                ),
-                "make the code_images command finish within 30 seconds",
-            ));
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        let poll = remaining.min(Duration::from_millis(25));
-        let _ = receive_code_image_event_until(&rx, &mut stdout, &mut stderr, poll);
+        ProcessOutcome::TimedOut { stderr } => Err(code_image_runner_error(
+            format!(
+                "command timed out after {}s; stderr: {}",
+                timeout.as_secs(),
+                stderr_excerpt(&stderr)
+            ),
+            "make the code_images command finish within 30 seconds",
+        )),
     }
-}
-
-fn spawn_code_image_pipe_reader<R>(
-    mut pipe: R,
-    pipe_name: CodeImagePipe,
-    tx: mpsc::Sender<CodeImagePipeEvent>,
-) -> thread::JoinHandle<()>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut buffer = [0; 8192];
-        loop {
-            match pipe.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let bytes = buffer[..n].to_vec();
-                    let event = match pipe_name {
-                        CodeImagePipe::Stdout => CodeImagePipeEvent::Stdout(bytes),
-                        CodeImagePipe::Stderr => CodeImagePipeEvent::Stderr(bytes),
-                    };
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    })
-}
-
-fn append_code_image_event(event: CodeImagePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
-    match event {
-        CodeImagePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
-        CodeImagePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
-    }
-}
-
-fn drain_code_image_events(
-    rx: &mpsc::Receiver<CodeImagePipeEvent>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-) {
-    while let Ok(event) = rx.try_recv() {
-        append_code_image_event(event, stdout, stderr);
-    }
-}
-
-fn drain_code_image_events_for(
-    rx: &mpsc::Receiver<CodeImagePipeEvent>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    duration: Duration,
-) {
-    let deadline = Instant::now() + duration;
-    loop {
-        drain_code_image_events(rx, stdout, stderr);
-        let now = Instant::now();
-        if now >= deadline {
-            return;
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let poll = remaining.min(Duration::from_millis(10));
-        match receive_code_image_event_until(rx, stdout, stderr, poll) {
-            CodeImageReceive::Event | CodeImageReceive::Timeout => {}
-            CodeImageReceive::Disconnected => return,
-        }
-    }
-}
-
-enum CodeImageReceive {
-    Event,
-    Timeout,
-    Disconnected,
-}
-
-fn receive_code_image_event_until(
-    rx: &mpsc::Receiver<CodeImagePipeEvent>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    poll: Duration,
-) -> CodeImageReceive {
-    match rx.recv_timeout(poll) {
-        Ok(event) => {
-            append_code_image_event(event, stdout, stderr);
-            CodeImageReceive::Event
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => CodeImageReceive::Timeout,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            thread::sleep(poll);
-            CodeImageReceive::Disconnected
-        }
-    }
-}
-
-fn kill_and_reap_code_image_child(child: &mut Child) -> std::io::Result<()> {
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-    }
-    child.wait()?;
-    Ok(())
 }
 
 fn stderr_excerpt(stderr: &[u8]) -> String {
@@ -2043,6 +1974,35 @@ fn stderr_excerpt(stderr: &[u8]) -> String {
         "(empty)".to_owned()
     } else {
         excerpt
+    }
+}
+
+fn code_image_process_error(program: &str, err: ProcessRunError) -> peitho_core::BuildError {
+    match err {
+        ProcessRunError::Spawn(err) => code_image_runner_error(
+            format!("failed to start command '{program}': {err}"),
+            "install the command or fix the code_images frontmatter",
+        ),
+        ProcessRunError::CaptureStdout => code_image_runner_error(
+            "failed to capture command stdout",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::CaptureStderr => code_image_runner_error(
+            "failed to capture command stderr",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::CaptureStdin => code_image_runner_error(
+            "failed to capture command stdin",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::Wait(err) => code_image_runner_error(
+            format!("failed to wait for command '{program}': {err}"),
+            "retry the build or check the code_images command",
+        ),
+        ProcessRunError::Kill(err) => code_image_runner_error(
+            format!("failed to kill timed-out command '{program}': {err}"),
+            "stop the hung code_images command and retry the build",
+        ),
     }
 }
 
