@@ -349,7 +349,8 @@ ol {
   border: 1px solid var(--hair);
 }
 
-.doc-body .gallery-tile img {
+.doc-body .gallery-tile img,
+.doc-body .deck-shot img {
   margin: 0;
   border: 0;
 }
