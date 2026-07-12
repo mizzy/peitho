@@ -295,7 +295,7 @@ function agendaState(index, currentSection) {
   return "upcoming";
 }
 function actualText(state, actual) {
-  return state === "upcoming" ? EM_DASH : formatMinuteSeconds(actual);
+  return actual > 0 || state !== "upcoming" ? formatMinuteSeconds(actual) : EM_DASH;
 }
 function formatSlideRange(section) {
   const start = String(section.startIndex + 1).padStart(2, "0");
