@@ -5,6 +5,7 @@ import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
+import { nextNonSkippedIndex } from "./skipnav";
 import {
   isGenerationSyncMessage,
   serverSyncChannelFactory,
@@ -237,7 +238,10 @@ class PreviewShellController implements PreviewShell {
         this.slides.push(view);
       }
       const restored = this.restoredState;
-      const restoredIndex = this.clampIndex(restored?.index ?? 0);
+      const restoredIndex =
+        restored === null
+          ? this.clampIndex(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0)
+          : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? "single";
@@ -392,8 +396,14 @@ class PreviewShellController implements PreviewShell {
   private resolveTarget(to: PreviewNavigateTarget): number | null {
     if (to === "first") return 0;
     if (to === "last") return this.slides.length - 1;
-    if (to === "next") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
-    if (to === "prev") return Math.max(this.selectedIndex - 1, 0);
+    if (to === "next") {
+      if (this.mode === "grid") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
+      return this.resolveSequentialTarget(1);
+    }
+    if (to === "prev") {
+      if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
+      return this.resolveSequentialTarget(-1);
+    }
     if (to === "up" || to === "down") return this.resolveGridVerticalTarget(to);
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
@@ -408,6 +418,14 @@ class PreviewShellController implements PreviewShell {
       return null;
     }
     return index;
+  }
+
+  private resolveSequentialTarget(direction: 1 | -1): number | null {
+    return nextNonSkippedIndex(
+      this.slides.map((slide) => slide.meta),
+      this.selectedIndex,
+      direction
+    );
   }
 
   private resolveGridVerticalTarget(direction: "up" | "down"): number | null {

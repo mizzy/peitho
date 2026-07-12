@@ -2,6 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
+import { nextNonSkippedIndex } from "./skipnav";
 
 export type NavigateTarget =
   | "next"
@@ -140,7 +141,7 @@ class PresentShellController implements PresentShell {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(0);
+      this.show(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0);
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -244,8 +245,8 @@ class PresentShellController implements PresentShell {
   private resolveTarget(to: NavigateTarget): number | null {
     if (to === "first") return 0;
     if (to === "last") return this.slides.length - 1;
-    if (to === "next") return Math.min(this.currentIndex + 1, this.slides.length - 1);
-    if (to === "prev") return Math.max(this.currentIndex - 1, 0);
+    if (to === "next") return this.resolveSequentialTarget(1);
+    if (to === "prev") return this.resolveSequentialTarget(-1);
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
@@ -259,6 +260,14 @@ class PresentShellController implements PresentShell {
       return null;
     }
     return index;
+  }
+
+  private resolveSequentialTarget(direction: 1 | -1): number | null {
+    return nextNonSkippedIndex(
+      this.slides.map((slide) => slide.meta),
+      this.currentIndex,
+      direction
+    );
   }
 
   private show(index: number): void {

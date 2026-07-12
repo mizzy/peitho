@@ -830,6 +830,7 @@ mod tests {
             DeckSettings::default(),
             vec![ParsedSlide {
                 index: 0,
+                source_index: 0,
                 key: crate::domain::SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
@@ -838,6 +839,7 @@ mod tests {
                     Some("mermaid".to_owned()),
                     code.to_owned(),
                 )],
+                skip: false,
                 notes: None,
             }],
         )

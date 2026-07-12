@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Page settings comment, deck-style:
-/// `<!-- {"key":"...","layout":"...","section":"...","time":"..."} -->`.
+/// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true} -->`.
 /// Unknown fields are rejected so a typo never silently drops a setting.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +31,8 @@ struct PageComment {
     layout: Option<String>,
     section: Option<String>,
     time: Option<PlannedTime>,
+    draft: Option<bool>,
+    skip: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,12 +70,21 @@ struct PageSettings {
     key: Option<SlideKey>,
     layout: Option<String>,
     section: Option<PageSectionMarker>,
+    draft: Option<bool>,
+    skip: Option<bool>,
 }
 
 #[derive(Debug)]
-struct ParsedSlideDraft {
+struct PageFlag {
+    enabled: bool,
+    line: usize,
+}
+
+#[derive(Debug)]
+struct PendingSlide {
     slide: ParsedSlide,
     section: Option<PageSectionMarker>,
+    draft: Option<PageFlag>,
 }
 
 #[derive(Debug)]
@@ -174,9 +185,9 @@ pub(crate) fn parse_markdown(
         ));
     }
 
-    let mut drafts = Vec::new();
+    let mut pending = Vec::new();
     for (index, range) in ranges.into_iter().enumerate() {
-        drafts.push(parse_slide(
+        pending.push(parse_slide(
             source,
             range,
             index,
@@ -184,13 +195,42 @@ pub(crate) fn parse_markdown(
             settings.code_images(),
         )?);
     }
-    let resolved_sections = resolve_deck_sections(&drafts)?;
-    let settings = finalize_section_settings(settings, resolved_sections)?;
-    let slides = drafts
+    validate_unique_keys(pending.iter().map(|pending_slide| &pending_slide.slide))?;
+    let first_draft_line = pending
+        .iter()
+        .filter_map(|pending_slide| pending_slide.draft.as_ref().filter(|flag| flag.enabled))
+        .map(|flag| flag.line)
+        .next();
+    let mut survivors = pending
         .into_iter()
-        .map(|draft| draft.slide)
+        .filter(|pending_slide| {
+            !pending_slide
+                .draft
+                .as_ref()
+                .map(|flag| flag.enabled)
+                .unwrap_or(false)
+        })
         .collect::<Vec<_>>();
-    validate_unique_keys(&slides)?;
+    if survivors.is_empty() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            first_draft_line,
+            "every slide in the deck is marked draft",
+            "remove draft from at least one slide so the deck has content to build",
+        ));
+    }
+    for (index, pending_slide) in survivors.iter_mut().enumerate() {
+        // Final index is position among surviving slides; source_index keeps
+        // the original parse position for error attribution.
+        pending_slide.slide.index = index;
+    }
+
+    let resolved_sections = resolve_deck_sections(&survivors)?;
+    let settings = finalize_section_settings(settings, resolved_sections)?;
+    let slides = survivors
+        .into_iter()
+        .map(|pending_slide| pending_slide.slide)
+        .collect::<Vec<_>>();
     Ok(Deck::parsed(settings, slides))
 }
 
@@ -229,11 +269,11 @@ fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRan
     Ok(ranges)
 }
 
-fn resolve_deck_sections(drafts: &[ParsedSlideDraft]) -> Result<Vec<ResolvedSection>> {
-    let markers = drafts
+fn resolve_deck_sections(slides: &[PendingSlide]) -> Result<Vec<ResolvedSection>> {
+    let markers = slides
         .iter()
         .enumerate()
-        .filter_map(|(index, draft)| draft.section.as_ref().map(|marker| (index, marker)))
+        .filter_map(|(index, slide)| slide.section.as_ref().map(|marker| (index, marker)))
         .collect::<Vec<_>>();
 
     if markers.is_empty() {
@@ -255,7 +295,7 @@ fn resolve_deck_sections(drafts: &[ParsedSlideDraft]) -> Result<Vec<ResolvedSect
             let end = markers
                 .get(marker_index + 1)
                 .map(|(next_start, _)| next_start - 1)
-                .unwrap_or(drafts.len() - 1);
+                .unwrap_or(slides.len() - 1);
             ResolvedSection {
                 section: DeckSection::new(marker.name.clone(), marker.planned, *start, end),
                 line: marker.line,
@@ -1113,12 +1153,14 @@ fn parse_slide(
     index: usize,
     highlighter: &Highlighter,
     code_images: &CodeImagesConfig,
-) -> Result<ParsedSlideDraft> {
+) -> Result<PendingSlide> {
     let slice = &source[range.start..range.end];
     let markers = scan_slot_div_markers(slice, range.start, source)?;
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
     let mut section_marker: Option<PageSectionMarker> = None;
+    let mut draft_flag: Option<PageFlag> = None;
+    let mut skip_flag: Option<bool> = None;
     let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
     // Stack of open SlotGroups. Each frame owns the children collected so far
@@ -1198,6 +1240,8 @@ fn parse_slide(
                         &mut explicit_key,
                         &mut layout_request,
                         &mut section_marker,
+                        &mut draft_flag,
+                        &mut skip_flag,
                         &mut page_settings_line,
                         &mut note_fragments,
                     )?;
@@ -1498,6 +1542,8 @@ fn parse_slide(
                         &mut explicit_key,
                         &mut layout_request,
                         &mut section_marker,
+                        &mut draft_flag,
+                        &mut skip_flag,
                         &mut page_settings_line,
                         &mut note_fragments,
                     )?;
@@ -1577,16 +1623,19 @@ fn parse_slide(
         Some(note_fragments.join("\n\n"))
     };
 
-    Ok(ParsedSlideDraft {
+    Ok(PendingSlide {
         slide: ParsedSlide {
             index,
+            source_index: index,
             key,
             key_source,
             layout_request,
             fragments,
+            skip: skip_flag.unwrap_or(false),
             notes,
         },
         section: section_marker,
+        draft: draft_flag,
     })
 }
 
@@ -1649,6 +1698,8 @@ fn process_html_chunk(
     explicit_key: &mut Option<(SlideKey, usize)>,
     layout_request: &mut Option<LayoutRequest>,
     section_marker: &mut Option<PageSectionMarker>,
+    draft_flag: &mut Option<PageFlag>,
+    skip_flag: &mut Option<bool>,
     page_settings_line: &mut Option<usize>,
     note_fragments: &mut Vec<String>,
 ) -> Result<()> {
@@ -1692,6 +1743,15 @@ fn process_html_chunk(
         }
         if let Some(section) = settings.section {
             *section_marker = Some(section);
+        }
+        if let Some(draft) = settings.draft {
+            *draft_flag = Some(PageFlag {
+                enabled: draft,
+                line,
+            });
+        }
+        if let Some(skip) = settings.skip {
+            *skip_flag = Some(skip);
         }
         return Ok(());
     }
@@ -1746,7 +1806,7 @@ fn slide_split_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES
 }
 
-fn validate_unique_keys(slides: &[ParsedSlide]) -> Result<()> {
+fn validate_unique_keys<'a>(slides: impl IntoIterator<Item = &'a ParsedSlide>) -> Result<()> {
     let mut seen = BTreeMap::<String, usize>::new();
     for slide in slides {
         let key = slide.key.as_str().to_owned();
@@ -1765,7 +1825,7 @@ fn validate_unique_keys(slides: &[ParsedSlide]) -> Result<()> {
                 format!("duplicate slide key '{key}'"),
                 help,
             )
-            .with_slide(slide.index + 1, Some(slide.key.as_str())));
+            .with_slide(slide.source_index + 1, Some(slide.key.as_str())));
         }
     }
     Ok(())
@@ -1788,13 +1848,15 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             ErrorKind::Parse,
             Some(line),
             format!("invalid page settings comment: {err}"),
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true} --> (key/layout/draft/skip optional; section and time must appear together; no other fields)"#,
         )
     })?;
     if parsed.key.is_none()
         && parsed.layout.is_none()
         && parsed.section.is_none()
         && parsed.time.is_none()
+        && parsed.draft.is_none()
+        && parsed.skip.is_none()
     {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -1835,6 +1897,22 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         }
         (None, None) => None,
     };
+    if parsed.draft == Some(true) && parsed.skip == Some(true) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "slide cannot be both draft and skipped",
+            r#"remove "skip":true because draft slides are excluded from the build"#,
+        ));
+    }
+    if parsed.draft == Some(true) && section.is_some() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "draft slide cannot declare a section marker",
+            "move the section marker to the next non-draft slide",
+        ));
+    }
     let key = parsed
         .key
         .map(|key| {
@@ -1852,6 +1930,8 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         key,
         layout: parsed.layout,
         section,
+        draft: parsed.draft,
+        skip: parsed.skip,
     }))
 }
 
@@ -3086,6 +3166,61 @@ After list
     }
 
     #[test]
+    fn parses_draft_and_skip_page_settings_flags() {
+        let draft = parse_page_comment(r#"<!-- {"draft":true} -->"#, 7)
+            .unwrap()
+            .unwrap();
+        let skip = parse_page_comment(r#"<!-- {"skip":true} -->"#, 8)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(draft.draft, Some(true));
+        assert_eq!(draft.skip, None);
+        assert_eq!(skip.draft, None);
+        assert_eq!(skip.skip, Some(true));
+    }
+
+    #[test]
+    fn accepts_false_draft_and_skip_page_settings_flags() {
+        let settings = parse_page_comment(r#"<!-- {"draft":false,"skip":false} -->"#, 7)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(settings.draft, Some(false));
+        assert_eq!(settings.skip, Some(false));
+    }
+
+    #[test]
+    fn rejects_draft_and_skip_on_same_slide() {
+        let err = parse_page_comment(r#"<!-- {"draft":true,"skip":true} -->"#, 3).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "slide cannot be both draft and skipped");
+        assert_eq!(
+            err.help,
+            r#"remove "skip":true because draft slides are excluded from the build"#
+        );
+    }
+
+    #[test]
+    fn rejects_draft_section_marker() {
+        let err = parse_page_comment(
+            r#"<!-- {"draft":true,"section":"Setup","time":"1m"} -->"#,
+            3,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "draft slide cannot declare a section marker");
+        assert_eq!(
+            err.help,
+            "move the section marker to the next non-draft slide"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_section_page_comments_with_line_and_help() {
         let cases = [
             (
@@ -3186,7 +3321,7 @@ After list
         assert!(err.to_string().contains("invalid page settings comment"));
         assert_eq!(
             err.help,
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m"} --> (key/layout optional; section and time must appear together; no other fields)"#
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true} --> (key/layout/draft/skip optional; section and time must appear together; no other fields)"#
         );
     }
 
@@ -3202,6 +3337,156 @@ After list
         assert!(err
             .to_string()
             .contains("page settings comment has no settings"));
+    }
+
+    #[test]
+    fn false_draft_flag_is_not_empty_page_settings_comment() {
+        let deck = parse_markdown(
+            "<!-- {\"draft\":false} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides().len(), 1);
+    }
+
+    #[test]
+    fn drops_draft_slides_before_exposing_parsed_deck() {
+        let deck = parse_markdown(
+            "# Intro\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Draft\n\n---\n\
+             # Live",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].index, 0);
+        assert_eq!(slides[0].key.as_str(), "intro");
+        assert_eq!(slides[1].index, 1);
+        assert_eq!(slides[1].key.as_str(), "live");
+    }
+
+    #[test]
+    fn draft_drop_preserves_parse_time_derived_number_key() {
+        let deck = parse_markdown(
+            "<!-- {\"draft\":true} -->\nDraft body\n\n---\nLive body",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 1);
+        let slide = &slides[0];
+        assert_eq!(slide.index, 0);
+        assert_eq!(slide.key.as_str(), "slide-2");
+        assert_eq!(slide.key_source, KeySource::Derived { line: None });
+        assert_eq!(slide.fragments[0].markdown(), "Live body");
+    }
+
+    #[test]
+    fn draft_drop_does_not_shift_later_derived_number_keys() {
+        let deck = parse_markdown(
+            "Live body 1\n\n---\n\
+             <!-- {\"draft\":true} -->\nDraft body\n\n---\n\
+             Live body 3",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].index, 0);
+        assert_eq!(slides[0].key.as_str(), "slide-1");
+        assert_eq!(slides[1].index, 1);
+        assert_eq!(slides[1].key.as_str(), "slide-3");
+    }
+
+    #[test]
+    fn rejects_deck_where_every_slide_is_draft() {
+        let err = parse_markdown(
+            "<!-- {\"draft\":true} -->\n# A\n\n---\n\
+             <!-- {\"draft\":true} -->\n# B",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert_eq!(err.message, "every slide in the deck is marked draft");
+        assert_eq!(
+            err.help,
+            "remove draft from at least one slide so the deck has content to build"
+        );
+    }
+
+    #[test]
+    fn section_markers_are_validated_against_first_surviving_slide() {
+        let deck = parse_markdown(
+            "<!-- {\"draft\":true} -->\n# Draft\n\n---\n\
+             <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n# B",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.settings().sections()[0].start(), 0);
+        assert_eq!(deck.settings().sections()[0].end(), 1);
+    }
+
+    #[test]
+    fn section_ranges_are_computed_over_surviving_slides() {
+        let deck = parse_markdown(
+            "---\ntime: 3m\n---\n\
+             <!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# A\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Draft\n\n---\n\
+             # B\n\n---\n\
+             <!-- {\"section\":\"Demo\",\"time\":\"2m\"} -->\n# C",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let sections = deck.settings().sections();
+        assert_eq!(deck.parsed_slides().len(), 3);
+        assert_eq!(
+            (sections[0].name(), sections[0].start(), sections[0].end()),
+            ("Setup", 0, 1)
+        );
+        assert_eq!(
+            (sections[1].name(), sections[1].start(), sections[1].end()),
+            ("Demo", 2, 2)
+        );
+        assert_eq!(
+            deck.settings().planned_time().map(PlannedTime::as_millis),
+            Some(180_000)
+        );
+    }
+
+    #[test]
+    fn draft_slide_notes_do_not_surface_after_parse() {
+        let deck = parse_markdown(
+            "# Live\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Draft\n\n<!-- draft note -->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides().len(), 1);
+        assert!(deck.parsed_slides()[0].notes.is_none());
+    }
+
+    #[test]
+    fn parsed_slide_records_skip_flag() {
+        let deck = parse_markdown(
+            "<!-- {\"skip\":true} -->\n# Skipped\n\n---\n\
+             <!-- {\"skip\":false} -->\n# Normal",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert!(slides[0].skip);
+        assert!(!slides[1].skip);
     }
 
     #[test]
@@ -4091,6 +4376,39 @@ After list
         assert_eq!(err.line, Some(5));
         assert!(err.to_string().contains("slide 2 ('same'), line 5"));
         assert!(err.to_string().contains("duplicate slide key 'same'"));
+        assert_eq!(err.help, "choose a unique explicit slide key");
+    }
+
+    #[test]
+    fn rejects_duplicate_explicit_key_between_live_and_draft_slide() {
+        let err = parse_markdown(
+            "<!-- {\"key\":\"foo\"} -->\n# Live\n\n---\n\
+             <!-- {\"key\":\"foo\",\"draft\":true} -->\n# Draft",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("slide 2 ('foo'), line 5"));
+        assert!(err.to_string().contains("duplicate slide key 'foo'"));
+        assert_eq!(err.help, "choose a unique explicit slide key");
+    }
+
+    #[test]
+    fn rejects_duplicate_explicit_key_between_two_draft_slides() {
+        let err = parse_markdown(
+            "<!-- {\"key\":\"foo\",\"draft\":true} -->\n# Draft 1\n\n---\n\
+             <!-- {\"key\":\"foo\",\"draft\":true} -->\n# Draft 2\n\n---\n\
+             # Live",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("slide 2 ('foo'), line 5"));
+        assert!(err.to_string().contains("duplicate slide key 'foo'"));
         assert_eq!(err.help, "choose a unique explicit slide key");
     }
 

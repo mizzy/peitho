@@ -14,7 +14,7 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
     let (settings, mapped_slides) = deck.into_mapped_parts();
     let mut slides = Vec::new();
     for slide in mapped_slides {
-        let slide_number = slide.index + 1;
+        let slide_number = slide.source_index + 1;
         let slide_key = slide.key.as_str().to_owned();
         check_slide(&slide).map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         let mut mapped_slots = slide.slots;
@@ -39,9 +39,11 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
             .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
         slides.push(CheckedSlide::new(
             slide.index,
+            slide.source_index,
             slide.key,
             slide.layout,
             checked_slots,
+            slide.skip,
             slide.notes,
         ));
     }
@@ -227,6 +229,53 @@ mod tests {
     }
 
     #[test]
+    fn check_deck_carries_skip_flag_to_checked_slide() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "<!-- {\"skip\":true} -->\n# Appendix",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let checked = check_deck(mapped).unwrap();
+
+        assert!(checked.checked_slides()[0].skip());
+    }
+
+    #[test]
+    fn check_errors_use_source_slide_number_after_draft_drop() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "# Live\n\n---\n\
+                 <!-- {\"draft\":true} -->\n# Draft\n\n---\n\
+                 Body only",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert!(err.to_string().contains("slide 3 ('slide-3')"));
+        assert!(err.to_string().contains("slot 'title' got 0 item(s)"));
+    }
+
+    #[test]
     fn rejects_two_code_blocks_for_zero_or_one_code_slot() {
         let markdown = "# Title\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```";
         let layout = parse_layout(
@@ -351,10 +400,12 @@ mod tests {
         slots.insert(hero, mapped_slot);
         let slide = MappedSlide {
             index: 0,
+            source_index: 0,
             key: SlideKey::new("image").unwrap(),
             layout,
             slots,
             unassigned: Vec::new(),
+            skip: false,
             notes: None,
         };
 
@@ -385,10 +436,12 @@ mod tests {
             crate::phase::DeckSettings::default(),
             vec![MappedSlide {
                 index: 0,
+                source_index: 0,
                 key: SlideKey::new("title").unwrap(),
                 layout,
                 slots,
                 unassigned: Vec::new(),
+                skip: false,
                 notes: None,
             }],
         );

@@ -1022,9 +1022,11 @@ mod tests {
             DeckSettings::default(),
             vec![CheckedSlide::new(
                 0,
+                0,
                 SlideKey::new("visual").unwrap(),
                 layout,
                 slots,
+                false,
                 None,
             )],
         );

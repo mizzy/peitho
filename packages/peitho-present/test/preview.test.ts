@@ -32,6 +32,7 @@ const manifest = {
       key: "intro",
       src: "slides/000-intro.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -39,6 +40,7 @@ const manifest = {
       key: "middle",
       src: "slides/001-middle.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -46,6 +48,7 @@ const manifest = {
       key: "end",
       src: "slides/002-end.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     }
   ]
@@ -68,6 +71,22 @@ function manifestWithSlideCount(slideCount: number): typeof manifest {
       key: `slide-${index}`,
       src: `slides/${String(index).padStart(3, "0")}.html`,
       hasNotes: false,
+      skip: false,
+      text: { title: "", body: "", code: "" }
+    }))
+  };
+}
+
+function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typeof manifest {
+  return {
+    ...manifest,
+    slideCount: slides.length,
+    slides: slides.map((slide, index) => ({
+      index,
+      key: slide.key,
+      src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
+      hasNotes: false,
+      skip: slide.skip ?? false,
       text: { title: "", body: "", code: "" }
     }))
   };
@@ -468,6 +487,119 @@ it("single mode navigation does not scroll preview tiles into view", async () =>
   expect(scrollIntoView).not.toHaveBeenCalled();
 });
 
+it("single mode next skips one or more skipped slides in preview", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix-a", skip: true },
+        { key: "appendix-b", skip: true },
+        { key: "summary" }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(3);
+  expect(shell.selectedIndex).toBe(3);
+});
+
+it("single mode prev skips one or more skipped slides in preview", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix-a", skip: true },
+        { key: "appendix-b", skip: true },
+        { key: "summary" }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.selectedIndex).toBe(0);
+});
+
+it("single mode next is a no-op when only skipped slides remain in preview", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix-a", skip: true },
+        { key: "appendix-b", skip: true }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  const event = new CustomEvent("peitho:navigate", {
+    cancelable: true,
+    detail: { to: "next" }
+  });
+  bus.dispatchEvent(event);
+
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.selectedIndex).toBe(0);
+  expect(event.defaultPrevented).toBe(false);
+});
+
+it("grid next navigation can select and activate a skipped slide in preview", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix", skip: true },
+        { key: "summary" }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.selectedIndex).toBe(1);
+});
+
 it("grid vertical navigation moves by one computed row and stops at row edges", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
@@ -664,6 +796,53 @@ it("ignores corrupt preview state JSON and starts at the first slide", async () 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(0);
   expect(shell.selectedIndex).toBe(0);
+});
+
+it("starts on the first non-skipped slide in preview when there is no restored state", async () => {
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro", skip: true },
+        { key: "main" },
+        { key: "appendix", skip: true }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.selectedIndex).toBe(1);
+});
+
+it("restores a skipped slide index exactly in preview", async () => {
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode: "single", index: 1 }));
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix", skip: true },
+        { key: "summary" }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(shell.mode).toBe("single");
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.selectedIndex).toBe(1);
 });
 
 it("handshakes sync generation before fetching preview content", async () => {

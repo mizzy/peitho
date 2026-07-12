@@ -106,7 +106,7 @@ rendered as plaintext.
 ## Page settings comments
 
 JSON HTML comments carry page settings. The supported settings are `key`,
-`layout`, `section`, and `time`.
+`layout`, `section`, `time`, `draft`, and `skip`.
 
 ```markdown
 <!-- {"key":"checks","layout":"agenda","section":"Contracts","time":"3m"} -->
@@ -116,6 +116,17 @@ JSON HTML comments carry page settings. The supported settings are `key`,
 layout. `section` and `time` mark agenda sections. A slide accepts at most one
 page settings comment, so combine the settings in one JSON object when a slide
 needs more than one.
+
+`draft:true` excludes a slide from the build. Draft slides are not rendered,
+not counted, not written to the manifest, and do not contribute notes.
+`skip:true` keeps a slide in the deck and manifest, but `next` and `prev`
+navigation step over it in the presentation and single-slide preview shells.
+Presentation and preview open on the first non-skipped slide (unless preview
+restores a saved index). Direct navigation by key or index, Home/End first/last
+navigation, and overview grid selection can still land on skipped slides.
+
+Draft slides cannot also be skipped or declare section markers. If every slide
+is marked draft, the build fails instead of producing an empty deck.
 
 ## Agenda sections
 

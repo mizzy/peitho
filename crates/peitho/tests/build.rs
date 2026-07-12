@@ -414,6 +414,98 @@ fn build_writes_manifest_json_with_refs_not_html() {
 }
 
 #[test]
+fn build_drops_draft_slides_from_dist_and_manifest() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-body-code.html",
+            "# Public\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Draft\n\n<!-- draft note -->\n\n---\n\
+             # Final",
+        ),
+    )
+    .unwrap();
+    write_layout(dir.path());
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 2 slide(s)"));
+
+    assert!(out.join("slides/000-public.html").exists());
+    assert!(out.join("slides/001-final.html").exists());
+    assert!(!out.join("slides/001-draft.html").exists());
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["slideCount"].as_u64(), Some(2));
+    let slides = manifest["slides"].as_array().unwrap();
+    assert_eq!(slides.len(), 2);
+    assert_eq!(slides[0]["key"].as_str(), Some("public"));
+    assert_eq!(slides[1]["key"].as_str(), Some("final"));
+    assert!(slides
+        .iter()
+        .all(|slide| slide["key"].as_str() != Some("draft")));
+}
+
+#[test]
+fn build_keeps_skip_slides_counted_and_marks_manifest() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./title-body-code.html",
+            "# Intro\n\n---\n\
+             <!-- {\"skip\":true} -->\n# Appendix\n\n---\n\
+             # End",
+        ),
+    )
+    .unwrap();
+    write_layout(dir.path());
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 3 slide(s)"));
+
+    assert!(out.join("slides/000-intro.html").exists());
+    assert!(out.join("slides/001-appendix.html").exists());
+    assert!(out.join("slides/002-end.html").exists());
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["slideCount"].as_u64(), Some(3));
+    let slides = manifest["slides"].as_array().unwrap();
+    assert_eq!(slides[0]["skip"].as_bool(), Some(false));
+    assert_eq!(slides[1]["key"].as_str(), Some("appendix"));
+    assert_eq!(slides[1]["skip"].as_bool(), Some(true));
+    assert_eq!(slides[2]["skip"].as_bool(), Some(false));
+}
+
+#[test]
 fn build_still_writes_distribution_after_pipeline_refactor() {
     let (_dir, out) = build_multi_slide_fixture();
 

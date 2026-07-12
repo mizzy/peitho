@@ -69,7 +69,7 @@ pub fn dispatch_by_convention(deck: Deck<Parsed>, layouts: &Layouts) -> Result<D
     let (settings, parsed_slides) = deck.into_parsed_parts();
     let mut slides = Vec::new();
     for slide in parsed_slides {
-        let slide_number = slide.index + 1;
+        let slide_number = slide.source_index + 1;
         let slide_key = slide.key.as_str().to_owned();
         let mapped = dispatch_slide(slide, layouts)
             .map_err(|err| err.with_slide(slide_number, Some(&slide_key)))?;
@@ -322,10 +322,12 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
 
     Ok(MappedSlide {
         index: slide.index,
+        source_index: slide.source_index,
         key: slide.key.clone(),
         layout: layout.clone(),
         slots,
         unassigned,
+        skip: slide.skip,
         notes: slide.notes.clone(),
     })
 }
@@ -440,6 +442,26 @@ mod tests {
 
         assert_eq!(mapped.mapped_slides()[0].layout.name(), "cover");
         assert_eq!(mapped.mapped_slides()[1].layout.name(), "statement");
+    }
+
+    #[test]
+    fn mapping_carries_skip_flag_from_parsed_slide() {
+        let layout = parse_layout(
+            "cover",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "<!-- {\"skip\":true} -->\n# Appendix",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        assert!(mapped.mapped_slides()[0].skip);
     }
 
     #[test]
