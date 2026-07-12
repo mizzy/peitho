@@ -1,0 +1,179 @@
+.peitho-slide {
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+}
+
+.statement,
+.spotlight {
+  --paper: #f6f4ef;
+  --ink: #191817;
+  --body-ink: #45413b;
+  --accent: #b4530a;
+  --night: #16151a;
+  --moon: #f0ede6;
+  --dim: #b7b2a6;
+  --rule: rgba(25, 24, 23, 0.16);
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.statement *,
+.statement *::before,
+.statement *::after,
+.spotlight *,
+.spotlight *::before,
+.spotlight *::after {
+  box-sizing: border-box;
+}
+
+/* ---- statement: light, left-aligned editorial ---- */
+
+.statement {
+  gap: 34px;
+  padding: 68px 80px;
+  background: var(--paper);
+  color: var(--body-ink);
+}
+
+.statement h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 52px;
+  line-height: 1.12;
+  font-weight: 780;
+  letter-spacing: -0.01em;
+}
+
+.statement h1::after {
+  content: "";
+  display: block;
+  width: 88px;
+  height: 4px;
+  margin-top: 18px;
+  background: var(--accent);
+}
+
+.statement .statement-body {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 29px;
+  line-height: 1.5;
+}
+
+.statement .statement-body p {
+  margin: 0 0 22px;
+}
+
+.statement .statement-body ul {
+  margin: 0 0 22px;
+  padding-left: 34px;
+}
+
+.statement .statement-body li {
+  margin-bottom: 12px;
+}
+
+.statement .statement-body code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: rgba(25, 24, 23, 0.06);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.statement .statement-code {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.statement .slot-code {
+  display: block;
+  margin: 0;
+  padding: 26px 30px;
+  background: #14130f;
+  color: #e8e4d8;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 23px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- spotlight: dark, centered display ---- */
+
+.spotlight {
+  gap: 30px;
+  padding: 72px 110px;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  background: var(--night);
+  color: var(--dim);
+}
+
+.spotlight h1 {
+  margin: 0;
+  color: var(--moon);
+  font-size: 66px;
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  max-width: 18ch;
+}
+
+.spotlight .spotlight-body {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 28px;
+  line-height: 1.55;
+  max-width: 34ch;
+}
+
+.spotlight .spotlight-body p {
+  margin: 0 0 20px;
+}
+
+.spotlight .spotlight-body p:last-child {
+  margin-bottom: 0;
+}
+
+.spotlight .spotlight-body code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--moon);
+  background: rgba(240, 237, 230, 0.08);
+  border: 1px solid rgba(240, 237, 230, 0.22);
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.spotlight .spotlight-code {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  align-self: stretch;
+}
+
+.spotlight .slot-code {
+  display: block;
+  margin: 0;
+  padding: 26px 30px;
+  background: rgba(240, 237, 230, 0.06);
+  border: 1px solid rgba(240, 237, 230, 0.16);
+  color: var(--moon);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 23px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
