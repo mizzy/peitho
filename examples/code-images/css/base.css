@@ -166,11 +166,11 @@
   padding: 48px 28px 28px;
 }
 
-.code-images-source:not(:has(.slot-image)) .source-pane {
+.code-images-source:has(.rendered-pane:not(:has(img))) .source-pane {
   grid-column: 1 / -1;
 }
 
-.code-images-source:not(:has(.slot-image)) .rendered-pane {
+.rendered-pane:not(:has(img)) {
   display: none;
 }
 
