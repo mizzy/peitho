@@ -2647,21 +2647,18 @@ enum Phase { Parsed, Mapped, Checked }
     }
 
     #[test]
-    fn accepts_svg_image_extension() {
-        let deck = parse_markdown(
+    fn rejects_svg_until_policy_is_decided() {
+        let err = parse_markdown(
             "# Title\n\n![Icon](icon.svg)",
             &crate::highlight::Highlighter::defaults(),
         )
-        .unwrap();
-        let slide = &deck.parsed_slides()[0];
+        .unwrap_err();
 
-        match slide.fragments[1].kind() {
-            FragmentKind::Image { alt, src } => {
-                assert_eq!(alt, "Icon");
-                assert_eq!(src.as_str(), "icon.svg");
-            }
-            other => panic!("expected image fragment, got {other:?}"),
-        }
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported image extension 'svg'; supported: png, jpg, jpeg, gif, webp"));
     }
 
     #[test]

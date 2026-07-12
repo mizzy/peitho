@@ -408,8 +408,8 @@ pub struct ResolvedImageAsset {
     pub dist_rel: ResolvedImagePath,
 }
 
-const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
-const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp, svg";
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
 
 impl RawImagePath {
     /// Image extensions accepted by Markdown parsing.
@@ -497,6 +497,10 @@ impl RawImagePath {
     #[cfg(test)]
     pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
+    }
+
+    pub(crate) fn from_code_images_cache(key: &str) -> Self {
+        Self(format!(".peitho/code-images-cache/{key}.svg"))
     }
 
     /// Return the original deck-relative path.

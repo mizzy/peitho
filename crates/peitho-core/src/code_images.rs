@@ -13,7 +13,6 @@ use crate::{
     phase::{Deck, Parsed},
 };
 
-const RAW_CACHE_DIR: &str = ".peitho/code-images-cache";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub trait SvgRunner {
@@ -77,7 +76,7 @@ fn transform_fragment<R: SvgRunner>(
                         )
                     })?;
                 }
-                let raw = RawImagePath::new(format!("{RAW_CACHE_DIR}/{key}.svg"), fragment.line())?;
+                let raw = RawImagePath::from_code_images_cache(&key);
                 return Ok(SourceFragment::image(
                     fragment.line(),
                     format!("diagram ({tag})"),
