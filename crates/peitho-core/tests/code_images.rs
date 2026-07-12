@@ -7,7 +7,7 @@ use peitho_core::{
     domain::CodeImageCommand,
     highlight::Highlighter,
     parse_frontmatter, parse_layout, parse_markdown, render_deck, resolve_image_paths,
-    ResolvedImageAsset, ResolvedImagePath, Result,
+    ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR,
 };
 
 struct FakeRunner;
@@ -26,7 +26,7 @@ fn renders_code_image_as_resolved_svg_img() {
     let config = frontmatter.settings().code_images().clone();
     let parsed = parse_markdown(markdown, frontmatter, &Highlighter::defaults()).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let cache_dir = temp.path().join(".peitho/code-images-cache");
+    let cache_dir = temp.path().join(CODE_IMAGES_CACHE_DIR);
     let transformed = transform_code_images(parsed, &config, &FakeRunner, &cache_dir).unwrap();
     let layout = parse_layout(
         "title-image",

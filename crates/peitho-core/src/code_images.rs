@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn transforms_matching_code_block_to_cached_image() {
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let runner = FakeRunner::svg("<svg>diagram</svg>");
 
         let deck = transform_code_images(
@@ -323,7 +323,7 @@ mod tests {
                 assert_eq!(alt, "diagram (mermaid)");
                 assert_eq!(
                     src.as_str(),
-                    format!(".peitho/code-images-cache/{MERMAID_KEY}.svg")
+                    format!("{}/{MERMAID_KEY}.svg", crate::CODE_IMAGES_CACHE_DIR)
                 );
             }
             other => panic!("expected image fragment, got {other:?}"),
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn uses_non_empty_cache_hit_without_running_command() {
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(
             cache_dir.join(format!("{MERMAID_KEY}.svg")),
@@ -360,7 +360,7 @@ mod tests {
             FragmentKind::Image { src, .. } => {
                 assert_eq!(
                     src.as_str(),
-                    format!(".peitho/code-images-cache/{MERMAID_KEY}.svg")
+                    format!("{}/{MERMAID_KEY}.svg", crate::CODE_IMAGES_CACHE_DIR)
                 );
             }
             other => panic!("expected image fragment, got {other:?}"),
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn runner_failure_reports_code_block_line_and_stderr_excerpt() {
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let runner = FakeRunner::err("command exited with status 1; stderr: boom");
 
         let err = match transform_code_images(
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn empty_stdout_reports_code_block_line() {
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let runner = FakeRunner::svg(Vec::new());
 
         let err = match transform_code_images(
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn non_svg_stdout_reports_code_block_line() {
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let runner = FakeRunner::svg("<html>not svg</html>");
 
         let err = match transform_code_images(
@@ -474,7 +474,7 @@ mod tests {
             parsed,
             &config,
             &runner,
-            &temp.path().join(".peitho/code-images-cache"),
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[1];
@@ -500,7 +500,7 @@ mod tests {
         )
         .unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let cache_dir = temp.path().join(".peitho/code-images-cache");
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let transformed = transform_code_images(
             parsed,
             &config,

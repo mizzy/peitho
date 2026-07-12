@@ -500,7 +500,7 @@ impl RawImagePath {
     }
 
     pub(crate) fn from_code_images_cache(key: &str) -> Self {
-        Self(format!(".peitho/code-images-cache/{key}.svg"))
+        Self(format!("{}/{key}.svg", crate::CODE_IMAGES_CACHE_DIR))
     }
 
     /// Return the original deck-relative path.

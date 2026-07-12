@@ -15,6 +15,8 @@ pub mod present_config;
 pub mod render;
 pub mod theme;
 
+pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";
+
 pub use check::check_deck;
 pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
 pub use error::{BuildError, Result};

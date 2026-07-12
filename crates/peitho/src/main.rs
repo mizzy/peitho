@@ -1420,7 +1420,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
 }
 
 fn code_images_cache_dir(input: &Path) -> PathBuf {
-    asset_resolution::deck_parent(input).join(".peitho/code-images-cache")
+    asset_resolution::deck_parent(input).join(peitho_core::CODE_IMAGES_CACHE_DIR)
 }
 
 fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
