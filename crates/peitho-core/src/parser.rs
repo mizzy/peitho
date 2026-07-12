@@ -2627,7 +2627,7 @@ enum Phase { Parsed, Mapped, Checked }
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
         assert!(err.to_string().contains(
-            "unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp, svg"
+            "unsupported image extension 'exe'; supported: png, jpg, jpeg, gif, webp"
         ));
     }
 
@@ -2642,7 +2642,7 @@ enum Phase { Parsed, Mapped, Checked }
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
         assert!(err.to_string().contains(
-            "unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp, svg"
+            "unsupported image extension 'EXE'; supported: png, jpg, jpeg, gif, webp"
         ));
     }
 
