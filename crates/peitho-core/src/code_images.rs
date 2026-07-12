@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     domain::{CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath, SourceFragment},
     error::{BuildError, ErrorKind, Result},
+    highlight::Highlighter,
+    parser::{parse_markdown, ParsedFrontmatter},
     phase::{Deck, Parsed},
 };
 
@@ -17,6 +19,18 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub trait SvgRunner {
     fn run(&self, command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>>;
+}
+
+pub fn parse_deck_and_transform<R: SvgRunner>(
+    source: &str,
+    frontmatter: ParsedFrontmatter,
+    highlighter: &Highlighter,
+    config: &CodeImagesConfig,
+    runner: &R,
+    cache_dir: &Path,
+) -> Result<Deck<Parsed>> {
+    let parsed = parse_markdown(source, frontmatter, highlighter)?;
+    transform_code_images(parsed, config, runner, cache_dir)
 }
 
 pub fn transform_code_images<R: SvgRunner>(

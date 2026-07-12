@@ -537,10 +537,14 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
     };
 
     let highlighter = load_highlighter(assets.syntaxes.path())?;
-    let parsed = core(peitho_core::parse_markdown(
+    let code_images = frontmatter.settings().code_images().clone();
+    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
         &markdown,
         frontmatter,
         &highlighter,
+        &code_images,
+        &CliSvgRunner::default(),
+        &code_images_cache_dir(&input),
     ))?;
     let Some(slide) = parsed
         .parsed_slides()
@@ -1381,13 +1385,10 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     let highlighter = load_highlighter(assets.syntaxes.path())?;
     let layouts = load_layouts(assets.layouts.path())?;
     let css_files = load_css(assets.css.path())?;
-    let parsed = core(peitho_core::parse_markdown(
+    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
         &markdown,
         frontmatter,
         &highlighter,
-    ))?;
-    let parsed = core(peitho_core::code_images::transform_code_images(
-        parsed,
         &code_images,
         &CliSvgRunner::default(),
         &code_images_cache_dir(input),
@@ -5468,6 +5469,52 @@ printf '0 bytes written to file %s\n' "$out" >&2
             stdout.contains("result: title-body-code"),
             "actual stdout: {stdout}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn layouts_explain_applies_code_images_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let command = dir.path().join("svg-command.sh");
+        fs::create_dir_all(&layouts).unwrap();
+        write_script(
+            &command,
+            "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>'\n",
+        );
+        fs::write(
+            layouts.join("code.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            layouts.join("image.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            format!(
+                "---\ncode_images:\n  mermaid: /bin/sh {}\n---\n<!-- {{\"key\":\"diagram\"}} -->\n# Diagram\n\n```mermaid\ngraph TD\n```",
+                command.display()
+            ),
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("diagram")
+            .arg("--json")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["dispatch"]["result"], "image");
     }
 
     #[test]
