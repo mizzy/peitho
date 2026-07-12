@@ -1,7 +1,10 @@
-.image-showcase {
-  box-sizing: border-box;
+.peitho-slide {
   width: var(--peitho-canvas-width, 1280px);
   height: var(--peitho-canvas-height, 720px);
+}
+
+.image-showcase {
+  box-sizing: border-box;
   padding: 72px 88px;
   background: #f8fafc;
   color: #172033;

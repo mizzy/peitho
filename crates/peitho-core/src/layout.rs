@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::BTreeMap, error::Error, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    rc::Rc,
+};
 
 use lol_html::{element, errors::RewritingError, HtmlRewriter, Settings};
 
@@ -12,6 +17,7 @@ pub struct Layout {
     name: String,
     html: String,
     slots: BTreeMap<SlotName, SlotContract>,
+    root_classes: BTreeSet<String>,
 }
 
 impl Layout {
@@ -25,6 +31,13 @@ impl Layout {
 
     pub fn slots(&self) -> &BTreeMap<SlotName, SlotContract> {
         &self.slots
+    }
+
+    /// Class attribute tokens from this layout's single root `<section>`;
+    /// `build_theme_css` validates root-class `width`/`height` overrides
+    /// against these classes.
+    pub fn root_classes(&self) -> &BTreeSet<String> {
+        &self.root_classes
     }
 
     pub fn slot(&self, name: &str) -> Option<&SlotContract> {
@@ -115,6 +128,16 @@ impl Layouts {
             .flat_map(|layout| layout.slots().keys().map(SlotName::class_name))
             .collect()
     }
+
+    /// Class attribute tokens from the single root `<section>` of every
+    /// provided layout; `build_theme_css` validates root-class `width`/`height`
+    /// overrides against this union.
+    pub fn root_classes(&self) -> BTreeSet<String> {
+        self.layouts
+            .iter()
+            .flat_map(|layout| layout.root_classes().iter().cloned())
+            .collect()
+    }
 }
 
 pub fn describe_layouts(layouts: &Layouts) -> Vec<LayoutSummary> {
@@ -140,11 +163,18 @@ pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
     let sink = slots.clone();
     let section_count = Rc::new(RefCell::new(0usize));
     let section_sink = section_count.clone();
+    let root_classes = Rc::new(RefCell::new(BTreeSet::new()));
+    let root_classes_sink = root_classes.clone();
     let mut rewriter = HtmlRewriter::new(
         Settings {
             element_content_handlers: vec![
-                element!("section", move |_el| {
+                element!("section", move |el| {
                     *section_sink.borrow_mut() += 1;
+                    if let Some(classes) = el.get_attribute("class") {
+                        root_classes_sink
+                            .borrow_mut()
+                            .extend(classes.split_whitespace().map(str::to_owned));
+                    }
                     Ok(())
                 }),
                 element!("slot", move |el| {
@@ -186,6 +216,7 @@ pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
         name: name.into(),
         html: html.to_owned(),
         slots: Rc::try_unwrap(slots).unwrap().into_inner(),
+        root_classes: Rc::try_unwrap(root_classes).unwrap().into_inner(),
     })
 }
 
@@ -271,6 +302,77 @@ mod tests {
         assert_eq!(layout.slot("title").unwrap().accepts, Accepts::Inline);
         assert_eq!(layout.slot("body").unwrap().arity, Arity::ZeroOrMore);
         assert_eq!(layout.slot("code").unwrap().accepts, Accepts::Code);
+    }
+
+    #[test]
+    fn extracts_root_section_classes() {
+        let layout = parse_layout(
+            "root",
+            r#"<section class="cover code-images"><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout
+                .root_classes()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["code-images", "cover"]
+        );
+    }
+
+    #[test]
+    fn root_section_classes_are_empty_without_class_attribute() {
+        let layout = parse_layout(
+            "root",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+
+        assert!(layout.root_classes().is_empty());
+    }
+
+    #[test]
+    fn root_section_classes_split_whitespace() {
+        let layout = parse_layout(
+            "root",
+            "<section class=\"  cover\tstatement\nwide  \"><slot name=\"title\" accepts=\"inline\" arity=\"1\"></slot></section>",
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout
+                .root_classes()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["cover", "statement", "wide"]
+        );
+    }
+
+    #[test]
+    fn layouts_root_classes_are_union_across_layouts() {
+        let cover = parse_layout(
+            "cover",
+            r#"<section class="cover shared"><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let body = parse_layout(
+            "body",
+            r#"<section class="body shared"><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let layouts = Layouts::new(vec![cover, body]).unwrap();
+
+        assert_eq!(
+            layouts
+                .root_classes()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["body", "cover", "shared"]
+        );
     }
 
     #[test]

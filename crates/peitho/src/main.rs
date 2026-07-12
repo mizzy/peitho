@@ -1407,6 +1407,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &css_files,
         &checked.slide_slot_classes(),
         &layouts.slot_classes(),
+        &layouts.root_classes(),
     ))?;
     let mut image_resolver = ImageResolver::new(input);
     let (resolved, image_assets) = core(peitho_core::resolve_image_paths(checked, |request| {
