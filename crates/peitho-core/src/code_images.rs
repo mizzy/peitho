@@ -73,9 +73,7 @@ fn transform_fragment<R: SvgRunner>(
                         "make the .peitho directory writable and rebuild",
                     )
                 })?;
-                let cache_hit = fs::metadata(&cache_path)
-                    .map(|metadata| metadata.is_file() && metadata.len() > 0)
-                    .unwrap_or(false);
+                let cache_hit = valid_cached_svg(fragment.line(), tag, &cache_path);
                 if !cache_hit {
                     let bytes = runner.run(command, fragment.code_text()).map_err(|err| {
                         code_image_error(fragment.line(), tag, err.message, err.help)
@@ -120,6 +118,18 @@ fn transform_fragment<R: SvgRunner>(
         | FragmentKind::Image { .. }
         | FragmentKind::List => Ok(fragment),
     }
+}
+
+fn valid_cached_svg(line: usize, tag: &str, path: &Path) -> bool {
+    let cache_hit = fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if !cache_hit {
+        return false;
+    }
+    fs::read(path)
+        .map(|bytes| validate_svg_output(line, tag, &bytes).is_ok())
+        .unwrap_or(false)
 }
 
 fn code_image_cache_key(command: &CodeImageCommand, code_text: &str) -> String {
@@ -373,6 +383,29 @@ mod tests {
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
             b"<svg>cached</svg>"
+        );
+    }
+
+    #[test]
+    fn corrupt_cache_hit_is_replaced_by_runner_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join(format!("{MERMAID_KEY}.svg")), b"not svg").unwrap();
+        let runner = FakeRunner::svg("<svg>new</svg>");
+
+        transform_code_images(
+            deck_with_mermaid("graph TD"),
+            &config(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(runner.calls.get(), 1);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
+            b"<svg>new</svg>"
         );
     }
 
