@@ -21,6 +21,11 @@ That makes it a compact example of hybrid dispatch by content shape. The
 Markdown stays close to the talk outline, and the layout files decide how title
 and body slots render; the mechanism is covered in [Layouts](@/guide/layouts.md).
 
+The deck also sets `breaks: true` in its frontmatter, so single newlines in
+slide bodies render as hard line breaks. The "Line breaks are content" slide is
+one paragraph of three short lines — broken exactly where the Markdown breaks,
+with no trailing-space or backslash tricks.
+
 ## What to look at
 
 The custom CSS gives the deck a centered, serif keynote style with larger cover

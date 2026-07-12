@@ -1,3 +1,7 @@
+---
+breaks: true
+---
+
 <!-- {"key":"cover"} -->
 # Peitho
 
@@ -18,6 +22,14 @@ Content in Markdown, look and feel in layouts and CSS. While you write, you neve
 # The layout is the schema
 
 Slot excess and deficiency, type mismatches, broken references — the build stops with line numbers. Nothing is dropped silently.
+
+---
+<!-- {"key":"breaks"} -->
+# Line breaks are content
+
+Write a line.
+Break where you breathe.
+The deck keeps your phrasing.
 
 ---
 <!-- {"key":"closing"} -->
