@@ -55,6 +55,11 @@ title = "Code Walkthrough"
 image = "/deck-shots/code-walkthrough.png"
 
 [[extra.sections.gallery]]
+path = "@/examples/code-images.md"
+title = "Code Images"
+image = "/deck-shots/code-images.png"
+
+[[extra.sections.gallery]]
 path = "@/examples/two-column.md"
 title = "Two Column"
 image = "/deck-shots/two-column.png"

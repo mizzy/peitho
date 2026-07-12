@@ -46,6 +46,22 @@ Markdown images are deck-relative local files. They must use supported local
 image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`) and must map to a layout
 with exactly one unambiguous `accepts="image"` slot.
 
+## Code images
+
+Use `code_images:` when fenced diagram source should become an SVG image during
+the build. Each mapping entry uses the fence language tag as the key and a
+command string as the value; Peitho sends the fenced source to stdin and reads
+SVG from stdout.
+
+```yaml
+code_images:
+  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
+```
+
+After conversion, those blocks behave like normal images and need an
+`accepts="image"` slot. See [Frontmatter](@/guide/frontmatter.md#code-images)
+and the [Code Images example](@/examples/code-images.md).
+
 ## Explicit slot syntax
 
 Use `::: {slot=name}` when convention mapping cannot choose between slots. This
