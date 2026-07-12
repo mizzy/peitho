@@ -224,6 +224,16 @@ function hasChordModifier(event) {
   return event.metaKey || event.ctrlKey || event.altKey;
 }
 
+// src/skipnav.ts
+function nextNonSkippedIndex(slides, from, direction) {
+  let index = from + direction;
+  while (index >= 0 && index < slides.length) {
+    if (slides[index].skip !== true) return index;
+    index += direction;
+  }
+  return null;
+}
+
 // src/swap.ts
 var SWAP_ROUTES = Object.freeze({
   "/present.html": Object.freeze({ swapped: false, counterpart: "presenter-swapped" }),
@@ -535,7 +545,7 @@ var PreviewShellController = class {
         this.slides.push(view);
       }
       const restored = this.restoredState;
-      const restoredIndex = this.clampIndex(restored?.index ?? 0);
+      const restoredIndex = restored === null ? this.clampIndex(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? "single";
@@ -671,8 +681,14 @@ var PreviewShellController = class {
   resolveTarget(to) {
     if (to === "first") return 0;
     if (to === "last") return this.slides.length - 1;
-    if (to === "next") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
-    if (to === "prev") return Math.max(this.selectedIndex - 1, 0);
+    if (to === "next") {
+      if (this.mode === "grid") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
+      return this.resolveSequentialTarget(1);
+    }
+    if (to === "prev") {
+      if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
+      return this.resolveSequentialTarget(-1);
+    }
     if (to === "up" || to === "down") return this.resolveGridVerticalTarget(to);
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
@@ -687,6 +703,13 @@ var PreviewShellController = class {
       return null;
     }
     return index;
+  }
+  resolveSequentialTarget(direction) {
+    return nextNonSkippedIndex(
+      this.slides.map((slide) => slide.meta),
+      this.selectedIndex,
+      direction
+    );
   }
   resolveGridVerticalTarget(direction) {
     if (this.mode !== "grid") return null;

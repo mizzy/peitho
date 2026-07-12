@@ -215,10 +215,12 @@ pub struct LayoutRequest {
 #[derive(Debug, Clone)]
 pub struct ParsedSlide {
     pub index: usize,
+    pub source_index: usize,
     pub key: SlideKey,
     pub key_source: KeySource,
     pub layout_request: Option<LayoutRequest>,
     pub fragments: Vec<SourceFragment>,
+    pub skip: bool,
     pub notes: Option<String>,
 }
 
@@ -233,10 +235,12 @@ pub struct Mapped {
 #[derive(Debug, Clone)]
 pub struct MappedSlide {
     pub(crate) index: usize,
+    pub(crate) source_index: usize,
     pub(crate) key: SlideKey,
     pub(crate) layout: Layout,
     pub(crate) slots: BTreeMap<SlotName, MappedSlot>,
     pub(crate) unassigned: Vec<UnassignedFragment>,
+    pub(crate) skip: bool,
     pub(crate) notes: Option<String>,
 }
 
@@ -298,9 +302,11 @@ pub struct Checked<S = RawImagePath> {
 #[derive(Debug, Clone)]
 pub struct CheckedSlide<S = RawImagePath> {
     index: usize,
+    source_index: usize,
     key: SlideKey,
     layout: Layout,
     slots: BTreeMap<SlotName, CheckedSlot<S>>,
+    skip: bool,
     notes: Option<String>,
 }
 
@@ -375,16 +381,20 @@ impl Deck<Mapped> {
 impl<S> CheckedSlide<S> {
     pub(crate) fn new(
         index: usize,
+        source_index: usize,
         key: SlideKey,
         layout: Layout,
         slots: BTreeMap<SlotName, CheckedSlot<S>>,
+        skip: bool,
         notes: Option<String>,
     ) -> Self {
         Self {
             index,
+            source_index,
             key,
             layout,
             slots,
+            skip,
             notes,
         }
     }
@@ -407,6 +417,10 @@ impl<S> CheckedSlide<S> {
 
     pub(crate) fn notes(&self) -> Option<&str> {
         self.notes.as_deref()
+    }
+
+    pub(crate) fn skip(&self) -> bool {
+        self.skip
     }
 
     pub(crate) fn title_text(&self) -> Option<String> {
@@ -502,12 +516,14 @@ where
     for slide in checked_slides {
         let CheckedSlide {
             index,
+            source_index,
             key,
             layout,
             slots,
+            skip,
             notes,
         } = slide;
-        let slide_number = index + 1;
+        let slide_number = source_index + 1;
         let slide_key_for_error = key.as_str().to_owned();
         let mut resolved_slots = BTreeMap::new();
 
@@ -545,7 +561,15 @@ where
             resolved_slots.insert(slot, CheckedSlot::new(contract, resolved_fragments));
         }
 
-        slides.push(CheckedSlide::new(index, key, layout, resolved_slots, notes));
+        slides.push(CheckedSlide::new(
+            index,
+            source_index,
+            key,
+            layout,
+            resolved_slots,
+            skip,
+            notes,
+        ));
     }
 
     Ok((Deck::checked(settings, slides), assets))
@@ -752,9 +776,11 @@ mod tests {
             vec![ParsedSlide {
                 key: SlideKey::new("arch-1").unwrap(),
                 index: 0,
+                source_index: 0,
                 key_source: KeySource::Explicit { line: 1 },
                 layout_request: None,
                 fragments: vec![SourceFragment::paragraph(3, "body")],
+                skip: false,
                 notes: None,
             }],
         );
@@ -786,9 +812,11 @@ mod tests {
             DeckSettings::default(),
             vec![CheckedSlide::new(
                 0,
+                0,
                 SlideKey::new("gallery").unwrap(),
                 layout,
                 slots,
+                false,
                 None,
             )],
         );
@@ -807,5 +835,50 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].dist_rel.as_str(), "assets/same-a.png");
+    }
+
+    #[test]
+    fn resolve_image_paths_preserves_skip_flag() {
+        let layout = parse_layout(
+            "images",
+            r#"<section><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let contract = layout.slot("hero").unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::image(
+                    3,
+                    "A",
+                    RawImagePath::new_unchecked("a.png".into()),
+                )],
+            ),
+        );
+        let deck = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("gallery").unwrap(),
+                layout,
+                slots,
+                true,
+                None,
+            )],
+        );
+
+        let (resolved, _assets) = resolve_image_paths(deck, |_request| {
+            Ok(ResolvedImageAsset {
+                source_abs: PathBuf::from("/tmp/a.png"),
+                dist_rel: ResolvedImagePath::from_string("assets/a.png".to_owned()),
+            })
+        })
+        .unwrap();
+
+        assert!(resolved.checked_slides()[0].skip());
     }
 }

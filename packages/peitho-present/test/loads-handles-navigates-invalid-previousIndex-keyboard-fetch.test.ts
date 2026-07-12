@@ -26,6 +26,7 @@ const manifest = {
       key: "intro",
       src: "slides/000-intro.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -33,6 +34,7 @@ const manifest = {
       key: "arch-1",
       src: "slides/001-arch-1.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     }
   ]
@@ -77,6 +79,35 @@ function standardFetch(responseManifest = manifest, css = cssText): typeof fetch
     if (url === "peitho.css") return okText(css);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
+    return {
+      ok: false,
+      status: 404,
+      text: async () => "not found",
+      json: async () => ({})
+    } as Response;
+  }) as unknown as typeof fetch;
+}
+
+function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typeof manifest {
+  return {
+    ...manifest,
+    slideCount: slides.length,
+    slides: slides.map((slide, index) => ({
+      index,
+      key: slide.key,
+      src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
+      hasNotes: false,
+      skip: slide.skip ?? false,
+      text: { title: "", body: "", code: "" }
+    }))
+  };
+}
+
+function fetchForManifest(responseManifest: typeof manifest): typeof fetch {
+  return vi.fn(async (url: string) => {
+    if (url === "manifest.json") return okJson(responseManifest);
+    if (url === "peitho.css") return okText(cssText);
+    if (url.startsWith("slides/")) return okText(`<section>${url}</section>`);
     return {
       ok: false,
       status: 404,
@@ -337,6 +368,150 @@ it("does not emit slidechange when next at the last slide is a no-op", async () 
 
   expect(shell.currentIndex).toBe(1);
   expect(changes.map((change) => change.index)).toEqual([0, 1]);
+});
+
+it("next skips one or more skipped slides in the present shell", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro" },
+    { key: "appendix-a", skip: true },
+    { key: "appendix-b", skip: true },
+    { key: "summary" }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.currentIndex).toBe(3);
+  expect(changes.map((change) => change.index)).toEqual([0, 3]);
+});
+
+it("prev skips one or more skipped slides in the present shell", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro" },
+    { key: "appendix-a", skip: true },
+    { key: "appendix-b", skip: true },
+    { key: "summary" }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+
+  expect(shell.currentIndex).toBe(0);
+  expect(changes.map((change) => change.index)).toEqual([0, 3, 0]);
+});
+
+it("next is a no-op when only skipped slides remain in the present shell", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro" },
+    { key: "appendix-a", skip: true },
+    { key: "appendix-b", skip: true }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.currentIndex).toBe(0);
+  expect(changes.map((change) => change.index)).toEqual([0]);
+});
+
+it("opens on the first non-skipped slide in the present shell", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", skip: true },
+    { key: "main" },
+    { key: "appendix", skip: true }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number; previousIndex: number | null }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+  const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-slide")];
+
+  expect(shell.currentIndex).toBe(1);
+  expect(changes).toEqual([{ key: "main", index: 1, total: 3, previousIndex: null }]);
+  expect(hosts.map((host) => host.hidden)).toEqual([true, false, true]);
+});
+
+it("opens on the first slide when every present shell slide is skipped", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", skip: true },
+    { key: "appendix", skip: true }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+
+  expect(shell.currentIndex).toBe(0);
+  expect(changes.map((change) => change.index)).toEqual([0]);
+});
+
+it("direct index and key navigation can land on skipped slides in the present shell", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro" },
+    { key: "appendix", skip: true },
+    { key: "summary" }
+  ]);
+  const root = document.createElement("main");
+  const changes: Array<{ index: number }> = [];
+  listenWindow("peitho:slidechange", (event) => {
+    changes.push((event as CustomEvent).detail);
+  });
+
+  const shell = await mountForTest({
+    root,
+    fetcher: fetchForManifest(responseManifest),
+    window
+  });
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "first" } }));
+  window.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { key: "appendix" } } })
+  );
+
+  expect(shell.currentIndex).toBe(1);
+  expect(changes.map((change) => change.index)).toEqual([0, 1, 0, 1]);
 });
 
 it("keyboard emits navigate events instead of calling shell directly", () => {

@@ -91,14 +91,16 @@ pub struct ManifestSection {
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSlide {
-    index: usize,
+    pub(crate) index: usize,
     #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "string"))]
-    key: SlideKey,
-    src: String,
+    pub(crate) key: SlideKey,
+    pub(crate) src: String,
     #[serde(rename = "hasNotes")]
-    has_notes: bool,
+    pub(crate) has_notes: bool,
     #[serde(default)]
-    text: ManifestSlideText,
+    pub(crate) skip: bool,
+    #[serde(default)]
+    pub(crate) text: ManifestSlideText,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -156,22 +158,6 @@ impl ManifestSection {
 }
 
 impl ManifestSlide {
-    pub fn new(
-        index: usize,
-        key: SlideKey,
-        src: impl Into<String>,
-        has_notes: bool,
-        text: ManifestSlideText,
-    ) -> Self {
-        Self {
-            index,
-            key,
-            src: src.into(),
-            has_notes,
-            text,
-        }
-    }
-
     pub fn index(&self) -> usize {
         self.index
     }
@@ -186,6 +172,10 @@ impl ManifestSlide {
 
     pub fn has_notes(&self) -> bool {
         self.has_notes
+    }
+
+    pub fn skip(&self) -> bool {
+        self.skip
     }
 
     pub fn text(&self) -> &ManifestSlideText {
@@ -384,13 +374,14 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
         .iter()
         .map(|slide| {
             let text = crate::plain::slide_text(slide);
-            ManifestSlide::new(
-                slide.index(),
-                slide.key().clone(),
-                fragment_src(slide.index(), slide.key()),
-                slide.notes().is_some(),
+            ManifestSlide {
+                index: slide.index(),
+                key: slide.key().clone(),
+                src: fragment_src(slide.index(), slide.key()),
+                has_notes: slide.notes().is_some(),
+                skip: slide.skip(),
                 text,
-            )
+            }
         })
         .collect();
 
@@ -425,19 +416,22 @@ mod tests {
     };
 
     #[test]
-    fn manifest_slide_text_constructor_and_accessors() {
+    fn manifest_slide_text_and_slide_accessors() {
         let text = ManifestSlideText::new("Title", "Body", "Code");
-        let slide = ManifestSlide::new(
-            0,
-            SlideKey::new("intro").unwrap(),
-            "slides/000-intro.html",
-            true,
-            text.clone(),
-        );
+        let slide = ManifestSlide {
+            index: 0,
+            key: SlideKey::new("intro").unwrap(),
+            src: "slides/000-intro.html".to_owned(),
+            has_notes: true,
+            skip: true,
+            text: text.clone(),
+        };
 
         assert_eq!(text.title(), "Title");
         assert_eq!(text.body(), "Body");
         assert_eq!(text.code(), "Code");
+        assert!(slide.has_notes());
+        assert!(slide.skip());
         assert_eq!(slide.text(), &text);
     }
 
@@ -449,20 +443,22 @@ mod tests {
             AspectRatio::Ratio16To9,
             Vec::new(),
             vec![
-                ManifestSlide::new(
-                    0,
-                    SlideKey::new("arch-1").unwrap(),
-                    "slides/000-arch-1.html",
-                    false,
-                    ManifestSlideText::default(),
-                ),
-                ManifestSlide::new(
-                    1,
-                    SlideKey::new("details").unwrap(),
-                    "slides/001-details.html",
-                    false,
-                    ManifestSlideText::default(),
-                ),
+                ManifestSlide {
+                    index: 0,
+                    key: SlideKey::new("arch-1").unwrap(),
+                    src: "slides/000-arch-1.html".to_owned(),
+                    has_notes: false,
+                    skip: false,
+                    text: ManifestSlideText::default(),
+                },
+                ManifestSlide {
+                    index: 1,
+                    key: SlideKey::new("details").unwrap(),
+                    src: "slides/001-details.html".to_owned(),
+                    has_notes: false,
+                    skip: false,
+                    text: ManifestSlideText::default(),
+                },
             ],
         );
 
@@ -489,6 +485,7 @@ mod tests {
                 "      \"key\": \"arch-1\",\n",
                 "      \"src\": \"slides/000-arch-1.html\",\n",
                 "      \"hasNotes\": false,\n",
+                "      \"skip\": false,\n",
                 "      \"text\": {\n",
                 "        \"title\": \"\",\n",
                 "        \"body\": \"\",\n",
@@ -500,6 +497,7 @@ mod tests {
                 "      \"key\": \"details\",\n",
                 "      \"src\": \"slides/001-details.html\",\n",
                 "      \"hasNotes\": false,\n",
+                "      \"skip\": false,\n",
                 "      \"text\": {\n",
                 "        \"title\": \"\",\n",
                 "        \"body\": \"\",\n",
@@ -552,13 +550,14 @@ mod tests {
             None,
             AspectRatio::Ratio16To9,
             Vec::new(),
-            vec![ManifestSlide::new(
-                0,
-                SlideKey::new("intro").unwrap(),
-                "slides/000-intro.html",
-                false,
-                ManifestSlideText::new("Intro", "Body text", "fn main() {}\n"),
-            )],
+            vec![ManifestSlide {
+                index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                src: "slides/000-intro.html".to_owned(),
+                has_notes: false,
+                skip: false,
+                text: ManifestSlideText::new("Intro", "Body text", "fn main() {}\n"),
+            }],
         );
 
         let json = manifest_json(&manifest).unwrap();
@@ -610,13 +609,14 @@ mod tests {
             None,
             AspectRatio::Ratio16To9,
             Vec::new(),
-            vec![ManifestSlide::new(
-                0,
-                SlideKey::new("intro").unwrap(),
-                "slides/000-intro.html",
-                false,
-                ManifestSlideText::default(),
-            )],
+            vec![ManifestSlide {
+                index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                src: "slides/000-intro.html".to_owned(),
+                has_notes: false,
+                skip: false,
+                text: ManifestSlideText::default(),
+            }],
         );
 
         let json = manifest_json(&manifest).unwrap();
@@ -633,13 +633,14 @@ mod tests {
             Some(900_000),
             AspectRatio::Ratio16To9,
             Vec::new(),
-            vec![ManifestSlide::new(
-                0,
-                SlideKey::new("intro").unwrap(),
-                "slides/000-intro.html",
-                false,
-                ManifestSlideText::default(),
-            )],
+            vec![ManifestSlide {
+                index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                src: "slides/000-intro.html".to_owned(),
+                has_notes: false,
+                skip: false,
+                text: ManifestSlideText::default(),
+            }],
         );
 
         let json = manifest_json(&manifest).unwrap();
@@ -655,6 +656,22 @@ mod tests {
 
         assert!(manifest.slides()[0].has_notes());
         assert!(!manifest.slides()[1].has_notes());
+    }
+
+    #[test]
+    fn build_manifest_marks_skip_from_checked_slides() {
+        let checked = checked_deck(
+            "<!-- {\"skip\":true} -->\n# Appendix\n\n---\n# Normal",
+            title_body_layout(),
+        );
+
+        let manifest = build_manifest(&checked, &[]);
+        let json = manifest_json(&manifest).unwrap();
+
+        assert!(manifest.slides()[0].skip());
+        assert!(!manifest.slides()[1].skip());
+        assert!(json.contains(r#""skip": true"#));
+        assert!(json.contains(r#""skip": false"#));
     }
 
     #[test]
@@ -712,6 +729,29 @@ mod tests {
 
         let manifest: Manifest = serde_json::from_str(json).unwrap();
         assert!(manifest.sections().is_empty());
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_slide_skip_as_false() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
+            "  \"sections\": [],\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}],\n",
+            "  \"images\": []\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert!(!manifest.slides()[0].skip());
     }
 
     #[test]
@@ -1011,6 +1051,7 @@ mod ts_tests {
         assert!(section.contains("plannedDurationMs: number"));
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
+        assert!(slide.contains("skip: boolean"));
         assert!(slide.contains(r#"import type { ManifestSlideText } from "./ManifestSlideText";"#));
         assert!(slide.contains("text: ManifestSlideText"));
         assert!(slide_text.contains("title: string"));

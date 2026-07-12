@@ -8,6 +8,7 @@ import {
   type SlideChangeDetail,
   type TimerControlDetail
 } from "./shell";
+import { nextNonSkippedIndex } from "./skipnav";
 import { installSyncBridge, type SyncChannelFactory } from "./sync";
 import { urgencyFor } from "./timerUrgency";
 import { installTimeTracker, isOverrun, isValidDurationMs } from "./timeTracker";
@@ -338,8 +339,8 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       sectionLabel.hidden = true;
       sectionSep.hidden = true;
     }
-    const nextIndex = detail.index + 1;
-    if (nextIndex < detail.total) {
+    const nextIndex = nextNonSkippedIndex(mainShell.manifest?.slides ?? [], detail.index, 1);
+    if (nextIndex !== null) {
       previewRoot.hidden = false;
       previewEnd.hidden = true;
       nextPosition.textContent = `${formatSlideNumber(nextIndex + 1)} / ${total}`;

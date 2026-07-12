@@ -42,6 +42,7 @@ describe("generated manifest contract", () => {
           key: "intro",
           src: "slides/000-intro.html",
           hasNotes: false,
+          skip: false,
           text: { title: "", body: "", code: "" }
         }
       ],
@@ -50,6 +51,7 @@ describe("generated manifest contract", () => {
     const options: ShellOptions = { root: document.createElement("main") };
 
     expect(manifest.slides[0].key).toBe("intro");
+    expect(manifest.slides[0].skip).toBe(false);
     expect(manifest.aspectRatio).toBe("16:9");
     expect(manifest.canvasWidth).toBe(1280);
     expect(manifest.canvasHeight).toBe(720);
@@ -73,6 +75,7 @@ describe("generated manifest contract", () => {
           key: "intro",
           src: "slides/000-intro.html",
           hasNotes: false,
+          skip: false,
           text: { title: "", body: "", code: "" }
         }
       ],

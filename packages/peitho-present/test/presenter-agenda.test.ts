@@ -27,6 +27,7 @@ const manifest: Manifest = {
       key: "intro",
       src: "slides/000-intro.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     }
   ],

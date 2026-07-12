@@ -85,7 +85,7 @@ fn validate_override_selectors(
                     Some(line_no),
                     format!("unknown slide key '{key}' in override selector"),
                     format!(
-                        "use one of: {}",
+                        "use one of: {}; if this key belongs to a slide marked {{\"draft\":true}}, remove the override or the draft flag",
                         slide_slots.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
@@ -320,7 +320,47 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::Theme);
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown slide key 'missing'"));
-        assert_eq!(err.help, "use one of: arch-1");
+        assert_eq!(
+            err.help,
+            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+        );
+    }
+
+    #[test]
+    fn unknown_slide_key_help_mentions_drafted_slides() {
+        let markdown = "# Live\n\n---\n\
+                        <!-- {\"key\":\"drafted\",\"draft\":true} -->\n# Drafted";
+        let frontmatter = crate::parser::parse_frontmatter(markdown).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let layout = crate::layout::parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = crate::mapping::map_by_convention(parsed, &layout).unwrap();
+        let checked = crate::check::check_deck(mapped).unwrap();
+        let slide_slots = checked.slide_slot_classes();
+        let layout_slots: BTreeSet<String> = slide_slots.values().flatten().cloned().collect();
+
+        let err = build_theme_css(
+            &[CssFile {
+                name: "overrides.css".to_owned(),
+                content: r#"[data-slide-key="drafted"] .slot-title { color: red; }"#.to_owned(),
+            }],
+            &slide_slots,
+            &layout_slots,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert!(err.to_string().contains("unknown slide key 'drafted'"));
+        assert!(err.help.contains("draft"));
+        assert!(err.help.contains("remove the override or the draft flag"));
     }
 
     #[test]
@@ -335,7 +375,10 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::Theme);
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown slide key 'missing'"));
-        assert_eq!(err.help, "use one of: arch-1");
+        assert_eq!(
+            err.help,
+            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+        );
     }
 
     #[test]
@@ -350,7 +393,10 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::Theme);
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown slide key 'missing'"));
-        assert_eq!(err.help, "use one of: arch-1");
+        assert_eq!(
+            err.help,
+            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+        );
     }
 
     #[test]

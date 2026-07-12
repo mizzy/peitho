@@ -28,6 +28,7 @@ const manifest: Manifest = {
       key: "intro",
       src: "slides/000-intro.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -35,6 +36,7 @@ const manifest: Manifest = {
       key: "details",
       src: "slides/001-details.html",
       hasNotes: false,
+      skip: false,
       text: { title: "", body: "", code: "" }
     }
   ],
@@ -44,14 +46,32 @@ const manifest: Manifest = {
 const notes: Notes = { version: 1, notes: { intro: "Opening note" } };
 
 function standardFetch(overrides: Partial<typeof manifest> = {}): typeof fetch {
+  const responseManifest = Object.assign({}, manifest, overrides) as Manifest;
   return vi.fn(async (url: string) => {
-    if (url === "manifest.json") return okJson(Object.assign({}, manifest, overrides));
+    if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
       return okText("<section><h1>Details</h1></section>");
+    const slide = responseManifest.slides.find((item) => item.src === url);
+    if (slide) return okText(`<section><h1>${slide.key}</h1></section>`);
     return { ok: false, status: 404, text: async () => "" } as Response;
   }) as typeof fetch;
+}
+
+function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): Manifest {
+  return {
+    ...manifest,
+    slideCount: slides.length,
+    slides: slides.map((slide, index) => ({
+      index,
+      key: slide.key,
+      src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
+      hasNotes: false,
+      skip: slide.skip ?? false,
+      text: { title: "", body: "", code: "" }
+    }))
+  };
 }
 
 function legacyManifestFetch(): typeof fetch {
@@ -71,6 +91,7 @@ function legacyManifestFetch(): typeof fetch {
         key: "intro",
         src: "slides/000-intro.html",
         hasNotes: false,
+        skip: false,
         text: { title: "", body: "", code: "" }
       },
       {
@@ -78,6 +99,7 @@ function legacyManifestFetch(): typeof fetch {
         key: "details",
         src: "slides/001-details.html",
         hasNotes: false,
+        skip: false,
         text: { title: "", body: "", code: "" }
       }
     ]
@@ -449,6 +471,67 @@ it("updates preview and shows end of deck on the last slide", async () => {
   expect(root.querySelector('[data-peitho-presenter="preview-end"]')?.textContent).toContain(
     "End of deck"
   );
+});
+
+it("next preview skips skipped slides while counters keep total slide count", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({
+      ...manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix", skip: true },
+        { key: "summary" }
+      ])
+    }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  expect(root.querySelector('[data-peitho-presenter="position"]')?.textContent).toBe(
+    "Slide 01 of 03"
+  );
+  expect(root.querySelector('[data-peitho-presenter="position-short"]')?.textContent).toBe(
+    "01 / 03"
+  );
+  expect(root.querySelector('[data-peitho-presenter="next-position"]')?.textContent).toBe(
+    "03 / 03"
+  );
+  expect(
+    root.querySelector<HTMLElement>(
+      '[data-peitho-presenter="preview"] [data-slide-index="2"]'
+    )?.shadowRoot?.textContent
+  ).toContain("summary");
+});
+
+it("next preview shows end when only skipped slides remain", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch({
+      ...manifestWithSlides([
+        { key: "intro" },
+        { key: "appendix", skip: true },
+        { key: "backup", skip: true }
+      ])
+    }),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-presenter="preview"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-presenter="preview-end"]')?.hidden).toBe(
+    false
+  );
+  expect(root.querySelector('[data-peitho-presenter="next-position"]')?.textContent).toBe("End");
 });
 
 it("scales current and next preview shells to their pane sizes", async () => {

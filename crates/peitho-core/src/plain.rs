@@ -192,7 +192,15 @@ mod tests {
                 vec![SourceFragment::paragraph(1, "![Alt text](x.png)")],
             ),
         );
-        let slide = CheckedSlide::new(0, SlideKey::new("intro").unwrap(), layout, slots, None);
+        let slide = CheckedSlide::new(
+            0,
+            0,
+            SlideKey::new("intro").unwrap(),
+            layout,
+            slots,
+            false,
+            None,
+        );
 
         let text = slide_text(&slide);
 

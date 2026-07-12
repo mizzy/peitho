@@ -732,6 +732,16 @@ function isCssWhitespace(char) {
   return char === " " || char === "\n" || char === "\r" || char === "	" || char === "\f";
 }
 
+// src/skipnav.ts
+function nextNonSkippedIndex(slides, from, direction) {
+  let index = from + direction;
+  while (index >= 0 && index < slides.length) {
+    if (slides[index].skip !== true) return index;
+    index += direction;
+  }
+  return null;
+}
+
 // src/shell.ts
 async function mountPresentShell(options) {
   const shell = new PresentShellController(options);
@@ -815,7 +825,7 @@ var PresentShellController = class {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(0);
+      this.show(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0);
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -902,8 +912,8 @@ var PresentShellController = class {
   resolveTarget(to) {
     if (to === "first") return 0;
     if (to === "last") return this.slides.length - 1;
-    if (to === "next") return Math.min(this.currentIndex + 1, this.slides.length - 1);
-    if (to === "prev") return Math.max(this.currentIndex - 1, 0);
+    if (to === "next") return this.resolveSequentialTarget(1);
+    if (to === "prev") return this.resolveSequentialTarget(-1);
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
@@ -917,6 +927,13 @@ var PresentShellController = class {
       return null;
     }
     return index;
+  }
+  resolveSequentialTarget(direction) {
+    return nextNonSkippedIndex(
+      this.slides.map((slide) => slide.meta),
+      this.currentIndex,
+      direction
+    );
   }
   show(index) {
     if (index < 0 || index >= this.slides.length) {
@@ -1513,8 +1530,8 @@ async function mountPresenterView(options) {
       sectionLabel.hidden = true;
       sectionSep.hidden = true;
     }
-    const nextIndex = detail.index + 1;
-    if (nextIndex < detail.total) {
+    const nextIndex = nextNonSkippedIndex(mainShell.manifest?.slides ?? [], detail.index, 1);
+    if (nextIndex !== null) {
       previewRoot.hidden = false;
       previewEnd.hidden = true;
       nextPosition.textContent = `${formatSlideNumber(nextIndex + 1)} / ${total}`;
