@@ -216,7 +216,9 @@ fn is_svg_output(bytes: &[u8]) -> bool {
         return false;
     }
 
-    significant.windows(b"<svg".len()).any(|window| window == b"<svg")
+    significant
+        .windows(b"<svg".len())
+        .any(|window| window == b"<svg")
 }
 
 fn starts_with_ascii_case_insensitive(bytes: &[u8], prefix: &[u8]) -> bool {

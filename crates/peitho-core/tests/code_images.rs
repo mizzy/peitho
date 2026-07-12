@@ -1,13 +1,9 @@
 use std::fs;
 
 use peitho_core::{
-    check_deck,
-    code_images::SvgRunner,
-    dispatch_by_convention,
-    domain::CodeImageCommand,
-    highlight::Highlighter,
-    parse_deck_and_transform, parse_frontmatter, parse_layout, render_deck, resolve_image_paths,
-    ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR,
+    check_deck, code_images::SvgRunner, dispatch_by_convention, domain::CodeImageCommand,
+    highlight::Highlighter, parse_deck_and_transform, parse_frontmatter, parse_layout, render_deck,
+    resolve_image_paths, ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR,
 };
 
 struct FakeRunner;
