@@ -77,6 +77,7 @@ presenter.ts / agenda.ts (new) consume shell.manifest.sections
 - `done`/`current`/`upcoming` are decided by the current slide's position: current = the section the current slide belongs to, done = anything before it, upcoming = anything after. Going back to a previous section makes it current again
 - `under`/`over` on done is decided live. The sole judgment source is the **second-rounded difference** `Math.round((actual − planned) / 1000)` — so the sign and color of the delta display are structurally consistent (using raw milliseconds would produce contradictions like "+0:00 shown as over" and "just-on-target shown as −0:00 under"; finalized during implementation review 2026-07-04). Rounded delta > 0 → `over`, otherwise `under`
 - When the timer is not started (stopped), all section actuals are 0. Following the mock, done/current show `actual / planned`, upcoming shows `— / planned`, and delta is shown only for done as `±M:SS` (current/upcoming show `·`)
+- Amendment (2026-07-12, Issue #258): an upcoming section that already accumulated a measured actual (revisit scenario — the presenter navigated back to an earlier section) keeps showing `actual / planned`; the `—` placeholder applies only while the stored actual is 0 (never visited, or zeroed by reset). See `docs/plans/2026-07-12-issue-258-agenda-revisit-actual.md`
 - Time display uses the same `m:ss` format as the tracker ticks (shared with the existing formatter in `timeTracker.ts`)
 
 ## Implementation placement

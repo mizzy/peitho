@@ -146,6 +146,26 @@ it("renders agenda header and rows with mock-compatible structure", () => {
   expect(rows[1].hasAttribute("data-peitho-agenda-outcome")).toBe(false);
 });
 
+it("renders never-visited upcoming sections with a dash actual", () => {
+  const root = document.createElement("div");
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0 }),
+    sections: [
+      { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 1_000 },
+      { name: "Demo", startIndex: 1, endIndex: 1, plannedDurationMs: 2_000 }
+    ],
+    bus: new EventTarget(),
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
+  expect(rows[1].dataset.peithoAgendaState).toBe("upcoming");
+  expect(rows[1].querySelector("[data-peitho-agenda-time]")?.textContent).toBe("— / 0:02");
+});
+
 it("marks the current agenda row over only after exceeding planned duration", () => {
   let elapsed = 0;
   const root = document.createElement("div");
@@ -279,7 +299,7 @@ it("accumulates elapsed deltas into the current section and resumes when returni
     root.querySelectorAll("[data-peitho-agenda-time]"),
     (node) => node.textContent
   );
-  expect(times).toEqual(["0:02 / 0:01", "— / 0:01"]);
+  expect(times).toEqual(["0:02 / 0:01", "0:02 / 0:01"]);
 
   rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
   expect(rows[0].dataset.peithoAgendaState).toBe("current");
@@ -297,6 +317,12 @@ it("accumulates elapsed deltas into the current section and resumes when returni
   expect(rows[0].dataset.peithoAgendaOutcome).toBe("over");
   expect(rows[0].querySelector("[data-peitho-agenda-delta]")?.textContent).toBe("+0:01");
 
+  currentIndex = 0;
+  bus.dispatchEvent(
+    new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
+      detail: { key: "setup", index: 0, total: 3, previousIndex: 2 }
+    })
+  );
   elapsed = 0;
   timerStarted = false;
   bus.dispatchEvent(
@@ -306,6 +332,11 @@ it("accumulates elapsed deltas into the current section and resumes when returni
   );
   vi.advanceTimersByTime(250);
   expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:00 / 0:01");
+  const resetTimes = Array.from(
+    root.querySelectorAll("[data-peitho-agenda-time]"),
+    (node) => node.textContent
+  );
+  expect(resetTimes[1]).toBe("— / 0:01");
 });
 
 it("clears actuals immediately when the timer is reset before restarting", () => {

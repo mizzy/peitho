@@ -189,7 +189,7 @@ function agendaState(index: number, currentSection: number): AgendaState {
 }
 
 function actualText(state: AgendaState, actual: number): string {
-  return state === "upcoming" ? EM_DASH : formatMinuteSeconds(actual);
+  return actual > 0 || state !== "upcoming" ? formatMinuteSeconds(actual) : EM_DASH;
 }
 
 function formatSlideRange(section: ManifestSection): string {
