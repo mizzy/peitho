@@ -153,7 +153,7 @@ pub fn parse_frontmatter(source: &str) -> Result<ParsedFrontmatter> {
     })
 }
 
-pub fn parse_markdown(
+pub(crate) fn parse_markdown(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,

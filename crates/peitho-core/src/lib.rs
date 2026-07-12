@@ -18,6 +18,7 @@ pub mod theme;
 pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";
 
 pub use check::check_deck;
+pub use code_images::parse_deck_and_transform;
 pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
 pub use error::{BuildError, Result};
 pub use layout::{describe_layouts, parse_layout, Layout, LayoutSummary, Layouts, SlotSummary};
@@ -30,7 +31,7 @@ pub use mapping::{
     DispatchResult, DispatchTrace,
 };
 pub use notes::{notes_json, Notes};
-pub use parser::{parse_frontmatter, parse_markdown, ParsedFrontmatter};
+pub use parser::{parse_frontmatter, ParsedFrontmatter};
 pub use phase::{
     require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, ImageRequest,
     Mapped, Rendered,
