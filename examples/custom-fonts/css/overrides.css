@@ -1,0 +1,21 @@
+.peitho-slide[data-slide-key="cover"] {
+  justify-content: center;
+  gap: 28px;
+}
+
+.peitho-slide[data-slide-key="cover"] h1 {
+  font-size: 92px;
+  line-height: 1.05;
+  max-width: 20ch;
+}
+
+.peitho-slide[data-slide-key="cover"] h1::after {
+  width: 140px;
+  margin-top: 28px;
+}
+
+.peitho-slide[data-slide-key="cover"] .slot-body {
+  font-size: 32px;
+  font-style: italic;
+  color: var(--accent);
+}
