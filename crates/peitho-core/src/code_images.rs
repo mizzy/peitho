@@ -494,6 +494,43 @@ mod tests {
     }
 
     #[test]
+    fn transforms_code_images_inside_slot_group() {
+        let markdown = "---\ncode_images:\n  mermaid: mmdc -i -\n---\n# Intro\n\n::: {slot=main}\n\n```mermaid\ngraph TD\n```\n:::\n";
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let config = frontmatter.settings().code_images().clone();
+        let parsed = parse_markdown(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let transformed = transform_code_images(
+            parsed,
+            &config,
+            &FakeRunner::svg("<svg>slot</svg>"),
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+        )
+        .unwrap();
+
+        let slot_group = transformed.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment.kind() {
+                FragmentKind::SlotGroup { name, children } => Some((name, children)),
+                _ => None,
+            })
+            .expect("expected transformed slide to contain a slot group");
+
+        assert_eq!(slot_group.0.as_slot_name().as_str(), "main");
+        assert_eq!(slot_group.1.len(), 1);
+        match slot_group.1[0].kind() {
+            FragmentKind::Image { alt, .. } => assert_eq!(alt, "diagram (mermaid)"),
+            other => panic!("expected slot group child image, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn duplicate_diagrams_share_one_cache_file_and_one_dist_asset() {
         let markdown = "---\ncode_images:\n  mermaid: mmdc -i -\n---\n# One\n\n```mermaid\ngraph TD\n```\n\n---\n# Two\n\n```mermaid\ngraph TD\n```";
         let frontmatter = parse_frontmatter(markdown).unwrap();
