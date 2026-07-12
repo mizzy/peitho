@@ -102,4 +102,5 @@ For debugging, open the presenter in a normal window instead of full-screen:
 peitho present --presenter-windowed
 ```
 
-Next, learn the deck syntax in [Writing Decks](@/guide/writing-decks.md).
+Next, learn the deck syntax in [Writing Decks](@/guide/writing-decks.md);
+for diagrams-as-code, see [Frontmatter](@/guide/frontmatter.md#code-images).
