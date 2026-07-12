@@ -1073,11 +1073,10 @@ fn repository_example_css_is_root_size_lint_clean() {
     let mut linted_examples = 0;
     for example_dir in examples {
         let example = example_dir.file_name().unwrap().to_string_lossy();
-        if !example_uses_lintable_conventional_assets(&example_dir) {
+        let Some(layouts) = example_lint_layouts(&example_dir) else {
             continue;
-        }
+        };
         linted_examples += 1;
-        let layouts = read_example_layouts(&example_dir.join("layouts"));
         let css_files = read_example_css_files(&example_dir.join("css"));
         let layout_slots = layouts.slot_classes();
         let slide_slots = broad_slide_slots_for_css_keys(&css_files, &layout_slots);
@@ -1583,25 +1582,11 @@ fn workspace_root() -> PathBuf {
         .to_owned()
 }
 
-fn example_uses_lintable_conventional_assets(example_dir: &Path) -> bool {
+fn example_lint_layouts(example_dir: &Path) -> Option<peitho_core::Layouts> {
     let example = example_dir.file_name().unwrap().to_string_lossy();
     let has_layouts_dir = example_dir.join("layouts").is_dir();
     let has_css_dir = example_dir.join("css").is_dir();
     let (layouts_key, css_key) = example_frontmatter_asset_values(example_dir);
-    let has_asset_keys = layouts_key.is_some() || css_key.is_some();
-
-    if !has_asset_keys && !has_layouts_dir && !has_css_dir {
-        return false;
-    }
-
-    assert!(
-        has_layouts_dir,
-        "{example} has deck asset configuration but no layouts/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
-    );
-    assert!(
-        has_css_dir,
-        "{example} has deck asset configuration but no css/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
-    );
 
     if let Some(value) = layouts_key.as_deref() {
         assert_conventional_frontmatter_asset(&example, "layouts", value, "./layouts");
@@ -1610,7 +1595,31 @@ fn example_uses_lintable_conventional_assets(example_dir: &Path) -> bool {
         assert_conventional_frontmatter_asset(&example, "css", value, "./css");
     }
 
-    true
+    if css_key.is_none() && !has_css_dir {
+        return None;
+    }
+    assert!(
+        has_css_dir,
+        "{example} has css: frontmatter but no css/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+    );
+
+    if layouts_key.is_some() {
+        assert!(
+            has_layouts_dir,
+            "{example} has layouts: frontmatter but no layouts/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+        );
+    }
+
+    if has_layouts_dir {
+        Some(read_example_layouts(&example_dir.join("layouts")))
+    } else {
+        Some(read_builtin_example_layout())
+    }
+}
+
+fn read_builtin_example_layout() -> peitho_core::Layouts {
+    let html = fs::read_to_string(workspace_root().join("layouts/title-body-code.html")).unwrap();
+    peitho_core::Layouts::single(peitho_core::parse_layout("title-body-code", &html).unwrap())
 }
 
 fn example_frontmatter_asset_values(example_dir: &Path) -> (Option<String>, Option<String>) {

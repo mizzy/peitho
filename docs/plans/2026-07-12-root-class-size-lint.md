@@ -170,11 +170,18 @@ correctly flags. Its canvas sizing moved to a `.peitho-slide` rule,
 matching every other example.
 
 The lint-clean canary enumerates `examples/` via `read_dir` rather than a
-hardcoded name list, and asserts every example follows the deck-adjacent
-`layouts/` + `css/` convention (loud failure telling the author to extend
-the canary if a future example diverges). It deliberately does not run
-`peitho build` per example: a real build of `code-images` requires
-graphviz/mermaid binaries, which this test must not depend on.
+hardcoded name list. An example is linted when it has deck CSS (a `css/`
+directory, or a `css:` frontmatter key — which must point at `./css`);
+its layout set is the deck-adjacent `layouts/` directory when present,
+otherwise the built-in default layout (parsed from the same
+`layouts/title-body-code.html` the binary embeds, so the test stays in
+lockstep with the embed source — `custom-fonts` is this shape: `css/` +
+`fonts/`, built-in layout). Examples with no deck CSS are skipped
+(nothing to lint). Genuinely divergent configurations (asset keys
+pointing outside the convention) fail loudly, telling the author to
+extend the canary. It deliberately does not run `peitho build` per
+example: a real build of `code-images` requires graphviz/mermaid
+binaries, which this test must not depend on.
 
 ### Task 4: docs
 
