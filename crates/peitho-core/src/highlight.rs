@@ -56,7 +56,7 @@ impl Highlighter {
     /// author asked for highlighting, so failing to honor the tag silently
     /// would be a silent drop. Blocks without a tag stay unhighlighted on
     /// purpose.
-    pub fn validate_language(&self, token: &str, line: usize) -> Result<()> {
+    pub(crate) fn validate_language(&self, token: &str, line: usize) -> Result<()> {
         if self.syntax_set.find_syntax_by_token(token).is_some() {
             return Ok(());
         }

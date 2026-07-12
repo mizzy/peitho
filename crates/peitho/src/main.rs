@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, HashSet},
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
-    io::{IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Child, Stdio},
+    process::{Child, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -34,6 +34,39 @@ struct BuildArtifacts {
     css: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
     fonts_source: Option<PathBuf>,
+}
+
+struct CliSvgRunner {
+    cwd: PathBuf,
+    timeout: Duration,
+}
+
+impl Default for CliSvgRunner {
+    fn default() -> Self {
+        Self {
+            cwd: PathBuf::from("."),
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl CliSvgRunner {
+    fn for_deck(input: &Path) -> Self {
+        Self {
+            cwd: asset_resolution::deck_parent(input).to_path_buf(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl peitho_core::code_images::SvgRunner for CliSvgRunner {
+    fn run(
+        &self,
+        command: &peitho_core::domain::CodeImageCommand,
+        stdin: &str,
+    ) -> peitho_core::Result<Vec<u8>> {
+        run_code_image_command(command, stdin, self.timeout, &self.cwd)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -515,10 +548,12 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
     };
 
     let highlighter = load_highlighter(assets.syntaxes.path())?;
-    let parsed = core(peitho_core::parse_markdown(
+    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
         &markdown,
         frontmatter,
         &highlighter,
+        &CliSvgRunner::for_deck(&input),
+        &code_images_cache_dir(&input),
     ))?;
     let Some(slide) = parsed
         .parsed_slides()
@@ -1358,10 +1393,12 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     let highlighter = load_highlighter(assets.syntaxes.path())?;
     let layouts = load_layouts(assets.layouts.path())?;
     let css_files = load_css(assets.css.path())?;
-    let parsed = core(peitho_core::parse_markdown(
+    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
         &markdown,
         frontmatter,
         &highlighter,
+        &CliSvgRunner::for_deck(input),
+        &code_images_cache_dir(input),
     ))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
@@ -1387,6 +1424,10 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
     })
+}
+
+fn code_images_cache_dir(input: &Path) -> PathBuf {
+    asset_resolution::deck_parent(input).join(peitho_core::CODE_IMAGES_CACHE_DIR)
 }
 
 fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
@@ -1592,66 +1633,26 @@ fn scan_for_needle(buffer: &[u8], scanned: &mut usize, needle: &[u8]) -> bool {
     found
 }
 
-#[derive(Debug)]
-enum ChromePipeEvent {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ChromePipe {
-    Stdout,
-    Stderr,
-}
-
 fn run_one_shot_chrome(
     chrome: &Path,
     args: &[OsString],
     completion: ChromeCompletion,
     timeout: Duration,
 ) -> miette::Result<Vec<u8>> {
-    let mut child = std::process::Command::new(chrome)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            miette::miette!(
-                "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
-                chrome.display()
-            )
-        })?;
-    let stdout_pipe = child.stdout.take().ok_or_else(|| {
-        miette::miette!(
-            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
-        )
-    })?;
-    let stderr_pipe = child.stderr.take().ok_or_else(|| {
-        miette::miette!(
-            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
-        )
-    })?;
-    let (tx, rx) = mpsc::channel();
-    // Intentionally do not join these readers: lingering Chrome grandchildren can hold pipes open forever; threads exit with this process.
-    let _stdout_reader = spawn_chrome_pipe_reader(stdout_pipe, ChromePipe::Stdout, tx.clone());
-    let _stderr_reader = spawn_chrome_pipe_reader(stderr_pipe, ChromePipe::Stderr, tx);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
     let mut completion_state = ChromeCompletionState::default();
-    let deadline = Instant::now() + timeout;
+    let outcome = run_child_with_timeout(chrome, args, None, timeout, |stdout, stderr| {
+        completion.is_ready(stdout, stderr, &mut completion_state)
+    })
+    .map_err(|err| chrome_process_error(chrome, err))?;
 
-    loop {
-        if completion.is_ready(&stdout, &stderr, &mut completion_state) {
-            kill_and_reap_child(&mut child)?;
-            drain_chrome_events(&rx, &mut stdout, &mut stderr);
-            return Ok(stdout);
-        }
-
-        if let Some(status) = child.try_wait().into_diagnostic()? {
-            drain_chrome_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
-            if completion.is_ready(&stdout, &stderr, &mut completion_state)
-                || (status.success() && completion.is_ready_after_successful_exit())
-            {
+    match outcome {
+        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+        } => {
+            if status.success() && completion.is_ready_after_successful_exit() {
                 return Ok(stdout);
             }
             if !status.success() {
@@ -1661,35 +1662,154 @@ fn run_one_shot_chrome(
                     String::from_utf8_lossy(&stderr).trim()
                 ));
             }
-            return Err(miette::miette!(
+            Err(miette::miette!(
                 "Chrome completed before one-shot output was ready\nhelp: expected {} before Chrome exited\nstderr: {}",
                 completion.description(),
                 String::from_utf8_lossy(&stderr).trim()
-            ));
+            ))
+        }
+        ProcessOutcome::TimedOut { stderr } => Err(miette::miette!(
+            "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
+            timeout.as_secs(),
+            completion.description(),
+            String::from_utf8_lossy(&stderr).trim()
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum ProcessOutcome {
+    Ready {
+        stdout: Vec<u8>,
+    },
+    Exited {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    TimedOut {
+        stderr: Vec<u8>,
+    },
+}
+
+#[derive(Debug)]
+enum ProcessPipeEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessPipe {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+enum ProcessRunError {
+    Spawn(io::Error),
+    CaptureStdout,
+    CaptureStderr,
+    CaptureStdin,
+    Wait(io::Error),
+    Kill(io::Error),
+}
+
+fn run_child_with_timeout<P, A, F>(
+    program: P,
+    args: &[A],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    is_complete: F,
+) -> Result<ProcessOutcome, ProcessRunError>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+    F: FnMut(&[u8], &[u8]) -> bool,
+{
+    run_child_with_timeout_in_dir(program, args, stdin, None, timeout, is_complete)
+}
+
+fn run_child_with_timeout_in_dir<P, A, F>(
+    program: P,
+    args: &[A],
+    stdin: Option<&[u8]>,
+    cwd: Option<&Path>,
+    timeout: Duration,
+    mut is_complete: F,
+) -> Result<ProcessOutcome, ProcessRunError>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+    F: FnMut(&[u8], &[u8]) -> bool,
+{
+    let mut command = std::process::Command::new(program.as_ref());
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(ProcessRunError::Spawn)?;
+    let stdout_pipe = child.stdout.take().ok_or(ProcessRunError::CaptureStdout)?;
+    let stderr_pipe = child.stderr.take().ok_or(ProcessRunError::CaptureStderr)?;
+    let (tx, rx) = mpsc::channel();
+    // Intentionally do not join these readers: lingering grandchildren can hold pipes open forever; threads exit with this process.
+    let _stdout_reader = spawn_process_pipe_reader(stdout_pipe, ProcessPipe::Stdout, tx.clone());
+    let _stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, tx);
+
+    if let Some(input) = stdin {
+        let mut stdin_pipe = child.stdin.take().ok_or(ProcessRunError::CaptureStdin)?;
+        let input = input.to_vec();
+        let _stdin_writer = thread::spawn(move || {
+            let _ = stdin_pipe.write_all(&input);
+        });
+    }
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if is_complete(&stdout, &stderr) {
+            kill_and_reap_process_child(&mut child).map_err(ProcessRunError::Kill)?;
+            drain_process_events(&rx, &mut stdout, &mut stderr);
+            return Ok(ProcessOutcome::Ready { stdout });
+        }
+
+        if let Some(status) = child.try_wait().map_err(ProcessRunError::Wait)? {
+            drain_process_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
+            if is_complete(&stdout, &stderr) {
+                return Ok(ProcessOutcome::Ready { stdout });
+            }
+            return Ok(ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            });
         }
 
         let now = Instant::now();
         if now >= deadline {
-            kill_and_reap_child(&mut child)?;
-            drain_chrome_events(&rx, &mut stdout, &mut stderr);
-            return Err(miette::miette!(
-                "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
-                timeout.as_secs(),
-                completion.description(),
-                String::from_utf8_lossy(&stderr).trim()
-            ));
+            kill_and_reap_process_child(&mut child).map_err(ProcessRunError::Kill)?;
+            drain_process_events(&rx, &mut stdout, &mut stderr);
+            return Ok(ProcessOutcome::TimedOut { stderr });
         }
 
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(25));
-        let _ = receive_chrome_event_until(&rx, &mut stdout, &mut stderr, poll);
+        let _ = receive_process_event_until(&rx, &mut stdout, &mut stderr, poll);
     }
 }
 
-fn spawn_chrome_pipe_reader<R>(
+fn spawn_process_pipe_reader<R>(
     mut pipe: R,
-    pipe_name: ChromePipe,
-    tx: mpsc::Sender<ChromePipeEvent>,
+    pipe_name: ProcessPipe,
+    tx: mpsc::Sender<ProcessPipeEvent>,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -1702,8 +1822,8 @@ where
                 Ok(n) => {
                     let bytes = buffer[..n].to_vec();
                     let event = match pipe_name {
-                        ChromePipe::Stdout => ChromePipeEvent::Stdout(bytes),
-                        ChromePipe::Stderr => ChromePipeEvent::Stderr(bytes),
+                        ProcessPipe::Stdout => ProcessPipeEvent::Stdout(bytes),
+                        ProcessPipe::Stderr => ProcessPipeEvent::Stderr(bytes),
                     };
                     if tx.send(event).is_err() {
                         break;
@@ -1715,80 +1835,205 @@ where
     })
 }
 
-fn append_chrome_event(event: ChromePipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+fn append_process_event(event: ProcessPipeEvent, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
     match event {
-        ChromePipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
-        ChromePipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+        ProcessPipeEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        ProcessPipeEvent::Stderr(bytes) => stderr.extend_from_slice(&bytes),
     }
 }
 
-fn drain_chrome_events(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn drain_process_events(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
 ) {
     while let Ok(event) = rx.try_recv() {
-        append_chrome_event(event, stdout, stderr);
+        append_process_event(event, stdout, stderr);
     }
 }
 
-fn drain_chrome_events_for(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn drain_process_events_for(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
     duration: Duration,
 ) {
     let deadline = Instant::now() + duration;
     loop {
-        drain_chrome_events(rx, stdout, stderr);
+        drain_process_events(rx, stdout, stderr);
         let now = Instant::now();
         if now >= deadline {
             return;
         }
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(10));
-        match receive_chrome_event_until(rx, stdout, stderr, poll) {
-            ChromeReceive::Event | ChromeReceive::Timeout => {}
-            ChromeReceive::Disconnected => return,
+        match receive_process_event_until(rx, stdout, stderr, poll) {
+            ProcessReceive::Event | ProcessReceive::Timeout => {}
+            ProcessReceive::Disconnected => return,
         }
     }
 }
 
-enum ChromeReceive {
+enum ProcessReceive {
     Event,
     Timeout,
     Disconnected,
 }
 
-fn receive_chrome_event_until(
-    rx: &mpsc::Receiver<ChromePipeEvent>,
+fn receive_process_event_until(
+    rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
     poll: Duration,
-) -> ChromeReceive {
+) -> ProcessReceive {
     match rx.recv_timeout(poll) {
         Ok(event) => {
-            append_chrome_event(event, stdout, stderr);
-            ChromeReceive::Event
+            append_process_event(event, stdout, stderr);
+            ProcessReceive::Event
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => ChromeReceive::Timeout,
+        Err(mpsc::RecvTimeoutError::Timeout) => ProcessReceive::Timeout,
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             thread::sleep(poll);
-            ChromeReceive::Disconnected
+            ProcessReceive::Disconnected
         }
     }
 }
 
-fn kill_and_reap_child(child: &mut Child) -> miette::Result<()> {
-    if child.try_wait().into_diagnostic()?.is_none() {
-        child.kill().into_diagnostic()?;
+fn kill_and_reap_process_child(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill()?;
     }
-    child.wait().into_diagnostic()?;
+    child.wait()?;
     Ok(())
+}
+
+fn chrome_process_error(chrome: &Path, err: ProcessRunError) -> miette::Error {
+    match err {
+        ProcessRunError::CaptureStdout => miette::miette!(
+            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::CaptureStderr => miette::miette!(
+            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::CaptureStdin => miette::miette!(
+            "failed to capture Chrome stdin\nhelp: retry export; this is an internal process setup error"
+        ),
+        ProcessRunError::Spawn(err) => miette::miette!(
+            "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+            chrome.display()
+        ),
+        ProcessRunError::Wait(err) => {
+            miette::miette!("failed to wait on Chrome: {err}\nhelp: retry export")
+        }
+        ProcessRunError::Kill(err) => miette::miette!(
+            "failed to terminate Chrome: {err}\nhelp: report the underlying io error"
+        ),
+    }
 }
 
 fn output_file_is_nonempty(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+}
+
+fn run_code_image_command(
+    command: &peitho_core::domain::CodeImageCommand,
+    stdin: &str,
+    timeout: Duration,
+    cwd: &Path,
+) -> peitho_core::Result<Vec<u8>> {
+    let Some(program) = command.argv.first() else {
+        return Err(code_image_runner_error(
+            "code_images command has empty argv",
+            "set the code_images entry to a command",
+        ));
+    };
+
+    let outcome = run_child_with_timeout_in_dir(
+        program,
+        &command.argv[1..],
+        Some(stdin.as_bytes()),
+        Some(cwd),
+        timeout,
+        |_, _| false,
+    )
+    .map_err(|err| code_image_process_error(program, err))?;
+
+    match outcome {
+        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+        } => {
+            if status.success() {
+                return Ok(stdout);
+            }
+            Err(code_image_runner_error(
+                format!(
+                    "command exited with status {status}; stderr: {}",
+                    stderr_excerpt(&stderr)
+                ),
+                "fix the code_images command or the fenced code block input",
+            ))
+        }
+        ProcessOutcome::TimedOut { stderr } => Err(code_image_runner_error(
+            format!(
+                "command timed out after {}s; stderr: {}",
+                timeout.as_secs(),
+                stderr_excerpt(&stderr)
+            ),
+            "make the code_images command finish within 30 seconds",
+        )),
+    }
+}
+
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    let excerpt = String::from_utf8_lossy(stderr)
+        .trim()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if excerpt.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        excerpt
+    }
+}
+
+fn code_image_process_error(program: &str, err: ProcessRunError) -> peitho_core::BuildError {
+    match err {
+        ProcessRunError::Spawn(err) => code_image_runner_error(
+            format!("failed to start command '{program}': {err}"),
+            "install the command or fix the code_images frontmatter",
+        ),
+        ProcessRunError::CaptureStdout => code_image_runner_error(
+            "failed to capture command stdout",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::CaptureStderr => code_image_runner_error(
+            "failed to capture command stderr",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::CaptureStdin => code_image_runner_error(
+            "failed to capture command stdin",
+            "retry the build; this is an internal process setup error",
+        ),
+        ProcessRunError::Wait(err) => code_image_runner_error(
+            format!("failed to wait for command '{program}': {err}"),
+            "retry the build or check the code_images command",
+        ),
+        ProcessRunError::Kill(err) => code_image_runner_error(
+            format!("failed to kill timed-out command '{program}': {err}"),
+            "stop the hung code_images command and retry the build",
+        ),
+    }
+}
+
+fn code_image_runner_error(
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> peitho_core::BuildError {
+    peitho_core::BuildError::new(peitho_core::error::ErrorKind::Asset, None, message, help)
 }
 
 fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
@@ -4562,6 +4807,172 @@ contexts:
         );
     }
 
+    #[test]
+    fn chrome_process_wait_error_does_not_use_install_hint() {
+        let err = chrome_process_error(
+            Path::new("/tmp/chrome"),
+            ProcessRunError::Wait(std::io::Error::other("wait failed")),
+        );
+        let message = err.to_string();
+
+        assert!(
+            message.contains("failed to wait on Chrome: wait failed"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("help: retry export"),
+            "actual error: {message}"
+        );
+        assert!(
+            !message.contains("install Google Chrome"),
+            "actual error: {message}"
+        );
+    }
+
+    #[test]
+    fn chrome_process_kill_error_does_not_use_install_hint() {
+        let err = chrome_process_error(
+            Path::new("/tmp/chrome"),
+            ProcessRunError::Kill(std::io::Error::other("kill failed")),
+        );
+        let message = err.to_string();
+
+        assert!(
+            message.contains("failed to terminate Chrome: kill failed"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("help: report the underlying io error"),
+            "actual error: {message}"
+        );
+        assert!(
+            !message.contains("install Google Chrome"),
+            "actual error: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_success_writes_stdin_and_captures_stdout() {
+        let args = [
+            OsString::from("-c"),
+            OsString::from("read value; printf 'seen:%s' \"$value\""),
+        ];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            Some(b"input\n"),
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            } => {
+                assert!(status.success());
+                assert_eq!(stdout, b"seen:input");
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_nonzero_exit_captures_stderr() {
+        let args = [
+            OsString::from("-c"),
+            OsString::from("printf 'boom\\n' >&2; exit 1"),
+        ];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            } => {
+                assert!(!status.success());
+                assert!(stdout.is_empty());
+                assert_eq!(stderr, b"boom\n");
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_timeout_kills_child() {
+        let args = [OsString::from("-c"), OsString::from("sleep 5")];
+        let started = std::time::Instant::now();
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_millis(100),
+            |_, _| false,
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match outcome {
+            ProcessOutcome::TimedOut { stderr } => assert!(stderr.is_empty()),
+            other => panic!("expected timed-out process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_passes_stdin_to_child() {
+        let args = [OsString::from("-c"), OsString::from("cat")];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            Some(b"echoed input"),
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited { status, stdout, .. } => {
+                assert!(status.success());
+                assert_eq!(stdout, b"echoed input");
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_image_runner_resolves_relative_paths_from_deck_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("puppeteer-config.json"), "{}").unwrap();
+        let command = peitho_core::domain::CodeImageCommand {
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "test -f ./puppeteer-config.json && printf '<svg></svg>'".to_owned(),
+            ],
+        };
+        let runner = CliSvgRunner::for_deck(&dir.path().join("deck.md"));
+
+        let stdout = peitho_core::code_images::SvgRunner::run(&runner, &command, "").unwrap();
+
+        assert_eq!(stdout, b"<svg></svg>");
+    }
+
     #[cfg(unix)]
     #[test]
     fn one_shot_chrome_runner_returns_after_pdf_completion_signal_and_kills_child() {
@@ -5207,6 +5618,52 @@ printf '0 bytes written to file %s\n' "$out" >&2
             stdout.contains("result: title-body-code"),
             "actual stdout: {stdout}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn layouts_explain_applies_code_images_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let command = dir.path().join("svg-command.sh");
+        fs::create_dir_all(&layouts).unwrap();
+        write_script(
+            &command,
+            "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>'\n",
+        );
+        fs::write(
+            layouts.join("code.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            layouts.join("image.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            format!(
+                "---\ncode_images:\n  mermaid: /bin/sh {}\n---\n<!-- {{\"key\":\"diagram\"}} -->\n# Diagram\n\n```mermaid\ngraph TD\n```",
+                command.display()
+            ),
+        )
+        .unwrap();
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("layouts")
+            .arg(&deck)
+            .arg("--explain")
+            .arg("diagram")
+            .arg("--json")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["dispatch"]["result"], "image");
     }
 
     #[test]

@@ -104,6 +104,109 @@ fn build_fails_with_line_and_help_for_contract_violation() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn build_with_code_images_writes_svg_asset_and_references_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layout = dir.path().join("title-image.html");
+    let command = dir.path().join("svg-command");
+    let out = dir.path().join("dist");
+    fs::write(
+        &command,
+        "#!/bin/sh\ncat >/dev/null\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        &deck,
+        format!(
+            "---\nlayouts: ./title-image.html\ncss: ./css\ncode_images:\n  mermaid: {}\n---\n# Diagram\n\n```mermaid\ngraph TD\n```",
+            command.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &layout,
+        r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><figure><slot name="image" accepts="image" arity="1"></slot></figure></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    assert_eq!(
+        assets[0].extension().and_then(|ext| ext.to_str()),
+        Some("svg")
+    );
+    assert_eq!(
+        fs::read(&assets[0]).unwrap(),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+    );
+    let slide = fs::read_to_string(out.join("slides/000-diagram.html")).unwrap();
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(slide.contains(&format!(r#"src="assets/{asset_name}""#)));
+}
+
+#[test]
+fn build_with_missing_code_images_command_reports_code_block_line() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layout = dir.path().join("title-image.html");
+    let missing = dir.path().join("missing-svg-command");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        format!(
+            "---\nlayouts: ./title-image.html\ncss: ./css\ncode_images:\n  mermaid: {}\n---\n# Diagram\n\n```mermaid\ngraph TD\n```",
+            missing.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &layout,
+        r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><figure><slot name="image" accepts="image" arity="1"></slot></figure></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("line 9"))
+        .stderr(predicate::str::contains("code_images 'mermaid' failed"))
+        .stderr(predicate::str::contains("missing-svg-"))
+        .stderr(predicate::str::contains(
+            "command': No such file or directory",
+        ))
+        .stderr(predicate::str::contains(
+            "help: install the command or fix the code_images frontmatter",
+        ));
+}
+
 #[test]
 fn contract_error_uses_layout_file_stem_as_layout_name() {
     let dir = tempdir().unwrap();

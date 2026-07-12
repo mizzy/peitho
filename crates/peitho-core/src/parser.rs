@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, ExplicitSlot, FragmentKind, RawImagePath, Resolution, SlideKey, SlotName,
-        SourceFragment,
+        AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FragmentKind, RawImagePath,
+        Resolution, SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -59,6 +59,8 @@ struct DeckFrontmatter {
     syntaxes: Option<AssetPath>,
     #[serde(default)]
     fonts: Option<AssetPath>,
+    #[serde(default)]
+    code_images: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -151,7 +153,7 @@ pub fn parse_frontmatter(source: &str) -> Result<ParsedFrontmatter> {
     })
 }
 
-pub fn parse_markdown(
+pub(crate) fn parse_markdown(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
@@ -174,7 +176,13 @@ pub fn parse_markdown(
 
     let mut drafts = Vec::new();
     for (index, range) in ranges.into_iter().enumerate() {
-        drafts.push(parse_slide(source, range, index, highlighter)?);
+        drafts.push(parse_slide(
+            source,
+            range,
+            index,
+            highlighter,
+            settings.code_images(),
+        )?);
     }
     let resolved_sections = resolve_deck_sections(&drafts)?;
     let settings = finalize_section_settings(settings, resolved_sections)?;
@@ -477,9 +485,10 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         return Ok(DeckSettings::default());
     }
     validate_frontmatter_lines(raw)?;
+    let yaml = normalize_frontmatter_yaml_for_parse(&raw.yaml);
 
     let value: serde_norway::Value =
-        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+        serde_norway::from_str(&yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
     if !matches!(value, serde_norway::Value::Mapping(_)) {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -491,13 +500,15 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
 
     let key_lines = frontmatter_key_lines(Some(raw));
     let parsed: DeckFrontmatter =
-        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+        serde_norway::from_str(&yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
     let aspect_ratio = parse_frontmatter_aspect_ratio(
         parsed.aspect_ratio,
         key_lines.get("aspect_ratio").copied(),
     )?;
     let resolution =
         parse_frontmatter_resolution(parsed.resolution, key_lines.get("resolution").copied())?;
+    let code_images =
+        parse_code_images_config(parsed.code_images, key_lines.get("code_images").copied())?;
 
     DeckSettings::new(
         parsed.time,
@@ -509,6 +520,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.css,
         parsed.syntaxes,
         parsed.fonts,
+        code_images,
     )
     .map_err(|message| {
         let help = deck_settings_resolution_error_help(&message);
@@ -519,6 +531,79 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
             help,
         )
     })
+}
+
+fn normalize_frontmatter_yaml_for_parse(yaml: &str) -> String {
+    let mut normalized = String::with_capacity(yaml.len());
+    for line in yaml.split_inclusive('\n') {
+        let mut body_start = line.len();
+        for (index, ch) in line.char_indices() {
+            match ch {
+                ' ' => normalized.push(' '),
+                '\t' => normalized.push_str("  "),
+                _ => {
+                    body_start = index;
+                    break;
+                }
+            }
+        }
+        if body_start < line.len() {
+            normalized.push_str(&line[body_start..]);
+        }
+    }
+    normalized
+}
+
+fn parse_code_images_config(
+    entries: Option<HashMap<String, String>>,
+    key_line: Option<usize>,
+) -> Result<CodeImagesConfig> {
+    let mut parsed_entries = BTreeMap::new();
+    for (tag, command) in entries.unwrap_or_default() {
+        validate_code_images_tag(&tag, key_line)?;
+        let argv = shlex::split(&command).ok_or_else(|| {
+            BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' has invalid command string"),
+                "quote the command using shell-like syntax or remove the unmatched quote",
+            )
+        })?;
+        if argv.is_empty() {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' has empty command"),
+                format!("set code_images.{tag} to a command, like mmdc -i - -o - -e svg"),
+            ));
+        }
+        parsed_entries.insert(tag, CodeImageCommand { argv });
+    }
+
+    Ok(CodeImagesConfig {
+        entries: parsed_entries,
+        key_line,
+    })
+}
+
+fn validate_code_images_tag(tag: &str, line: Option<usize>) -> Result<()> {
+    if tag.trim().is_empty() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            line,
+            "code_images entry has empty language tag",
+            "give the code_images entry a non-empty language tag like 'mermaid'",
+        ));
+    }
+    if tag.trim() != tag || tag.chars().any(char::is_whitespace) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            line,
+            format!("code_images entry '{tag}' has invalid language tag"),
+            "use a code_images language tag without whitespace, like 'mermaid'",
+        ));
+    }
+    Ok(())
 }
 
 fn deck_settings_resolution_error_help(message: &str) -> &'static str {
@@ -545,6 +630,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "css",
             "syntaxes",
             "fonts",
+            "code_images",
         ] {
             if line.starts_with(key) && line.as_bytes().get(key.len()) == Some(&b':') {
                 key_lines.entry(key).or_insert(raw.line + index + 1);
@@ -623,8 +709,48 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
         .map(|index| index + 1)
         .unwrap_or(0);
 
+    let mut nested_mapping: Option<NestedFrontmatterMappingState> = None;
     for (index, line) in lines[..content_len].iter().enumerate() {
-        if !starts_with_flat_yaml_key(line) {
+        if line.starts_with(char::is_whitespace) {
+            if let Some(mapping) = nested_mapping.as_mut() {
+                if let Some(entry) = nested_frontmatter_mapping_entry(line) {
+                    match &mapping.indent {
+                        None => {
+                            mapping.indent = Some(entry.indent.to_owned());
+                            mapping.previous_entry_had_value = entry.has_value;
+                            continue;
+                        }
+                        Some(expected) if expected == entry.indent => {
+                            mapping.previous_entry_had_value = entry.has_value;
+                            continue;
+                        }
+                        Some(_) if mapping.previous_entry_had_value => {
+                            return Err(BuildError::new(
+                                ErrorKind::Parse,
+                                Some(raw.line + index + 1),
+                                "inconsistent indentation in code_images frontmatter",
+                                "use the same indentation for every code_images entry",
+                            ));
+                        }
+                        Some(_) => {
+                            return Err(BuildError::new(
+                                ErrorKind::Parse,
+                                Some(raw.line + index + 1),
+                                "unsupported nested mapping in code_images frontmatter",
+                                "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
+                            ));
+                        }
+                    }
+                }
+                if line.trim_start().contains(':') {
+                    return Err(BuildError::new(
+                        ErrorKind::Parse,
+                        Some(raw.line + index + 1),
+                        "unsupported nested mapping in code_images frontmatter",
+                        "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
+                    ));
+                }
+            }
             return Err(BuildError::new(
                 ErrorKind::Parse,
                 Some(raw.line + index + 1),
@@ -632,20 +758,58 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
                 "keep only key: value settings (like time: 15m) between the --- markers",
             ));
         }
+
+        let Some((key, has_value)) = flat_yaml_key_and_value_presence(line) else {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(raw.line + index + 1),
+                "unexpected line in deck frontmatter (missing closing ---?)",
+                "keep only key: value settings (like time: 15m) between the --- markers",
+            ));
+        };
+        nested_mapping = (!has_value && allows_nested_frontmatter_mapping(key))
+            .then_some(NestedFrontmatterMappingState::default());
     }
 
     Ok(())
 }
 
-fn starts_with_flat_yaml_key(line: &str) -> bool {
-    let Some(colon_index) = line.find(':') else {
-        return false;
-    };
+#[derive(Default)]
+struct NestedFrontmatterMappingState {
+    indent: Option<String>,
+    previous_entry_had_value: bool,
+}
+
+struct NestedFrontmatterMappingEntry<'a> {
+    indent: &'a str,
+    has_value: bool,
+}
+
+fn flat_yaml_key_and_value_presence(line: &str) -> Option<(&str, bool)> {
+    let colon_index = line.find(':')?;
     let key = &line[..colon_index];
-    !key.is_empty()
+    let valid = !key.is_empty()
         && key
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    valid.then(|| {
+        let value = &line[colon_index + 1..];
+        (key, !value.trim().is_empty())
+    })
+}
+
+fn allows_nested_frontmatter_mapping(key: &str) -> bool {
+    matches!(key, "code_images")
+}
+
+fn nested_frontmatter_mapping_entry(line: &str) -> Option<NestedFrontmatterMappingEntry<'_>> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    if indent.is_empty() {
+        return None;
+    }
+    flat_yaml_key_and_value_presence(trimmed)
+        .map(|(_, has_value)| NestedFrontmatterMappingEntry { indent, has_value })
 }
 
 fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
@@ -664,7 +828,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -948,6 +1112,7 @@ fn parse_slide(
     range: SlideRange,
     index: usize,
     highlighter: &Highlighter,
+    code_images: &CodeImagesConfig,
 ) -> Result<ParsedSlideDraft> {
     let slice = &source[range.start..range.end];
     let markers = scan_slot_div_markers(slice, range.start, source)?;
@@ -1248,11 +1413,18 @@ fn parse_slide(
                     };
                     let code_line = line_for_offset(source, start);
                     if let Some(language) = &language {
-                        highlighter
-                            .validate_language(language, code_line)
-                            .map_err(|err| {
-                                attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
-                            })?;
+                        if !code_images.entries.contains_key(language) {
+                            highlighter
+                                .validate_language(language, code_line)
+                                .map_err(|err| {
+                                    attach_slide_context(
+                                        err,
+                                        index,
+                                        explicit_key.as_ref(),
+                                        &fragments,
+                                    )
+                                })?;
+                        }
                     }
                     push_fragment(
                         &mut fragments,
@@ -1855,6 +2027,176 @@ mod tests {
         assert_eq!(
             settings.planned_time().map(PlannedTime::as_millis),
             Some(900_000)
+        );
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_to_shlex_argv() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images: { mermaid: mmdc -i - -o - -e svg }\n---\n# Intro")
+                .unwrap();
+        let config = frontmatter.settings().code_images();
+        let command = config.entries.get("mermaid").unwrap();
+
+        assert_eq!(config.key_line, Some(2));
+        assert_eq!(command.argv, ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_two_space_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n  mermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_four_space_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n    mermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_tab_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n\tmermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn rejects_inconsistent_code_images_indent_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid: mmdc -i -\n    dot: dot -Tsvg\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected inconsistent code_images indentation to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(
+            err.message,
+            "inconsistent indentation in code_images frontmatter"
+        );
+        assert_eq!(
+            err.help,
+            "use the same indentation for every code_images entry"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_code_images_command_with_line_and_help() {
+        let err = match parse_frontmatter("---\ncode_images: { mermaid: \"\" }\n---\n# Intro") {
+            Ok(_) => panic!("expected empty code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.message, "code_images entry 'mermaid' has empty command");
+        assert_eq!(
+            err.help,
+            "set code_images.mermaid to a command, like mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_code_images_tag_with_line_and_help() {
+        let err = match parse_frontmatter("---\ncode_images: { \"\": mmdc }\n---\n# Intro") {
+            Ok(_) => panic!("expected empty code_images tag to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.message, "code_images entry has empty language tag");
+        assert_eq!(
+            err.help,
+            "give the code_images entry a non-empty language tag like 'mermaid'"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_code_images_tag_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images: { \"mermaid diagram\": mmdc }\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected whitespace code_images tag to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid diagram' has invalid language tag"
+        );
+        assert_eq!(
+            err.help,
+            "use a code_images language tag without whitespace, like 'mermaid'"
+        );
+    }
+
+    #[test]
+    fn rejects_shlex_invalid_code_images_command_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images: { mermaid: \"mmdc 'unterminated\" }\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected invalid code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid' has invalid command string"
+        );
+        assert_eq!(
+            err.help,
+            "quote the command using shell-like syntax or remove the unmatched quote"
+        );
+    }
+
+    #[test]
+    fn rejects_three_level_code_images_nesting_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid:\n    command: mmdc\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected three-level code_images nesting to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(
+            err.message,
+            "unsupported nested mapping in code_images frontmatter"
+        );
+        assert_eq!(
+            err.help,
+            "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
         );
     }
 
@@ -2876,6 +3218,17 @@ After list
     }
 
     #[test]
+    fn accepts_code_images_language_tag_unknown_to_highlighter() {
+        let markdown = "---\ncode_images:\n  mermaid: mmdc -i - -o - -e svg\n---\n# Intro\n\n```mermaid\ngraph TD\n```";
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::Code);
+        assert_eq!(fragment.language(), Some("mermaid"));
+    }
+
+    #[test]
     fn untagged_code_block_needs_no_language() {
         let deck = parse_markdown(
             "# Title\n\n```\nplain\n```",
@@ -3264,7 +3617,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -3465,7 +3818,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -3498,6 +3851,7 @@ After list
             },
             1,
             &crate::highlight::Highlighter::defaults(),
+            &crate::domain::CodeImagesConfig::default(),
         )
         .unwrap_err();
 
@@ -3521,7 +3875,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
         );
     }
 

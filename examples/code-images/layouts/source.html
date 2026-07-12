@@ -1,0 +1,15 @@
+<section class="code-images code-images-source">
+  <header class="source-header">
+    <p class="eyebrow">source to SVG</p>
+    <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+    <div class="body-copy">
+      <slot name="body" accepts="blocks" arity="0..*"></slot>
+    </div>
+  </header>
+  <figure class="source-pane">
+    <slot name="code" accepts="code" arity="1"></slot>
+  </figure>
+  <figure class="rendered-pane">
+    <slot name="image" accepts="image" arity="0..1"></slot>
+  </figure>
+</section>

@@ -141,6 +141,11 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         "css" => "text/css; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
         "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
         _ => "application/octet-stream",
     }
 }
@@ -522,6 +527,15 @@ mod tests {
             content_type(Path::new("manifest.json")),
             "application/json; charset=utf-8"
         );
+        assert_eq!(
+            content_type(Path::new("assets/diagram.svg")),
+            "image/svg+xml"
+        );
+        assert_eq!(content_type(Path::new("assets/photo.png")), "image/png");
+        assert_eq!(content_type(Path::new("assets/photo.jpg")), "image/jpeg");
+        assert_eq!(content_type(Path::new("assets/photo.jpeg")), "image/jpeg");
+        assert_eq!(content_type(Path::new("assets/animation.gif")), "image/gif");
+        assert_eq!(content_type(Path::new("assets/diagram.webp")), "image/webp");
         assert_eq!(
             content_type(Path::new("slide.bin")),
             "application/octet-stream"

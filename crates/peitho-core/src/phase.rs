@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     domain::{
-        AspectRatio, RawImagePath, RenderedSlide, Resolution, ResolvedImageAsset,
+        AspectRatio, CodeImagesConfig, RawImagePath, RenderedSlide, Resolution, ResolvedImageAsset,
         ResolvedImagePath, SlideKey, SlotContract, SlotName, SourceFragment,
     },
     error::{BuildError, Result},
@@ -94,6 +94,7 @@ pub struct DeckSettings {
     css: Option<AssetPath>,
     syntaxes: Option<AssetPath>,
     fonts: Option<AssetPath>,
+    code_images: CodeImagesConfig,
 }
 
 impl DeckSettings {
@@ -114,6 +115,7 @@ impl DeckSettings {
         css: Option<AssetPath>,
         syntaxes: Option<AssetPath>,
         fonts: Option<AssetPath>,
+        code_images: CodeImagesConfig,
     ) -> std::result::Result<Self, String> {
         let resolution =
             resolution.unwrap_or_else(|| Resolution::from_aspect_ratio_default(aspect_ratio));
@@ -129,6 +131,7 @@ impl DeckSettings {
             css,
             syntaxes,
             fonts,
+            code_images,
         })
     }
 
@@ -166,6 +169,10 @@ impl DeckSettings {
 
     pub fn fonts(&self) -> Option<&AssetPath> {
         self.fonts.as_ref()
+    }
+
+    pub fn code_images(&self) -> &CodeImagesConfig {
+        &self.code_images
     }
 
     pub(crate) fn with_sections(mut self, sections: Vec<DeckSection>) -> Self {
@@ -639,6 +646,7 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
         )
         .unwrap();
 
@@ -667,6 +675,7 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
         )
         .unwrap()
         .with_planned_time(Some(PlannedTime::from_millis(120_000).unwrap()));
@@ -687,6 +696,7 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
         )
         .unwrap();
 
@@ -706,6 +716,7 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
         )
         .unwrap_err();
 
@@ -724,6 +735,7 @@ mod tests {
             None,
             None,
             None,
+            Default::default(),
         )
         .unwrap_err();
 
