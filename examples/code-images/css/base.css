@@ -95,22 +95,27 @@
 
 .code-images-source {
   display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
-  column-gap: 34px;
-  row-gap: 28px;
+  gap: 28px;
 }
 
 .source-header {
-  grid-column: 1;
+  grid-column: 1 / -1;
   grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-width: none;
+}
+
+.source-header h1 {
+  margin: 0;
 }
 
 .source-header .body-copy {
   margin-top: 0;
+  max-width: 780px;
 }
 
 .source-pane,
