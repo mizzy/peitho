@@ -113,7 +113,12 @@ fn transform_fragment<R: SvgRunner>(
                 children,
             ))
         }
-        _ => Ok(fragment),
+        FragmentKind::Heading { .. }
+        | FragmentKind::Paragraph
+        | FragmentKind::Text
+        | FragmentKind::Code
+        | FragmentKind::Image { .. }
+        | FragmentKind::List => Ok(fragment),
     }
 }
 
