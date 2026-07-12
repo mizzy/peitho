@@ -1729,24 +1729,15 @@ where
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command.spawn().map_err(ProcessRunError::Spawn)?;
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or(ProcessRunError::CaptureStdout)?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or(ProcessRunError::CaptureStderr)?;
+    let stdout_pipe = child.stdout.take().ok_or(ProcessRunError::CaptureStdout)?;
+    let stderr_pipe = child.stderr.take().ok_or(ProcessRunError::CaptureStderr)?;
     let (tx, rx) = mpsc::channel();
     // Intentionally do not join these readers: lingering grandchildren can hold pipes open forever; threads exit with this process.
     let _stdout_reader = spawn_process_pipe_reader(stdout_pipe, ProcessPipe::Stdout, tx.clone());
     let _stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, tx);
 
     if let Some(input) = stdin {
-        let mut stdin_pipe = child
-            .stdin
-            .take()
-            .ok_or(ProcessRunError::CaptureStdin)?;
+        let mut stdin_pipe = child.stdin.take().ok_or(ProcessRunError::CaptureStdin)?;
         let input = input.to_vec();
         let _stdin_writer = thread::spawn(move || {
             let _ = stdin_pipe.write_all(&input);
