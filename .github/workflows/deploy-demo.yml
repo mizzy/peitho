@@ -48,6 +48,18 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --no-save --no-package-lock playwright@latest
           npx playwright@latest install --with-deps chromium
 
+      - name: Install diagram renderers
+        run: |
+          set -euo pipefail
+          # The code-images demo deck shells out to these user-declared tools.
+          # Mermaid CLI installs its own Puppeteer-managed browser; the
+          # Playwright step above installs the shared Linux browser libraries.
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+          npm install -g @mermaid-js/mermaid-cli
+          dot -V
+          mmdc --version
+
       # このリポジトリ自身がpeithoなので、リリースバイナリではなく
       # ソースからビルドした今のpeithoでデモサイトを組む
       - name: Build demo site
