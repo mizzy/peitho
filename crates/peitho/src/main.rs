@@ -4821,6 +4821,109 @@ contexts:
 
     #[cfg(unix)]
     #[test]
+    fn process_runner_success_writes_stdin_and_captures_stdout() {
+        let args = [
+            OsString::from("-c"),
+            OsString::from("read value; printf 'seen:%s' \"$value\""),
+        ];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            Some(b"input\n"),
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            } => {
+                assert!(status.success());
+                assert_eq!(stdout, b"seen:input");
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_nonzero_exit_captures_stderr() {
+        let args = [
+            OsString::from("-c"),
+            OsString::from("printf 'boom\\n' >&2; exit 1"),
+        ];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            } => {
+                assert!(!status.success());
+                assert!(stdout.is_empty());
+                assert_eq!(stderr, b"boom\n");
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_timeout_kills_child() {
+        let args = [OsString::from("-c"), OsString::from("sleep 5")];
+        let started = std::time::Instant::now();
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_millis(100),
+            |_, _| false,
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        match outcome {
+            ProcessOutcome::TimedOut { stderr } => assert!(stderr.is_empty()),
+            other => panic!("expected timed-out process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_passes_stdin_to_child() {
+        let args = [OsString::from("-c"), OsString::from("cat")];
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            Some(b"echoed input"),
+            Duration::from_secs(2),
+            |_, _| false,
+        )
+        .unwrap();
+
+        match outcome {
+            ProcessOutcome::Exited { status, stdout, .. } => {
+                assert!(status.success());
+                assert_eq!(stdout, b"echoed input");
+            }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn one_shot_chrome_runner_returns_after_pdf_completion_signal_and_kills_child() {
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
