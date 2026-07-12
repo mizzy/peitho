@@ -485,9 +485,10 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         return Ok(DeckSettings::default());
     }
     validate_frontmatter_lines(raw)?;
+    let yaml = normalize_frontmatter_yaml_for_parse(&raw.yaml);
 
     let value: serde_norway::Value =
-        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+        serde_norway::from_str(&yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
     if !matches!(value, serde_norway::Value::Mapping(_)) {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -499,7 +500,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
 
     let key_lines = frontmatter_key_lines(Some(raw));
     let parsed: DeckFrontmatter =
-        serde_norway::from_str(&raw.yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
+        serde_norway::from_str(&yaml).map_err(|err| frontmatter_yaml_error(raw, &err))?;
     let aspect_ratio = parse_frontmatter_aspect_ratio(
         parsed.aspect_ratio,
         key_lines.get("aspect_ratio").copied(),
@@ -530,6 +531,27 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
             help,
         )
     })
+}
+
+fn normalize_frontmatter_yaml_for_parse(yaml: &str) -> String {
+    let mut normalized = String::with_capacity(yaml.len());
+    for line in yaml.split_inclusive('\n') {
+        let mut body_start = line.len();
+        for (index, ch) in line.char_indices() {
+            match ch {
+                ' ' => normalized.push(' '),
+                '\t' => normalized.push_str("  "),
+                _ => {
+                    body_start = index;
+                    break;
+                }
+            }
+        }
+        if body_start < line.len() {
+            normalized.push_str(&line[body_start..]);
+        }
+    }
+    normalized
 }
 
 fn parse_code_images_config(
@@ -666,19 +688,47 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
         .map(|index| index + 1)
         .unwrap_or(0);
 
-    let mut nested_mapping_parent = None;
+    let mut nested_mapping: Option<NestedFrontmatterMappingState> = None;
     for (index, line) in lines[..content_len].iter().enumerate() {
         if line.starts_with(char::is_whitespace) {
-            if nested_mapping_parent.is_some() && is_nested_frontmatter_mapping_entry(line) {
-                continue;
-            }
-            if nested_mapping_parent.is_some() && line.trim_start().contains(':') {
-                return Err(BuildError::new(
-                    ErrorKind::Parse,
-                    Some(raw.line + index + 1),
-                    "unsupported nested mapping in code_images frontmatter",
-                    "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
-                ));
+            if let Some(mapping) = nested_mapping.as_mut() {
+                if let Some(entry) = nested_frontmatter_mapping_entry(line) {
+                    match &mapping.indent {
+                        None => {
+                            mapping.indent = Some(entry.indent.to_owned());
+                            mapping.previous_entry_had_value = entry.has_value;
+                            continue;
+                        }
+                        Some(expected) if expected == entry.indent => {
+                            mapping.previous_entry_had_value = entry.has_value;
+                            continue;
+                        }
+                        Some(_) if mapping.previous_entry_had_value => {
+                            return Err(BuildError::new(
+                                ErrorKind::Parse,
+                                Some(raw.line + index + 1),
+                                "inconsistent indentation in code_images frontmatter",
+                                "use the same indentation for every code_images entry",
+                            ));
+                        }
+                        Some(_) => {
+                            return Err(BuildError::new(
+                                ErrorKind::Parse,
+                                Some(raw.line + index + 1),
+                                "unsupported nested mapping in code_images frontmatter",
+                                "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
+                            ));
+                        }
+                    }
+                }
+                if line.trim_start().contains(':') {
+                    return Err(BuildError::new(
+                        ErrorKind::Parse,
+                        Some(raw.line + index + 1),
+                        "unsupported nested mapping in code_images frontmatter",
+                        "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg",
+                    ));
+                }
             }
             return Err(BuildError::new(
                 ErrorKind::Parse,
@@ -696,15 +746,22 @@ fn validate_frontmatter_lines(raw: &RawFrontmatter) -> Result<()> {
                 "keep only key: value settings (like time: 15m) between the --- markers",
             ));
         };
-        nested_mapping_parent =
-            (!has_value && allows_nested_frontmatter_mapping(key)).then_some(key);
+        nested_mapping = (!has_value && allows_nested_frontmatter_mapping(key))
+            .then_some(NestedFrontmatterMappingState::default());
     }
 
     Ok(())
 }
 
-fn starts_with_flat_yaml_key(line: &str) -> bool {
-    flat_yaml_key_and_value_presence(line).is_some()
+#[derive(Default)]
+struct NestedFrontmatterMappingState {
+    indent: Option<String>,
+    previous_entry_had_value: bool,
+}
+
+struct NestedFrontmatterMappingEntry<'a> {
+    indent: &'a str,
+    has_value: bool,
 }
 
 fn flat_yaml_key_and_value_presence(line: &str) -> Option<(&str, bool)> {
@@ -724,9 +781,16 @@ fn allows_nested_frontmatter_mapping(key: &str) -> bool {
     matches!(key, "code_images")
 }
 
-fn is_nested_frontmatter_mapping_entry(line: &str) -> bool {
-    let indent = line.len() - line.trim_start().len();
-    indent == 2 && starts_with_flat_yaml_key(line.trim_start())
+fn nested_frontmatter_mapping_entry(line: &str) -> Option<NestedFrontmatterMappingEntry<'_>> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    if indent.is_empty() {
+        return None;
+    }
+    flat_yaml_key_and_value_presence(trimmed).map(|(_, has_value)| NestedFrontmatterMappingEntry {
+        indent,
+        has_value,
+    })
 }
 
 fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
@@ -1957,6 +2021,69 @@ mod tests {
 
         assert_eq!(config.key_line, Some(2));
         assert_eq!(command.argv, ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_two_space_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n  mermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_four_space_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n    mermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn parses_code_images_frontmatter_with_tab_indent() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n\tmermaid: mmdc -i -\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["mmdc", "-i", "-"]);
+    }
+
+    #[test]
+    fn rejects_inconsistent_code_images_indent_with_line_and_help() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid: mmdc -i -\n    dot: dot -Tsvg\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected inconsistent code_images indentation to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(
+            err.message,
+            "inconsistent indentation in code_images frontmatter"
+        );
+        assert_eq!(
+            err.help,
+            "use the same indentation for every code_images entry"
+        );
     }
 
     #[test]
