@@ -1,0 +1,60 @@
+%YAML 1.2
+---
+# A compact TOML grammar written for this example. Scopes are chosen to hit
+# the hl-* classes the built-in theme colors (comment, string, constant,
+# keyword, function, type).
+name: TOML
+file_extensions:
+  - toml
+scope: source.toml
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.toml
+    - match: '^\s*(\[\[?)([^\]]+)(\]\]?)'
+      captures:
+        1: punctuation.definition.table.toml
+        2: entity.name.function.table.toml
+        3: punctuation.definition.table.toml
+    - match: '^\s*([A-Za-z0-9_.-]+)\s*(=)'
+      captures:
+        1: support.type.property-name.toml
+        2: keyword.operator.assignment.toml
+    - match: '"""'
+      scope: punctuation.definition.string.begin.toml
+      push: multiline_string
+    - match: '"'
+      scope: punctuation.definition.string.begin.toml
+      push: string
+    - match: "'"
+      scope: punctuation.definition.string.begin.toml
+      push: literal_string
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.toml
+    - match: '\d{4}-\d{2}-\d{2}([Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[-+]\d{2}:\d{2})?)?'
+      scope: constant.other.datetime.toml
+    - match: '[-+]?\d[\d_]*(\.[\d_]+)?([eE][-+]?\d+)?'
+      scope: constant.numeric.toml
+
+  string:
+    - meta_scope: string.quoted.double.toml
+    - match: '\\.'
+      scope: constant.character.escape.toml
+    - match: '"'
+      scope: punctuation.definition.string.end.toml
+      pop: true
+
+  literal_string:
+    - meta_scope: string.quoted.single.toml
+    - match: "'"
+      scope: punctuation.definition.string.end.toml
+      pop: true
+
+  multiline_string:
+    - meta_scope: string.quoted.triple.toml
+    - match: '\\.'
+      scope: constant.character.escape.toml
+    - match: '"""'
+      scope: punctuation.definition.string.end.toml
+      pop: true
