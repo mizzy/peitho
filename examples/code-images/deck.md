@@ -2,7 +2,7 @@
 layouts: ./layouts
 css: ./css
 code_images:
-  mermaid: mmdc -i - -o - -e svg
+  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
   dot: dot -Tsvg
 ---
 <!-- {"key":"mermaid-flow"} -->
@@ -92,7 +92,7 @@ commands, and each command receives the fenced source on stdin.
 layouts: ./layouts
 css: ./css
 code_images:
-  mermaid: mmdc -i - -o - -e svg
+  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
   dot: dot -Tsvg
 ---
 ```

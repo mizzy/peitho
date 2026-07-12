@@ -37,12 +37,23 @@ struct BuildArtifacts {
 }
 
 struct CliSvgRunner {
+    cwd: PathBuf,
     timeout: Duration,
 }
 
 impl Default for CliSvgRunner {
     fn default() -> Self {
         Self {
+            cwd: PathBuf::from("."),
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl CliSvgRunner {
+    fn for_deck(input: &Path) -> Self {
+        Self {
+            cwd: asset_resolution::deck_parent(input).to_path_buf(),
             timeout: Duration::from_secs(30),
         }
     }
@@ -54,7 +65,7 @@ impl peitho_core::code_images::SvgRunner for CliSvgRunner {
         command: &peitho_core::domain::CodeImageCommand,
         stdin: &str,
     ) -> peitho_core::Result<Vec<u8>> {
-        run_code_image_command(command, stdin, self.timeout)
+        run_code_image_command(command, stdin, self.timeout, &self.cwd)
     }
 }
 
@@ -541,7 +552,7 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
         &markdown,
         frontmatter,
         &highlighter,
-        &CliSvgRunner::default(),
+        &CliSvgRunner::for_deck(&input),
         &code_images_cache_dir(&input),
     ))?;
     let Some(slide) = parsed
@@ -1386,7 +1397,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &markdown,
         frontmatter,
         &highlighter,
-        &CliSvgRunner::default(),
+        &CliSvgRunner::for_deck(input),
         &code_images_cache_dir(input),
     ))?;
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
@@ -1708,6 +1719,22 @@ fn run_child_with_timeout<P, A, F>(
     args: &[A],
     stdin: Option<&[u8]>,
     timeout: Duration,
+    is_complete: F,
+) -> Result<ProcessOutcome, ProcessRunError>
+where
+    P: AsRef<OsStr>,
+    A: AsRef<OsStr>,
+    F: FnMut(&[u8], &[u8]) -> bool,
+{
+    run_child_with_timeout_in_dir(program, args, stdin, None, timeout, is_complete)
+}
+
+fn run_child_with_timeout_in_dir<P, A, F>(
+    program: P,
+    args: &[A],
+    stdin: Option<&[u8]>,
+    cwd: Option<&Path>,
+    timeout: Duration,
     mut is_complete: F,
 ) -> Result<ProcessOutcome, ProcessRunError>
 where
@@ -1718,6 +1745,9 @@ where
     let mut command = std::process::Command::new(program.as_ref());
     for arg in args {
         command.arg(arg.as_ref());
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
     }
     if stdin.is_some() {
         command.stdin(Stdio::piped());
@@ -1909,6 +1939,7 @@ fn run_code_image_command(
     command: &peitho_core::domain::CodeImageCommand,
     stdin: &str,
     timeout: Duration,
+    cwd: &Path,
 ) -> peitho_core::Result<Vec<u8>> {
     let Some(program) = command.argv.first() else {
         return Err(code_image_runner_error(
@@ -1917,10 +1948,11 @@ fn run_code_image_command(
         ));
     };
 
-    let outcome = run_child_with_timeout(
+    let outcome = run_child_with_timeout_in_dir(
         program,
         &command.argv[1..],
         Some(stdin.as_bytes()),
+        Some(cwd),
         timeout,
         |_, _| false,
     )
@@ -4920,6 +4952,25 @@ contexts:
             }
             other => panic!("expected exited process, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_image_runner_resolves_relative_paths_from_deck_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("puppeteer-config.json"), "{}").unwrap();
+        let command = peitho_core::domain::CodeImageCommand {
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "test -f ./puppeteer-config.json && printf '<svg></svg>'".to_owned(),
+            ],
+        };
+        let runner = CliSvgRunner::for_deck(&dir.path().join("deck.md"));
+
+        let stdout = peitho_core::code_images::SvgRunner::run(&runner, &command, "").unwrap();
+
+        assert_eq!(stdout, b"<svg></svg>");
     }
 
     #[cfg(unix)]
