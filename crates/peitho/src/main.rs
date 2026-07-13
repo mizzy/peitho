@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 mod asset_resolution;
 mod doctor;
+mod new_cmd;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
 use peitho::{browser, server};
@@ -340,6 +341,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    New {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value_t = new_cmd::LayoutVariant::Default)]
+        layouts: new_cmd::LayoutVariant,
+        #[arg(long, value_enum, default_value_t = new_cmd::ThemeVariant::Light)]
+        theme: new_cmd::ThemeVariant,
+        #[arg(
+            long,
+            help = "overwrite the scaffold-owned files (deck.md, layouts/, css/base.css, .gitignore) in a non-empty directory"
+        )]
+        force: bool,
+    },
     Build {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
@@ -431,6 +445,20 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] =
 fn main() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::New {
+            dir,
+            layouts,
+            theme,
+            force,
+        } => new_cmd::run(
+            new_cmd::NewOptions {
+                target: dir,
+                layouts,
+                theme,
+                force,
+            },
+            &mut std::io::stdout(),
+        ),
         Command::Build { input, out, watch } => {
             let options = BuildOptions { input, out };
             if watch {
@@ -4550,6 +4578,7 @@ contexts:
                 assert!(presenter_windowed);
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -4576,6 +4605,7 @@ contexts:
                 assert!(no_open);
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Present { .. }
@@ -4599,6 +4629,7 @@ contexts:
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -4619,6 +4650,7 @@ contexts:
                 assert_eq!(shell, Shell::Bash);
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -4645,6 +4677,7 @@ contexts:
                 assert!(json);
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
             | Command::Present { .. }
@@ -5403,6 +5436,153 @@ printf '0 bytes written to file %s\n' "$out" >&2
     }
 
     #[test]
+    fn new_command_defaults_and_accepts_options() {
+        let cli = Cli::parse_from([
+            "peitho",
+            "new",
+            "starter",
+            "--layouts",
+            "cover",
+            "--theme",
+            "dark",
+            "--force",
+        ]);
+
+        match cli.command {
+            Command::New {
+                dir,
+                layouts,
+                theme,
+                force,
+            } => {
+                assert_eq!(dir, PathBuf::from("starter"));
+                assert_eq!(layouts, new_cmd::LayoutVariant::Cover);
+                assert_eq!(theme, new_cmd::ThemeVariant::Dark);
+                assert!(force);
+            }
+            Command::Build { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected new command");
+            }
+        }
+
+        let cli = Cli::parse_from(["peitho", "new"]);
+        match cli.command {
+            Command::New {
+                dir,
+                layouts,
+                theme,
+                force,
+            } => {
+                assert_eq!(dir, PathBuf::from("."));
+                assert_eq!(layouts, new_cmd::LayoutVariant::Default);
+                assert_eq!(theme, new_cmd::ThemeVariant::Light);
+                assert!(!force);
+            }
+            Command::Build { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected new command");
+            }
+        }
+    }
+
+    #[test]
+    fn new_command_is_listed_in_help() {
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("--help")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let lists_new_subcommand = stdout.lines().any(|line| {
+            line.strip_prefix("  new")
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_whitespace)
+        });
+        assert!(lists_new_subcommand, "actual stdout: {stdout}");
+    }
+
+    #[test]
+    fn new_command_scaffolds_from_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("starter");
+
+        let assert = AssertCommand::cargo_bin("peitho")
+            .unwrap()
+            .arg("new")
+            .arg(&target)
+            .arg("--layouts")
+            .arg("split")
+            .arg("--theme")
+            .arg("dark")
+            .assert()
+            .success();
+
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        assert!(stdout.contains("deck.md"), "actual stdout: {stdout}");
+        assert!(stdout.contains("peitho preview"), "actual stdout: {stdout}");
+        assert!(target.join("deck.md").is_file());
+        assert!(target.join("layouts/title-body-code.html").is_file());
+        assert!(target.join("layouts/two-column.html").is_file());
+        assert!(target.join("css/base.css").is_file());
+        assert!(target.join(".gitignore").is_file());
+    }
+
+    #[test]
+    fn generated_scaffolds_build_for_all_layout_and_theme_combinations() {
+        let layouts = [
+            new_cmd::LayoutVariant::Default,
+            new_cmd::LayoutVariant::Split,
+            new_cmd::LayoutVariant::Cover,
+        ];
+        let themes = [new_cmd::ThemeVariant::Light, new_cmd::ThemeVariant::Dark];
+
+        for layout in layouts {
+            for theme in themes {
+                let dir = tempfile::tempdir().unwrap();
+                let target = dir
+                    .path()
+                    .join(format!("{layout:?}-{theme:?}").to_lowercase());
+                let mut stdout = Vec::new();
+
+                new_cmd::run(
+                    new_cmd::NewOptions {
+                        target: target.clone(),
+                        layouts: layout,
+                        theme,
+                        force: false,
+                    },
+                    &mut stdout,
+                )
+                .unwrap();
+                build(&BuildOptions {
+                    input: target.join("deck.md"),
+                    out: target.join("dist"),
+                })
+                .unwrap();
+
+                assert!(
+                    target.join("dist/manifest.json").is_file(),
+                    "missing manifest for {layout:?}/{theme:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn build_command_defaults_input_to_deck_md() {
         let cli = Cli::parse_from(["peitho", "build"]);
 
@@ -5411,6 +5591,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Present { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5431,6 +5612,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5453,6 +5635,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5495,6 +5678,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(watch);
             }
             Command::Present { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5517,6 +5701,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(!watch);
             }
             Command::Present { .. }
+            | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }

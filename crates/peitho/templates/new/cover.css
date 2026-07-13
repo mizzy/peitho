@@ -1,0 +1,28 @@
+.cover {
+  justify-content: center;
+  align-items: center;
+  padding: 96px;
+  text-align: center;
+  background:
+    linear-gradient(135deg, rgba(29, 78, 216, 0.12), transparent 42%),
+    #f7f7f2;
+}
+
+.cover .cover-inner {
+  max-width: 920px;
+}
+
+.cover h1 {
+  font-size: 84px;
+  line-height: 0.98;
+}
+
+.cover h1::after {
+  content: "";
+  display: block;
+  width: 96px;
+  height: 5px;
+  margin: 34px auto 0;
+  border-radius: 999px;
+  background: #1d4ed8;
+}

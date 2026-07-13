@@ -38,7 +38,7 @@ The three pillars, in short:
 brew install mizzy/tap/peitho    # prebuilt binaries and cargo: see Install below
 ```
 
-Write `deck.md`. Convention mapping turns plain Markdown into slides as-is: slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest becomes the body. Deck-level settings live in YAML frontmatter, per-slide settings in a `<!-- { ... } -->` JSON comment, and non-JSON HTML comments become speaker notes:
+Write `deck.md` (or scaffold one with `peitho new my-deck`). Convention mapping turns plain Markdown into slides as-is: slides are separated by `---`, the shallowest heading is the title, code blocks go to the code slot, and the rest becomes the body. Deck-level settings live in YAML frontmatter, per-slide settings in a `<!-- { ... } -->` JSON comment, and non-JSON HTML comments become speaker notes:
 
 ````markdown
 ---
@@ -215,6 +215,9 @@ Available targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-
 The deck argument defaults to `deck.md` in the current directory, so it can be omitted when the file follows the convention.
 
 ```sh
+# Scaffold a starter deck (deck.md + layouts/ + css/base.css + .gitignore; --layouts default|split|cover, --theme light|dark)
+peitho new my-deck
+
 # Generate the distribution (dist/ with slides/ fragments + manifest.json + index.html + peitho.css)
 peitho build            # same as: peitho build deck.md
 
