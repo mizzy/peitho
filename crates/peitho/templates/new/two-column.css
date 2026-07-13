@@ -1,0 +1,37 @@
+.two-column {
+  padding: 56px 64px;
+  gap: 28px;
+}
+
+.two-column h1 {
+  font-size: 44px;
+}
+
+.two-column .columns {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 28px;
+}
+
+.two-column .column {
+  min-width: 0;
+  overflow: hidden;
+  padding: 28px;
+  border: 1px solid rgba(24, 24, 24, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.two-column .slot-left,
+.two-column .slot-right {
+  font-size: 24px;
+  line-height: 1.45;
+}
+
+.two-column h2 {
+  margin: 0 0 16px;
+  font-size: 28px;
+  line-height: 1.15;
+}

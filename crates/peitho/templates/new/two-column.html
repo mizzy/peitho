@@ -1,0 +1,11 @@
+<section class="two-column">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="columns">
+    <div class="column column-left">
+      <slot name="left" accepts="blocks" arity="1..*"></slot>
+    </div>
+    <div class="column column-right">
+      <slot name="right" accepts="blocks" arity="1..*"></slot>
+    </div>
+  </div>
+</section>

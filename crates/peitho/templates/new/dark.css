@@ -1,0 +1,42 @@
+/* Dark scaffold theme overrides. */
+.peitho-slide {
+  background: #181a20;
+  color: #f4f1ea;
+}
+
+.peitho-slide h1 {
+  color: #fffaf0;
+}
+
+.slot-body {
+  color: #e4ded2;
+}
+
+.slot-code {
+  color: #f4f1ea;
+}
+
+.slot-code .hl-comment {
+  color: #8d99ae;
+}
+
+.slot-code .hl-string {
+  color: #8bd49c;
+}
+
+.slot-code .hl-keyword,
+.slot-code .hl-storage {
+  color: #c4a7ff;
+}
+
+.slot-code .hl-constant {
+  color: #f7c37b;
+}
+
+.slot-code .hl-function {
+  color: #8ab4ff;
+}
+
+.slot-code .hl-type {
+  color: #7dd3c7;
+}
