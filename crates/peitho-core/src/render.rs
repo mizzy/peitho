@@ -18,6 +18,7 @@ use crate::{
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
+const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 
 /// Render a checked deck whose image paths have already been resolved.
 ///
@@ -559,6 +560,41 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
         canvas_height = aspect_ratio.height(),
         canvas_aspect = aspect_ratio.css_aspect_value(),
         pdf_flatten_js = PDF_FLATTEN_JS,
+    )
+}
+
+pub fn render_lint_document(deck: &Deck<Rendered>) -> String {
+    let settings = deck.settings();
+    let aspect_ratio = settings.aspect_ratio();
+    let mut slides = String::new();
+    for slide in deck.slides() {
+        slides.push_str(slide.html());
+        slides.push('\n');
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="peitho.css">
+  <title>Peitho Lint</title>
+  <style>
+    :root {{ --peitho-canvas-width: {canvas_width}px; --peitho-canvas-height: {canvas_height}px; --peitho-canvas-aspect: {canvas_aspect}; }}
+    html, body {{ margin: 0; padding: 0; }}
+    .peitho-slide {{ transform: scale(1); }}
+  </style>
+</head>
+<body>
+{slides}  <script>
+{lint_measure_js}
+  </script>
+</body>
+</html>"#,
+        canvas_width = aspect_ratio.width(),
+        canvas_height = aspect_ratio.height(),
+        canvas_aspect = aspect_ratio.css_aspect_value(),
+        lint_measure_js = LINT_MEASURE_JS,
     )
 }
 
@@ -1886,6 +1922,83 @@ Paragraph after heading.
         let html = render_pdf_document(&rendered);
 
         assert!(!html.contains("speaker secret"));
+    }
+
+    #[test]
+    fn lint_document_uses_aspect_ratio_canvas_and_ignores_resolution() {
+        let rendered = render_checked_deck("---\nresolution: 1920x1080\n---\n# Intro");
+
+        let html = render_lint_document(&rendered);
+
+        assert!(html.contains("--peitho-canvas-width: 1280px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("--peitho-canvas-aspect: 16 / 9;"));
+        assert!(html.contains("html, body { margin: 0; padding: 0; }"));
+        assert!(html.contains(".peitho-slide { transform: scale(1); }"));
+        assert!(!html.contains("html, body { margin: 0; padding: 0; background: #fff; }"));
+        assert!(!html.contains("1920px"));
+        assert!(!html.contains("1080px"));
+        assert!(!html.contains(".peitho-slide-wrap"));
+        assert!(!html.contains("transform: scale(1.5"));
+    }
+
+    #[test]
+    fn lint_document_inlines_slides_in_order_and_embeds_measurement_script_only() {
+        let rendered = render_checked_deck("# Intro\n\n---\n# Details");
+
+        let html = render_lint_document(&rendered);
+
+        let intro_index = html.find(r#"data-slide-key="intro""#).unwrap();
+        let details_index = html.find(r#"data-slide-key="details""#).unwrap();
+        let script_index = html.find("function measureSlides").unwrap();
+        assert!(intro_index < details_index);
+        assert!(details_index < script_index);
+        assert!(html.contains("PEITHO_LINT_"));
+        assert!(html.contains(">Intro</span>"));
+        assert!(html.contains(">Details</span>"));
+        assert!(!html.contains("flattenGradients"));
+        assert!(!html.contains("flattenBoxShadows"));
+        assert!(!html.contains(".peitho-slide-wrap"));
+    }
+
+    #[test]
+    fn lint_measure_script_cannot_close_script_tag_or_decode_images() {
+        let script = LINT_MEASURE_JS.to_ascii_lowercase();
+
+        assert!(!script.contains("</script"));
+        assert!(!script.contains(".decode("));
+    }
+
+    #[test]
+    fn lint_measure_script_publishes_payload_to_console_log() {
+        assert!(LINT_MEASURE_JS.contains("console.log("));
+        assert!(LINT_MEASURE_JS.contains("CHUNK_SIZE"));
+        assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "CHUNK""#));
+        assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "DONE""#));
+        assert!(!LINT_MEASURE_JS.contains("document.title"));
+    }
+
+    #[test]
+    fn lint_measure_script_does_not_contain_raw_sentinel_strings() {
+        assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_BEGIN"));
+        assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_END"));
+        assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_CHUNK"));
+        assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_DONE"));
+    }
+
+    #[test]
+    fn lint_measure_script_uses_descendant_rect_union_with_scroll_floor() {
+        assert!(LINT_MEASURE_JS.contains("getBoundingClientRect"));
+        assert!(LINT_MEASURE_JS.contains("function walkDescendants"));
+        assert!(LINT_MEASURE_JS.contains("Array.prototype.forEach.call(element.children"));
+        assert!(!LINT_MEASURE_JS.contains(r#"querySelectorAll("*")"#));
+        assert!(!LINT_MEASURE_JS.contains("getComputedStyle"));
+        assert!(!LINT_MEASURE_JS.contains(r#"position === "fixed""#));
+        assert!(LINT_MEASURE_JS.contains("rect.width === 0 && rect.height === 0"));
+        assert!(LINT_MEASURE_JS.contains("bounds.maxRight - bounds.minLeft"));
+        assert!(LINT_MEASURE_JS.contains("slide.scrollWidth"));
+        assert!(LINT_MEASURE_JS.contains("contentWidth"));
+        assert!(LINT_MEASURE_JS.contains("boxWidth"));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
