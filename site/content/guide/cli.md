@@ -2,11 +2,11 @@
 title = "CLI"
 weight = 50
 template = "guide-page.html"
-description = "Scaffold, preview, present, export, and publish a deck — plus inspection commands and shell completions."
+description = "Scaffold, preview, lint, present, export, and publish a deck — plus inspection commands and shell completions."
 +++
 
 Start a deck with `peitho new`; the day-to-day commands are `preview`,
-`present`, `export`, and `publish`. Each command that reads a deck takes a
+`lint`, `present`, `export`, and `publish`. Each command that reads a deck takes a
 deck path and defaults to `deck.md` in the current directory, so the argument
 can be omitted when the file follows the convention:
 
@@ -38,6 +38,20 @@ peitho preview
 
 It watches the deck and its assets, serves locally, and reloads while
 preserving the current slide and overview state.
+
+## `peitho lint`
+
+Lint renders every slide in headless Chrome and warns when layout content
+overflows the slide box by more than 1px horizontally or vertically.
+
+```sh
+peitho lint
+```
+
+Warnings include the slide number, axis, and overflow delta in pixels. The
+command exits 1 when any overflow is found and 0 when the deck is clean. It
+requires Chrome or Chromium, using the same discovery rules as PDF export and
+`PEITHO_CHROME_PATH`.
 
 ## `peitho present`
 

@@ -230,6 +230,9 @@ peitho layouts --explain intro
 # Diagnose the runtime environment (Chrome, displays, embedded shells, deck assets)
 peitho doctor
 
+# Check rendered slides for content that overflows the slide box
+peitho lint
+
 # Daily editing loop: watch, serve, open, and reload on every successful rebuild
 peitho preview
 
@@ -254,6 +257,11 @@ peitho publish -- aws s3 sync dist/ s3://your-bucket/
 # Generate a shell completion script (bash / zsh / fish / powershell / elvish)
 peitho completions zsh
 ```
+
+`peitho lint` renders each slide in headless Chrome and warns when layout
+content exceeds the slide box by more than 1px on either axis. It exits 1
+when any overflow warning is found and 0 when the deck is clean; it uses the
+same Chrome discovery as `peitho export pdf`.
 
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 

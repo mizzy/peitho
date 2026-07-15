@@ -1750,6 +1750,7 @@ name = "peitho"
 version = "1.7.0"
 dependencies = [
  "assert_cmd",
+ "base64",
  "clap",
  "clap_complete",
  "miette",

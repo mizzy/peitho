@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 mod asset_resolution;
 mod doctor;
+mod lint;
 mod new_cmd;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
@@ -362,6 +363,10 @@ enum Command {
         #[arg(long)]
         watch: bool,
     },
+    Lint {
+        #[arg(default_value = "deck.md")]
+        input: PathBuf,
+    },
     Layouts {
         #[arg(default_value = "deck.md")]
         input: PathBuf,
@@ -466,6 +471,14 @@ fn main() -> miette::Result<()> {
             } else {
                 build(&options)
             }
+        }
+        Command::Lint { input } => {
+            let mut stdout = std::io::stdout();
+            let code = lint::run(input, &mut stdout)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
         }
         Command::Layouts {
             input,
@@ -1615,39 +1628,84 @@ const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 enum ChromeCompletion {
     PdfWritten { output_path: PathBuf },
+    LintResultLogged,
 }
 
 #[derive(Default)]
 struct ChromeCompletionState {
     stderr_scanned: usize,
-    pdf_signal_seen: bool,
+    signal_seen: bool,
 }
 
 impl ChromeCompletion {
     fn description(&self) -> &'static str {
         match self {
             Self::PdfWritten { .. } => "PDF output",
+            Self::LintResultLogged => "lint measurement payload",
         }
+    }
+
+    fn retry_help(&self) -> &'static str {
+        match self {
+            Self::PdfWritten { .. } => "retry export",
+            Self::LintResultLogged => {
+                "retry lint; if a lint workspace was kept, inspect lint.html there"
+            }
+        }
+    }
+
+    fn timeout_help(&self) -> &'static str {
+        match self {
+            Self::PdfWritten { .. } => {
+                "retry export or check the generated HTML in the workspace path reported by the export command"
+            }
+            Self::LintResultLogged => {
+                "retry lint; if a lint workspace was kept, inspect lint.html there"
+            }
+        }
+    }
+
+    fn process_setup_help(&self) -> String {
+        format!(
+            "{}; this is an internal process setup error",
+            self.retry_help()
+        )
     }
 
     fn is_ready(&self, _stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
         match self {
             Self::PdfWritten { output_path } => {
-                if !state.pdf_signal_seen {
-                    state.pdf_signal_seen = scan_for_needle(
+                if !state.signal_seen {
+                    state.signal_seen = scan_for_needle(
                         stderr,
                         &mut state.stderr_scanned,
                         b"bytes written to file",
                     );
                 }
-                output_file_is_nonempty(output_path) && state.pdf_signal_seen
+                output_file_is_nonempty(output_path) && state.signal_seen
+            }
+            Self::LintResultLogged => {
+                if !state.signal_seen {
+                    state.signal_seen = scan_for_needle(
+                        stderr,
+                        &mut state.stderr_scanned,
+                        lint::PEITHO_LINT_DONE.as_bytes(),
+                    );
+                }
+                state.signal_seen
             }
         }
     }
 
-    fn is_ready_after_successful_exit(&self) -> bool {
+    fn is_ready_after_successful_exit(
+        &self,
+        stdout: &[u8],
+        stderr: &[u8],
+        state: &mut ChromeCompletionState,
+    ) -> bool {
         match self {
             Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
+            Self::LintResultLogged => self.is_ready(stdout, stderr, state),
         }
     }
 }
@@ -1667,22 +1725,28 @@ fn run_one_shot_chrome(
     args: &[OsString],
     completion: ChromeCompletion,
     timeout: Duration,
-) -> miette::Result<Vec<u8>> {
+) -> miette::Result<ChromeOutput> {
     let mut completion_state = ChromeCompletionState::default();
     let outcome = run_child_with_timeout(chrome, args, None, timeout, |stdout, stderr| {
         completion.is_ready(stdout, stderr, &mut completion_state)
     })
-    .map_err(|err| chrome_process_error(chrome, err))?;
+    .map_err(|err| chrome_process_error(chrome, err, &completion))?;
 
     match outcome {
-        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Ready { stdout, stderr } => Ok(chrome_output(stdout, stderr)),
         ProcessOutcome::Exited {
             status,
             stdout,
             stderr,
         } => {
-            if status.success() && completion.is_ready_after_successful_exit() {
-                return Ok(stdout);
+            if status.success()
+                && completion.is_ready_after_successful_exit(
+                    &stdout,
+                    &stderr,
+                    &mut completion_state,
+                )
+            {
+                return Ok(chrome_output(stdout, stderr));
             }
             if !status.success() {
                 return Err(miette::miette!(
@@ -1698,11 +1762,31 @@ fn run_one_shot_chrome(
             ))
         }
         ProcessOutcome::TimedOut { stderr } => Err(miette::miette!(
-            "Chrome timed out after {}s waiting for {}\nhelp: retry export or check the generated HTML in the workspace path reported by the export command\nstderr: {}",
+            "Chrome timed out after {}s waiting for {}\nhelp: {}\nstderr: {}",
             timeout.as_secs(),
             completion.description(),
-            String::from_utf8_lossy(&stderr).trim()
+            completion.timeout_help(),
+            String::from_utf8_lossy(&stderr).trim(),
         )),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ChromeOutput {
+    #[cfg(test)]
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+fn chrome_output(stdout: Vec<u8>, stderr: Vec<u8>) -> ChromeOutput {
+    #[cfg(test)]
+    {
+        ChromeOutput { stdout, stderr }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = stdout;
+        ChromeOutput { stderr }
     }
 }
 
@@ -1710,6 +1794,7 @@ fn run_one_shot_chrome(
 enum ProcessOutcome {
     Ready {
         stdout: Vec<u8>,
+        stderr: Vec<u8>,
     },
     Exited {
         status: ExitStatus,
@@ -1807,13 +1892,13 @@ where
         if is_complete(&stdout, &stderr) {
             kill_and_reap_process_child(&mut child).map_err(ProcessRunError::Kill)?;
             drain_process_events(&rx, &mut stdout, &mut stderr);
-            return Ok(ProcessOutcome::Ready { stdout });
+            return Ok(ProcessOutcome::Ready { stdout, stderr });
         }
 
         if let Some(status) = child.try_wait().map_err(ProcessRunError::Wait)? {
             drain_process_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
             if is_complete(&stdout, &stderr) {
-                return Ok(ProcessOutcome::Ready { stdout });
+                return Ok(ProcessOutcome::Ready { stdout, stderr });
             }
             return Ok(ProcessOutcome::Exited {
                 status,
@@ -1936,24 +2021,32 @@ fn kill_and_reap_process_child(child: &mut Child) -> io::Result<()> {
     Ok(())
 }
 
-fn chrome_process_error(chrome: &Path, err: ProcessRunError) -> miette::Error {
+fn chrome_process_error(
+    chrome: &Path,
+    err: ProcessRunError,
+    completion: &ChromeCompletion,
+) -> miette::Error {
     match err {
         ProcessRunError::CaptureStdout => miette::miette!(
-            "failed to capture Chrome stdout\nhelp: retry export; this is an internal process setup error"
+            "failed to capture Chrome stdout\nhelp: {}",
+            completion.process_setup_help()
         ),
         ProcessRunError::CaptureStderr => miette::miette!(
-            "failed to capture Chrome stderr\nhelp: retry export; this is an internal process setup error"
+            "failed to capture Chrome stderr\nhelp: {}",
+            completion.process_setup_help()
         ),
         ProcessRunError::CaptureStdin => miette::miette!(
-            "failed to capture Chrome stdin\nhelp: retry export; this is an internal process setup error"
+            "failed to capture Chrome stdin\nhelp: {}",
+            completion.process_setup_help()
         ),
         ProcessRunError::Spawn(err) => miette::miette!(
             "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
             chrome.display()
         ),
-        ProcessRunError::Wait(err) => {
-            miette::miette!("failed to wait on Chrome: {err}\nhelp: retry export")
-        }
+        ProcessRunError::Wait(err) => miette::miette!(
+            "failed to wait on Chrome: {err}\nhelp: {}",
+            completion.retry_help()
+        ),
         ProcessRunError::Kill(err) => miette::miette!(
             "failed to terminate Chrome: {err}\nhelp: report the underlying io error"
         ),
@@ -1988,7 +2081,7 @@ fn run_code_image_command(
     .map_err(|err| code_image_process_error(program, err))?;
 
     match outcome {
-        ProcessOutcome::Ready { stdout } => Ok(stdout),
+        ProcessOutcome::Ready { stdout, .. } => Ok(stdout),
         ProcessOutcome::Exited {
             status,
             stdout,
@@ -4613,6 +4706,7 @@ contexts:
                 assert!(presenter_windowed);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -4621,6 +4715,28 @@ contexts:
             | Command::Export { .. }
             | Command::Completions { .. } => {
                 panic!("expected present command");
+            }
+        }
+    }
+
+    #[test]
+    fn lint_command_defaults_input_to_deck_md() {
+        let cli = Cli::parse_from(["peitho", "lint"]);
+
+        match cli.command {
+            Command::Lint { input } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+            }
+            Command::Build { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Present { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected lint command");
             }
         }
     }
@@ -4640,6 +4756,7 @@ contexts:
                 assert!(no_open);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -4664,6 +4781,7 @@ contexts:
                 assert_eq!(out, Some(PathBuf::from("out.pdf")));
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -4685,6 +4803,7 @@ contexts:
                 assert_eq!(shell, Shell::Bash);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -4712,6 +4831,7 @@ contexts:
                 assert!(json);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -4881,6 +5001,9 @@ contexts:
         let err = chrome_process_error(
             Path::new("/tmp/chrome"),
             ProcessRunError::Wait(std::io::Error::other("wait failed")),
+            &ChromeCompletion::PdfWritten {
+                output_path: PathBuf::from("out.pdf"),
+            },
         );
         let message = err.to_string();
 
@@ -4899,10 +5022,42 @@ contexts:
     }
 
     #[test]
+    fn chrome_process_wait_error_uses_lint_retry_for_lint_completion() {
+        let err = chrome_process_error(
+            Path::new("/tmp/chrome"),
+            ProcessRunError::Wait(std::io::Error::other("wait failed")),
+            &ChromeCompletion::LintResultLogged,
+        );
+        let message = err.to_string();
+
+        assert!(
+            message.contains("failed to wait on Chrome: wait failed"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("help: retry lint"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("lint workspace"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("lint.html"), "actual error: {message}");
+        assert!(
+            !message.contains("chrome-stderr.log"),
+            "actual error: {message}"
+        );
+        assert!(!message.contains("retry export"), "actual error: {message}");
+    }
+
+    #[test]
     fn chrome_process_kill_error_does_not_use_install_hint() {
         let err = chrome_process_error(
             Path::new("/tmp/chrome"),
             ProcessRunError::Kill(std::io::Error::other("kill failed")),
+            &ChromeCompletion::PdfWritten {
+                output_path: PathBuf::from("out.pdf"),
+            },
         );
         let message = err.to_string();
 
@@ -5060,7 +5215,7 @@ exec sleep 30
         );
 
         let started = std::time::Instant::now();
-        let stdout = run_one_shot_chrome(
+        let output = run_one_shot_chrome(
             Path::new("/bin/sh"),
             &[
                 fake_chrome.clone().into_os_string(),
@@ -5077,7 +5232,12 @@ exec sleep 30
         // triggered the early return, with headroom for loaded CI runners.
         assert!(started.elapsed() < Duration::from_secs(10));
         assert!(out.is_file());
-        assert!(stdout.is_empty());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("bytes written to file"),
+            "actual stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]
@@ -5094,7 +5254,7 @@ printf '%s' '%PDF-test' > "$out"
 "#,
         );
 
-        let stdout = run_one_shot_chrome(
+        let output = run_one_shot_chrome(
             Path::new("/bin/sh"),
             &[
                 fake_chrome.clone().into_os_string(),
@@ -5108,7 +5268,8 @@ printf '%s' '%PDF-test' > "$out"
         .unwrap();
 
         assert!(out.is_file());
-        assert!(stdout.is_empty());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -5131,6 +5292,58 @@ printf '%s' '%PDF-test' > "$out"
             &stderr,
             &mut state
         ));
+    }
+
+    #[test]
+    fn lint_completion_scans_stderr_for_done_sentinel_only() {
+        let mut state = ChromeCompletionState::default();
+        let stdout = b"PEITHO_LINT_DONE".to_vec();
+        let mut stderr = b"[1:2:INFO:CONSOLE(59)] \"PEITHO_LINT_CHUNK 1/1 abc".to_vec();
+
+        assert!(!ChromeCompletion::LintResultLogged.is_ready(&stdout, &stderr, &mut state));
+
+        stderr.extend_from_slice(
+            b"\n[1:2:INFO:CONSOLE(60)] \"PEITHO_LINT_DONE\", source: file:///tmp/lint.html (60)",
+        );
+
+        assert!(ChromeCompletion::LintResultLogged.is_ready(&stdout, &stderr, &mut state));
+        assert!(ChromeCompletion::LintResultLogged
+            .is_ready_after_successful_exit(&stdout, &stderr, &mut state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_rejects_successful_lint_exit_without_done_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        write_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+printf 'JavaScript exploded before lint payload\n' >&2
+"#,
+        );
+
+        let err = run_one_shot_chrome(
+            Path::new("/bin/sh"),
+            &[fake_chrome.clone().into_os_string()],
+            ChromeCompletion::LintResultLogged,
+            CHROME_ONE_SHOT_TIMEOUT,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("completed before one-shot output was ready"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("lint measurement payload"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("JavaScript exploded"),
+            "actual error: {message}"
+        );
     }
 
     #[cfg(unix)]
@@ -5160,6 +5373,45 @@ exec sleep 30
         assert!(started.elapsed() < Duration::from_secs(10));
         let message = err.to_string();
         assert!(message.contains("timed out"), "actual error: {message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_shot_chrome_runner_lint_timeout_uses_lint_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        write_script(
+            &fake_chrome,
+            r#"#!/bin/sh
+exec sleep 30
+"#,
+        );
+
+        let err = run_one_shot_chrome(
+            Path::new("/bin/sh"),
+            &[fake_chrome.clone().into_os_string()],
+            ChromeCompletion::LintResultLogged,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("timed out"), "actual error: {message}");
+        assert!(message.contains("retry lint"), "actual error: {message}");
+        assert!(
+            message.contains("lint workspace"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("lint.html"), "actual error: {message}");
+        assert!(
+            !message.contains("chrome-stderr.log"),
+            "actual error: {message}"
+        );
+        assert!(!message.contains("retry export"), "actual error: {message}");
+        assert!(
+            !message.contains("export command"),
+            "actual error: {message}"
+        );
     }
 
     #[cfg(unix)]
@@ -5496,6 +5748,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(force);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5521,6 +5774,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(!force);
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
             | Command::Preview { .. }
@@ -5626,6 +5880,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Present { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -5647,6 +5902,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -5670,6 +5926,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert_eq!(input, PathBuf::from("deck.md"));
             }
             Command::Build { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -5713,6 +5970,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(watch);
             }
             Command::Present { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }
@@ -5736,6 +5994,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 assert!(!watch);
             }
             Command::Present { .. }
+            | Command::Lint { .. }
             | Command::New { .. }
             | Command::Layouts { .. }
             | Command::Doctor { .. }

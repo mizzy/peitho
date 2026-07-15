@@ -9,6 +9,7 @@ name = "peitho"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 miette.workspace = true
