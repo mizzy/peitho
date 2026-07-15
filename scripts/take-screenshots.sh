@@ -37,6 +37,7 @@ declare -a DECKS=(
   "code-walkthrough:examples/code-walkthrough/deck.md"
   "keynote:examples/keynote/deck.md"
   "peitho-tour:examples/peitho-tour/deck.md"
+  "code-images:examples/code-images/deck.md"
 )
 
 for entry in "${DECKS[@]}"; do

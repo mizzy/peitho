@@ -227,6 +227,9 @@ peitho build            # same as: peitho build deck.md
 # Inspect layout slot contracts and explain dispatch for a slide key
 peitho layouts --explain intro
 
+# Diagnose the runtime environment (Chrome, displays, embedded shells, deck assets)
+peitho doctor
+
 # Daily editing loop: watch, serve, open, and reload on every successful rebuild
 peitho preview
 
@@ -256,7 +259,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 
 ## Examples
 
-`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
+`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture and `draft-skip` (whose behavior is only observable locally) are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
@@ -266,9 +269,13 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/keynote/` | Product keynote | Cream background, serif, centered | Two-layout setup. Title-only slides go to `cover`, slides with a body go to `statement` via type-driven dispatch |
 | `examples/peitho-tour/` | Peitho's own product tour | Dark space theme with cyan/purple accents | Four layouts (`cover`, `topic`, `code`, `shot`), a full six-section agenda, an image slide that lands on the `shot` layout by type-driven dispatch, and multi-comment speaker notes throughout |
 | `examples/two-column/` | Explicit slot syntax demo | Two-column layout | `::: {slot=left}` / `::: {slot=right}` route content where convention mapping can't decide between two `accepts="blocks"` slots |
+| `examples/layout-pin/` | Explicit layout pin demo | Two looks: light `statement`, dark `spotlight` | Both layouts declare the same slot contract, so structural dispatch can never decide — every slide carries a `{"layout":"…"}` pin |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
 | `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid uses the built-in renderer; `code_images:` declares the Graphviz command and any explicit overrides |
+| `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/toml.sublime-syntax` turns an unknown-language build error into build-time TOML highlighting |
+| `examples/custom-fonts/` | Bundled webfonts demo | Playfair Display + JetBrains Mono, all local `.woff2` | Zero-config `fonts/` auto-detect; files (including licenses) are copied verbatim into every output |
 | `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |
+| `examples/draft-skip/` | Per-slide `draft` / `skip` flags | Default theme | A draft slide is dropped at parse end and appears in no output; a skipped slide stays in output but present/preview `next`/`prev` step over it |
 | `examples/pdf-export/` | PDF export fixture | Default theme | `aspect_ratio` + `resolution` frontmatter set the PDF page size; speaker notes stay out of the exported PDF |
 
 Same tool, same Markdown conventions — entirely different decks:
@@ -282,7 +289,9 @@ The Peitho tour turns the tool on itself — one deck walking through the concep
 
 ![Peitho tour: dark space theme with cyan and purple accents](docs/images/example-peitho-tour.png)
 
-<!-- TODO: add code-images screenshot after next make demo-screenshots run -->
+Diagrams as code: the code-images deck's fenced `mermaid` block, rendered to an SVG image at build time by the built-in renderer:
+
+![Code images: a fenced mermaid block rendered to an SVG diagram at build time](docs/images/example-code-images.png)
 
 ```sh
 # Each sample has its layouts/ and css/ alongside it, so no flags are needed by convention

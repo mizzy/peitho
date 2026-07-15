@@ -22,7 +22,9 @@ embedded, so Node.js and npm are not runtime dependencies.
 
 ## Create a first deck
 
-Create `deck.md` in an empty directory. This example is adapted from
+Create `deck.md` in an empty directory — or run `peitho new my-deck` to
+scaffold a starter `deck.md` with layouts and a theme (see
+[CLI](@/guide/cli.md#peitho-new) for the variants). This example is adapted from
 `examples/minimal/deck.md`: it has a title, body text, a fenced code block, a
 slide separator, and a speaker note written as an HTML comment.
 
