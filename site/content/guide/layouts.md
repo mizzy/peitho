@@ -54,11 +54,13 @@ An unknown explicit layout name is a build error. With structural dispatch,
 zero matches and multiple matches are also build errors; Peitho does not pick a
 layout silently.
 
-`code_images:` conversion runs before layout dispatch. A `mermaid` fence covered
-by that frontmatter is an image fragment by the time dispatch runs, so it routes
-to `accepts="image"` slots rather than `accepts="code"` slots. Layouts intended
-for rendered diagrams should expose an image slot, while source panes that must
-stay visible should keep using normal fenced code blocks or explicit slots.
+Code-image conversion runs before layout dispatch. Built-in Mermaid fences and
+fences covered by `code_images:` entries are image fragments by the time
+dispatch runs, so they route to `accepts="image"` slots rather than
+`accepts="code"` slots. Layouts intended for rendered diagrams should expose an
+image slot. Source panes that must stay visible should wrap the fence in a
+````md block (as in the [Code Images example](@/examples/code-images.md)) or
+use a different language tag.
 
 ## Inspecting layouts
 

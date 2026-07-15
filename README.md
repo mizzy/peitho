@@ -144,14 +144,17 @@ Unclosed or nested blocks, unknown slot names, and contract violations inside th
 
 ### Diagrams as code
 
-`code_images:` turns fenced blocks with matching language tags into SVG images at build time. Peitho pipes the fence source to the declared command, expects SVG on stdout, caches the result, and then routes it as a normal image:
+Fenced `mermaid` blocks render to SVG at build time with Peitho's built-in Mermaid renderer. The generated SVG is cached and then routed as a normal image, so the slide still needs a layout with an `accepts="image"` slot.
+
+Use `code_images:` for other diagram tags, or to override the built-in Mermaid renderer with an external command. Peitho pipes the fence source to the declared command, expects SVG on stdout, caches the result, and then routes it as a normal image:
 
 ```yaml
 code_images:
-  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
+  dot: dot -Tsvg
+  mermaid: mmdc -i - -o - -e svg  # optional override
 ```
 
-See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images) and the [Code Images example](https://peitho.gosu.ke/examples/code-images/) for command details and a Mermaid/Graphviz deck.
+See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images) and the [Code Images example](https://peitho.gosu.ke/examples/code-images/) for built-in Mermaid behavior and a Mermaid/Graphviz deck.
 
 ### Deck frontmatter
 
@@ -167,7 +170,7 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
 | `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
-| `code_images` | Language tag → command map for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; not a path like the asset keys) |
+| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid is built in unless overridden) |
 
 Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
@@ -264,7 +267,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/peitho-tour/` | Peitho's own product tour | Dark space theme with cyan/purple accents | Four layouts (`cover`, `topic`, `code`, `shot`), a full six-section agenda, an image slide that lands on the `shot` layout by type-driven dispatch, and multi-comment speaker notes throughout |
 | `examples/two-column/` | Explicit slot syntax demo | Two-column layout | `::: {slot=left}` / `::: {slot=right}` route content where convention mapping can't decide between two `accepts="blocks"` slots |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
-| `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | `code_images:` frontmatter declares per-language commands; peitho pipes fenced source into each command and embeds the SVG |
+| `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid uses the built-in renderer; `code_images:` declares the Graphviz command and any explicit overrides |
 | `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |
 | `examples/pdf-export/` | PDF export fixture | Default theme | `aspect_ratio` + `resolution` frontmatter set the PDF page size; speaker notes stay out of the exported PDF |
 

@@ -187,6 +187,21 @@ pub struct CodeImagesConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeImageRenderer<'a> {
+    External(&'a CodeImageCommand),
+    BuiltinMermaid,
+}
+
+impl CodeImagesConfig {
+    pub fn renderer_for(&self, tag: &str) -> Option<CodeImageRenderer<'_>> {
+        if let Some(command) = self.entries.get(tag) {
+            return Some(CodeImageRenderer::External(command));
+        }
+        (tag == "mermaid").then_some(CodeImageRenderer::BuiltinMermaid)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeImageCommand {
     pub argv: Vec<String>,
 }
@@ -828,6 +843,38 @@ impl RenderedSlide {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_images_renderer_for_resolves_explicit_builtin_and_absent_tags() {
+        let mermaid_command = CodeImageCommand {
+            argv: vec!["mmdc".to_owned(), "-i".to_owned(), "-".to_owned()],
+        };
+        let dot_command = CodeImageCommand {
+            argv: vec!["dot".to_owned(), "-Tsvg".to_owned()],
+        };
+        let config = CodeImagesConfig {
+            entries: BTreeMap::from([
+                ("mermaid".to_owned(), mermaid_command.clone()),
+                ("dot".to_owned(), dot_command.clone()),
+            ]),
+            key_line: Some(2),
+        };
+        let empty = CodeImagesConfig::default();
+
+        assert_eq!(
+            config.renderer_for("mermaid"),
+            Some(CodeImageRenderer::External(&mermaid_command))
+        );
+        assert_eq!(
+            config.renderer_for("dot"),
+            Some(CodeImageRenderer::External(&dot_command))
+        );
+        assert_eq!(
+            empty.renderer_for("mermaid"),
+            Some(CodeImageRenderer::BuiltinMermaid)
+        );
+        assert_eq!(empty.renderer_for("plantuml"), None);
+    }
 
     #[test]
     fn aspect_ratio_constants_define_canvas_dimensions() {

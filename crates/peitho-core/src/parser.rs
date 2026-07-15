@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     path::PathBuf,
 };
 
@@ -62,7 +63,53 @@ struct DeckFrontmatter {
     #[serde(default)]
     fonts: Option<AssetPath>,
     #[serde(default)]
-    code_images: Option<HashMap<String, String>>,
+    code_images: Option<HashMap<String, CodeImagesFrontmatterValue>>,
+}
+
+#[derive(Debug)]
+enum CodeImagesFrontmatterValue {
+    Command(String),
+    Bool,
+}
+
+impl<'de> Deserialize<'de> for CodeImagesFrontmatterValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CodeImagesFrontmatterValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CodeImagesFrontmatterValueVisitor {
+            type Value = CodeImagesFrontmatterValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a command string")
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CodeImagesFrontmatterValue::Bool)
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CodeImagesFrontmatterValue::Command(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CodeImagesFrontmatterValue::Command(value))
+            }
+        }
+
+        deserializer.deserialize_any(CodeImagesFrontmatterValueVisitor)
+    }
 }
 
 #[derive(Debug)]
@@ -595,12 +642,26 @@ fn normalize_frontmatter_yaml_for_parse(yaml: &str) -> String {
 }
 
 fn parse_code_images_config(
-    entries: Option<HashMap<String, String>>,
+    entries: Option<HashMap<String, CodeImagesFrontmatterValue>>,
     key_line: Option<usize>,
 ) -> Result<CodeImagesConfig> {
     let mut parsed_entries = BTreeMap::new();
-    for (tag, command) in entries.unwrap_or_default() {
+    for (tag, value) in entries.unwrap_or_default() {
         validate_code_images_tag(&tag, key_line)?;
+        let command = match value {
+            CodeImagesFrontmatterValue::Command(command) => command,
+            CodeImagesFrontmatterValue::Bool => {
+                return Err(boolean_code_images_value_error(&tag, key_line));
+            }
+        };
+        if command.contains('\0') {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' contains a NUL byte"),
+                "remove the NUL byte from the code_images command",
+            ));
+        }
         let argv = shlex::split(&command).ok_or_else(|| {
             BuildError::new(
                 ErrorKind::Parse,
@@ -615,6 +676,14 @@ fn parse_code_images_config(
                 key_line,
                 format!("code_images entry '{tag}' has empty command"),
                 format!("set code_images.{tag} to a command, like mmdc -i - -o - -e svg"),
+            ));
+        }
+        if argv.iter().any(|arg| arg.is_empty()) {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                key_line,
+                format!("code_images entry '{tag}' has empty argument"),
+                "remove the empty argument",
             ));
         }
         parsed_entries.insert(tag, CodeImageCommand { argv });
@@ -852,6 +921,17 @@ fn nested_frontmatter_mapping_entry(line: &str) -> Option<NestedFrontmatterMappi
         .map(|(_, has_value)| NestedFrontmatterMappingEntry { indent, has_value })
 }
 
+fn boolean_code_images_value_error(tag: &str, line: Option<usize>) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        line,
+        format!(
+            "code_images entry '{tag}' has a boolean value, reserved for future built-in opt-out syntax"
+        ),
+        "built-in opt-out is not supported; provide an external command instead, like mmdc -i - -o - -e svg",
+    )
+}
+
 fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> BuildError {
     let yaml_line = err
         .location()
@@ -883,6 +963,11 @@ fn frontmatter_help(message: &str) -> &'static str {
         "provide a path (relative to the deck file), or remove the syntaxes: key"
     } else if frontmatter_message_mentions_key(message, "fonts") {
         "provide a path (relative to the deck file), or remove the fonts: key"
+    } else if frontmatter_message_mentions_key(message, "code_images")
+        || message.contains("code_images.")
+        || message.contains("command string")
+    {
+        "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
     } else if frontmatter_message_mentions_key(message, "time")
         || message.contains("duration")
         || message.contains(PlannedTime::GREATER_THAN_ZERO_MESSAGE)
@@ -1457,7 +1542,7 @@ fn parse_slide(
                     };
                     let code_line = line_for_offset(source, start);
                     if let Some(language) = &language {
-                        if !code_images.entries.contains_key(language) {
+                        if code_images.renderer_for(language).is_none() {
                             highlighter
                                 .validate_language(language, code_line)
                                 .map_err(|err| {
@@ -2199,6 +2284,153 @@ mod tests {
             err.help,
             "set code_images.mermaid to a command, like mmdc -i - -o - -e svg"
         );
+    }
+
+    #[test]
+    fn rejects_code_images_command_with_empty_argument() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid: \"'' peitho-builtin-mermaid 1.6.0\"\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected empty code_images argument to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid' has empty argument"
+        );
+        assert_eq!(err.help, "remove the empty argument");
+    }
+
+    #[test]
+    fn rejects_code_images_command_with_nul_byte() {
+        let err =
+            match parse_frontmatter("---\ncode_images:\n  mermaid: \"mmdc\\0-i\"\n---\n# Intro") {
+                Ok(_) => panic!("expected code_images NUL byte to fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid' contains a NUL byte"
+        );
+        assert_eq!(err.help, "remove the NUL byte from the code_images command");
+    }
+
+    fn assert_reserved_boolean_code_images_error(source: &str) {
+        let err = match parse_frontmatter(source) {
+            Ok(_) => panic!("expected bare boolean code_images value to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(
+            err.message,
+            "code_images entry 'mermaid' has a boolean value, reserved for future built-in opt-out syntax"
+        );
+        assert_eq!(
+            err.help,
+            "built-in opt-out is not supported; provide an external command instead, like mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_bare_boolean_code_images_values_with_key_line_and_help() {
+        for value in ["false", "true", "True", "FALSE"] {
+            let source = format!("---\ncode_images:\n  mermaid: {value}\n---\n# Intro");
+            assert_reserved_boolean_code_images_error(&source);
+        }
+    }
+
+    #[test]
+    fn rejects_commented_bare_boolean_code_images_values_with_key_line_and_help() {
+        assert_reserved_boolean_code_images_error(
+            "---\ncode_images:\n  mermaid: false # opt out\n---\n# Intro",
+        );
+    }
+
+    #[test]
+    fn rejects_inline_bare_boolean_after_quoted_comma_command_with_key_line_and_help() {
+        assert_reserved_boolean_code_images_error(
+            "---\ncode_images: { dot: \"a, b\", mermaid: false }\n---\n# Intro",
+        );
+    }
+
+    #[test]
+    fn rejects_inline_bare_boolean_code_images_values_with_key_line_and_help() {
+        assert_reserved_boolean_code_images_error(
+            "---\ncode_images: { mermaid: false }\n---\n# Intro",
+        );
+    }
+
+    #[test]
+    fn rejects_nested_code_images_mapping_before_boolean_value_guard() {
+        let err = match parse_frontmatter(
+            "---\ncode_images:\n  mermaid:\n    theme: false\n---\n# Intro",
+        ) {
+            Ok(_) => panic!("expected nested code_images mapping to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(
+            err.message,
+            "unsupported nested mapping in code_images frontmatter"
+        );
+        assert_eq!(
+            err.help,
+            "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_null_code_images_command_with_code_images_help() {
+        let err = match parse_frontmatter("---\ncode_images:\n  mermaid:\n---\n# Intro") {
+            Ok(_) => panic!("expected null code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.help,
+            "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn rejects_integer_code_images_command_with_code_images_help() {
+        let err = match parse_frontmatter("---\ncode_images:\n  mermaid: 42\n---\n# Intro") {
+            Ok(_) => panic!("expected integer code_images command to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.help,
+            "use code_images entries as tag: command strings, like mermaid: mmdc -i - -o - -e svg"
+        );
+    }
+
+    #[test]
+    fn parses_quoted_boolean_code_images_value_as_command_string() {
+        let frontmatter =
+            parse_frontmatter("---\ncode_images:\n  mermaid: \"false\"\n---\n# Intro").unwrap();
+        let command = frontmatter
+            .settings()
+            .code_images()
+            .entries
+            .get("mermaid")
+            .unwrap();
+
+        assert_eq!(command.argv, ["false"]);
     }
 
     #[test]
@@ -3511,6 +3743,32 @@ After list
 
         assert_eq!(fragment.kind(), &FragmentKind::Code);
         assert_eq!(fragment.language(), Some("mermaid"));
+    }
+
+    #[test]
+    fn accepts_bare_mermaid_language_as_builtin_code_image() {
+        let deck = parse_markdown(
+            "# Intro\n\n```mermaid\ngraph TD\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::Code);
+        assert_eq!(fragment.language(), Some("mermaid"));
+    }
+
+    #[test]
+    fn rejects_bare_plantuml_language_without_code_images_entry() {
+        let err = parse_markdown(
+            "# Intro\n\n```plantuml\n@startuml\n@enduml\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unknown code language 'plantuml'"));
     }
 
     #[test]

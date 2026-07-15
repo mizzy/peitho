@@ -10,6 +10,7 @@ ts-bindings = ["dep:ts-rs"]
 [dependencies]
 html-escape.workspace = true
 lol_html.workspace = true
+merman.workspace = true
 pulldown-cmark.workspace = true
 serde.workspace = true
 serde_norway.workspace = true

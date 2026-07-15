@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 html-escape = "0.2"
 lol_html = "2"
+merman = { version = "0.7", features = ["render"] }
 miette = { version = "7", features = ["fancy"] }
 notify = "8.2.0"
 notify-debouncer-mini = "0.7.0"
