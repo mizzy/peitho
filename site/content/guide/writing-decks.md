@@ -48,14 +48,16 @@ with exactly one unambiguous `accepts="image"` slot.
 
 ## Code images
 
-Use `code_images:` when fenced diagram source should become an SVG image during
-the build. Each mapping entry uses the fence language tag as the key and a
-command string as the value; Peitho sends the fenced source to stdin and reads
-SVG from stdout.
+Fenced `mermaid` source becomes an SVG image during the build with Peitho's
+built-in Mermaid renderer. For other diagram tags, or to override Mermaid with
+an external renderer, add `code_images:` frontmatter. Each mapping entry uses
+the fence language tag as the key and a command string as the value; Peitho
+sends the fenced source to stdin and reads SVG from stdout.
 
 ```yaml
 code_images:
-  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
+  dot: dot -Tsvg
+  mermaid: mmdc -i - -o - -e svg  # optional override
 ```
 
 After conversion, those blocks behave like normal images and need an

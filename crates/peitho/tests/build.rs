@@ -217,6 +217,50 @@ fn build_with_code_images_writes_svg_asset_and_references_it() {
 }
 
 #[test]
+fn build_with_builtin_mermaid_writes_svg_asset_and_references_it() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layout = dir.path().join("title-image.html");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\nlayouts: ./title-image.html\ncss: ./css\n---\n# Diagram\n\n```mermaid\ngraph TD\n  A-->B\n```",
+    )
+    .unwrap();
+    fs::write(
+        &layout,
+        r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><figure><slot name="image" accepts="image" arity="1"></slot></figure></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    assert_eq!(
+        assets[0].extension().and_then(|ext| ext.to_str()),
+        Some("svg")
+    );
+    assert!(fs::read_to_string(&assets[0]).unwrap().contains("<svg"));
+    let slide = fs::read_to_string(out.join("slides/000-diagram.html")).unwrap();
+    let asset_name = assets[0].file_name().unwrap().to_string_lossy();
+    assert!(slide.contains(&format!(r#"src="assets/{asset_name}""#)));
+    assert!(slide.contains(r#"alt="diagram (mermaid)""#));
+}
+
+#[test]
 fn build_with_missing_code_images_command_reports_code_block_line() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

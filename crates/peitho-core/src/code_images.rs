@@ -1,15 +1,23 @@
 use std::{
+    any::Any,
     borrow::Cow,
     fs::{self, OpenOptions},
     io::{self, Write},
+    panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock,
+    },
 };
 
 use sha2::{Digest, Sha256};
 
 use crate::{
-    domain::{CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath, SourceFragment},
+    domain::{
+        CodeImageCommand, CodeImageRenderer, CodeImagesConfig, FragmentKind, RawImagePath,
+        SourceFragment,
+    },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     parser::{parse_markdown, ParsedFrontmatter},
@@ -17,6 +25,8 @@ use crate::{
 };
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static BUILTIN_MERMAID_RENDERER: LazyLock<merman::render::HeadlessRenderer> =
+    LazyLock::new(merman::render::HeadlessRenderer::new);
 
 pub trait SvgRunner {
     fn run(&self, command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>>;
@@ -63,8 +73,15 @@ fn transform_fragment<R: SvgRunner>(
 ) -> Result<SourceFragment> {
     if let Some(tag) = fragment.language() {
         if matches!(fragment.kind(), FragmentKind::Code) {
-            if let Some(command) = config.entries.get(tag) {
-                let key = code_image_cache_key(command, fragment.code_text());
+            if let Some(renderer) = config.renderer_for(tag) {
+                let key = match &renderer {
+                    CodeImageRenderer::External(command) => {
+                        code_image_cache_key(command, fragment.code_text())
+                    }
+                    CodeImageRenderer::BuiltinMermaid => {
+                        builtin_mermaid_cache_key(fragment.code_text())
+                    }
+                };
                 let cache_path = cache_dir.join(format!("{key}.svg"));
                 fs::create_dir_all(cache_dir).map_err(|err| {
                     code_image_error(
@@ -74,13 +91,33 @@ fn transform_fragment<R: SvgRunner>(
                         "make the .peitho directory writable and rebuild",
                     )
                 })?;
-                let cache_hit = valid_cached_svg(fragment.line(), tag, &cache_path);
+                let cache_hit = valid_cached_svg(&cache_path);
                 if !cache_hit {
-                    let bytes = runner.run(command, fragment.code_text()).map_err(|err| {
-                        code_image_error(fragment.line(), tag, err.message, err.help)
-                    })?;
-                    validate_svg_output(fragment.line(), tag, &bytes)?;
-                    let bytes = normalize_svg_intrinsic_size(fragment.line(), tag, &bytes)?;
+                    let (bytes, output_context) = match &renderer {
+                        CodeImageRenderer::External(command) => {
+                            let bytes =
+                                runner.run(command, fragment.code_text()).map_err(|err| {
+                                    code_image_error(fragment.line(), tag, err.message, err.help)
+                                })?;
+                            (bytes, CodeImageOutputContext::ExternalCommand)
+                        }
+                        CodeImageRenderer::BuiltinMermaid => {
+                            let bytes = render_builtin_mermaid(fragment.code_text()).map_err(
+                                |message| {
+                                    code_image_error(
+                                        fragment.line(),
+                                        tag,
+                                        message,
+                                        builtin_mermaid_override_help(),
+                                    )
+                                },
+                            )?;
+                            (bytes, CodeImageOutputContext::BuiltinMermaid)
+                        }
+                    };
+                    validate_svg_output(fragment.line(), tag, &bytes, output_context)?;
+                    let bytes =
+                        normalize_svg_intrinsic_size(fragment.line(), tag, &bytes, output_context)?;
                     write_cache_file_atomic(&cache_path, bytes.as_ref()).map_err(|err| {
                         code_image_error(
                             fragment.line(),
@@ -122,7 +159,51 @@ fn transform_fragment<R: SvgRunner>(
     }
 }
 
-fn valid_cached_svg(line: usize, tag: &str, path: &Path) -> bool {
+fn render_builtin_mermaid(code_text: &str) -> std::result::Result<Vec<u8>, String> {
+    render_builtin_mermaid_with(|| BUILTIN_MERMAID_RENDERER.render_svg_sync(code_text))
+}
+
+fn render_builtin_mermaid_with<F>(render: F) -> std::result::Result<Vec<u8>, String>
+where
+    F: FnOnce() -> std::result::Result<Option<String>, merman::render::HeadlessError>,
+{
+    // AssertUnwindSafe is limited to the captured static HeadlessRenderer: plain immutable data with no interior mutability in merman 0.7.0; re-verify on merman upgrades.
+    let result = catch_unwind(AssertUnwindSafe(render)).map_err(|payload| {
+        format!(
+            "built-in mermaid renderer panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )
+    })?;
+    let svg = match result {
+        Ok(Some(svg)) => svg,
+        Ok(None) => return Err(builtin_mermaid_non_diagram_message().to_owned()),
+        Err(merman::render::HeadlessError::Parse(merman::Error::DetectType(_))) => {
+            return Err(builtin_mermaid_non_diagram_message().to_owned());
+        }
+        Err(err) => return Err(err.to_string()),
+    };
+    Ok(svg.into_bytes())
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_owned()
+    }
+}
+
+fn builtin_mermaid_non_diagram_message() -> &'static str {
+    "built-in renderer did not detect a mermaid diagram"
+}
+
+fn builtin_mermaid_override_help() -> &'static str {
+    "fix the mermaid source, or set code_images.mermaid to an external command like mmdc -i - -o - -e svg"
+}
+
+fn valid_cached_svg(path: &Path) -> bool {
     let cache_hit = fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
         .unwrap_or(false);
@@ -130,9 +211,7 @@ fn valid_cached_svg(line: usize, tag: &str, path: &Path) -> bool {
         return false;
     }
     fs::read(path)
-        .map(|bytes| {
-            validate_svg_output(line, tag, &bytes).is_ok() && svg_has_usable_intrinsic_size(&bytes)
-        })
+        .map(|bytes| is_valid_svg_bytes(&bytes) && svg_has_usable_intrinsic_size(&bytes))
         .unwrap_or(false)
 }
 
@@ -142,6 +221,15 @@ fn code_image_cache_key(command: &CodeImageCommand, code_text: &str) -> String {
         hasher.update(arg.as_bytes());
         hasher.update([0]);
     }
+    hasher.update(code_text.as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
+fn builtin_mermaid_cache_key(code_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"\0peitho-builtin-mermaid\0");
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\0");
     hasher.update(code_text.as_bytes());
     hex_encode(&hasher.finalize())
 }
@@ -186,33 +274,39 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-fn validate_svg_output(line: usize, tag: &str, bytes: &[u8]) -> Result<()> {
+#[derive(Clone, Copy)]
+enum CodeImageOutputContext {
+    ExternalCommand,
+    BuiltinMermaid,
+}
+
+fn validate_svg_output(
+    line: usize,
+    tag: &str,
+    bytes: &[u8],
+    context: CodeImageOutputContext,
+) -> Result<()> {
     if bytes.is_empty() {
-        return Err(code_image_error(
-            line,
-            tag,
-            "command wrote empty stdout",
-            format!("make code_images.{tag} write an SVG document to stdout"),
-        ));
+        return Err(svg_empty_output_error(line, tag, context));
     }
-    if !is_svg_output(bytes) {
-        return Err(code_image_error(
-            line,
-            tag,
-            "command stdout is not an SVG document",
-            format!("make code_images.{tag} write an SVG document to stdout"),
-        ));
+    if !is_valid_svg_bytes(bytes) {
+        return Err(svg_not_document_error(line, tag, context));
     }
     Ok(())
+}
+
+fn is_valid_svg_bytes(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && is_svg_output(bytes)
 }
 
 fn normalize_svg_intrinsic_size<'a>(
     line: usize,
     tag: &str,
     bytes: &'a [u8],
+    context: CodeImageOutputContext,
 ) -> Result<Cow<'a, [u8]>> {
     let Some(root) = find_root_svg_tag(bytes) else {
-        return Err(svg_root_not_found_error(line, tag));
+        return Err(svg_root_not_found_error(line, tag, context));
     };
     let attrs = parse_svg_root_attributes(bytes, root);
 
@@ -224,7 +318,7 @@ fn normalize_svg_intrinsic_size<'a>(
         .view_box
         .and_then(|attr| parse_view_box_dimensions(&bytes[attr.value_start..attr.value_end]))
     else {
-        return Err(svg_intrinsic_size_error(line, tag));
+        return Err(svg_intrinsic_size_error(line, tag, context));
     };
 
     Ok(Cow::Owned(apply_dimension_edits(
@@ -703,24 +797,74 @@ fn find_subsequence(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> 
         .map(|offset| start + offset)
 }
 
-fn svg_intrinsic_size_error(line: usize, tag: &str) -> BuildError {
-    code_image_error(
-        line,
-        tag,
-        "command's SVG has no usable intrinsic size (no absolute width/height and no viewBox)",
-        format!(
-            "make code_images.{tag} emit an SVG with a viewBox (width/height are derived from it) or absolute width/height attributes"
+fn svg_empty_output_error(line: usize, tag: &str, context: CodeImageOutputContext) -> BuildError {
+    match context {
+        CodeImageOutputContext::ExternalCommand => code_image_error(
+            line,
+            tag,
+            "command wrote empty stdout",
+            format!("make code_images.{tag} write an SVG document to stdout"),
         ),
-    )
+        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+            line,
+            tag,
+            "built-in renderer produced empty SVG output",
+            builtin_mermaid_override_help(),
+        ),
+    }
 }
 
-fn svg_root_not_found_error(line: usize, tag: &str) -> BuildError {
-    code_image_error(
-        line,
-        tag,
-        "could not locate the root <svg> element in the command's SVG output",
-        format!("make code_images.{tag} write a standalone SVG document to stdout"),
-    )
+fn svg_not_document_error(line: usize, tag: &str, context: CodeImageOutputContext) -> BuildError {
+    match context {
+        CodeImageOutputContext::ExternalCommand => code_image_error(
+            line,
+            tag,
+            "command stdout is not an SVG document",
+            format!("make code_images.{tag} write an SVG document to stdout"),
+        ),
+        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+            line,
+            tag,
+            "built-in renderer output is not an SVG document",
+            builtin_mermaid_override_help(),
+        ),
+    }
+}
+
+fn svg_intrinsic_size_error(line: usize, tag: &str, context: CodeImageOutputContext) -> BuildError {
+    match context {
+        CodeImageOutputContext::ExternalCommand => code_image_error(
+            line,
+            tag,
+            "command's SVG has no usable intrinsic size (no absolute width/height and no viewBox)",
+            format!(
+                "make code_images.{tag} emit an SVG with a viewBox (width/height are derived from it) or absolute width/height attributes"
+            ),
+        ),
+        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+            line,
+            tag,
+            "built-in renderer's SVG has no usable intrinsic size (no absolute width/height and no viewBox)",
+            builtin_mermaid_override_help(),
+        ),
+    }
+}
+
+fn svg_root_not_found_error(line: usize, tag: &str, context: CodeImageOutputContext) -> BuildError {
+    match context {
+        CodeImageOutputContext::ExternalCommand => code_image_error(
+            line,
+            tag,
+            "could not locate the root <svg> element in the command's SVG output",
+            format!("make code_images.{tag} write a standalone SVG document to stdout"),
+        ),
+        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+            line,
+            tag,
+            "could not locate the root <svg> element in the built-in renderer's SVG output",
+            builtin_mermaid_override_help(),
+        ),
+    }
 }
 
 fn is_svg_output(bytes: &[u8]) -> bool {
@@ -762,7 +906,12 @@ fn code_image_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_svg_output, transform_code_images, SvgRunner};
+    use super::{
+        builtin_mermaid_cache_key, builtin_mermaid_override_help, code_image_cache_key, hex_encode,
+        is_svg_output, render_builtin_mermaid_with, svg_empty_output_error,
+        svg_has_usable_intrinsic_size, svg_intrinsic_size_error, svg_not_document_error,
+        svg_root_not_found_error, transform_code_images, CodeImageOutputContext, SvgRunner,
+    };
     use crate::error::ErrorKind;
     use crate::{
         check::check_deck,
@@ -776,6 +925,7 @@ mod tests {
         phase::{resolve_image_paths, Deck, DeckSettings, KeySource, Parsed, ParsedSlide},
         BuildError, Result,
     };
+    use sha2::{Digest, Sha256};
     use std::{cell::Cell, collections::BTreeMap, fs, path::PathBuf};
 
     const MERMAID_KEY: &str = "4dba32c8d19de69fc2671719f51c327b802adf382763f36d20c1bffd972745f1";
@@ -952,6 +1102,260 @@ mod tests {
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
             br#"<svg viewBox="0 0 10 10" width="10" height="10">new</svg>"#
+        );
+    }
+
+    #[test]
+    fn builtin_mermaid_cache_key_uses_discriminator_version_and_code() {
+        let code = "graph TD";
+        let expected_input = format!(
+            "\0peitho-builtin-mermaid\0{}\0{}",
+            env!("CARGO_PKG_VERSION"),
+            code
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(expected_input.as_bytes());
+        let expected = hex_encode(&hasher.finalize());
+        let external = code_image_cache_key(config().entries.get("mermaid").unwrap(), code);
+
+        assert_eq!(builtin_mermaid_cache_key(code), expected);
+        assert_ne!(
+            builtin_mermaid_cache_key(code),
+            builtin_mermaid_cache_key("graph TD\n  A-->B\n")
+        );
+        assert_ne!(builtin_mermaid_cache_key(code), external);
+    }
+
+    #[test]
+    fn builtin_mermaid_uses_valid_cache_hit_without_rewriting() {
+        let code = "graph TD\n  A-->B\n";
+        let key = builtin_mermaid_cache_key(code);
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let cache_path = cache_dir.join(format!("{key}.svg"));
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(
+            &cache_path,
+            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#,
+        )
+        .unwrap();
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let deck = transform_code_images(
+            deck_with_mermaid(code),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(runner.calls.get(), 0);
+        match deck.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::Image { src, .. } => {
+                assert_eq!(
+                    src.as_str(),
+                    format!("{}/{key}.svg", crate::CODE_IMAGES_CACHE_DIR)
+                );
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(cache_path).unwrap(),
+            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#
+        );
+    }
+
+    #[test]
+    fn transforms_bare_mermaid_with_builtin_renderer_without_running_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let deck = transform_code_images(
+            deck_with_mermaid("graph TD\n  A-->B\n"),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[0];
+
+        assert_eq!(runner.calls.get(), 0);
+        match fragment.kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "diagram (mermaid)");
+                assert!(src.as_str().starts_with(crate::CODE_IMAGES_CACHE_DIR));
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+
+        let cache_files = fs::read_dir(&cache_dir).unwrap().collect::<Vec<_>>();
+        assert_eq!(cache_files.len(), 1);
+        let bytes = fs::read(cache_files[0].as_ref().unwrap().path()).unwrap();
+        assert!(is_svg_output(&bytes));
+        assert!(svg_has_usable_intrinsic_size(&bytes));
+    }
+
+    #[test]
+    fn explicit_mermaid_entry_overrides_builtin_renderer() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external override</svg>"#);
+
+        transform_code_images(
+            deck_with_mermaid("graph TD"),
+            &config(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(runner.calls.get(), 1);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
+            br#"<svg viewBox="0 0 10 10" width="10" height="10">external override</svg>"#
+        );
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn builtin_mermaid_render_error_reports_line_and_override_help() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let err = match transform_code_images(
+            deck_with_mermaid("flowchart TD\n  A[unterminated\n"),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        ) {
+            Ok(_) => panic!("expected built-in mermaid render failure"),
+            Err(err) => err,
+        };
+
+        assert_eq!(runner.calls.get(), 0);
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("code_images 'mermaid' failed"));
+        assert!(err.message.contains("Unterminated node label"));
+        assert_eq!(err.help, builtin_mermaid_override_help());
+    }
+
+    #[test]
+    fn builtin_mermaid_non_diagram_reports_line_and_override_help() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let err = match transform_code_images(
+            deck_with_mermaid("this is not a diagram"),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        ) {
+            Ok(_) => panic!("expected built-in mermaid non-diagram failure"),
+            Err(err) => err,
+        };
+
+        assert_eq!(runner.calls.get(), 0);
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "code_images 'mermaid' failed: built-in renderer did not detect a mermaid diagram"
+        );
+        assert_eq!(err.help, builtin_mermaid_override_help());
+    }
+
+    #[test]
+    fn builtin_mermaid_renderer_panic_becomes_error_message() {
+        let err = render_builtin_mermaid_with(
+            || -> std::result::Result<Option<String>, merman::render::HeadlessError> {
+                panic!("boom");
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "built-in mermaid renderer panicked: boom");
+    }
+
+    #[test]
+    fn builtin_svg_output_errors_use_builtin_renderer_context() {
+        let empty = svg_empty_output_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        assert_eq!(
+            empty.message,
+            "code_images 'mermaid' failed: built-in renderer produced empty SVG output"
+        );
+        assert_eq!(empty.help, builtin_mermaid_override_help());
+
+        let not_svg = svg_not_document_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        assert_eq!(
+            not_svg.message,
+            "code_images 'mermaid' failed: built-in renderer output is not an SVG document"
+        );
+        assert_eq!(not_svg.help, builtin_mermaid_override_help());
+
+        let no_root =
+            svg_root_not_found_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        assert_eq!(
+            no_root.message,
+            "code_images 'mermaid' failed: could not locate the root <svg> element in the built-in renderer's SVG output"
+        );
+        assert_eq!(no_root.help, builtin_mermaid_override_help());
+
+        let no_size =
+            svg_intrinsic_size_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        assert_eq!(
+            no_size.message,
+            "code_images 'mermaid' failed: built-in renderer's SVG has no usable intrinsic size (no absolute width/height and no viewBox)"
+        );
+        assert_eq!(no_size.help, builtin_mermaid_override_help());
+    }
+
+    #[test]
+    fn external_svg_output_errors_keep_command_context() {
+        let empty = svg_empty_output_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
+        assert_eq!(
+            empty.message,
+            "code_images 'mermaid' failed: command wrote empty stdout"
+        );
+        assert_eq!(
+            empty.help,
+            "make code_images.mermaid write an SVG document to stdout"
+        );
+
+        let not_svg = svg_not_document_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
+        assert_eq!(
+            not_svg.message,
+            "code_images 'mermaid' failed: command stdout is not an SVG document"
+        );
+        assert_eq!(
+            not_svg.help,
+            "make code_images.mermaid write an SVG document to stdout"
+        );
+
+        let no_root =
+            svg_root_not_found_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
+        assert_eq!(
+            no_root.message,
+            "code_images 'mermaid' failed: could not locate the root <svg> element in the command's SVG output"
+        );
+        assert_eq!(
+            no_root.help,
+            "make code_images.mermaid write a standalone SVG document to stdout"
+        );
+
+        let no_size =
+            svg_intrinsic_size_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
+        assert_eq!(
+            no_size.message,
+            "code_images 'mermaid' failed: command's SVG has no usable intrinsic size (no absolute width/height and no viewBox)"
+        );
+        assert_eq!(
+            no_size.help,
+            "make code_images.mermaid emit an SVG with a viewBox (width/height are derived from it) or absolute width/height attributes"
         );
     }
 

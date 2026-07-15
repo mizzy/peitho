@@ -30,7 +30,7 @@ Supported keys are `time`, `aspect_ratio`, `resolution`, `layouts`, `css`,
 | `css` | Theme CSS file or directory. |
 | `syntaxes` | Custom syntect syntax file or directory. |
 | `fonts` | Font asset file or directory. |
-| `code_images` | Commands that turn matching fenced code blocks into SVG images. |
+| `code_images` | External commands or overrides that turn matching fenced code blocks into SVG images. |
 
 Examples in the repository include:
 
@@ -45,15 +45,19 @@ resolution: 1920x1080
 
 ## Code images
 
-Use `code_images` when a fenced code block should be rendered by an external
-command at build time and then treated as an image. Each entry maps a language
-tag to a command string. Peitho shell-splits the string into argv and executes
-the program directly; it does not run the command through `sh -c`.
+Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
+then treated as images. Use `code_images` for other diagram tags, or when a
+deck needs to override the built-in Mermaid renderer with an external command.
+
+Each `code_images` entry maps a language tag to a command string. Peitho
+shell-splits the string into argv and executes the program directly; it does
+not run the command through `sh -c`.
 
 ````markdown
 ---
 code_images:
-  mermaid: mmdc -i - -o - -e svg
+  dot: dot -Tsvg
+  mermaid: mmdc -i - -o - -e svg  # optional override
 ---
 
 # Flow
@@ -69,12 +73,16 @@ to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
 then flows through the normal image resolver, so layouts should provide an
 `accepts="image"` slot.
 
+Bare boolean values such as `mermaid: false` and `mermaid: true` are reserved
+for possible future built-in opt-out syntax and are rejected with a line-numbered
+error. Use a command string when you want an override.
+
 Preview watches the deck, layout, CSS, syntax, and font roots. It does not watch
 files read by the command itself, such as Mermaid theme files or config JSON.
 Restart preview or touch the deck after changing those command inputs.
 
-See [Code Images](@/examples/code-images.md) for a complete Mermaid and
-Graphviz example deck.
+See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
+and Graphviz example deck.
 
 ## Asset resolution order
 

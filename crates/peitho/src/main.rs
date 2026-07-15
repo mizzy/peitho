@@ -2408,11 +2408,36 @@ fn spawn_preview_watch(
     server: server::PresentServer,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        if let Err(err) = watch_preview(watch, cache, server) {
+        if let Err(err) = preview_watch_thread_result(|| watch_preview(watch, cache, server)) {
             eprintln!("preview watch error: {err}");
             std::process::exit(1);
         }
     })
+}
+
+fn preview_watch_thread_result<F>(run_watch: F) -> std::result::Result<(), String>
+where
+    F: FnOnce() -> miette::Result<()>,
+{
+    // AssertUnwindSafe is acceptable here because the process exits immediately after a caught panic, so no state is observed post-panic.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_watch)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(payload) => Err(format!(
+            "preview watch panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )),
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_owned()
+    }
 }
 
 fn watch_preview(
@@ -3326,6 +3351,16 @@ contexts:
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
+    }
+
+    #[test]
+    fn preview_watch_thread_result_reports_panics_as_errors() {
+        let err = preview_watch_thread_result(|| -> miette::Result<()> {
+            panic!("boom");
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "preview watch panicked: boom");
     }
 
     #[test]

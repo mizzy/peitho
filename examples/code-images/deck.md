@@ -2,20 +2,19 @@
 layouts: ./layouts
 css: ./css
 code_images:
-  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
   dot: dot -Tsvg
 ---
 <!-- {"key":"mermaid-flow"} -->
-# Mermaid becomes a build artifact
+# Mermaid is built in
 
-Fenced `mermaid` source is sent to `mmdc` at build time. The SVG lands in
-Peitho's code image cache, then enters the normal image pipeline.
+Fenced `mermaid` source is rendered at build time without frontmatter. The SVG
+lands in Peitho's code image cache, then enters the normal image pipeline.
 
 ```mermaid
 flowchart LR
   Source["deck.md"] --> Fence["Mermaid fence"]
-  Fence --> Runner["mmdc stdin"]
-  Runner --> Cache[".peitho/code-images-cache"]
+  Fence --> Renderer["built-in renderer"]
+  Renderer --> Cache[".peitho/code-images-cache"]
   Cache --> Slot["image slot"]
 ```
 
@@ -55,8 +54,8 @@ digraph Peitho {
 # Before and after stay visible
 
 The left pane is the same Mermaid graph shown as ordinary Markdown source.
-The right pane is the matching fenced block after `code_images:` turns it into
-an SVG image.
+The right pane is the matching fenced block after Peitho's built-in Mermaid
+renderer turns it into an SVG image.
 
 ::: {slot=code}
 
@@ -84,15 +83,15 @@ flowchart LR
 <!-- {"key":"config-source"} -->
 # The deck owns the commands
 
-No diagram tool is built into Peitho. The deck declares which language tags are
-commands, and each command receives the fenced source on stdin.
+Mermaid is built in. The deck declares commands for non-built-in language tags,
+and each command receives the fenced source on stdin. An explicit
+`code_images.mermaid` entry would override the built-in renderer.
 
 ```yaml
 ---
 layouts: ./layouts
 css: ./css
 code_images:
-  mermaid: mmdc -p ./puppeteer-config.json -i - -o - -e svg
   dot: dot -Tsvg
 ---
 ```
