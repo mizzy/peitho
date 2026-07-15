@@ -18,14 +18,15 @@ by a missing closing `---` all stop the build.
 
 ## Keys
 
-Supported keys are `time`, `aspect_ratio`, `resolution`, `layouts`, `css`,
-`syntaxes`, `fonts`, and `code_images`.
+Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `layouts`,
+`css`, `syntaxes`, `fonts`, and `code_images`.
 
 | Key | Purpose |
 | --- | --- |
 | `time` | Planned presentation time: `15m`, `90s`, `1h30m`, or a bare integer in minutes. |
 | `aspect_ratio` | Slide canvas aspect ratio: `16:9` (default) or `4:3`. |
 | `resolution` | PDF-only physical page size in `WxH` CSS pixels. |
+| `breaks` | Render single newlines in slide body Markdown as hard line breaks: `true` or `false` (default). |
 | `layouts` | Layout HTML file or directory. |
 | `css` | Theme CSS file or directory. |
 | `syntaxes` | Custom syntect syntax file or directory. |
