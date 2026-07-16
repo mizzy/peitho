@@ -52,6 +52,7 @@ git diff --exit-code bindings/  # contract drift
 cd packages/peitho-present && npm run build && npm test && npm run typecheck
 git diff --exit-code packages/peitho-present/dist/shell.js  # embedded shell drift (after npm run build)
 git diff --exit-code packages/peitho-present/dist/preview.js  # embedded preview drift (after npm run build)
+git diff --exit-code packages/peitho-present/dist/remote.js  # embedded remote drift (after npm run build)
 ```
 
 Always verify UX changes end-to-end in a real browser/real display (jsdom cannot detect layout, flashing, or window behavior. Past incidents — a fully black screen, undelivered SSE, infinite rebuild loops — were only caught via E2E). For checking present, a fixed `--port` + `curl POST /sync` + `screencapture -x -D <n>` is handy.

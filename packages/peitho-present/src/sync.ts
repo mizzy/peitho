@@ -31,20 +31,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isCloseSyncMessage(value: unknown): value is { close: true } {
+export function isCloseSyncMessage(value: unknown): value is { close: true } {
   return isRecord(value) && value.close === true;
 }
 
-function isIndexSyncMessage(value: unknown): value is { index: number } {
-  return isRecord(value) && typeof value.index === "number";
+export function isIndexSyncMessage(value: unknown): value is { index: number } {
+  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
 }
 
-function isSwappedSyncMessage(value: unknown): value is { swapped: boolean } {
+export function isSwappedSyncMessage(value: unknown): value is { swapped: boolean } {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
 
 export function isGenerationSyncMessage(value: unknown): value is { generation: number } {
-  return isRecord(value) && typeof value.generation === "number";
+  return (
+    isRecord(value) &&
+    typeof value.generation === "number" &&
+    Number.isFinite(value.generation)
+  );
 }
 
 function defaultChannelFactory(name: string): SyncChannel {
@@ -85,13 +89,13 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
     let retryTimer: number | null = null;
 
     const deliverReplayState = (body: Partial<ServerSyncPollResponse>): void => {
-      if (typeof body.index === "number") {
+      if (isIndexSyncMessage(body)) {
         onmessage?.({ data: { index: body.index } });
       }
-      if (typeof body.swapped === "boolean") {
+      if (isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
       }
-      if (typeof body.generation === "number") {
+      if (isGenerationSyncMessage(body)) {
         onmessage?.({ data: { generation: body.generation } });
       }
     };

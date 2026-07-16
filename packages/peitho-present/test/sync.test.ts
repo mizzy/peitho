@@ -6,7 +6,13 @@ import {
   serverSyncChannelFactory
 } from "../src/index";
 import type { PresentShell } from "../src/index";
-import type { SyncChannel } from "../src/sync";
+import {
+  isCloseSyncMessage,
+  isGenerationSyncMessage,
+  isIndexSyncMessage,
+  isSwappedSyncMessage,
+  type SyncChannel
+} from "../src/sync";
 
 function okJson(value: unknown): Response {
   return { ok: true, status: 200, json: async () => value } as Response;
@@ -68,6 +74,21 @@ function mockChannel() {
   };
   return channel;
 }
+
+it("exports strict sync message guards", () => {
+  expect(isCloseSyncMessage({ close: true })).toBe(true);
+  expect(isCloseSyncMessage({ close: false })).toBe(false);
+
+  expect(isIndexSyncMessage({ index: 1 })).toBe(true);
+  expect(isIndexSyncMessage({ index: Number.NaN })).toBe(false);
+  expect(isIndexSyncMessage({ index: Number.POSITIVE_INFINITY })).toBe(false);
+
+  expect(isSwappedSyncMessage({ swapped: true })).toBe(true);
+  expect(isSwappedSyncMessage({ swapped: "true" })).toBe(false);
+
+  expect(isGenerationSyncMessage({ generation: 1 })).toBe(true);
+  expect(isGenerationSyncMessage({ generation: Number.NaN })).toBe(false);
+});
 
 it("server sync channel posts local messages to /sync", async () => {
   const fetcher = vi.fn((url: string, init?: RequestInit) => {

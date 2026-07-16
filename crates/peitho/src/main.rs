@@ -4,6 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, IsTerminal, Read, Write},
+    net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Component, Path, PathBuf},
     process::{Child, ExitStatus, Stdio},
     sync::mpsc,
@@ -323,6 +324,7 @@ struct PresentOptions {
     no_serve: bool,
     no_presenter: bool,
     presenter_windowed: bool,
+    host: Option<IpAddr>,
 }
 
 struct PreviewOptions {
@@ -404,6 +406,8 @@ enum Command {
         no_presenter: bool,
         #[arg(long)]
         presenter_windowed: bool,
+        #[arg(long, value_name = "IP")]
+        host: Option<IpAddr>,
     },
     Publish {
         #[arg(long, default_value = "dist")]
@@ -441,11 +445,18 @@ const BUILTIN_BASE_CSS: &str = include_str!("../../../themes/base.css");
 /// discipline as the generated TS types in bindings/.
 const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/dist/shell.js");
 const BUILTIN_PREVIEW_JS: &str = include_str!("../../../packages/peitho-present/dist/preview.js");
+const BUILTIN_REMOTE_JS: &str = include_str!("../../../packages/peitho-present/dist/remote.js");
 
 const PRESENT_CACHE: &str = ".peitho/present-cache";
 const PREVIEW_CACHE: &str = ".peitho/preview-cache";
-const PRESENTATION_ONLY_DIST_FILES: &[&str] =
-    &["present.html", "presenter.html", "notes.json", "shell.js"];
+const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
+    "present.html",
+    "presenter.html",
+    "remote.html",
+    "notes.json",
+    "shell.js",
+    "remote.js",
+];
 
 fn main() -> miette::Result<()> {
     let cli = Cli::parse();
@@ -512,6 +523,7 @@ fn main() -> miette::Result<()> {
             no_serve,
             no_presenter,
             presenter_windowed,
+            host,
         } => present(PresentOptions {
             input,
             shell,
@@ -520,6 +532,7 @@ fn main() -> miette::Result<()> {
             no_serve,
             no_presenter,
             presenter_windowed,
+            host,
         }),
         Command::Publish { dist, command } => {
             let code = publish(&dist, &command)?;
@@ -2434,6 +2447,8 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
 }
 
 fn present(options: PresentOptions) -> miette::Result<()> {
+    validate_present_options(&options)?;
+
     let cache = PathBuf::from(PRESENT_CACHE);
     if cache.exists() {
         fs::remove_dir_all(&cache).into_diagnostic()?;
@@ -2447,7 +2462,12 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         return Ok(());
     }
 
-    let server = server::PresentServer::bind(cache.clone(), options.port, "present.html")?;
+    let server = server::PresentServer::bind_with_host(
+        cache.clone(),
+        options.port,
+        "present.html",
+        options.host,
+    )?;
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
     let browser_plan = if options.no_open {
@@ -2467,6 +2487,17 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         .is_some_and(|plan| plan.opens_presenter);
     emit_present_cache(&cache, &artifacts, options.shell.as_deref(), presenter_open)?;
     println!("serving presentation at {url}");
+    if let Some(host) = options.host {
+        let port = server.addr().port();
+        let target = if host.is_unspecified() {
+            RemoteControlTarget::Candidates(remote_url_candidates_from_interfaces(port, host))
+        } else {
+            RemoteControlTarget::Specific(host)
+        };
+        for line in format_remote_control_lines(target, port) {
+            println!("{line}");
+        }
+    }
     std::io::stdout().flush().into_diagnostic()?;
     if let Some(plan) = browser_plan {
         browser::open_browser_plan(plan);
@@ -2476,6 +2507,72 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         browser::quit_profile_instances();
     }
     result
+}
+
+fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
+    let Some(host) = options.host else {
+        return Ok(());
+    };
+    if options.no_serve {
+        return Err(miette::miette!(
+            "--host requires the present server\nhelp: remove --no-serve or omit --host"
+        ));
+    }
+    if host.is_loopback() {
+        return Err(miette::miette!(
+            "--host must be non-loopback\nhelp: use the default loopback server without --host, or pass a reachable Tailscale/LAN IP address"
+        ));
+    }
+    Ok(())
+}
+
+enum RemoteControlTarget {
+    Specific(IpAddr),
+    Candidates(Vec<peitho::remote_url::RemoteUrlCandidate>),
+}
+
+fn format_remote_control_lines(target: RemoteControlTarget, port: u16) -> Vec<String> {
+    match target {
+        RemoteControlTarget::Specific(host) => vec![format!(
+            "remote control: {}",
+            peitho::remote_url::remote_url_for_addr(host, port)
+        )],
+        RemoteControlTarget::Candidates(candidates) if candidates.is_empty() => {
+            vec!["remote control: no non-loopback network addresses found".to_owned()]
+        }
+        RemoteControlTarget::Candidates(candidates) => candidates
+            .iter()
+            .map(|candidate| match candidate.label {
+                Some(label) => format!("remote control ({}): {}", label.as_str(), candidate.url),
+                None => format!("remote control: {}", candidate.url),
+            })
+            .collect(),
+    }
+}
+
+fn remote_url_candidates_from_interfaces(
+    port: u16,
+    bound_wildcard: IpAddr,
+) -> Vec<peitho::remote_url::RemoteUrlCandidate> {
+    let addrs = match if_addrs::get_if_addrs() {
+        Ok(addrs) => addrs.into_iter().map(|addr| addr.ip()).collect::<Vec<_>>(),
+        Err(err) => {
+            eprintln!("warning: failed to enumerate network interfaces for remote URL: {err}");
+            Vec::new()
+        }
+    };
+    peitho::remote_url::remote_url_candidates(
+        &addrs,
+        default_route_ipv4(),
+        port,
+        Some(bound_wildcard),
+    )
+}
+
+fn default_route_ipv4() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 fn preview(options: PreviewOptions) -> miette::Result<()> {
@@ -2690,6 +2787,12 @@ fn emit_present_cache(
         peitho_core::render_presenter_index(artifacts.rendered.settings().aspect_ratio()),
     )
     .into_diagnostic()?;
+    fs::write(
+        cache.join("remote.html"),
+        peitho_core::render_remote_index(),
+    )
+    .into_diagnostic()?;
+    fs::write(cache.join("remote.js"), BUILTIN_REMOTE_JS).into_diagnostic()?;
     match shell {
         Some(shell) => {
             fs::copy(shell, cache.join("shell.js")).into_diagnostic()?;
@@ -4720,6 +4823,135 @@ contexts:
     }
 
     #[test]
+    fn present_command_accepts_host_flag() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--host", "100.64.0.5"]);
+
+        match cli.command {
+            Command::Present { input, host, .. } => {
+                assert_eq!(input, PathBuf::from("deck.md"));
+                assert_eq!(host, Some("100.64.0.5".parse().unwrap()));
+            }
+            Command::Build { .. }
+            | Command::Lint { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
+    }
+
+    #[test]
+    fn present_command_rejects_invalid_host_ip() {
+        let err = Cli::try_parse_from(["peitho", "present", "deck.md", "--host", "not-an-ip"])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn present_options_reject_host_with_no_serve() {
+        let options = PresentOptions {
+            input: PathBuf::from("deck.md"),
+            shell: None,
+            port: 0,
+            no_open: true,
+            no_serve: true,
+            no_presenter: false,
+            presenter_windowed: false,
+            host: Some("100.64.0.5".parse().unwrap()),
+        };
+
+        let err = validate_present_options(&options).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--host requires the present server"));
+        assert!(err.to_string().contains("--no-serve"));
+    }
+
+    #[test]
+    fn present_options_reject_loopback_host() {
+        let options = PresentOptions {
+            input: PathBuf::from("deck.md"),
+            shell: None,
+            port: 0,
+            no_open: true,
+            no_serve: false,
+            no_presenter: false,
+            presenter_windowed: false,
+            host: Some("127.0.0.1".parse().unwrap()),
+        };
+
+        let err = validate_present_options(&options).unwrap_err();
+
+        assert!(err.to_string().contains("--host must be non-loopback"));
+        assert!(err.to_string().contains("use the default loopback server"));
+    }
+
+    #[test]
+    fn remote_control_lines_format_specific_host() {
+        let lines = format_remote_control_lines(
+            RemoteControlTarget::Specific("100.64.0.5".parse().unwrap()),
+            3000,
+        );
+
+        assert_eq!(lines, vec!["remote control: http://100.64.0.5:3000/remote"]);
+    }
+
+    #[test]
+    fn remote_control_lines_bracket_specific_ipv6_host() {
+        let lines = format_remote_control_lines(
+            RemoteControlTarget::Specific("2001:db8::5".parse().unwrap()),
+            3000,
+        );
+
+        assert_eq!(
+            lines,
+            vec!["remote control: http://[2001:db8::5]:3000/remote"]
+        );
+    }
+
+    #[test]
+    fn remote_control_lines_format_unspecified_host_candidates_with_labels() {
+        let candidates = peitho::remote_url::remote_url_candidates(
+            &[
+                "192.168.1.20".parse().unwrap(),
+                "100.100.10.5".parse().unwrap(),
+                "10.0.0.15".parse().unwrap(),
+            ],
+            Some("10.0.0.15".parse().unwrap()),
+            3000,
+            None,
+        );
+
+        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(candidates), 3000);
+
+        assert_eq!(
+            lines,
+            vec![
+                "remote control: http://10.0.0.15:3000/remote",
+                "remote control (Tailscale): http://100.100.10.5:3000/remote",
+                "remote control: http://192.168.1.20:3000/remote"
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_control_lines_show_when_unspecified_host_has_no_candidates() {
+        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(Vec::new()), 3000);
+
+        assert_eq!(
+            lines,
+            vec!["remote control: no non-loopback network addresses found"]
+        );
+    }
+
+    #[test]
     fn lint_command_defaults_input_to_deck_md() {
         let cli = Cli::parse_from(["peitho", "lint"]);
 
@@ -5539,6 +5771,8 @@ printf '0 bytes written to file %s\n' "$out" >&2
         assert!(!generation_dir.join("presenter.html").exists());
         assert!(!generation_dir.join("present.json").exists());
         assert!(!generation_dir.join("shell.js").exists());
+        assert!(!generation_dir.join("remote.html").exists());
+        assert!(!generation_dir.join("remote.js").exists());
 
         let index = fs::read_to_string(generation_dir.join("index.html")).unwrap();
         assert!(index.contains("./preview.js"));
@@ -5704,6 +5938,16 @@ printf '0 bytes written to file %s\n' "$out" >&2
         .unwrap();
 
         assert_eq!(BUILTIN_PREVIEW_JS, committed);
+    }
+
+    #[test]
+    fn builtin_remote_shell_matches_committed_bundle() {
+        let committed = fs::read_to_string(
+            workspace_root_for_tests().join("packages/peitho-present/dist/remote.js"),
+        )
+        .unwrap();
+
+        assert_eq!(BUILTIN_REMOTE_JS, committed);
     }
 
     #[test]

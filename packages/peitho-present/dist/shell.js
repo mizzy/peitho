@@ -741,6 +741,10 @@ function nextNonSkippedIndex(slides, from, direction) {
   }
   return null;
 }
+function initialSlideIndex(slides) {
+  if (slides.length === 0) return null;
+  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
+}
 
 // src/shell.ts
 async function mountPresentShell(options) {
@@ -825,7 +829,7 @@ var PresentShellController = class {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0);
+      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -1030,13 +1034,13 @@ function isCloseSyncMessage(value) {
   return isRecord(value) && value.close === true;
 }
 function isIndexSyncMessage(value) {
-  return isRecord(value) && typeof value.index === "number";
+  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
 }
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
 function isGenerationSyncMessage(value) {
-  return isRecord(value) && typeof value.generation === "number";
+  return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
 function defaultChannelFactory(name) {
   const channel = new BroadcastChannel(name);
@@ -1073,13 +1077,13 @@ function serverSyncChannelFactory(options = {}) {
     let abortController = null;
     let retryTimer = null;
     const deliverReplayState = (body) => {
-      if (typeof body.index === "number") {
+      if (isIndexSyncMessage(body)) {
         onmessage?.({ data: { index: body.index } });
       }
-      if (typeof body.swapped === "boolean") {
+      if (isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
       }
-      if (typeof body.generation === "number") {
+      if (isGenerationSyncMessage(body)) {
         onmessage?.({ data: { generation: body.generation } });
       }
     };

@@ -2,7 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
-import { nextNonSkippedIndex } from "./skipnav";
+import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 
 export type NavigateTarget =
   | "next"
@@ -141,7 +141,7 @@ class PresentShellController implements PresentShell {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0);
+      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();

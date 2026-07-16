@@ -233,6 +233,10 @@ function nextNonSkippedIndex(slides, from, direction) {
   }
   return null;
 }
+function initialSlideIndex(slides) {
+  if (slides.length === 0) return null;
+  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
+}
 
 // src/swap.ts
 var SWAP_ROUTES = Object.freeze({
@@ -248,8 +252,14 @@ var SWAP_ROUTES = Object.freeze({
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
+function isIndexSyncMessage(value) {
+  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
+}
+function isSwappedSyncMessage(value) {
+  return isRecord(value) && typeof value.swapped === "boolean";
+}
 function isGenerationSyncMessage(value) {
-  return isRecord(value) && typeof value.generation === "number";
+  return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
 function serverSyncChannelFactory(options = {}) {
   const url = options.url ?? "/sync";
@@ -265,13 +275,13 @@ function serverSyncChannelFactory(options = {}) {
     let abortController = null;
     let retryTimer = null;
     const deliverReplayState = (body) => {
-      if (typeof body.index === "number") {
+      if (isIndexSyncMessage(body)) {
         onmessage?.({ data: { index: body.index } });
       }
-      if (typeof body.swapped === "boolean") {
+      if (isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
       }
-      if (typeof body.generation === "number") {
+      if (isGenerationSyncMessage(body)) {
         onmessage?.({ data: { generation: body.generation } });
       }
     };
@@ -545,7 +555,7 @@ var PreviewShellController = class {
         this.slides.push(view);
       }
       const restored = this.restoredState;
-      const restoredIndex = restored === null ? this.clampIndex(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0) : this.clampIndex(restored.index);
+      const restoredIndex = restored === null ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? "single";
