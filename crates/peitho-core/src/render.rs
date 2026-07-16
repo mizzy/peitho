@@ -760,15 +760,15 @@ pub fn render_remote_index() -> String {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Peitho Remote</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     html, body { margin: 0; min-height: 100%; background: #101216; color: #f5f7fb; }
-    body { min-height: 100vh; }
-    #peitho-remote-root { min-height: 100vh; display: grid; align-items: stretch; padding: 20px; box-sizing: border-box; }
+    body { min-height: 100vh; min-height: 100svh; }
+    #peitho-remote-root { min-height: 100vh; min-height: 100svh; display: grid; align-items: stretch; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
     .peitho-remote-error { align-self: center; justify-self: center; max-width: 32rem; padding: 16px; border: 1px solid #7f1d1d; background: #2a1215; color: #ffd7d7; border-radius: 6px; line-height: 1.4; }
-    .peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); }
+    .peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); min-height: calc(100svh - 40px); }
     .peitho-remote-counter { align-self: start; justify-self: center; font-size: clamp(2rem, 11vw, 4.5rem); font-weight: 700; }
     .peitho-remote-status { min-height: 1.5em; text-align: center; color: #aab3c2; }
     .peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-self: end; }
@@ -1684,8 +1684,16 @@ Paragraph after heading.
     fn remote_index_mounts_remote_bundle_with_feature_detection() {
         let html = render_remote_index();
 
-        assert!(html
-            .contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#));
+        assert!(html.contains(
+            r#"<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">"#
+        ));
+        assert!(html.contains("100svh"));
+        assert!(html.contains("body { min-height: 100vh; min-height: 100svh; }"));
+        assert!(html.contains("#peitho-remote-root { min-height: 100vh; min-height: 100svh;"));
+        assert!(html.contains(
+            ".peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); min-height: calc(100svh - 40px);"
+        ));
+        assert!(html.contains("env(safe-area-inset-bottom"));
         assert!(html.contains("import * as peitho from './remote.js';"));
         assert!(html.contains("typeof peitho.mountRemoteView === 'function'"));
         assert!(
