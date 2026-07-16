@@ -215,6 +215,13 @@ samp {
   justify-content: center;
 }
 
+/* Passthrough the slot wrapper so the flex shrink from `.shot-frame`
+   reaches `.shot-frame img`. Scoped to `.shot-frame`: other `.slot-*`
+   wrappers keep their box (see docs/plans/2026-07-12-code-images-svg-intrinsic-size.md). */
+.shot-frame .slot-shot {
+  display: contents;
+}
+
 .shot-frame img {
   max-width: 100%;
   max-height: 100%;
