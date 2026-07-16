@@ -267,7 +267,17 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     viewport: paneViewport(previewRoot)
   });
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
-  const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
+  const syncCleanup = installSyncBridge(
+    win,
+    options.syncChannelFactory,
+    bus,
+    {
+      adoptTimerState: (state) => {
+        mainShell.adoptTimerState(state);
+        tick();
+      }
+    }
+  );
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs =
     rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs)

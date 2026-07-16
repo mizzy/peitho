@@ -418,6 +418,67 @@ it("keeps actuals stable while paused with a non-null startedAt", () => {
   expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 0:02");
 });
 
+it("rebases elapsed after timer adoption without attributing the adopted delta", () => {
+  let elapsed = 0;
+  const root = document.createElement("div");
+  const bus = new EventTarget();
+  const cleanup = installAgenda({
+    root,
+    shell: {
+      currentIndex: 0,
+      elapsedMs: () => elapsed,
+      startedAt: () => 100
+    },
+    sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  elapsed = 1_000;
+  vi.advanceTimersByTime(250);
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 1:00");
+
+  elapsed = 1_201_000;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timeradopt", {
+      detail: { running: true, previousElapsedMs: 1_000, elapsedMs: 1_201_000 }
+    })
+  );
+  vi.advanceTimersByTime(250);
+
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 1:00");
+});
+
+it("attributes pending elapsed time before continuous timer adopt rebases", () => {
+  const root = document.createElement("div");
+  const bus = new EventTarget();
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0, startedAt: () => 100 }),
+    sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 10_000 }],
+    bus,
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  for (let i = 1; i <= 10; i += 1) {
+    bus.dispatchEvent(
+      new CustomEvent("peitho:timeradopt", {
+        detail: {
+          running: true,
+          previousElapsedMs: i * 210 - 10,
+          elapsedMs: i * 210
+        }
+      })
+    );
+  }
+
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:02 / 0:10");
+});
+
 it("flushes pending elapsed time to the previous section on slidechange", () => {
   let elapsed = 0;
   let currentIndex = 0;

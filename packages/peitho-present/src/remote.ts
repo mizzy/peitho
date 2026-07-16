@@ -1,15 +1,46 @@
 import type { Manifest } from "../../../bindings/Manifest";
+import type { Notes } from "../../../bindings/Notes";
+import { sectionIndexForSlide } from "./sections";
+import {
+  mountPresentShell as defaultMountPresentShell,
+  type PresentShell,
+  type ShellOptions,
+  type TimerControlDetail
+} from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
+  isSyncedSyncMessage,
   isSwappedSyncMessage,
+  isTimerReplaySyncMessage,
+  isTimerSyncMessage,
   serverSyncChannelFactory,
   type SyncChannelFactory
 } from "./sync";
+import { clamp01, formatMinuteSeconds, isValidDurationMs } from "./timeTracker";
 
-type RemoteSlide = { skip: boolean };
+export { mountPresentShell } from "./shell";
+export { serverSyncChannelFactory } from "./sync";
+
+type RemoteSlide = {
+  key: string;
+  skip: boolean;
+  title: string;
+};
+
+type RemoteTimerAnchor = {
+  running: boolean;
+  elapsedMs: number;
+  receivedAtMs: number;
+};
+
+type TimerVisualState = "stopped" | "running" | "paused";
+
+export type RemotePaceState =
+  | { kind: "ahead" | "behind"; label: string; emoji: "hare" | "tortoise" }
+  | { kind: "paused"; label: "Paused"; emoji: null };
 
 export type RemoteView = {
   manifest: Manifest | null;
@@ -20,12 +51,16 @@ export type RemoteView = {
 export type RemoteViewOptions = {
   root: HTMLElement;
   manifestUrl?: string;
+  notesUrl?: string;
   fetcher?: typeof fetch;
   channelFactory?: SyncChannelFactory;
+  syncChannelFactory?: SyncChannelFactory;
+  mountPresentShell?: (options: ShellOptions) => Promise<PresentShell>;
   window?: Window;
   document?: Document;
   bus?: EventTarget;
   console?: Pick<Console, "error">;
+  now?: () => number;
 };
 
 export type RemoteControlsOptions = {
@@ -38,8 +73,12 @@ export type RemoteSyncBridgeOptions = {
   slides: ReadonlyArray<RemoteSlide>;
   channelFactory?: SyncChannelFactory;
   bus?: EventTarget;
+  now?: () => number;
   getCurrentIndex(): number | null;
   setCurrentIndex(index: number): void;
+  getTimerState(): RemoteTimerAnchor | null;
+  setTimerState(state: RemoteTimerAnchor): void;
+  setSynced(): void;
   setEnded(): void;
   console?: Pick<Console, "error">;
 };
@@ -59,11 +98,82 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
 
   const container = doc.createElement("section");
   container.className = "peitho-remote";
+  container.dataset.peithoEnded = "false";
 
+  const preview = doc.createElement("div");
+  preview.className = "peitho-remote-preview peitho-remote-dim-on-end";
+  preview.dataset.peithoRemote = "preview";
+
+  const titlebar = doc.createElement("div");
+  titlebar.className = "peitho-remote-titlebar peitho-remote-dim-on-end";
+  const title = doc.createElement("div");
+  title.className = "peitho-remote-title";
+  title.dataset.peithoRemote = "title";
+  title.textContent = "Loading";
   const counter = doc.createElement("div");
   counter.className = "peitho-remote-counter";
   counter.dataset.peithoRemote = "counter";
   counter.textContent = "– / –";
+  titlebar.append(title, counter);
+
+  const progress = doc.createElement("div");
+  progress.className = "peitho-remote-progress peitho-remote-dim-on-end";
+  progress.dataset.peithoRemote = "progress";
+  const progressFill = doc.createElement("div");
+  progressFill.className = "peitho-remote-progress-fill";
+  progressFill.dataset.peithoRemote = "progress-fill";
+  const planTick = doc.createElement("div");
+  planTick.className = "peitho-remote-plan-tick";
+  planTick.dataset.peithoRemote = "plan-tick";
+  planTick.hidden = true;
+  progress.append(progressFill, planTick);
+
+  const pace = doc.createElement("div");
+  pace.className = "peitho-remote-pace peitho-remote-dim-on-end";
+  const timerButton = doc.createElement("button");
+  timerButton.type = "button";
+  timerButton.className = "peitho-remote-timer-button";
+  timerButton.dataset.peithoAction = "timer";
+  timerButton.dataset.peithoRunning = "false";
+  timerButton.dataset.peithoTimerAction = "start";
+  timerButton.disabled = true;
+  timerButton.setAttribute("aria-label", "Start timer");
+  const timerIcon = doc.createElement("span");
+  timerIcon.className = "peitho-remote-timer-icon";
+  timerIcon.dataset.peithoIcon = "play";
+  timerButton.append(timerIcon);
+  const elapsedRow = doc.createElement("div");
+  elapsedRow.className = "peitho-remote-elapsed-row";
+  elapsedRow.dataset.peithoRemote = "elapsed-row";
+  const elapsed = doc.createElement("span");
+  elapsed.className = "peitho-remote-elapsed";
+  elapsed.dataset.peithoRemote = "elapsed";
+  elapsed.textContent = "0:00";
+  const separator = doc.createElement("span");
+  separator.className = "peitho-remote-time-separator";
+  separator.dataset.peithoRemote = "time-separator";
+  separator.textContent = "/";
+  separator.hidden = true;
+  const planned = doc.createElement("span");
+  planned.className = "peitho-remote-planned";
+  planned.dataset.peithoRemote = "planned";
+  planned.hidden = true;
+  elapsedRow.append(elapsed, separator, planned);
+  const chip = doc.createElement("span");
+  chip.className = "peitho-remote-pace-chip";
+  chip.dataset.peithoRemote = "pace-chip";
+  chip.hidden = true;
+  pace.append(timerButton, elapsedRow, chip);
+
+  const notesPanel = doc.createElement("section");
+  notesPanel.className = "peitho-remote-notes peitho-remote-dim-on-end";
+  const notesCaption = doc.createElement("div");
+  notesCaption.className = "peitho-remote-notes-caption";
+  notesCaption.textContent = "NOTES";
+  const notesBody = doc.createElement("div");
+  notesBody.className = "peitho-remote-notes-body";
+  notesBody.dataset.peithoRemote = "notes";
+  notesPanel.append(notesCaption, notesBody);
 
   const status = doc.createElement("div");
   status.className = "peitho-remote-status";
@@ -71,22 +181,29 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
 
   const actions = doc.createElement("div");
   actions.className = "peitho-remote-actions";
-
   const prev = remoteButton(doc, "prev", "Previous");
   const next = remoteButton(doc, "next", "Next");
+  actions.append(prev, next);
 
   const onPrev = (): void => dispatchNavigate(bus, "prev");
   const onNext = (): void => dispatchNavigate(bus, "next");
+  const onTimer = (): void => {
+    const action = timerButton.dataset.peithoTimerAction;
+    if (action === "start" || action === "pause" || action === "resume") {
+      dispatchTimerControl(bus, action);
+    }
+  };
   prev.addEventListener("click", onPrev);
   next.addEventListener("click", onNext);
+  timerButton.addEventListener("click", onTimer);
 
-  actions.append(prev, next);
-  container.append(counter, status, actions);
+  container.append(preview, titlebar, progress, pace, notesPanel, status, actions);
   root.append(container);
 
   return () => {
     prev.removeEventListener("click", onPrev);
     next.removeEventListener("click", onNext);
+    timerButton.removeEventListener("click", onTimer);
     container.remove();
   };
 }
@@ -94,9 +211,12 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
 export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () => void {
   const bus = options.bus ?? window;
   const log = options.console ?? console;
+  const now = options.now ?? Date.now;
   const channel = (options.channelFactory ?? serverSyncChannelFactory())("peitho-sync");
+  let synced = false;
 
   const onNavigate = (event: Event): void => {
+    if (!synced) return;
     const to = (event as CustomEvent<{ to?: unknown }>).detail?.to;
     if (to !== "next" && to !== "prev") return;
     const target = resolveRemoteTarget(options.slides, options.getCurrentIndex(), to);
@@ -105,8 +225,28 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
     options.setCurrentIndex(target);
   };
 
+  const onTimerControl = (event: Event): void => {
+    if (!synced) return;
+    const action = (event as CustomEvent<TimerControlDetail>).detail?.action;
+    if (action !== "start" && action !== "pause" && action !== "resume" && action !== "reset") {
+      log.error("Invalid peitho:timercontrol event");
+      return;
+    }
+    const next = nextTimerStateForAction(action, options.getTimerState(), now());
+    if (next === null) return;
+    channel.postMessage({
+      timer: { running: next.running, elapsedMs: Math.round(next.elapsedMs) }
+    });
+    options.setTimerState(next);
+  };
+
   channel.onmessage = (event: { data: unknown }): void => {
     const data = event.data;
+    if (isSyncedSyncMessage(data)) {
+      synced = true;
+      options.setSynced();
+      return;
+    }
     if (isCloseSyncMessage(data)) {
       options.setEnded();
       return;
@@ -115,13 +255,30 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
       options.setCurrentIndex(data.index);
       return;
     }
-    if (isSwappedSyncMessage(data) || isGenerationSyncMessage(data)) return;
+    if (isTimerReplaySyncMessage(data)) {
+      const serverAdvance = data.timer.running ? Math.max(0, data.nowMs - data.timer.atMs) : 0;
+      options.setTimerState({
+        running: data.timer.running,
+        elapsedMs: data.timer.elapsedMs + serverAdvance,
+        receivedAtMs: now()
+      });
+      return;
+    }
+    if (
+      isSwappedSyncMessage(data) ||
+      isGenerationSyncMessage(data) ||
+      isTimerSyncMessage(data)
+    ) {
+      return;
+    }
     log.error("Invalid peitho remote sync message");
   };
 
   bus.addEventListener("peitho:navigate", onNavigate);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
   return () => {
     bus.removeEventListener("peitho:navigate", onNavigate);
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
     channel.onmessage = null;
     channel.close();
   };
@@ -132,45 +289,81 @@ class RemoteController implements RemoteView {
   currentIndex: number | null = null;
   private readonly root: HTMLElement;
   private readonly manifestUrl: string;
+  private readonly notesUrl: string;
   private readonly fetcher: typeof fetch;
   private readonly channelFactory?: SyncChannelFactory;
+  private readonly mountPresentShell: (options: ShellOptions) => Promise<PresentShell>;
   private readonly win: Window;
   private readonly doc: Document;
   private readonly bus: EventTarget;
+  private readonly previewBus = new EventTarget();
   private readonly log: Pick<Console, "error">;
+  private readonly now: () => number;
+  private synced = false;
+  private notes: Notes = { version: 1, notes: {} };
+  private renderedNotesValue: string | null = null;
   private slides: RemoteSlide[] = [];
+  private ended = false;
+  private timerState: RemoteTimerAnchor | null = null;
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
+  private previewShell: PresentShell | null = null;
+  private timerInterval: number | null = null;
 
   constructor(options: RemoteViewOptions) {
     this.root = options.root;
     this.manifestUrl = options.manifestUrl ?? "manifest.json";
+    this.notesUrl = options.notesUrl ?? "notes.json";
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
-    this.channelFactory = options.channelFactory;
+    this.channelFactory = options.syncChannelFactory ?? options.channelFactory;
+    this.mountPresentShell = options.mountPresentShell ?? defaultMountPresentShell;
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
     this.bus = options.bus ?? this.win;
     this.log = options.console ?? console;
+    this.now = options.now ?? Date.now;
   }
 
   async load(): Promise<void> {
     try {
       const manifest = await this.fetchJson<Manifest>(this.manifestUrl);
       this.manifest = manifest;
-      this.slides = manifest.slides.map((slide) => ({ skip: slide.skip === true }));
+      this.notes = await this.fetchNotes();
+      this.slides = manifest.slides.map((slide) => ({
+        key: slide.key,
+        skip: slide.skip === true,
+        title: slide.text.title
+      }));
       this.currentIndex = initialSlideIndex(this.slides);
       this.controlsCleanup = installRemoteControls({
         root: this.root,
         document: this.doc,
         bus: this.bus
       });
-      this.renderCounter();
+      const previewRoot = this.root.querySelector<HTMLElement>('[data-peitho-remote="preview"]');
+      if (previewRoot != null) {
+        this.previewShell = await this.mountPresentShell({
+          root: previewRoot,
+          fetcher: this.fetcher,
+          window: this.win,
+          document: this.doc,
+          bus: this.previewBus,
+          manifest,
+          now: this.now,
+          viewport: paneViewport(previewRoot)
+        });
+      }
+      this.render();
       this.syncCleanup = installRemoteSyncBridge({
         slides: this.slides,
         channelFactory: this.channelFactory,
         bus: this.bus,
+        now: this.now,
         getCurrentIndex: () => this.currentIndex,
         setCurrentIndex: (index) => this.setCurrentIndex(index),
+        getTimerState: () => this.timerState,
+        setTimerState: (state) => this.setTimerState(state),
+        setSynced: () => this.setSynced(),
         setEnded: () => this.setEnded(),
         console: this.log
       });
@@ -180,8 +373,11 @@ class RemoteController implements RemoteView {
   }
 
   destroy(): void {
+    this.clearTimerInterval();
     this.syncCleanup?.();
     this.syncCleanup = null;
+    this.previewShell?.destroy();
+    this.previewShell = null;
     this.controlsCleanup?.();
     this.controlsCleanup = null;
   }
@@ -192,27 +388,226 @@ class RemoteController implements RemoteView {
     return response.json() as Promise<T>;
   }
 
+  private async fetchNotes(): Promise<Notes> {
+    try {
+      return await this.fetchJson<Notes>(this.notesUrl);
+    } catch (error) {
+      this.log.error(
+        `Failed to load ${this.notesUrl}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return { version: 1, notes: {} };
+    }
+  }
+
   private setCurrentIndex(index: number): void {
     this.currentIndex = clampIndex(index, this.slides.length);
-    this.renderCounter();
+    this.render();
+  }
+
+  private setTimerState(state: RemoteTimerAnchor): void {
+    this.timerState = {
+      running: state.running,
+      elapsedMs: Math.max(0, state.elapsedMs),
+      receivedAtMs: state.receivedAtMs
+    };
+    this.render();
+  }
+
+  private setSynced(): void {
+    this.synced = true;
+    this.render();
   }
 
   private setEnded(): void {
     const cleanup = this.syncCleanup;
     this.syncCleanup = null;
     cleanup?.();
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-peitho-action]")) {
-      button.disabled = true;
-    }
-    const status = this.root.querySelector<HTMLElement>('[data-peitho-remote="status"]');
-    if (status != null) status.textContent = "Ended";
+    this.ended = true;
+    this.clearTimerInterval();
+    this.render();
   }
 
-  private renderCounter(): void {
-    const counter = this.root.querySelector<HTMLElement>('[data-peitho-remote="counter"]');
-    if (counter == null) return;
+  private render(): void {
+    const manifest = this.manifest;
+    if (manifest == null) return;
+    const container = this.root.querySelector<HTMLElement>(".peitho-remote");
+    if (container == null) return;
+    container.dataset.peithoEnded = this.ended ? "true" : "false";
+    const currentIndex = this.currentIndex;
+    const slide = currentIndex == null ? null : manifest.slides[currentIndex];
     const total = this.slides.length;
-    counter.textContent = this.currentIndex === null ? `– / ${total}` : `${this.currentIndex + 1} / ${total}`;
+
+    setText(this.root, "title", slideTitle(slide?.text.title));
+    setText(this.root, "counter", currentIndex == null ? `– / ${total}` : `${currentIndex + 1} / ${total}`);
+
+    this.renderProgress(manifest, currentIndex);
+    this.renderPaceStatic(manifest);
+    this.renderTimeDependentChrome(manifest, currentIndex);
+    this.renderSection(manifest, currentIndex);
+    this.renderNotes(slide?.key);
+    this.renderButtons(currentIndex);
+    setText(this.root, "status", this.ended ? "Ended" : "");
+    this.syncPreview(currentIndex);
+    this.updateTimerInterval();
+  }
+
+  private renderProgress(manifest: Manifest, currentIndex: number | null): void {
+    const progress = this.root.querySelector<HTMLElement>('[data-peitho-remote="progress"]');
+    const fill = this.root.querySelector<HTMLElement>('[data-peitho-remote="progress-fill"]');
+    if (progress == null || fill == null) return;
+    const fraction =
+      currentIndex == null ? 0 : manifest.slideCount <= 1 ? 1 : currentIndex / (manifest.slideCount - 1);
+    fill.style.width = `${clamp01(fraction) * 100}%`;
+    this.updatePlanTick(manifest, this.currentElapsedMs());
+  }
+
+  private renderPaceStatic(manifest: Manifest): void {
+    const elapsedRow = this.root.querySelector<HTMLElement>('[data-peitho-remote="elapsed-row"]');
+    if (elapsedRow == null) return;
+    const separator = elapsedRow.querySelector<HTMLElement>('[data-peitho-remote="time-separator"]');
+    const planned = elapsedRow.querySelector<HTMLElement>('[data-peitho-remote="planned"]');
+    const plannedDurationMs = validPlannedDurationMs(manifest);
+    if (separator != null) separator.hidden = plannedDurationMs == null;
+    if (planned != null) {
+      planned.hidden = plannedDurationMs == null;
+      planned.textContent = plannedDurationMs == null ? "" : formatMinuteSeconds(plannedDurationMs);
+    }
+  }
+
+  private renderTimeDependentChrome(manifest: Manifest, currentIndex: number | null): void {
+    const timerButton = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]');
+    const elapsed = this.root.querySelector<HTMLElement>('[data-peitho-remote="elapsed"]');
+    if (timerButton == null || elapsed == null) return;
+
+    const elapsedMs = this.currentElapsedMs();
+    const state = timerVisualState(this.timerState, elapsedMs);
+    timerButton.disabled = this.ended || !this.synced;
+    timerButton.dataset.peithoRunning = state === "running" ? "true" : "false";
+    timerButton.dataset.peithoTimerAction = playpauseActionFor(state);
+    timerButton.setAttribute("aria-label", timerAriaLabel(state));
+    const icon = timerButton.querySelector<HTMLElement>(".peitho-remote-timer-icon");
+    if (icon != null) icon.dataset.peithoIcon = state === "running" ? "pause" : "play";
+
+    elapsed.textContent = formatMinuteSeconds(elapsedMs);
+
+    this.updatePlanTick(manifest, elapsedMs);
+    const chip = this.root.querySelector<HTMLElement>('[data-peitho-remote="pace-chip"]');
+    if (chip == null || currentIndex == null) {
+      if (chip != null) chip.hidden = true;
+      return;
+    }
+    const paceState = remotePaceState(manifest, currentIndex, elapsedMs, state === "running");
+    if (paceState == null) {
+      chip.hidden = true;
+      chip.textContent = "";
+      return;
+    }
+    chip.hidden = false;
+    chip.dataset.peithoPace = paceState.kind;
+    if (paceState.emoji != null) {
+      const emoji = this.doc.createElement("span");
+      emoji.dataset.peithoPaceEmoji = "";
+      emoji.textContent = paceState.emoji === "hare" ? "🐇" : "🐢";
+      chip.replaceChildren(emoji, this.doc.createTextNode(` ${paceState.label}`));
+    } else {
+      chip.textContent = paceState.label;
+    }
+  }
+
+  private updatePlanTick(manifest: Manifest, elapsedMs: number): void {
+    const tick = this.root.querySelector<HTMLElement>('[data-peitho-remote="plan-tick"]');
+    if (tick == null) return;
+    const planProgress = plannedProgressAtElapsed(manifest, elapsedMs);
+    tick.hidden = planProgress == null;
+    if (planProgress != null) tick.style.left = `${planProgress * 100}%`;
+  }
+
+  private renderSection(manifest: Manifest, currentIndex: number | null): void {
+    const existing = this.root.querySelector<HTMLElement>('[data-peitho-remote="section"]');
+    if (currentIndex == null || manifest.sections.length === 0) {
+      existing?.remove();
+      return;
+    }
+    const sectionIndex = sectionIndexForSlide(manifest.sections, currentIndex);
+    if (sectionIndex < 0) {
+      existing?.remove();
+      return;
+    }
+    const section = manifest.sections[sectionIndex];
+    const sectionSlideCount = section.endIndex - section.startIndex + 1;
+    const sectionOffset = currentIndex - section.startIndex + 1;
+    const sectionLine = existing ?? this.doc.createElement("div");
+    sectionLine.className = "peitho-remote-section peitho-remote-dim-on-end";
+    sectionLine.dataset.peithoRemote = "section";
+    const name = this.doc.createElement("b");
+    name.textContent = section.name;
+    sectionLine.replaceChildren(
+      name,
+      this.doc.createTextNode(` · slide ${sectionOffset} / ${sectionSlideCount} in section`)
+    );
+    if (existing == null) {
+      const notes = this.root.querySelector<HTMLElement>(".peitho-remote-notes");
+      notes?.before(sectionLine);
+    }
+  }
+
+  private renderNotes(slideKey: string | undefined): void {
+    const notes = this.root.querySelector<HTMLElement>('[data-peitho-remote="notes"]');
+    if (notes == null) return;
+    const value = slideKey == null ? null : this.notes.notes[slideKey];
+    if (value == null || value.length === 0) {
+      this.setNotesText(notes, "No notes for this slide");
+      notes.dataset.peithoEmpty = "true";
+      return;
+    }
+    this.setNotesText(notes, value);
+    notes.dataset.peithoEmpty = "false";
+  }
+
+  private setNotesText(notes: HTMLElement, value: string): void {
+    if (this.renderedNotesValue === value) return;
+    notes.textContent = value;
+    this.renderedNotesValue = value;
+  }
+
+  private renderButtons(currentIndex: number | null): void {
+    const prev = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="prev"]');
+    const next = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]');
+    if (prev == null || next == null) return;
+    prev.disabled =
+      this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
+    next.disabled =
+      this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
+  }
+
+  private syncPreview(currentIndex: number | null): void {
+    if (currentIndex == null) return;
+    this.previewBus.dispatchEvent(
+      new CustomEvent("peitho:navigate", { detail: { to: { index: currentIndex } } })
+    );
+  }
+
+  private currentElapsedMs(): number {
+    return currentTimerElapsedMs(this.timerState, this.now());
+  }
+
+  private updateTimerInterval(): void {
+    if (this.ended || this.timerState?.running !== true) {
+      this.clearTimerInterval();
+      return;
+    }
+    if (this.timerInterval != null) return;
+    this.timerInterval = this.win.setInterval(() => {
+      const manifest = this.manifest;
+      if (manifest == null) return;
+      this.renderTimeDependentChrome(manifest, this.currentIndex);
+    }, 1000);
+  }
+
+  private clearTimerInterval(): void {
+    if (this.timerInterval == null) return;
+    this.win.clearInterval(this.timerInterval);
+    this.timerInterval = null;
   }
 
   private showError(message: string): void {
@@ -226,13 +621,26 @@ class RemoteController implements RemoteView {
 function remoteButton(doc: Document, action: "prev" | "next", label: string): HTMLButtonElement {
   const button = doc.createElement("button");
   button.type = "button";
+  button.disabled = true;
   button.dataset.peithoAction = action;
-  button.textContent = label;
+  button.dataset.peithoDirection = action;
+  const arrow = doc.createElement("span");
+  arrow.className = "peitho-remote-action-arrow";
+  arrow.textContent = action === "prev" ? "‹" : "›";
+  if (action === "prev") {
+    button.append(arrow, doc.createTextNode(` ${label}`));
+  } else {
+    button.append(doc.createTextNode(`${label} `), arrow);
+  }
   return button;
 }
 
 function dispatchNavigate(bus: EventTarget, to: "prev" | "next"): void {
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+}
+
+function dispatchTimerControl(bus: EventTarget, action: TimerControlDetail["action"]): void {
+  bus.dispatchEvent(new CustomEvent<TimerControlDetail>("peitho:timercontrol", { detail: { action } }));
 }
 
 function resolveRemoteTarget(
@@ -248,4 +656,142 @@ function resolveRemoteTarget(
 function clampIndex(index: number, total: number): number | null {
   if (total === 0) return null;
   return Math.max(0, Math.min(Math.trunc(index), total - 1));
+}
+
+function setText(root: HTMLElement, key: string, value: string): void {
+  const element = root.querySelector<HTMLElement>(`[data-peitho-remote="${key}"]`);
+  if (element != null) element.textContent = value;
+}
+
+function slideTitle(title: string | undefined): string {
+  return title == null || title.length === 0 ? "Untitled slide" : title;
+}
+
+function validPlannedDurationMs(manifest: Manifest): number | null {
+  const plannedDurationMs = manifest.plannedDurationMs;
+  return plannedDurationMs != null && isValidDurationMs(plannedDurationMs)
+    ? plannedDurationMs
+    : null;
+}
+
+export function expectedElapsedAtSlide(manifest: Manifest, index: number): number | null {
+  const plannedDurationMs = validPlannedDurationMs(manifest);
+  if (plannedDurationMs == null) return null;
+  const slideCount = Math.max(1, manifest.slideCount);
+  const clampedIndex = Math.max(0, Math.min(Math.trunc(index), slideCount - 1));
+  if (manifest.sections.length === 0) {
+    return (plannedDurationMs * clampedIndex) / slideCount;
+  }
+  const sectionIndex = sectionIndexForSlide(manifest.sections, clampedIndex);
+  if (sectionIndex < 0) return (plannedDurationMs * clampedIndex) / slideCount;
+  let elapsed = 0;
+  for (let i = 0; i < sectionIndex; i += 1) {
+    elapsed += manifest.sections[i].plannedDurationMs;
+  }
+  const section = manifest.sections[sectionIndex];
+  const sectionSlideCount = section.endIndex - section.startIndex + 1;
+  return (
+    elapsed +
+    section.plannedDurationMs * ((clampedIndex - section.startIndex) / sectionSlideCount)
+  );
+}
+
+export function plannedProgressAtElapsed(manifest: Manifest, elapsedMs: number): number | null {
+  const plannedDurationMs = validPlannedDurationMs(manifest);
+  if (plannedDurationMs == null) return null;
+  if (manifest.slideCount <= 1) return 1;
+  const elapsed = clamp01(elapsedMs / plannedDurationMs) * plannedDurationMs;
+  if (manifest.sections.length === 0) {
+    return clamp01(((elapsed / plannedDurationMs) * manifest.slideCount) / (manifest.slideCount - 1));
+  }
+  let elapsedBefore = 0;
+  for (const section of manifest.sections) {
+    const duration = section.plannedDurationMs;
+    const elapsedAfter = elapsedBefore + duration;
+    if (elapsed <= elapsedAfter) {
+      const sectionSlideCount = section.endIndex - section.startIndex + 1;
+      const ratio = duration === 0 ? 0 : (elapsed - elapsedBefore) / duration;
+      const slidePosition = section.startIndex + ratio * sectionSlideCount;
+      return clamp01(slidePosition / (manifest.slideCount - 1));
+    }
+    elapsedBefore = elapsedAfter;
+  }
+  return 1;
+}
+
+export function remotePaceState(
+  manifest: Manifest,
+  index: number,
+  elapsedMs: number,
+  running: boolean
+): RemotePaceState | null {
+  const expected = expectedElapsedAtSlide(manifest, index);
+  if (expected == null) return null;
+  if (!running) {
+    return elapsedMs > 0 ? { kind: "paused", label: "Paused", emoji: null } : null;
+  }
+  const delta = elapsedMs - expected;
+  if (delta >= 0) {
+    return {
+      kind: "behind",
+      label: `${formatMinuteSeconds(delta)} behind`,
+      emoji: "tortoise"
+    };
+  }
+  return {
+    kind: "ahead",
+    label: `${formatMinuteSeconds(Math.abs(delta))} ahead`,
+    emoji: "hare"
+  };
+}
+
+function currentTimerElapsedMs(timer: RemoteTimerAnchor | null, now: number): number {
+  if (timer == null) return 0;
+  return Math.max(0, timer.elapsedMs + (timer.running ? now - timer.receivedAtMs : 0));
+}
+
+function timerVisualState(timer: RemoteTimerAnchor | null, elapsedMs: number): TimerVisualState {
+  if (timer == null || (!timer.running && elapsedMs === 0)) return "stopped";
+  return timer.running ? "running" : "paused";
+}
+
+function playpauseActionFor(state: TimerVisualState): TimerControlDetail["action"] {
+  if (state === "running") return "pause";
+  if (state === "paused") return "resume";
+  return "start";
+}
+
+function timerAriaLabel(state: TimerVisualState): string {
+  if (state === "running") return "Pause timer";
+  if (state === "paused") return "Resume timer";
+  return "Start timer";
+}
+
+function nextTimerStateForAction(
+  action: TimerControlDetail["action"],
+  current: RemoteTimerAnchor | null,
+  now: number
+): RemoteTimerAnchor | null {
+  const elapsedMs = currentTimerElapsedMs(current, now);
+  const state = timerVisualState(current, elapsedMs);
+  if (action === "start") {
+    if (state !== "stopped") return null;
+    return { running: true, elapsedMs: 0, receivedAtMs: now };
+  }
+  if (action === "pause") {
+    if (state !== "running") return null;
+    return { running: false, elapsedMs, receivedAtMs: now };
+  }
+  if (action === "resume") {
+    if (state !== "paused") return null;
+    return { running: true, elapsedMs, receivedAtMs: now };
+  }
+  return { running: false, elapsedMs: 0, receivedAtMs: now };
+}
+
+function paneViewport(pane: HTMLElement): () => { width: number; height: number } {
+  return () => ({
+    width: pane.clientWidth,
+    height: pane.clientHeight
+  });
 }

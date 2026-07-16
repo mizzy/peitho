@@ -258,6 +258,15 @@ function isIndexSyncMessage(value) {
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
+function isNonNegativeFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isTimerSyncMessage(value) {
+  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs);
+}
+function isTimerReplaySyncMessage(value) {
+  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs) && isNonNegativeFiniteNumber(value.timer.atMs) && isNonNegativeFiniteNumber(value.nowMs);
+}
 function isGenerationSyncMessage(value) {
   return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
@@ -272,13 +281,39 @@ function serverSyncChannelFactory(options = {}) {
     let onmessage = null;
     let closed = false;
     let seq = 0;
+    let synced = false;
+    let highestAckedPostSeq = 0;
+    let pendingTimerPosts = 0;
+    let bufferedTimerReplay = null;
     let abortController = null;
     let retryTimer = null;
-    const deliverReplayState = (body) => {
-      if (isIndexSyncMessage(body)) {
+    const flushBufferedTimerReplay = () => {
+      if (closed || pendingTimerPosts > 0 || bufferedTimerReplay == null) return;
+      const replay = bufferedTimerReplay;
+      bufferedTimerReplay = null;
+      if (replay.seq >= highestAckedPostSeq) {
+        onmessage?.({ data: replay.data });
+      }
+    };
+    const deliverReplayState = (body, options2 = {}) => {
+      const skipAbsoluteState = options2.skipAbsoluteState === true;
+      const responseSeq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : 0;
+      if (isTimerReplaySyncMessage(body)) {
+        if (skipAbsoluteState) {
+          bufferedTimerReplay = null;
+        } else if (options2.deferTimerReplay === true) {
+          bufferedTimerReplay = {
+            seq: responseSeq,
+            data: { timer: body.timer, nowMs: body.nowMs }
+          };
+        } else {
+          onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
+        }
+      }
+      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
         onmessage?.({ data: { index: body.index } });
       }
-      if (isSwappedSyncMessage(body)) {
+      if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
       }
       if (isGenerationSyncMessage(body)) {
@@ -307,7 +342,14 @@ function serverSyncChannelFactory(options = {}) {
           return false;
         }
         seq = body.seq;
-        deliverReplayState(body);
+        deliverReplayState(body, {
+          skipAbsoluteState: body.seq < highestAckedPostSeq,
+          deferTimerReplay: pendingTimerPosts > 0
+        });
+        if (!synced) {
+          synced = true;
+          onmessage?.({ data: { synced: true } });
+        }
         return true;
       } catch (error) {
         if (!closed) {
@@ -347,7 +389,10 @@ function serverSyncChannelFactory(options = {}) {
           if (body.message != null) {
             onmessage?.({ data: body.message });
           }
-          deliverReplayState(body);
+          deliverReplayState(body, {
+            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            deferTimerReplay: pendingTimerPosts > 0
+          });
         } catch (error) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
@@ -366,15 +411,42 @@ function serverSyncChannelFactory(options = {}) {
         onmessage = next;
       },
       postMessage(message) {
-        void fetcher(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message),
-          keepalive: true
-        }).then((response) => {
-          if (!response.ok) console.error(`Failed to post sync message: ${response.status}`);
+        const isTimerPost = isTimerSyncMessage(message);
+        if (isTimerPost) pendingTimerPosts += 1;
+        const completeTimerPost = () => {
+          if (!isTimerPost) return;
+          pendingTimerPosts = Math.max(0, pendingTimerPosts - 1);
+          flushBufferedTimerReplay();
+        };
+        let request;
+        try {
+          request = fetcher(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(message),
+            keepalive: true
+          });
+        } catch (error) {
+          completeTimerPost();
+          console.error(`Failed to post sync message: ${String(error)}`);
+          return;
+        }
+        void request.then(async (response) => {
+          if (!response.ok) {
+            console.error(`Failed to post sync message: ${response.status}`);
+            return;
+          }
+          try {
+            const body = await response.json();
+            if (typeof body.seq === "number" && Number.isFinite(body.seq)) {
+              highestAckedPostSeq = Math.max(highestAckedPostSeq, body.seq);
+            }
+          } catch (_error) {
+          }
         }).catch((error) => {
           console.error(`Failed to post sync message: ${String(error)}`);
+        }).finally(() => {
+          completeTimerPost();
         });
       },
       close() {

@@ -46,12 +46,20 @@ export type {
   PresentationStartDetail,
   ShellOptions,
   SlideChangeDetail,
-  TimerControlDetail
+  TimerAdoptDetail,
+  TimerControlDetail,
+  TimerStateDetail
 } from "./shell";
 export type {
   ServerSyncOptions,
+  SyncBridgeHooks,
   SyncChannel,
   SyncChannelFactory,
-  SyncMessage
+  SyncMessage,
+  SyncedSyncMessage,
+  TimerReplaySyncMessage,
+  TimerSyncMessage,
+  TimerSyncSnapshot,
+  TimerSyncState
 } from "./sync";
 export type { TimeTrackerOptions, TimeTrackerShell } from "./timeTracker";

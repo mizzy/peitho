@@ -10,7 +10,10 @@ import {
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
+  isSyncedSyncMessage,
   isSwappedSyncMessage,
+  isTimerReplaySyncMessage,
+  isTimerSyncMessage,
   type SyncChannel
 } from "../src/sync";
 
@@ -20,6 +23,11 @@ function okJson(value: unknown): Response {
 
 function okText(value: string): Response {
   return { ok: true, status: 200, text: async () => value } as Response;
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 const manifest = {
@@ -86,6 +94,33 @@ it("exports strict sync message guards", () => {
   expect(isSwappedSyncMessage({ swapped: true })).toBe(true);
   expect(isSwappedSyncMessage({ swapped: "true" })).toBe(false);
 
+  expect(isTimerSyncMessage({ timer: { running: true, elapsedMs: 1000 } })).toBe(true);
+  expect(isTimerSyncMessage({ timer: { running: true, elapsedMs: -1 } })).toBe(false);
+  expect(isTimerSyncMessage({ timer: { running: true, elapsedMs: Number.NaN } })).toBe(false);
+  expect(isTimerSyncMessage({ timer: { running: "true", elapsedMs: 1000 } })).toBe(false);
+
+  expect(
+    isTimerReplaySyncMessage({
+      timer: { running: true, elapsedMs: 1000, atMs: 5000 },
+      nowMs: 5500
+    })
+  ).toBe(true);
+  expect(
+    isTimerReplaySyncMessage({
+      timer: { running: true, elapsedMs: 1000 },
+      nowMs: 5500
+    })
+  ).toBe(false);
+  expect(
+    isTimerReplaySyncMessage({
+      timer: { running: true, elapsedMs: 1000, atMs: 5000 },
+      nowMs: Number.NaN
+    })
+  ).toBe(false);
+
+  expect(isSyncedSyncMessage({ synced: true })).toBe(true);
+  expect(isSyncedSyncMessage({ synced: false })).toBe(false);
+
   expect(isGenerationSyncMessage({ generation: 1 })).toBe(true);
   expect(isGenerationSyncMessage({ generation: Number.NaN })).toBe(false);
 });
@@ -129,7 +164,7 @@ it("server sync channel polls and forwards long-poll messages", async () => {
   const received: unknown[] = [];
   channel.onmessage = (event) => received.push(event.data);
 
-  await vi.waitFor(() => expect(received).toEqual([{ index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
 
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith("/sync?seq=5", expect.objectContaining({ signal: expect.any(AbortSignal) }));
@@ -151,7 +186,96 @@ it("server sync channel replays poll response state after the poll message", asy
   channel.onmessage = (event) => received.push(event.data);
 
   await vi.waitFor(() =>
-    expect(received).toEqual([{ index: 1 }, { index: 2 }, { swapped: true }])
+    expect(received).toEqual([
+      { synced: true },
+      { index: 1 },
+      { index: 2 },
+      { swapped: true }
+    ])
+  );
+
+  channel.close();
+});
+
+it("server sync channel replays timer state from handshake and poll responses", async () => {
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
+    if (url === "/sync") {
+      return Promise.resolve(
+        okJson({
+          seq: 5,
+          message: null,
+          timer: { running: true, elapsedMs: 1000, atMs: 4000 },
+          nowMs: 4500
+        })
+      );
+    }
+    if (url === "/sync?seq=5") {
+      return Promise.resolve(
+        okJson({
+          seq: 6,
+          message: { timer: { running: false, elapsedMs: 3000 } },
+          timer: { running: false, elapsedMs: 3000, atMs: 9000 },
+          nowMs: 9500
+        })
+      );
+    }
+    if (url === "/sync?seq=6") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      {
+        timer: { running: true, elapsedMs: 1000, atMs: 4000 },
+        nowMs: 4500
+      },
+      { synced: true },
+      { timer: { running: false, elapsedMs: 3000 } },
+      {
+        timer: { running: false, elapsedMs: 3000, atMs: 9000 },
+        nowMs: 9500
+      }
+    ])
+  );
+
+  channel.close();
+});
+
+it("server sync channel delivers handshake replay timer before index and synced last", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(
+        okJson({
+          seq: 4,
+          message: null,
+          index: 2,
+          swapped: true,
+          timer: { running: true, elapsedMs: 600_000, atMs: 10_000 },
+          nowMs: 11_000
+        })
+      );
+    }
+    if (url === "/sync?seq=4") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      {
+        timer: { running: true, elapsedMs: 600_000, atMs: 10_000 },
+        nowMs: 11_000
+      },
+      { index: 2 },
+      { swapped: true },
+      { synced: true }
+    ])
   );
 
   channel.close();
@@ -171,7 +295,7 @@ it("server sync channel does not replay backlog close messages after handshake",
     expect(fetcher).toHaveBeenCalledWith("/sync?seq=9", expect.objectContaining({ signal: expect.any(AbortSignal) }))
   );
 
-  expect(received).toEqual([]);
+  expect(received).toEqual([{ synced: true }]);
   expect(fetcher).not.toHaveBeenCalledWith("/sync?seq=0", expect.anything());
   channel.close();
 });
@@ -188,7 +312,9 @@ it("server sync channel replays handshake index then swapped through onmessage",
   const received: unknown[] = [];
   channel.onmessage = (event) => received.push(event.data);
 
-  await vi.waitFor(() => expect(received).toEqual([{ index: 2 }, { swapped: true }]));
+  await vi.waitFor(() =>
+    expect(received).toEqual([{ index: 2 }, { swapped: true }, { synced: true }])
+  );
 
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith(
@@ -213,7 +339,9 @@ it("server sync channel forwards generation replay values", async () => {
   const received: unknown[] = [];
   channel.onmessage = (event) => received.push(event.data);
 
-  await vi.waitFor(() => expect(received).toEqual([{ generation: 8 }, { generation: 9 }]));
+  await vi.waitFor(() =>
+    expect(received).toEqual([{ generation: 8 }, { synced: true }, { generation: 9 }])
+  );
 
   channel.close();
 });
@@ -245,6 +373,7 @@ it("server sync channel re-handshakes after a poll network error", async () => {
   const received: unknown[] = [];
   channel.onmessage = (event) => received.push(event.data);
 
+  await vi.waitFor(() => expect(received).toContainEqual({ synced: true }));
   await vi.waitFor(() => expect(received).toContainEqual({ generation: 2 }));
 
   expect(fetcher).toHaveBeenCalledWith("/sync");
@@ -324,6 +453,358 @@ it("posts close sync messages from closerequest", () => {
   expect(channel.sent).toEqual([{ close: true }]);
 });
 
+it("posts absolute timer sync messages from timer changes", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+  channel.onmessage?.({ data: { synced: true } });
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timerchange", {
+      detail: { running: true, elapsedMs: 1250.6 }
+    })
+  );
+
+  expect(channel.sent).toEqual([{ timer: { running: true, elapsedMs: 1251 } }]);
+});
+
+it("drops timerchange posts until the initial sync snapshot has been applied", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timerchange", {
+      detail: { running: true, elapsedMs: 0 }
+    })
+  );
+
+  expect(channel.sent).toEqual([]);
+  channel.onmessage?.({ data: { synced: true } });
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timerchange", {
+      detail: { running: true, elapsedMs: 1000 }
+    })
+  );
+
+  expect(channel.sent).toEqual([{ timer: { running: true, elapsedMs: 1000 } }]);
+});
+
+it("does not repost an auto-start timerchange caused by pre-synced index replay", async () => {
+  const channel = mockChannel();
+  const root = document.createElement("main");
+  const shell = await mountPresentShell({ root, fetcher: standardFetch(), window });
+  shells.push(shell);
+  cleanups.push(installSyncBridge(window, () => channel));
+
+  channel.onmessage?.({ data: { index: 1 } });
+  window.dispatchEvent(
+    new CustomEvent("peitho:timerchange", {
+      detail: { running: true, elapsedMs: 0 }
+    })
+  );
+
+  expect(channel.sent).not.toContainEqual({ timer: { running: true, elapsedMs: 0 } });
+});
+
+it("skips stale poll replay state older than the highest acknowledged post seq", async () => {
+  let resolvePoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve(okJson({ seq: 8 }));
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=7") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync", expect.objectContaining({ method: "POST" })));
+  await vi.waitFor(() => expect(resolvePoll).toBeTypeOf("function"));
+  resolvePoll(
+    okJson({
+      seq: 7,
+      message: null,
+      timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
+      nowMs: 1000,
+      index: 1,
+      swapped: true
+    })
+  );
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync?seq=7", expect.anything()));
+
+  expect(received).toEqual([{ synced: true }]);
+  channel.close();
+});
+
+it("applies fresh poll replay state at or after the highest acknowledged post seq", async () => {
+  let resolvePoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return Promise.resolve(okJson({ seq: 8 }));
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await flushPromises();
+  await vi.waitFor(() => expect(resolvePoll).toBeTypeOf("function"));
+  resolvePoll(
+    okJson({
+      seq: 8,
+      message: null,
+      timer: { running: false, elapsedMs: 20_000, atMs: 1000 },
+      nowMs: 1000
+    })
+  );
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { synced: true },
+      {
+        timer: { running: false, elapsedMs: 20_000, atMs: 1000 },
+        nowMs: 1000
+      }
+    ])
+  );
+  channel.close();
+});
+
+it("buffers newer timer replay while a timer post is awaiting ack and delivers it once after ack", async () => {
+  let resolvePost!: (response: Response) => void;
+  let resolvePendingPoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+    }
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePendingPoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  await vi.waitFor(() => expect(resolvePendingPoll).toBeTypeOf("function"));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await vi.waitFor(() => expect(resolvePost).toBeTypeOf("function"));
+  resolvePendingPoll(
+    okJson({
+      seq: 8,
+      message: null,
+      timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
+      nowMs: 2000,
+      index: 1
+    })
+  );
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  resolvePost(okJson({ seq: 7 }));
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { synced: true },
+      { index: 1 },
+      {
+        timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
+        nowMs: 2000
+      }
+    ])
+  );
+  await flushPromises();
+  expect(received).toEqual([
+    { synced: true },
+    { index: 1 },
+    {
+      timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
+      nowMs: 2000
+    }
+  ]);
+  channel.close();
+});
+
+it("buffers re-handshake timer replay while a timer post is awaiting ack", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  let handshakeCount = 0;
+  let resolvePost!: (response: Response) => void;
+  let rejectPoll!: (error: Error) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+    }
+    if (url === "/sync") {
+      handshakeCount += 1;
+      if (handshakeCount === 1) return Promise.resolve(okJson({ seq: 5, message: null }));
+      return Promise.resolve(
+        okJson({
+          seq: 8,
+          message: null,
+          timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
+          nowMs: 2000,
+          index: 1
+        })
+      );
+    }
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((_resolve, reject) => {
+        rejectPoll = reject;
+      });
+    }
+    if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher, retryMs: 0 })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  await vi.waitFor(() => expect(rejectPoll).toBeTypeOf("function"));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await vi.waitFor(() => expect(resolvePost).toBeTypeOf("function"));
+  rejectPoll(new Error("poll lost"));
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  expect(error).toHaveBeenCalledWith("Failed to poll sync message: Error: poll lost");
+  resolvePost(okJson({ seq: 7 }));
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { synced: true },
+      { index: 1 },
+      {
+        timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
+        nowMs: 2000
+      }
+    ])
+  );
+  channel.close();
+});
+
+it("discards buffered timer replay older than the acknowledged timer post", async () => {
+  let resolvePost!: (response: Response) => void;
+  let resolvePendingPoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+    }
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePendingPoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=6") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  await vi.waitFor(() => expect(resolvePendingPoll).toBeTypeOf("function"));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await vi.waitFor(() => expect(resolvePost).toBeTypeOf("function"));
+  resolvePendingPoll(
+    okJson({
+      seq: 6,
+      message: null,
+      timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
+      nowMs: 1000,
+      index: 1
+    })
+  );
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  resolvePost(okJson({ seq: 7 }));
+  await flushPromises();
+
+  expect(received).toEqual([{ synced: true }, { index: 1 }]);
+  channel.close();
+});
+
+it("delivers buffered timer replay after a pending timer post fails", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  let rejectPost!: (error: Error) => void;
+  let resolvePendingPoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((_resolve, reject) => {
+        rejectPost = reject;
+      });
+    }
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePendingPoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=6") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  await vi.waitFor(() => expect(resolvePendingPoll).toBeTypeOf("function"));
+  channel.postMessage({ timer: { running: false, elapsedMs: 20_000 } });
+  await vi.waitFor(() => expect(rejectPost).toBeTypeOf("function"));
+  resolvePendingPoll(
+    okJson({
+      seq: 6,
+      message: null,
+      timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
+      nowMs: 1000,
+      index: 1
+    })
+  );
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  rejectPost(new Error("offline"));
+  await vi.waitFor(() => expect(error).toHaveBeenCalledWith("Failed to post sync message: Error: offline"));
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { synced: true },
+      { index: 1 },
+      {
+        timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
+        nowMs: 1000
+      }
+    ])
+  );
+  channel.close();
+});
+
 it("posts absolute swap state from swaprequest based on the current route", () => {
   for (const [path, expected] of [
     ["/present.html", { swapped: true }],
@@ -335,9 +816,11 @@ it("posts absolute swap state from swaprequest based on the current route", () =
       window,
       () => channel,
       bus,
-      () => undefined,
-      () => path,
-      () => undefined
+      {
+        closeWindow: () => undefined,
+        pathname: () => path,
+        navigate: () => undefined
+      }
     );
 
     bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
@@ -355,9 +838,11 @@ it("does not post swap state on unknown routes", () => {
     window,
     () => channel,
     bus,
-    () => undefined,
-    () => "/unknown",
-    () => undefined
+    {
+      closeWindow: () => undefined,
+      pathname: () => "/unknown",
+      navigate: () => undefined
+    }
   );
   cleanups.push(cleanup);
 
@@ -370,7 +855,7 @@ it("does not post swap state on unknown routes", () => {
 it("closes the window when a remote close sync message arrives", () => {
   const channel = mockChannel();
   const closeWindow = vi.fn();
-  const cleanup = installSyncBridge(window, () => channel, window, closeWindow);
+  const cleanup = installSyncBridge(window, () => channel, window, { closeWindow });
   cleanups.push(cleanup);
 
   channel.onmessage?.({ data: { close: true } });
@@ -389,6 +874,41 @@ it("turns remote index messages into navigate requests", () => {
   channel.onmessage?.({ data: { index: 1 } });
 
   expect(requests).toEqual([{ to: { index: 1 } }]);
+});
+
+it("adopts replayed timer sync state through the injected callback", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const adoptTimerState = vi.fn();
+  const cleanup = installSyncBridge(
+    window,
+    () => channel,
+    bus,
+    {
+      closeWindow: () => undefined,
+      pathname: () => "/present.html",
+      navigate: () => undefined,
+      adoptTimerState
+    }
+  );
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({
+    data: { timer: { running: true, elapsedMs: 1000, atMs: 4000 }, nowMs: 4750 }
+  });
+
+  expect(adoptTimerState).toHaveBeenCalledWith({ running: true, elapsedMs: 1750 });
+});
+
+it("ignores raw timer sync messages on the present sync bridge", () => {
+  const channel = mockChannel();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(window, () => channel);
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { timer: { running: false, elapsedMs: 3000 } } });
+
+  expect(error).not.toHaveBeenCalled();
 });
 
 it("ignores generation sync messages on the present sync bridge", () => {
@@ -420,9 +940,11 @@ it("navigates to the same-window counterpart when remote swapped state differs",
       window,
       () => channel,
       bus,
-      () => undefined,
-      () => testCase.path,
-      navigate
+      {
+        closeWindow: () => undefined,
+        pathname: () => testCase.path,
+        navigate
+      }
     );
 
     channel.onmessage?.({ data: { swapped: testCase.swapped } });
@@ -450,9 +972,11 @@ it("does not navigate when remote swapped state already matches the route", () =
       window,
       () => channel,
       bus,
-      () => undefined,
-      () => testCase.path,
-      navigate
+      {
+        closeWindow: () => undefined,
+        pathname: () => testCase.path,
+        navigate
+      }
     );
 
     channel.onmessage?.({ data: { swapped: testCase.swapped } });
@@ -471,9 +995,11 @@ it("does not navigate on swapped messages received on unknown routes", () => {
     window,
     () => channel,
     bus,
-    () => undefined,
-    () => "/unknown",
-    navigate
+    {
+      closeWindow: () => undefined,
+      pathname: () => "/unknown",
+      navigate
+    }
   );
   cleanups.push(cleanup);
 
@@ -501,9 +1027,11 @@ it("does not navigate when replayed swapped state equals the current route", asy
     window,
     serverSyncChannelFactory({ fetcher }),
     bus,
-    () => undefined,
-    () => "/present.html",
-    navigate
+    {
+      closeWindow: () => undefined,
+      pathname: () => "/present.html",
+      navigate
+    }
   );
   cleanups.push(cleanup);
 
@@ -529,9 +1057,11 @@ it("converges from poll response swapped state when the poll message is unrelate
     window,
     serverSyncChannelFactory({ fetcher }),
     bus,
-    () => undefined,
-    () => "/present.html",
-    navigate
+    {
+      closeWindow: () => undefined,
+      pathname: () => "/present.html",
+      navigate
+    }
   );
   cleanups.push(cleanup);
 

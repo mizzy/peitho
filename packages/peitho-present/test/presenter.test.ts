@@ -623,6 +623,7 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
   cleanups.push(() => window.removeEventListener("peitho:closerequest", onCloseRequest));
   cleanups.push(() => window.removeEventListener("peitho:swaprequest", onSwapRequest));
+  channel.onmessage?.({ data: { synced: true } });
 
   root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]')?.click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
@@ -641,7 +642,55 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   ]);
   expect(closeRequests).toEqual([null]);
   expect(swapRequests).toEqual([null]);
-  expect(channel.sent).toEqual([{ index: 1 }, { swapped: true }, { close: true }]);
+  expect(channel.sent).toEqual([
+    { index: 1 },
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 0 } },
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 0 } },
+    { swapped: true },
+    { close: true }
+  ]);
+});
+
+it("posts presenter timer transitions and adopts replayed timer state", async () => {
+  let now = 1_000;
+  const root = document.createElement("main");
+  const { channel, factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: standardFetch(),
+    window,
+    now: () => now,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+  const play = root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')!;
+  channel.onmessage?.({ data: { synced: true } });
+
+  play.click();
+  now = 2_500;
+  play.click();
+  now = 3_500;
+  play.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="reset"]')?.click();
+
+  expect(channel.sent).toEqual([
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 1500 } },
+    { timer: { running: true, elapsedMs: 1500 } },
+    { timer: { running: false, elapsedMs: 0 } }
+  ]);
+
+  now = 10_000;
+  channel.onmessage?.({
+    data: { timer: { running: true, elapsedMs: 2_000, atMs: 50_000 }, nowMs: 51_000 }
+  });
+  view.tick();
+
+  expect(view.mainShell.elapsedMs()).toBe(3_000);
+  expect(root.querySelector('[data-peitho-presenter="timer"]')?.textContent).toBe("00:03");
 });
 
 it("maps presenter Space to timer playpause without navigating", async () => {

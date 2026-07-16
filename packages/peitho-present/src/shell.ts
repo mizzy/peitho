@@ -23,6 +23,8 @@ export type SlideChangeDetail = {
 
 export type PresentationStartDetail = { total: number; startedAt: number };
 export type PresentationEndDetail = { endedAt: number; elapsedMs: number };
+export type TimerStateDetail = { running: boolean; elapsedMs: number };
+export type TimerAdoptDetail = TimerStateDetail & { previousElapsedMs: number };
 export type TimerControlDetail = { action: "start" | "pause" | "resume" | "reset" };
 
 export type PresentShell = {
@@ -32,11 +34,13 @@ export type PresentShell = {
   elapsedMs(): number;
   isPaused(): boolean;
   startedAt(): number | null;
+  adoptTimerState(state: TimerStateDetail): void;
   destroy(): void;
 };
 
 export type ShellOptions = {
   root: HTMLElement;
+  manifest?: Manifest;
   fetcher?: typeof fetch;
   window?: Window;
   document?: Document;
@@ -68,6 +72,7 @@ class PresentShellController implements PresentShell {
   private readonly slides: SlideView[] = [];
   private readonly root: HTMLElement;
   private readonly fetcher: typeof fetch;
+  private readonly injectedManifest?: Manifest;
   private readonly win: Window;
   private readonly doc: Document;
   private readonly log: Pick<Console, "error">;
@@ -100,6 +105,7 @@ class PresentShellController implements PresentShell {
 
   constructor(options: ShellOptions) {
     this.root = options.root;
+    this.injectedManifest = options.manifest;
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
@@ -121,7 +127,7 @@ class PresentShellController implements PresentShell {
 
   async load(): Promise<void> {
     try {
-      const manifest = await this.fetchJson<Manifest>("manifest.json");
+      const manifest = this.injectedManifest ?? (await this.fetchJson<Manifest>("manifest.json"));
       const dimensions = {
         width: manifest.canvasWidth,
         height: manifest.canvasHeight
@@ -168,6 +174,25 @@ class PresentShellController implements PresentShell {
 
   startedAt(): number | null {
     return this.startedAtValue;
+  }
+
+  adoptTimerState(state: TimerStateDetail): void {
+    const elapsedMs = Math.max(0, state.elapsedMs);
+    const previousElapsedMs = this.elapsedMs();
+    if (!state.running && elapsedMs === 0) {
+      this.startedAtValue = null;
+      this.pausedAtValue = null;
+      this.pausedTotalMs = 0;
+      this.ended = false;
+      this.dispatchTimerAdopt(elapsedMs, state.running, previousElapsedMs);
+      return;
+    }
+    const now = this.now();
+    this.startedAtValue = now - elapsedMs;
+    this.pausedAtValue = state.running ? null : now;
+    this.pausedTotalMs = 0;
+    this.ended = false;
+    this.dispatchTimerAdopt(elapsedMs, state.running, previousElapsedMs);
   }
 
   destroy(): void {
@@ -306,6 +331,7 @@ class PresentShellController implements PresentShell {
         detail: { total: this.slides.length, startedAt: this.startedAtValue }
       })
     );
+    this.dispatchTimerChange();
   }
 
   private endPresentation(): void {
@@ -323,12 +349,14 @@ class PresentShellController implements PresentShell {
   private pauseTimer(): void {
     if (this.startedAtValue === null || this.pausedAtValue !== null) return;
     this.pausedAtValue = this.now();
+    this.dispatchTimerChange();
   }
 
   private resumeTimer(): void {
     if (this.pausedAtValue === null) return;
     this.pausedTotalMs += this.now() - this.pausedAtValue;
     this.pausedAtValue = null;
+    this.dispatchTimerChange();
   }
 
   private resetTimer(): void {
@@ -336,5 +364,29 @@ class PresentShellController implements PresentShell {
     this.pausedAtValue = null;
     this.pausedTotalMs = 0;
     this.ended = false;
+    this.dispatchTimerChange();
+  }
+
+  private dispatchTimerChange(): void {
+    this.bus.dispatchEvent(
+      new CustomEvent<TimerStateDetail>("peitho:timerchange", {
+        detail: {
+          running: this.startedAtValue !== null && this.pausedAtValue === null,
+          elapsedMs: this.elapsedMs()
+        }
+      })
+    );
+  }
+
+  private dispatchTimerAdopt(
+    elapsedMs: number,
+    running: boolean,
+    previousElapsedMs: number
+  ): void {
+    this.bus.dispatchEvent(
+      new CustomEvent<TimerAdoptDetail>("peitho:timeradopt", {
+        detail: { running, elapsedMs, previousElapsedMs }
+      })
+    );
   }
 }

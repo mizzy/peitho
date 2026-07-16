@@ -205,6 +205,21 @@ function installAgenda(options) {
     lastElapsedMs = 0;
     render();
   }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (typeof detail?.running !== "boolean" || typeof detail.elapsedMs !== "number" || !Number.isFinite(detail.elapsedMs) || detail.elapsedMs < 0 || typeof detail.previousElapsedMs !== "number" || !Number.isFinite(detail.previousElapsedMs) || detail.previousElapsedMs < 0) {
+      log.error("Invalid peitho:timeradopt event");
+      return;
+    }
+    if (options.shell.startedAt() !== null) {
+      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
+      if (sectionIndex >= 0) {
+        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
+      }
+    }
+    lastElapsedMs = detail.elapsedMs;
+    render();
+  }
   function tick() {
     if (options.shell.startedAt() === null) {
       actualMs.fill(0);
@@ -218,11 +233,13 @@ function installAgenda(options) {
   render();
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
   const interval = win.setInterval(tick, 250);
   return () => {
     win.clearInterval(interval);
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
     host.remove();
   };
 }
@@ -758,6 +775,7 @@ var PresentShellController = class {
   slides = [];
   root;
   fetcher;
+  injectedManifest;
   win;
   doc;
   log;
@@ -789,6 +807,7 @@ var PresentShellController = class {
   onPageHide = () => this.endPresentation();
   constructor(options) {
     this.root = options.root;
+    this.injectedManifest = options.manifest;
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
@@ -809,7 +828,7 @@ var PresentShellController = class {
   }
   async load() {
     try {
-      const manifest = await this.fetchJson("manifest.json");
+      const manifest = this.injectedManifest ?? await this.fetchJson("manifest.json");
       const dimensions = {
         width: manifest.canvasWidth,
         height: manifest.canvasHeight
@@ -852,6 +871,24 @@ var PresentShellController = class {
   }
   startedAt() {
     return this.startedAtValue;
+  }
+  adoptTimerState(state) {
+    const elapsedMs = Math.max(0, state.elapsedMs);
+    const previousElapsedMs = this.elapsedMs();
+    if (!state.running && elapsedMs === 0) {
+      this.startedAtValue = null;
+      this.pausedAtValue = null;
+      this.pausedTotalMs = 0;
+      this.ended = false;
+      this.dispatchTimerAdopt(elapsedMs, state.running, previousElapsedMs);
+      return;
+    }
+    const now = this.now();
+    this.startedAtValue = now - elapsedMs;
+    this.pausedAtValue = state.running ? null : now;
+    this.pausedTotalMs = 0;
+    this.ended = false;
+    this.dispatchTimerAdopt(elapsedMs, state.running, previousElapsedMs);
   }
   destroy() {
     this.endPresentation();
@@ -973,6 +1010,7 @@ var PresentShellController = class {
         detail: { total: this.slides.length, startedAt: this.startedAtValue }
       })
     );
+    this.dispatchTimerChange();
   }
   endPresentation() {
     if (this.ended || this.startedAtValue === null) return;
@@ -988,17 +1026,37 @@ var PresentShellController = class {
   pauseTimer() {
     if (this.startedAtValue === null || this.pausedAtValue !== null) return;
     this.pausedAtValue = this.now();
+    this.dispatchTimerChange();
   }
   resumeTimer() {
     if (this.pausedAtValue === null) return;
     this.pausedTotalMs += this.now() - this.pausedAtValue;
     this.pausedAtValue = null;
+    this.dispatchTimerChange();
   }
   resetTimer() {
     this.startedAtValue = null;
     this.pausedAtValue = null;
     this.pausedTotalMs = 0;
     this.ended = false;
+    this.dispatchTimerChange();
+  }
+  dispatchTimerChange() {
+    this.bus.dispatchEvent(
+      new CustomEvent("peitho:timerchange", {
+        detail: {
+          running: this.startedAtValue !== null && this.pausedAtValue === null,
+          elapsedMs: this.elapsedMs()
+        }
+      })
+    );
+  }
+  dispatchTimerAdopt(elapsedMs, running, previousElapsedMs) {
+    this.bus.dispatchEvent(
+      new CustomEvent("peitho:timeradopt", {
+        detail: { running, elapsedMs, previousElapsedMs }
+      })
+    );
   }
 };
 
@@ -1039,12 +1097,31 @@ function isIndexSyncMessage(value) {
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
+function isSyncedSyncMessage(value) {
+  return isRecord(value) && value.synced === true;
+}
+function isNonNegativeFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isTimerSyncMessage(value) {
+  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs);
+}
+function isTimerReplaySyncMessage(value) {
+  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs) && isNonNegativeFiniteNumber(value.timer.atMs) && isNonNegativeFiniteNumber(value.nowMs);
+}
 function isGenerationSyncMessage(value) {
   return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
 function defaultChannelFactory(name) {
   const channel = new BroadcastChannel(name);
   let onmessage = null;
+  let syncedDelivered = false;
+  const deliverSynced = () => {
+    if (syncedDelivered || onmessage == null) return;
+    syncedDelivered = true;
+    onmessage({ data: { synced: true } });
+  };
+  queueMicrotask(deliverSynced);
   channel.onmessage = (event) => {
     onmessage?.({ data: event.data });
   };
@@ -1054,6 +1131,7 @@ function defaultChannelFactory(name) {
     },
     set onmessage(next) {
       onmessage = next;
+      deliverSynced();
     },
     postMessage(message) {
       channel.postMessage(message);
@@ -1074,13 +1152,39 @@ function serverSyncChannelFactory(options = {}) {
     let onmessage = null;
     let closed = false;
     let seq = 0;
+    let synced = false;
+    let highestAckedPostSeq = 0;
+    let pendingTimerPosts = 0;
+    let bufferedTimerReplay = null;
     let abortController = null;
     let retryTimer = null;
-    const deliverReplayState = (body) => {
-      if (isIndexSyncMessage(body)) {
+    const flushBufferedTimerReplay = () => {
+      if (closed || pendingTimerPosts > 0 || bufferedTimerReplay == null) return;
+      const replay = bufferedTimerReplay;
+      bufferedTimerReplay = null;
+      if (replay.seq >= highestAckedPostSeq) {
+        onmessage?.({ data: replay.data });
+      }
+    };
+    const deliverReplayState = (body, options2 = {}) => {
+      const skipAbsoluteState = options2.skipAbsoluteState === true;
+      const responseSeq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : 0;
+      if (isTimerReplaySyncMessage(body)) {
+        if (skipAbsoluteState) {
+          bufferedTimerReplay = null;
+        } else if (options2.deferTimerReplay === true) {
+          bufferedTimerReplay = {
+            seq: responseSeq,
+            data: { timer: body.timer, nowMs: body.nowMs }
+          };
+        } else {
+          onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
+        }
+      }
+      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
         onmessage?.({ data: { index: body.index } });
       }
-      if (isSwappedSyncMessage(body)) {
+      if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
       }
       if (isGenerationSyncMessage(body)) {
@@ -1109,7 +1213,14 @@ function serverSyncChannelFactory(options = {}) {
           return false;
         }
         seq = body.seq;
-        deliverReplayState(body);
+        deliverReplayState(body, {
+          skipAbsoluteState: body.seq < highestAckedPostSeq,
+          deferTimerReplay: pendingTimerPosts > 0
+        });
+        if (!synced) {
+          synced = true;
+          onmessage?.({ data: { synced: true } });
+        }
         return true;
       } catch (error) {
         if (!closed) {
@@ -1149,7 +1260,10 @@ function serverSyncChannelFactory(options = {}) {
           if (body.message != null) {
             onmessage?.({ data: body.message });
           }
-          deliverReplayState(body);
+          deliverReplayState(body, {
+            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            deferTimerReplay: pendingTimerPosts > 0
+          });
         } catch (error) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
@@ -1168,15 +1282,42 @@ function serverSyncChannelFactory(options = {}) {
         onmessage = next;
       },
       postMessage(message) {
-        void fetcher(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message),
-          keepalive: true
-        }).then((response) => {
-          if (!response.ok) console.error(`Failed to post sync message: ${response.status}`);
+        const isTimerPost = isTimerSyncMessage(message);
+        if (isTimerPost) pendingTimerPosts += 1;
+        const completeTimerPost = () => {
+          if (!isTimerPost) return;
+          pendingTimerPosts = Math.max(0, pendingTimerPosts - 1);
+          flushBufferedTimerReplay();
+        };
+        let request;
+        try {
+          request = fetcher(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(message),
+            keepalive: true
+          });
+        } catch (error) {
+          completeTimerPost();
+          console.error(`Failed to post sync message: ${String(error)}`);
+          return;
+        }
+        void request.then(async (response) => {
+          if (!response.ok) {
+            console.error(`Failed to post sync message: ${response.status}`);
+            return;
+          }
+          try {
+            const body = await response.json();
+            if (typeof body.seq === "number" && Number.isFinite(body.seq)) {
+              highestAckedPostSeq = Math.max(highestAckedPostSeq, body.seq);
+            }
+          } catch (_error) {
+          }
         }).catch((error) => {
           console.error(`Failed to post sync message: ${String(error)}`);
+        }).finally(() => {
+          completeTimerPost();
         });
       },
       close() {
@@ -1190,8 +1331,12 @@ function serverSyncChannelFactory(options = {}) {
     };
   };
 }
-function installSyncBridge(win = window, channelFactory = defaultChannelFactory, bus = win, closeWindow = () => win.close(), pathname = () => win.location.pathname, navigate = (url) => win.location.replace(url)) {
+function installSyncBridge(win = window, channelFactory = defaultChannelFactory, bus = win, hooks = {}) {
   const channel = channelFactory("peitho-sync");
+  const closeWindow = hooks.closeWindow ?? (() => win.close());
+  const pathname = hooks.pathname ?? (() => win.location.pathname);
+  const navigate = hooks.navigate ?? ((url) => win.location.replace(url));
+  let synced = false;
   const onSlideChange = (event) => {
     const detail = event.detail;
     if (typeof detail?.index !== "number") return;
@@ -1208,8 +1353,23 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
     }
     channel.postMessage({ swapped: !route.swapped });
   };
+  const onTimerChange = (event) => {
+    if (!synced) return;
+    const detail = event.detail;
+    if (typeof detail?.running !== "boolean" || !isNonNegativeFiniteNumber(detail.elapsedMs)) {
+      console.error("Invalid peitho:timerchange event");
+      return;
+    }
+    channel.postMessage({
+      timer: { running: detail.running, elapsedMs: Math.round(detail.elapsedMs) }
+    });
+  };
   channel.onmessage = (event) => {
     const data = event.data;
+    if (isSyncedSyncMessage(data)) {
+      synced = true;
+      return;
+    }
     if (isCloseSyncMessage(data)) {
       closeWindow();
       return;
@@ -1233,15 +1393,27 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
     if (isGenerationSyncMessage(data)) {
       return;
     }
+    if (isTimerReplaySyncMessage(data)) {
+      if (hooks.adoptTimerState) {
+        const serverElapsed = data.timer.elapsedMs + (data.timer.running ? Math.max(0, data.nowMs - data.timer.atMs) : 0);
+        hooks.adoptTimerState({ running: data.timer.running, elapsedMs: serverElapsed });
+      }
+      return;
+    }
+    if (isTimerSyncMessage(data)) {
+      return;
+    }
     console.error("Invalid peitho sync message");
   };
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:closerequest", onCloseRequest);
   bus.addEventListener("peitho:swaprequest", onSwapRequest);
+  bus.addEventListener("peitho:timerchange", onTimerChange);
   return () => {
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
     bus.removeEventListener("peitho:swaprequest", onSwapRequest);
+    bus.removeEventListener("peitho:timerchange", onTimerChange);
     channel.onmessage = null;
     channel.close();
   };
@@ -1471,7 +1643,17 @@ async function mountPresenterView(options) {
     viewport: paneViewport(previewRoot)
   });
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);
-  const syncCleanup = installSyncBridge(win, options.syncChannelFactory, bus);
+  const syncCleanup = installSyncBridge(
+    win,
+    options.syncChannelFactory,
+    bus,
+    {
+      adoptTimerState: (state) => {
+        mainShell.adoptTimerState(state);
+        tick();
+      }
+    }
+  );
   const rawPlannedDurationMs = mainShell.manifest?.plannedDurationMs ?? null;
   const plannedDurationMs = rawPlannedDurationMs != null && isValidDurationMs(rawPlannedDurationMs) ? rawPlannedDurationMs : null;
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
