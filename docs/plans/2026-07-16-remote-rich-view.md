@@ -248,6 +248,37 @@ below are part of the design, not incidental patches:
   `navigate`/`adoptTimerState`) instead of positional defaults restated at
   every caller.
 
+## Amendment: hare-and-tortoise chase track (2026-07-17, author-approved "Remote v3" mock)
+
+The separate progress bar (+ plan tick) and pace chip merge into one
+presenter-style chase track, mirroring the PC presenter's time tracker
+(🐰 = slide position marker, 🐢 = time position marker) on the phone:
+
+- **Track**: a 34px-tall zone; the 6px rounded track sits at the bottom
+  (`#232935`), markers ride above it (17px emoji, `filter: saturate(0.9)`,
+  positioned with `left: X%; transform: translateX(-X%)` — the same
+  edge-safe placement as the presenter's `setMarker`).
+- **Fill follows 🐢 (time)**, like the presenter: `rgba(56,189,248,0.55)`.
+- **🐰 position** = slide fraction `index / (slideCount - 1)` (unchanged).
+  **🐢 position** = the existing `plannedProgressAtElapsed` fraction (the old
+  plan tick's position). Deliberate deviation from the presenter's linear
+  `elapsed / planned`: the piecewise mapping is what the behind/ahead number
+  uses, so markers and text can never contradict each other on decks with
+  uneven section times; without sections both definitions coincide at the
+  endpoints and the piecewise one is used throughout.
+- **Overrun** (`isOverrun`, i.e. elapsed > planned): the fill turns red
+  (`rgba(239,68,68,0.6)`), the track gets a red ring
+  (`box-shadow: 0 0 0 1px rgba(239,68,68,0.35)`), 🐢 pins at 100%.
+- **The pace chip is removed.** The number lives on as small colored text at
+  the right end of the pace row (`13px/600`): behind = `#e8c07a`
+  `m:ss behind`, ahead = `#8fd9a0` `m:ss ahead`, overrun = `#e8c07a`
+  `+m:ss over` (delta = elapsed − planned), paused = `#aab3c2` `Paused`.
+- **No time-scale labels** (presenter has them; too cramped on a phone).
+- **Decks without `time`**: the chase degrades to the plain slide-progress
+  fill (solid accent, as before) with no markers and no delta text.
+- 1 s tick updates stay in place: fill width, 🐢 `left/transform`, delta
+  text; 🐰 moves only on index change. Ended dims the whole track as before.
+
 ## Non-goals
 
 - Markdown rendering of notes (undecided item — plaintext only).

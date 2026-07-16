@@ -250,7 +250,7 @@ it("remote controller treats a null replay index as the first non-skipped slide"
   expect(channel.sent).toEqual([{ index: 2 }]);
 });
 
-it("remote renders preview title progress section notes and planned pace chrome", async () => {
+it("remote renders preview title section notes and section-aware chase chrome", async () => {
   const previewNavigations: unknown[] = [];
   const manifest = manifestWithSlides(
     [
@@ -281,10 +281,21 @@ it("remote renders preview title progress section notes and planned pace chrome"
   expect(previewNavigations.at(-1)).toEqual({ to: { index: 1 } });
   expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Architecture");
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("2 / 3");
-  expect(root.querySelector<HTMLElement>('[data-peitho-remote="progress-fill"]')?.style.width).toBe(
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "41.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
     "50%"
   );
-  expect(root.querySelector('[data-peitho-remote="plan-tick"]')).not.toBeNull();
+  expect(
+    root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.transform
+  ).toBe("translateX(-50%)");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "41.67%"
+  );
+  expect(
+    root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.transform
+  ).toBe("translateX(-41.67%)");
   expect(root.querySelector('[data-peitho-remote="section"]')?.textContent).toBe(
     "Architecture · slide 1 / 2 in section"
   );
@@ -293,7 +304,12 @@ it("remote renders preview title progress section notes and planned pace chrome"
   );
   expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:25");
   expect(root.querySelector('[data-peitho-remote="planned"]')?.textContent).toBe("1:30");
-  expect(root.querySelector('[data-peitho-remote="pace-chip"]')?.textContent).toContain("ahead");
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "0:05 ahead"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "ahead"
+  );
 });
 
 it("remote mounts with empty notes placeholders when notes fetch fails", async () => {
@@ -346,13 +362,21 @@ it("remote mounts with empty notes placeholders when notes fetch fails", async (
 });
 
 it("remote omits planned and section rows when the deck has no time or sections", async () => {
-  const { root } = await mountRemoteForTest(
+  const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro", title: "Intro" }, { key: "end", title: "End" }])
   );
+  channel.deliver({ index: 1 });
 
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="planned"]')?.hidden).toBe(true);
-  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-chip"]')?.hidden).toBe(true);
-  expect(root.querySelector<HTMLElement>('[data-peitho-remote="plan-tick"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.dataset.peithoChase).toBe(
+    "slide"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "100%"
+  );
   expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
   expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:00");
   expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')).not.toBeNull();
@@ -396,7 +420,7 @@ it("remote timer button emits requests while the bridge posts absolute timer sta
   timer.click();
   vi.setSystemTime(3_500);
   timer.click();
-  expect(root.querySelector('[data-peitho-remote="pace-chip"]')?.textContent).toBe("Paused");
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe("Paused");
   timer.click();
 
   expect(requests).toEqual([{ action: "start" }, { action: "pause" }, { action: "resume" }]);
@@ -419,21 +443,81 @@ it("remote timer states render stopped running and paused rows", async () => {
   const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
 
   expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
-  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-chip"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
 
   channel.deliver({
     timer: { running: true, elapsedMs: 35_000, atMs: 10_000 },
     nowMs: 10_000
   });
   expect(timer.querySelector('[data-peitho-icon="pause"]')).not.toBeNull();
-  expect(root.querySelector('[data-peitho-remote="pace-chip"]')?.textContent).toContain("behind");
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toContain("behind");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "0%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "100%"
+  );
 
   channel.deliver({
     timer: { running: false, elapsedMs: 20_000, atMs: 10_000 },
     nowMs: 10_000
   });
   expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
-  expect(root.querySelector('[data-peitho-remote="pace-chip"]')?.textContent).toBe("Paused");
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe("Paused");
+});
+
+it("remote chase renders behind and overrun states", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "middle", title: "Middle" }, { key: "end" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+
+  channel.deliver({ index: 1 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 25_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "50%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "62.5%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "62.5%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "0:05 behind"
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 70_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
+    "peitho-remote-chase-overrun"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "100%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "+0:10 over"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "overrun"
+  );
 });
 
 it("remote preview shell reuses the already loaded manifest", async () => {
@@ -472,7 +556,7 @@ it("remote preview shell reuses the already loaded manifest", async () => {
   expect(root.querySelector('[data-peitho-remote="preview"] .peitho-slide')).not.toBeNull();
 });
 
-it("remote timer interval updates time chrome without replacing the notes text node", async () => {
+it("remote timer interval updates turtle fill and delta in place without touching rabbit or notes", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
   const { root, channel } = await mountRemoteForTest(
@@ -485,15 +569,30 @@ it("remote timer interval updates time chrome without replacing the notes text n
   );
   const notes = root.querySelector<HTMLElement>('[data-peitho-remote="notes"]')!;
   const firstTextNode = notes.firstChild;
+  const rabbit = root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')!;
+  const turtle = root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')!;
+  const fill = root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')!;
+  const delta = root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')!;
   channel.deliver({
     timer: { running: true, elapsedMs: 1_000, atMs: 10_000 },
     nowMs: 10_000
   });
+  const rabbitLeft = rabbit.style.left;
+  const turtleElement = turtle;
+  const fillElement = fill;
+  const deltaElement = delta;
 
   vi.advanceTimersByTime(1000);
 
   expect(notes.firstChild).toBe(firstTextNode);
   expect(notes.textContent).toBe("Long note");
+  expect(rabbit.style.left).toBe(rabbitLeft);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')).toBe(turtleElement);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')).toBe(fillElement);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')).toBe(deltaElement);
+  expect(turtle.style.left).toBe("6.67%");
+  expect(fill.style.width).toBe("6.67%");
+  expect(delta.textContent).toBe("0:02 behind");
   expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:02");
 });
 
@@ -536,6 +635,34 @@ it("remote controller disables buttons and shows ended state on close", async ()
   );
   expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
   expect(root.querySelector<HTMLElement>(".peitho-remote")?.dataset.peithoEnded).toBe("true");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
+    "peitho-remote-dim-on-end"
+  );
+});
+
+it("remote ended state freezes the chase track", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }], { plannedDurationMs: 60_000 })
+  );
+  channel.deliver({
+    timer: { running: true, elapsedMs: 10_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  const turtle = root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')!;
+  const fill = root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')!;
+  const delta = root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')!;
+
+  channel.deliver({ close: true });
+  const turtleLeft = turtle.style.left;
+  const fillWidth = fill.style.width;
+  const deltaText = delta.textContent;
+  vi.advanceTimersByTime(1000);
+
+  expect(turtle.style.left).toBe(turtleLeft);
+  expect(fill.style.width).toBe(fillWidth);
+  expect(delta.textContent).toBe(deltaText);
 });
 
 it("remote controller closes the sync channel and ignores clicks after ended", async () => {
@@ -579,7 +706,7 @@ it("pace math falls back to whole-deck timing without sections", () => {
   expect(expectedElapsedAtSlide(manifest, 2)).toBe(40_000);
 });
 
-it("pace math clamps plan tick progress", () => {
+it("plannedProgressAtElapsed clamps the chase turtle fraction", () => {
   const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
     plannedDurationMs: 60_000
   });
@@ -590,7 +717,7 @@ it("pace math clamps plan tick progress", () => {
   expect(plannedProgressAtElapsed(manifest, 90_000)).toBe(1);
 });
 
-it("pace chip selection covers ahead behind paused and null planned time", () => {
+it("pace state selection covers ahead behind overrun paused and null planned time", () => {
   const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
     plannedDurationMs: 60_000
   });
@@ -598,18 +725,19 @@ it("pace chip selection covers ahead behind paused and null planned time", () =>
 
   expect(remotePaceState(manifest, 1, 25_000, true)).toEqual({
     kind: "behind",
-    label: "0:05 behind",
-    emoji: "tortoise"
+    label: "0:05 behind"
   });
   expect(remotePaceState(manifest, 1, 15_000, true)).toEqual({
     kind: "ahead",
-    label: "0:05 ahead",
-    emoji: "hare"
+    label: "0:05 ahead"
+  });
+  expect(remotePaceState(manifest, 1, 70_000, true)).toEqual({
+    kind: "overrun",
+    label: "+0:10 over"
   });
   expect(remotePaceState(manifest, 1, 15_000, false)).toEqual({
     kind: "paused",
-    label: "Paused",
-    emoji: null
+    label: "Paused"
   });
   expect(remotePaceState(unplanned, 1, 15_000, true)).toBeNull();
 });

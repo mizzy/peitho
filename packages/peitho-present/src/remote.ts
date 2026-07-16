@@ -19,7 +19,7 @@ import {
   serverSyncChannelFactory,
   type SyncChannelFactory
 } from "./sync";
-import { clamp01, formatMinuteSeconds, isValidDurationMs } from "./timeTracker";
+import { clamp01, formatMinuteSeconds, isOverrun, isValidDurationMs } from "./timeTracker";
 
 export { mountPresentShell } from "./shell";
 export { serverSyncChannelFactory } from "./sync";
@@ -39,8 +39,8 @@ type RemoteTimerAnchor = {
 type TimerVisualState = "stopped" | "running" | "paused";
 
 export type RemotePaceState =
-  | { kind: "ahead" | "behind"; label: string; emoji: "hare" | "tortoise" }
-  | { kind: "paused"; label: "Paused"; emoji: null };
+  | { kind: "ahead" | "behind" | "overrun"; label: string }
+  | { kind: "paused"; label: "Paused" };
 
 export type RemoteView = {
   manifest: Manifest | null;
@@ -116,17 +116,28 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   counter.textContent = "– / –";
   titlebar.append(title, counter);
 
-  const progress = doc.createElement("div");
-  progress.className = "peitho-remote-progress peitho-remote-dim-on-end";
-  progress.dataset.peithoRemote = "progress";
-  const progressFill = doc.createElement("div");
-  progressFill.className = "peitho-remote-progress-fill";
-  progressFill.dataset.peithoRemote = "progress-fill";
-  const planTick = doc.createElement("div");
-  planTick.className = "peitho-remote-plan-tick";
-  planTick.dataset.peithoRemote = "plan-tick";
-  planTick.hidden = true;
-  progress.append(progressFill, planTick);
+  const chase = doc.createElement("div");
+  chase.className = "peitho-remote-chase peitho-remote-dim-on-end";
+  chase.dataset.peithoRemote = "chase";
+  chase.dataset.peithoChase = "slide";
+  const chaseTrack = doc.createElement("div");
+  chaseTrack.className = "peitho-remote-chase-track";
+  chaseTrack.dataset.peithoRemote = "chase-track";
+  const chaseFill = doc.createElement("div");
+  chaseFill.className = "peitho-remote-chase-fill";
+  chaseFill.dataset.peithoRemote = "chase-fill";
+  chaseTrack.append(chaseFill);
+  const rabbit = doc.createElement("span");
+  rabbit.className = "peitho-remote-chase-marker";
+  rabbit.dataset.peithoRemote = "marker-rabbit";
+  rabbit.setAttribute("aria-label", "slide progress");
+  rabbit.textContent = "🐰";
+  const turtle = doc.createElement("span");
+  turtle.className = "peitho-remote-chase-marker";
+  turtle.dataset.peithoRemote = "marker-turtle";
+  turtle.setAttribute("aria-label", "time progress");
+  turtle.textContent = "🐢";
+  chase.append(chaseTrack, rabbit, turtle);
 
   const pace = doc.createElement("div");
   pace.className = "peitho-remote-pace peitho-remote-dim-on-end";
@@ -159,11 +170,11 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   planned.dataset.peithoRemote = "planned";
   planned.hidden = true;
   elapsedRow.append(elapsed, separator, planned);
-  const chip = doc.createElement("span");
-  chip.className = "peitho-remote-pace-chip";
-  chip.dataset.peithoRemote = "pace-chip";
-  chip.hidden = true;
-  pace.append(timerButton, elapsedRow, chip);
+  const delta = doc.createElement("span");
+  delta.className = "peitho-remote-pace-delta";
+  delta.dataset.peithoRemote = "pace-delta";
+  delta.hidden = true;
+  pace.append(timerButton, elapsedRow, delta);
 
   const notesPanel = doc.createElement("section");
   notesPanel.className = "peitho-remote-notes peitho-remote-dim-on-end";
@@ -197,7 +208,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   next.addEventListener("click", onNext);
   timerButton.addEventListener("click", onTimer);
 
-  container.append(preview, titlebar, progress, pace, notesPanel, status, actions);
+  container.append(preview, titlebar, chase, pace, notesPanel, status, actions);
   root.append(container);
 
   return () => {
@@ -440,7 +451,7 @@ class RemoteController implements RemoteView {
     setText(this.root, "title", slideTitle(slide?.text.title));
     setText(this.root, "counter", currentIndex == null ? `– / ${total}` : `${currentIndex + 1} / ${total}`);
 
-    this.renderProgress(manifest, currentIndex);
+    this.renderChase(manifest, currentIndex);
     this.renderPaceStatic(manifest);
     this.renderTimeDependentChrome(manifest, currentIndex);
     this.renderSection(manifest, currentIndex);
@@ -451,14 +462,13 @@ class RemoteController implements RemoteView {
     this.updateTimerInterval();
   }
 
-  private renderProgress(manifest: Manifest, currentIndex: number | null): void {
-    const progress = this.root.querySelector<HTMLElement>('[data-peitho-remote="progress"]');
-    const fill = this.root.querySelector<HTMLElement>('[data-peitho-remote="progress-fill"]');
-    if (progress == null || fill == null) return;
-    const fraction =
-      currentIndex == null ? 0 : manifest.slideCount <= 1 ? 1 : currentIndex / (manifest.slideCount - 1);
-    fill.style.width = `${clamp01(fraction) * 100}%`;
-    this.updatePlanTick(manifest, this.currentElapsedMs());
+  private renderChase(manifest: Manifest, currentIndex: number | null): void {
+    const rabbit = this.root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]');
+    if (rabbit == null) return;
+    const plannedDurationMs = validPlannedDurationMs(manifest);
+    const planned = plannedDurationMs != null;
+    rabbit.hidden = !planned;
+    if (planned) setChaseMarker(rabbit, slideFraction(manifest, currentIndex));
   }
 
   private renderPaceStatic(manifest: Manifest): void {
@@ -490,36 +500,60 @@ class RemoteController implements RemoteView {
 
     elapsed.textContent = formatMinuteSeconds(elapsedMs);
 
-    this.updatePlanTick(manifest, elapsedMs);
-    const chip = this.root.querySelector<HTMLElement>('[data-peitho-remote="pace-chip"]');
-    if (chip == null || currentIndex == null) {
-      if (chip != null) chip.hidden = true;
+    this.updateChaseTime(manifest, currentIndex, elapsedMs, state);
+  }
+
+  private updateChaseTime(
+    manifest: Manifest,
+    currentIndex: number | null,
+    elapsedMs: number,
+    state: TimerVisualState
+  ): void {
+    const chase = this.root.querySelector<HTMLElement>('[data-peitho-remote="chase"]');
+    const fill = this.root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]');
+    const rabbit = this.root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]');
+    const turtle = this.root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]');
+    const delta = this.root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]');
+    if (chase == null || fill == null || rabbit == null || turtle == null || delta == null) return;
+
+    const plannedDurationMs = validPlannedDurationMs(manifest);
+    if (plannedDurationMs == null) {
+      chase.dataset.peithoChase = "slide";
+      chase.classList.remove("peitho-remote-chase-overrun");
+      rabbit.hidden = true;
+      turtle.hidden = true;
+      delta.hidden = true;
+      delta.textContent = "";
+      delete delta.dataset.peithoPace;
+      setChaseFill(fill, slideFraction(manifest, currentIndex));
+      return;
+    }
+
+    chase.dataset.peithoChase = "time";
+    rabbit.hidden = false;
+    turtle.hidden = false;
+    const overrun = isOverrun(elapsedMs, plannedDurationMs);
+    chase.classList.toggle("peitho-remote-chase-overrun", overrun);
+    const turtleFraction = overrun ? 1 : plannedProgressAtElapsed(manifest, elapsedMs);
+    setChaseMarker(turtle, turtleFraction ?? 0);
+    setChaseFill(fill, turtleFraction ?? 0);
+
+    if (currentIndex == null) {
+      delta.hidden = true;
+      delta.textContent = "";
+      delete delta.dataset.peithoPace;
       return;
     }
     const paceState = remotePaceState(manifest, currentIndex, elapsedMs, state === "running");
     if (paceState == null) {
-      chip.hidden = true;
-      chip.textContent = "";
+      delta.hidden = true;
+      delta.textContent = "";
+      delete delta.dataset.peithoPace;
       return;
     }
-    chip.hidden = false;
-    chip.dataset.peithoPace = paceState.kind;
-    if (paceState.emoji != null) {
-      const emoji = this.doc.createElement("span");
-      emoji.dataset.peithoPaceEmoji = "";
-      emoji.textContent = paceState.emoji === "hare" ? "🐇" : "🐢";
-      chip.replaceChildren(emoji, this.doc.createTextNode(` ${paceState.label}`));
-    } else {
-      chip.textContent = paceState.label;
-    }
-  }
-
-  private updatePlanTick(manifest: Manifest, elapsedMs: number): void {
-    const tick = this.root.querySelector<HTMLElement>('[data-peitho-remote="plan-tick"]');
-    if (tick == null) return;
-    const planProgress = plannedProgressAtElapsed(manifest, elapsedMs);
-    tick.hidden = planProgress == null;
-    if (planProgress != null) tick.style.left = `${planProgress * 100}%`;
+    delta.hidden = false;
+    delta.dataset.peithoPace = paceState.kind;
+    delta.textContent = paceState.label;
   }
 
   private renderSection(manifest: Manifest, currentIndex: number | null): void {
@@ -658,6 +692,26 @@ function clampIndex(index: number, total: number): number | null {
   return Math.max(0, Math.min(Math.trunc(index), total - 1));
 }
 
+function slideFraction(manifest: Manifest, currentIndex: number | null): number {
+  if (currentIndex == null) return 0;
+  if (manifest.slideCount <= 1) return 1;
+  return clamp01(currentIndex / (manifest.slideCount - 1));
+}
+
+function chasePercent(ratio: number): number {
+  return Math.round(clamp01(ratio) * 10_000) / 100;
+}
+
+function setChaseMarker(element: HTMLElement, ratio: number): void {
+  const percent = chasePercent(ratio);
+  element.style.left = `${percent}%`;
+  element.style.transform = `translateX(${-percent}%)`;
+}
+
+function setChaseFill(element: HTMLElement, ratio: number): void {
+  element.style.width = `${chasePercent(ratio)}%`;
+}
+
 function setText(root: HTMLElement, key: string, value: string): void {
   const element = root.querySelector<HTMLElement>(`[data-peitho-remote="${key}"]`);
   if (element != null) element.textContent = value;
@@ -728,20 +782,25 @@ export function remotePaceState(
   const expected = expectedElapsedAtSlide(manifest, index);
   if (expected == null) return null;
   if (!running) {
-    return elapsedMs > 0 ? { kind: "paused", label: "Paused", emoji: null } : null;
+    return elapsedMs > 0 ? { kind: "paused", label: "Paused" } : null;
+  }
+  const plannedDurationMs = validPlannedDurationMs(manifest);
+  if (plannedDurationMs != null && isOverrun(elapsedMs, plannedDurationMs)) {
+    return {
+      kind: "overrun",
+      label: `+${formatMinuteSeconds(elapsedMs - plannedDurationMs)} over`
+    };
   }
   const delta = elapsedMs - expected;
   if (delta >= 0) {
     return {
       kind: "behind",
-      label: `${formatMinuteSeconds(delta)} behind`,
-      emoji: "tortoise"
+      label: `${formatMinuteSeconds(delta)} behind`
     };
   }
   return {
     kind: "ahead",
-    label: `${formatMinuteSeconds(Math.abs(delta))} ahead`,
-    emoji: "hare"
+    label: `${formatMinuteSeconds(Math.abs(delta))} ahead`
   };
 }
 
