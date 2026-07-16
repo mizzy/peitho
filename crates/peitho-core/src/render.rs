@@ -755,6 +755,61 @@ pub fn render_preview_index(aspect_ratio: AspectRatio) -> String {
     fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
+pub fn render_remote_index() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peitho Remote</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    html, body { margin: 0; min-height: 100%; background: #101216; color: #f5f7fb; }
+    body { min-height: 100vh; }
+    #peitho-remote-root { min-height: 100vh; display: grid; align-items: stretch; padding: 20px; box-sizing: border-box; }
+    .peitho-remote-error { align-self: center; justify-self: center; max-width: 32rem; padding: 16px; border: 1px solid #7f1d1d; background: #2a1215; color: #ffd7d7; border-radius: 6px; line-height: 1.4; }
+    .peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); }
+    .peitho-remote-counter { align-self: start; justify-self: center; font-size: clamp(2rem, 11vw, 4.5rem); font-weight: 700; }
+    .peitho-remote-status { min-height: 1.5em; text-align: center; color: #aab3c2; }
+    .peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-self: end; }
+    .peitho-remote button { min-height: 88px; border: 1px solid #384252; border-radius: 8px; background: #f5f7fb; color: #101216; font: inherit; font-size: 1.4rem; font-weight: 700; touch-action: manipulation; }
+    .peitho-remote button:disabled { opacity: 0.45; }
+  </style>
+</head>
+<body>
+  <main id="peitho-remote-root"></main>
+  <script type="module">
+    import * as peitho from './remote.js';
+
+    function showError(message) {
+      const root = document.getElementById('peitho-remote-root');
+      root.className = 'peitho-remote-error';
+      root.textContent = message;
+    }
+
+    async function main() {
+      const root = document.getElementById('peitho-remote-root');
+      try {
+        if (typeof peitho.mountRemoteView === 'function') {
+          await peitho.mountRemoteView({
+            root,
+            manifestUrl: 'manifest.json'
+          });
+        } else {
+          throw new Error("remote bundle does not provide mountRemoteView; run npm run build");
+        }
+      } catch (error) {
+        showError(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>"#
+        .to_owned()
+}
+
 pub fn render_preview_error_index(generation: u64, error: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -1623,6 +1678,23 @@ Paragraph after heading.
         assert!(config_fetch_index < mount_index);
         assert!(mount_index < sync_index);
         assert!(sync_index < config_await_index);
+    }
+
+    #[test]
+    fn remote_index_mounts_remote_bundle_with_feature_detection() {
+        let html = render_remote_index();
+
+        assert!(html
+            .contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#));
+        assert!(html.contains("import * as peitho from './remote.js';"));
+        assert!(html.contains("typeof peitho.mountRemoteView === 'function'"));
+        assert!(
+            html.contains(r#""remote bundle does not provide mountRemoteView; run npm run build""#)
+        );
+        assert!(html.contains("showError"));
+        assert!(html.contains("manifestUrl: 'manifest.json'"));
+        assert!(html.contains("await peitho.mountRemoteView({"));
+        assert!(!html.contains("import { mountRemoteView }"));
     }
 
     #[test]

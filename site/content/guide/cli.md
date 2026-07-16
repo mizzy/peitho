@@ -68,6 +68,18 @@ Use windowed presenter mode while debugging:
 peitho present --presenter-windowed
 ```
 
+Use a phone as a clicker by exposing the present server on a reachable IP:
+
+```sh
+peitho present --host 100.64.0.5
+```
+
+The local slides and presenter windows still use loopback. A specific
+`--host` adds a listener for that address and prints exactly one `/remote`
+URL. A wildcard host (`0.0.0.0`/`::`) becomes the single listener, still
+covering loopback, and prints non-loopback `/remote` URL candidates for the
+phone. A Tailscale address is the recommended host when available.
+
 ## `peitho export`
 
 Export a PDF:

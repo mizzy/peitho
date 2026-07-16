@@ -20,3 +20,10 @@ await build({
   outfile: "dist/preview.js",
   sourcemap: true
 });
+
+await build({
+  ...shared,
+  entryPoints: ["src/remote.ts"],
+  outfile: "dist/remote.js",
+  sourcemap: true
+});

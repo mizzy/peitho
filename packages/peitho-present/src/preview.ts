@@ -5,7 +5,7 @@ import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
-import { nextNonSkippedIndex } from "./skipnav";
+import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
   isGenerationSyncMessage,
   serverSyncChannelFactory,
@@ -240,7 +240,7 @@ class PreviewShellController implements PreviewShell {
       const restored = this.restoredState;
       const restoredIndex =
         restored === null
-          ? this.clampIndex(nextNonSkippedIndex(pending.map((view) => view.meta), -1, 1) ?? 0)
+          ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0)
           : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;

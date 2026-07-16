@@ -2,7 +2,7 @@ use std::{
     ffi::OsString,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::TcpStream,
+    net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -49,7 +49,9 @@ fn present_no_serve_writes_clean_present_cache() {
     let cache = dir.path().join(".peitho/present-cache");
     assert!(!stale.exists());
     assert!(cache.join("present.html").exists());
+    assert!(cache.join("remote.html").exists());
     assert!(cache.join("shell.js").exists());
+    assert!(cache.join("remote.js").exists());
     assert!(cache.join("peitho.css").exists());
     assert!(cache.join("manifest.json").exists());
     assert!(cache.join("notes.json").exists());
@@ -191,6 +193,35 @@ fn present_server_serves_manifest_over_http() {
     assert!(response.contains("200 OK"));
     assert!(response.contains("application/json"));
     assert!(response.contains(r#"{"version":1}"#));
+}
+
+#[test]
+fn present_server_extra_listener_serves_manifest_over_http() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+    fs::write(cache.join("manifest.json"), r#"{"version":1}"#).unwrap();
+
+    let host = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let server =
+        peitho::server::PresentServer::bind_with_host(cache, 0, "present.html", Some(host))
+            .unwrap();
+    let primary_addr = server.addr();
+    let extra_addr = SocketAddr::new(host, primary_addr.port());
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let primary = get_http(primary_addr, "/manifest.json");
+    let extra = get_http(extra_addr, "/manifest.json");
+    assert!(post_sync(primary_addr, r#"{"close":true}"#).contains("204 No Content"));
+    join_present_server(handle, Duration::from_secs(3));
+
+    assert!(primary.contains("200 OK"));
+    assert!(primary.contains("application/json"));
+    assert!(primary.contains(r#"{"version":1}"#));
+    assert!(extra.contains("200 OK"));
+    assert!(extra.contains("application/json"));
+    assert!(extra.contains(r#"{"version":1}"#));
 }
 
 #[test]
@@ -412,6 +443,16 @@ fn present_server_shuts_down_after_close_sync_post() {
     assert!(post_response.contains("204 No Content"));
 
     join_present_server(handle, Duration::from_secs(3));
+}
+
+#[test]
+fn present_server_with_extra_listener_shuts_down_after_primary_close_sync_post() {
+    assert_dual_listener_shutdown(DualListenerCloseTarget::Primary);
+}
+
+#[test]
+fn present_server_with_extra_listener_shuts_down_after_extra_close_sync_post() {
+    assert_dual_listener_shutdown(DualListenerCloseTarget::Extra);
 }
 
 #[test]
@@ -711,6 +752,35 @@ fn present_process_exits_after_close_sync_post() {
     reader.join().unwrap();
 }
 
+enum DualListenerCloseTarget {
+    Primary,
+    Extra,
+}
+
+fn assert_dual_listener_shutdown(target: DualListenerCloseTarget) {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let host = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let server =
+        peitho::server::PresentServer::bind_with_host(cache, 0, "present.html", Some(host))
+            .unwrap();
+    let primary_addr = server.addr();
+    let extra_addr = SocketAddr::new(host, primary_addr.port());
+    let close_addr = match target {
+        DualListenerCloseTarget::Primary => primary_addr,
+        DualListenerCloseTarget::Extra => extra_addr,
+    };
+    let handle = thread::spawn(move || server.serve_forever());
+
+    let post_response = post_sync(close_addr, r#"{"close":true}"#);
+    assert!(post_response.contains("204 No Content"));
+
+    join_present_server(handle, Duration::from_secs(3));
+}
+
 #[test]
 fn repository_example_present_no_serve_smoke() {
     let shell = workspace_root().join("packages/peitho-present/dist/shell.js");
@@ -857,7 +927,7 @@ fn read_until_contains(stream: &mut TcpStream, needle: &str) -> String {
     out
 }
 
-fn post_sync(addr: std::net::SocketAddr, body: &str) -> String {
+fn post_sync(addr: SocketAddr, body: &str) -> String {
     let mut post = TcpStream::connect(addr).unwrap();
     write!(
         post,
@@ -871,7 +941,7 @@ fn post_sync(addr: std::net::SocketAddr, body: &str) -> String {
     response
 }
 
-fn get_http(addr: std::net::SocketAddr, path: &str) -> String {
+fn get_http(addr: SocketAddr, path: &str) -> String {
     let mut stream = TcpStream::connect(addr).unwrap();
     write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
     let mut response = String::new();
@@ -898,7 +968,7 @@ fn join_present_server(handle: thread::JoinHandle<miette::Result<()>>, timeout: 
     handle.join().unwrap().unwrap();
 }
 
-fn serving_addr(line: &str) -> std::net::SocketAddr {
+fn serving_addr(line: &str) -> SocketAddr {
     let prefix = "serving presentation at http://";
     let rest = line
         .strip_prefix(prefix)

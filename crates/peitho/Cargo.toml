@@ -12,6 +12,7 @@ path = "src/main.rs"
 base64.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+if-addrs.workspace = true
 miette.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true

@@ -10,3 +10,8 @@ export function nextNonSkippedIndex(
   }
   return null;
 }
+
+export function initialSlideIndex(slides: ReadonlyArray<{ skip: boolean }>): number | null {
+  if (slides.length === 0) return null;
+  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
+}

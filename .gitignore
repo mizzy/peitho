@@ -6,6 +6,7 @@ packages/peitho-present/node_modules/
 packages/peitho-present/dist/*
 !packages/peitho-present/dist/shell.js
 !packages/peitho-present/dist/preview.js
+!packages/peitho-present/dist/remote.js
 /.demo-site
 /.demo-site/deck-shots/
 /.screenshots

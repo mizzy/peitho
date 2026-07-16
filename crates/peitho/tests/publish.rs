@@ -112,6 +112,25 @@ fn publish_rejects_presentation_only_files() {
 }
 
 #[test]
+fn publish_rejects_remote_presentation_only_file() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(dist.join("remote.js"), "export {}").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "distribution contains presentation-only file: remote.js",
+        ));
+}
+
+#[test]
 fn publish_rejects_missing_manifest_slide_reference() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");

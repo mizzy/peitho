@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{Arc, Condvar, Mutex, RwLock},
     thread,
@@ -117,6 +117,7 @@ pub(crate) fn resolve_request_path(
     match trimmed {
         "presenter" | "presenter-swapped" => return Some(root.join("presenter.html")),
         "present-swapped" => return Some(root.join("present.html")),
+        "remote" => return Some(root.join("remote.html")),
         _ => {}
     }
 
@@ -150,24 +151,94 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindPlan {
+    LoopbackOnly,
+    WildcardOnly(IpAddr),
+    LoopbackPlusExtra(IpAddr),
+}
+
+fn bind_plan(host: Option<IpAddr>) -> BindPlan {
+    match host {
+        None => BindPlan::LoopbackOnly,
+        Some(host) if host.is_unspecified() => BindPlan::WildcardOnly(host),
+        Some(host) => BindPlan::LoopbackPlusExtra(host),
+    }
+}
+
 #[derive(Clone)]
 pub struct PresentServer {
     root: Arc<RwLock<PathBuf>>,
     default_document: String,
     server: Arc<Server>,
+    listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
 }
 
 impl PresentServer {
     pub fn bind(root: PathBuf, port: u16, default_document: &'static str) -> miette::Result<Self> {
-        let server = Server::http(("127.0.0.1", port))
-            .map_err(|err| miette::miette!("failed to bind present server: {err}"))?;
+        Self::bind_with_host(root, port, default_document, None)
+    }
+
+    pub fn bind_with_host(
+        root: PathBuf,
+        port: u16,
+        default_document: &'static str,
+        host: Option<IpAddr>,
+    ) -> miette::Result<Self> {
+        match bind_plan(host) {
+            BindPlan::LoopbackOnly => Self::bind_addr(
+                root,
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                default_document,
+            ),
+            BindPlan::WildcardOnly(host) => {
+                Self::bind_addr(root, SocketAddr::new(host, port), default_document)
+            }
+            BindPlan::LoopbackPlusExtra(host) => {
+                let server = Self::bind_addr(
+                    root,
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    default_document,
+                )?;
+                server.add_listener(host)?;
+                Ok(server)
+            }
+        }
+    }
+
+    fn bind_addr(
+        root: PathBuf,
+        addr: SocketAddr,
+        default_document: &'static str,
+    ) -> miette::Result<Self> {
+        let server = Server::http(addr)
+            .map_err(|err| miette::miette!("failed to bind present server at {addr}: {err}"))?;
+        let server = Arc::new(server);
         Ok(Self {
             root: Arc::new(RwLock::new(root)),
             default_document: default_document.to_owned(),
-            server: Arc::new(server),
+            server: server.clone(),
+            listeners: Arc::new(Mutex::new(vec![server])),
             sync: SyncHub::default(),
         })
+    }
+
+    fn add_listener(&self, host: IpAddr) -> miette::Result<SocketAddr> {
+        validate_extra_listener_host(host)?;
+        let addr = SocketAddr::new(host, self.addr().port());
+        let server = Server::http(addr)
+            .map_err(|err| miette::miette!("failed to bind present server at {addr}: {err}"))?;
+        let server = Arc::new(server);
+        let bound_addr = server
+            .server_addr()
+            .to_ip()
+            .expect("present server binds TCP");
+        self.listeners
+            .lock()
+            .expect("present server listeners mutex")
+            .push(server);
+        Ok(bound_addr)
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -198,8 +269,25 @@ impl PresentServer {
     }
 
     pub fn serve_forever(self) -> miette::Result<()> {
-        for request in self.server.incoming_requests() {
-            self.respond(request, Some(ShutdownHandle::new(self.server.clone())));
+        let listeners = self
+            .listeners
+            .lock()
+            .expect("present server listeners mutex")
+            .clone();
+        let mut handles = Vec::new();
+        for listener in listeners.iter().skip(1).cloned() {
+            let server = self.clone();
+            handles.push(thread::spawn(move || server.serve_listener(listener)));
+        }
+        self.serve_listener(self.server.clone());
+        let mut listener_panicked = false;
+        for handle in handles {
+            if handle.join().is_err() {
+                listener_panicked = true;
+            }
+        }
+        if listener_panicked {
+            return Err(miette::miette!("present server listener panicked"));
         }
         let _ = writeln!(std::io::stdout(), "presentation ended");
         Ok(())
@@ -208,6 +296,12 @@ impl PresentServer {
     pub fn handle_one(&self) {
         if let Some(request) = self.server.incoming_requests().next() {
             self.respond(request, None);
+        }
+    }
+
+    fn serve_listener(&self, server: Arc<Server>) {
+        for request in server.incoming_requests() {
+            self.respond(request, Some(ShutdownHandle::new(self.listeners.clone())));
         }
     }
 
@@ -321,19 +415,35 @@ impl PresentServer {
     }
 }
 
+fn validate_extra_listener_host(host: IpAddr) -> miette::Result<()> {
+    if host.is_unspecified() {
+        return Err(miette::miette!(
+            "extra listener must be specific\nhelp: bind the wildcard as the primary listener"
+        ));
+    }
+    Ok(())
+}
+
 struct ShutdownHandle {
-    server: Arc<Server>,
+    listeners: Arc<Mutex<Vec<Arc<Server>>>>,
 }
 
 impl ShutdownHandle {
-    fn new(server: Arc<Server>) -> Self {
-        Self { server }
+    fn new(listeners: Arc<Mutex<Vec<Arc<Server>>>>) -> Self {
+        Self { listeners }
     }
 
     fn start(self) {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(500));
-            self.server.unblock();
+            let listeners = self
+                .listeners
+                .lock()
+                .expect("present server listeners mutex")
+                .clone();
+            for server in listeners {
+                server.unblock();
+            }
         });
     }
 }
@@ -458,6 +568,57 @@ mod tests {
             resolve_request_path(Path::new("/cache"), "/presenter?seq=1", "present.html").unwrap(),
             Path::new("/cache").join("presenter.html")
         );
+    }
+
+    #[test]
+    fn resolves_extensionless_remote_route() {
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/remote", "present.html").unwrap(),
+            Path::new("/cache").join("remote.html")
+        );
+        assert_eq!(
+            resolve_request_path(Path::new("/cache"), "/remote?seq=1", "present.html").unwrap(),
+            Path::new("/cache").join("remote.html")
+        );
+    }
+
+    #[test]
+    fn bind_plan_defaults_to_loopback_only() {
+        assert_eq!(bind_plan(None), BindPlan::LoopbackOnly);
+    }
+
+    #[test]
+    fn bind_plan_uses_wildcard_only_for_unspecified_host() {
+        assert_eq!(
+            bind_plan(Some("0.0.0.0".parse().unwrap())),
+            BindPlan::WildcardOnly("0.0.0.0".parse().unwrap())
+        );
+        assert_eq!(
+            bind_plan(Some("::".parse().unwrap())),
+            BindPlan::WildcardOnly("::".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn bind_plan_uses_loopback_plus_extra_for_specific_host() {
+        assert_eq!(
+            bind_plan(Some("100.64.0.5".parse().unwrap())),
+            BindPlan::LoopbackPlusExtra("100.64.0.5".parse().unwrap())
+        );
+        assert_eq!(
+            bind_plan(Some("::1".parse().unwrap())),
+            BindPlan::LoopbackPlusExtra("::1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn extra_listener_guard_rejects_unspecified_host() {
+        let err = validate_extra_listener_host("0.0.0.0".parse().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("extra listener must be specific"));
+        assert!(err
+            .to_string()
+            .contains("bind the wildcard as the primary listener"));
     }
 
     #[test]
