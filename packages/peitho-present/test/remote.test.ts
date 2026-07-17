@@ -102,6 +102,7 @@ async function mountRemoteForTest(
     notes?: Notes;
     mountPresentShell?: (options: ShellOptions) => Promise<PresentShell>;
     autoSync?: boolean;
+    reload?: () => void;
   } = {}
 ): Promise<{ root: HTMLElement; channel: MockChannel; view: RemoteView }> {
   const root = document.createElement("main");
@@ -116,7 +117,8 @@ async function mountRemoteForTest(
     mountPresentShell: options.mountPresentShell ?? mockMountPresentShell(),
     window,
     document,
-    bus: window
+    bus: window,
+    reload: options.reload
   });
   views.push(view);
   if (options.autoSync !== false) {
@@ -828,142 +830,6 @@ it("remote controller disables buttons and shows ended state on close", async ()
   );
 });
 
-it("remote controller clears ended state when synced re-fires after close", async () => {
-  const { root, channel } = await mountRemoteForTest(
-    manifestWithSlides([{ key: "intro" }, { key: "middle" }, { key: "end" }]),
-    mockChannel(),
-    { autoSync: false }
-  );
-  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
-  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')!;
-  const container = root.querySelector<HTMLElement>(".peitho-remote")!;
-  const chase = root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')!;
-
-  channel.deliver({ synced: true });
-  channel.deliver({ index: 1 });
-  channel.deliver({
-    timer: { running: true, elapsedMs: 10_000, atMs: 20_000 },
-    nowMs: 20_000
-  });
-  channel.deliver({ close: true });
-
-  expect(button(root, "prev").disabled).toBe(true);
-  expect(button(root, "next").disabled).toBe(true);
-  expect(timer.disabled).toBe(true);
-  expect(reset.disabled).toBe(true);
-  expect(container.dataset.peithoEnded).toBe("true");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
-
-  channel.deliver({
-    timer: { running: true, elapsedMs: 12_000, atMs: 21_000 },
-    nowMs: 21_000
-  });
-  channel.deliver({ index: 1 });
-  channel.deliver({ synced: true });
-
-  expect(button(root, "prev").disabled).toBe(false);
-  expect(button(root, "next").disabled).toBe(false);
-  expect(timer.disabled).toBe(false);
-  expect(reset.disabled).toBe(false);
-  expect(container.dataset.peithoEnded).toBe("false");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("");
-  expect(chase.classList).toContain("peitho-remote-dim-on-end");
-});
-
-it("remote controller discards stale timer state across ended and re-synced", async () => {
-  vi.useFakeTimers();
-  vi.setSystemTime(1_000);
-  const { root, channel } = await mountRemoteForTest(
-    manifestWithSlides([{ key: "intro" }, { key: "middle" }, { key: "end" }]),
-    mockChannel(),
-    { autoSync: false }
-  );
-  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
-  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')!;
-  const container = root.querySelector<HTMLElement>(".peitho-remote")!;
-  const elapsed = root.querySelector<HTMLElement>('[data-peitho-remote="elapsed"]')!;
-
-  channel.deliver({ synced: true });
-  channel.deliver({
-    timer: { running: true, elapsedMs: 10_000, atMs: 1_000 },
-    nowMs: 1_000
-  });
-  expect(timer.dataset.peithoTimerAction).toBe("pause");
-  expect(elapsed.textContent).toBe("0:10");
-
-  channel.deliver({ close: true });
-  expect(container.dataset.peithoEnded).toBe("true");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
-
-  vi.advanceTimersByTime(60_000);
-  channel.deliver({ synced: true });
-
-  expect(container.dataset.peithoEnded).toBe("false");
-  expect(timer.disabled).toBe(false);
-  expect(timer.dataset.peithoTimerAction).toBe("start");
-  expect(elapsed.textContent).toBe("0:00");
-  expect(reset.disabled).toBe(true);
-});
-
-it("remote controller discards stale slide index across ended and re-synced when fresh server has no index", async () => {
-  const { root, channel } = await mountRemoteForTest(
-    manifestWithSlides([
-      { key: "intro", title: "intro" },
-      { key: "middle", title: "middle" },
-      { key: "late", title: "late" },
-      { key: "end", title: "end" }
-    ]),
-    mockChannel(),
-    { autoSync: false }
-  );
-  const container = root.querySelector<HTMLElement>(".peitho-remote")!;
-  const title = root.querySelector<HTMLElement>('[data-peitho-remote="title"]')!;
-  const counter = root.querySelector<HTMLElement>('[data-peitho-remote="counter"]')!;
-
-  channel.deliver({ synced: true });
-  channel.deliver({ index: 2 });
-  expect(title.textContent).toBe("late");
-  expect(counter.textContent).toBe("3 / 4");
-
-  channel.deliver({ close: true });
-  channel.deliver({ synced: true });
-
-  expect(container.dataset.peithoEnded).toBe("false");
-  expect(title.textContent).toBe("Untitled slide");
-  expect(title.textContent).not.toBe("late");
-  expect(counter.textContent).toBe("– / 4");
-});
-
-it("remote controller stays ended when a same-session poll message arrives after close", async () => {
-  const { root, channel } = await mountRemoteForTest(
-    manifestWithSlides([{ key: "intro" }, { key: "middle" }, { key: "late" }, { key: "end" }]),
-    mockChannel(),
-    { autoSync: false }
-  );
-  const container = root.querySelector<HTMLElement>(".peitho-remote")!;
-
-  channel.deliver({ synced: true });
-  channel.deliver({ index: 1 });
-  channel.deliver({ close: true });
-
-  expect(container.dataset.peithoEnded).toBe("true");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
-
-  channel.deliver({ index: 2 });
-
-  expect(container.dataset.peithoEnded).toBe("true");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
-  expect(button(root, "prev").disabled).toBe(true);
-  expect(button(root, "next").disabled).toBe(true);
-
-  channel.deliver({ synced: true });
-
-  expect(container.dataset.peithoEnded).toBe("false");
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("");
-  expect(button(root, "prev").disabled).toBe(false);
-  expect(button(root, "next").disabled).toBe(false);
-});
-
 it("remote ended state freezes the chase track", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
@@ -987,6 +853,55 @@ it("remote ended state freezes the chase track", async () => {
   expect(turtle.style.left).toBe(turtleLeft);
   expect(fill.style.width).toBe(fillWidth);
   expect(delta.textContent).toBe(deltaText);
+});
+
+it("remote controller reloads when the sync session changes", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { reload }
+  );
+
+  channel.deliver({ sessionChanged: true });
+
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it("remote controller reloads on session change while ended", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { autoSync: false, reload }
+  );
+
+  channel.deliver({ synced: true });
+  channel.deliver({ close: true });
+  channel.deliver({ sessionChanged: true });
+
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it("remote controller does not reload on ordinary sync messages", async () => {
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { reload }
+  );
+
+  channel.deliver({ index: 1 });
+  channel.deliver({ swapped: true });
+  channel.deliver({ generation: 2 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 1_000, atMs: 1_000 },
+    nowMs: 1_000
+  });
+
+  expect(reload).not.toHaveBeenCalled();
 });
 
 it("remote controller keeps the sync channel open after ended so it can re-handshake", async () => {

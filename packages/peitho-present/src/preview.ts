@@ -8,6 +8,7 @@ import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
   isGenerationSyncMessage,
+  isSessionChangedSyncMessage,
   serverSyncChannelFactory,
   type SyncChannelFactory
 } from "./sync";
@@ -138,6 +139,7 @@ export function installPreviewReload(
 ): () => void {
   const channel = channelFactory("peitho-sync");
   channel.onmessage = (event: { data: unknown }): void => {
+    if (isSessionChangedSyncMessage(event.data)) return;
     if (!isGenerationSyncMessage(event.data)) return;
     if (event.data.generation === shell.generation) return;
     shell.saveState();

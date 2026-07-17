@@ -556,6 +556,9 @@ function isSwappedSyncMessage(value) {
 function isSyncedSyncMessage(value) {
   return isRecord(value) && value.synced === true;
 }
+function isSessionChangedSyncMessage(value) {
+  return isRecord(value) && value.sessionChanged === true;
+}
 function isNonNegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
@@ -580,6 +583,7 @@ function serverSyncChannelFactory(options = {}) {
     let closed = false;
     let seq = 0;
     let synced = false;
+    let session = null;
     let highestAckedPostSeq = 0;
     let pendingTimerPosts = 0;
     let bufferedTimerReplay = null;
@@ -592,12 +596,6 @@ function serverSyncChannelFactory(options = {}) {
       if (replay.seq >= highestAckedPostSeq) {
         onmessage?.({ data: replay.data });
       }
-    };
-    const resetSessionState = () => {
-      synced = false;
-      highestAckedPostSeq = 0;
-      bufferedTimerReplay = null;
-      pendingTimerPosts = 0;
     };
     const deliverReplayState = (body, options2 = {}) => {
       const skipAbsoluteState = options2.skipAbsoluteState === true;
@@ -645,6 +643,14 @@ function serverSyncChannelFactory(options = {}) {
           await delay();
           return false;
         }
+        if (typeof body.session === "string") {
+          if (session === null) {
+            session = body.session;
+          } else if (body.session !== session) {
+            session = body.session;
+            onmessage?.({ data: { sessionChanged: true } });
+          }
+        }
         seq = body.seq;
         deliverReplayState(body, {
           skipAbsoluteState: body.seq < highestAckedPostSeq,
@@ -690,18 +696,17 @@ function serverSyncChannelFactory(options = {}) {
             continue;
           }
           seq = body.seq;
+          if (body.message != null) {
+            onmessage?.({ data: body.message });
+          }
           deliverReplayState(body, {
             skipAbsoluteState: body.seq < highestAckedPostSeq,
             deferTimerReplay: pendingTimerPosts > 0
           });
-          if (body.message != null) {
-            onmessage?.({ data: body.message });
-          }
         } catch (error) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
             needsHandshake = true;
-            resetSessionState();
             await delay();
           }
         }
@@ -968,6 +973,10 @@ function installRemoteSyncBridge(options) {
       });
       return;
     }
+    if (isSessionChangedSyncMessage(data)) {
+      options.onSessionChange();
+      return;
+    }
     if (isSwappedSyncMessage(data) || isGenerationSyncMessage(data) || isTimerSyncMessage(data)) {
       return;
     }
@@ -997,6 +1006,7 @@ var RemoteController = class {
   previewBus = new EventTarget();
   log;
   now;
+  reload;
   synced = false;
   notes = { version: 1, notes: {} };
   renderedNotesValue = null;
@@ -1019,6 +1029,7 @@ var RemoteController = class {
     this.bus = options.bus ?? this.win;
     this.log = options.console ?? console;
     this.now = options.now ?? Date.now;
+    this.reload = options.reload ?? (() => this.win.location.reload());
   }
   async load() {
     try {
@@ -1061,6 +1072,7 @@ var RemoteController = class {
         setTimerState: (state) => this.setTimerState(state),
         setSynced: () => this.setSynced(),
         setEnded: () => this.setEnded(),
+        onSessionChange: () => this.reload(),
         console: this.log
       });
     } catch (error) {
@@ -1105,13 +1117,10 @@ var RemoteController = class {
   }
   setSynced() {
     this.synced = true;
-    if (this.ended) this.ended = false;
     this.render();
   }
   setEnded() {
     this.ended = true;
-    this.currentIndex = null;
-    this.timerState = null;
     this.clearTimerInterval();
     this.render();
   }

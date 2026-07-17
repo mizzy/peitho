@@ -4,9 +4,12 @@ use std::{
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex, OnceLock, RwLock,
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -14,8 +17,18 @@ use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 static SERVER_CLOCK_START: OnceLock<Instant> = OnceLock::new();
+static SYNC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const REMOTE_WEBMANIFEST: &str = r##"{"name":"Peitho Remote","short_name":"Remote","start_url":"/remote","display":"standalone","background_color":"#101216","theme_color":"#101216","icons":[{"src":"remote-icon.png","sizes":"180x180","type":"image/png"}]}"##;
 const REMOTE_ICON_PNG: &[u8] = include_bytes!("../assets/remote-icon.png");
+
+fn new_sync_session() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let count = SYNC_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{millis:x}-{count:x}")
+}
 
 #[derive(Debug)]
 pub struct PresentServerBindError {
@@ -59,7 +72,6 @@ pub(crate) struct SyncHub {
     state: Arc<(Mutex<SyncState>, Condvar)>,
 }
 
-#[derive(Default)]
 struct SyncState {
     seq: u64,
     latest: Option<String>,
@@ -67,6 +79,21 @@ struct SyncState {
     swapped: bool,
     timer: Option<TimerSyncState>,
     generation: u64,
+    session: String,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            latest: None,
+            index: None,
+            swapped: false,
+            timer: None,
+            generation: 0,
+            session: new_sync_session(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -83,13 +110,14 @@ struct SyncPoll {
     message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SyncSnapshot {
     seq: u64,
     index: Option<usize>,
     swapped: bool,
     timer: Option<TimerSyncState>,
     generation: u64,
+    session: String,
 }
 
 impl SyncHub {
@@ -143,6 +171,7 @@ impl SyncHub {
                 swapped: state.swapped,
                 timer: state.timer,
                 generation: state.generation,
+                session: state.session.clone(),
             },
             message: state.latest.clone(),
         })
@@ -157,6 +186,7 @@ impl SyncHub {
             swapped: state.swapped,
             timer: state.timer,
             generation: state.generation,
+            session: state.session.clone(),
         }
     }
 }
@@ -616,6 +646,7 @@ fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
         index: Option<usize>,
         swapped: bool,
         generation: u64,
+        session: String,
         timer: Option<TimerSyncState>,
         now_ms: u64,
     }
@@ -628,6 +659,7 @@ fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
         index: snapshot.index,
         swapped: snapshot.swapped,
         generation: snapshot.generation,
+        session: snapshot.session,
         timer: snapshot.timer,
         now_ms: server_clock_ms(),
     })
@@ -874,6 +906,7 @@ mod tests {
     #[test]
     fn sync_hub_returns_latest_message_after_requested_sequence() {
         let hub = SyncHub::default();
+        let session = hub.snapshot().session;
 
         let message = SyncMessage::Index(SyncIndexMessage { index: 2 });
         let seq = hub.broadcast_sync_message(&message);
@@ -887,7 +920,8 @@ mod tests {
                     index: Some(2),
                     swapped: false,
                     timer: None,
-                    generation: 0
+                    generation: 0,
+                    session
                 },
                 message: Some(r#"{"index":2}"#.to_owned())
             }
@@ -962,6 +996,7 @@ mod tests {
     #[test]
     fn sync_hub_broadcast_reload_advances_generation_without_transient_message() {
         let hub = SyncHub::default();
+        let session = hub.snapshot().session;
 
         let seq = hub.broadcast_reload();
 
@@ -974,7 +1009,8 @@ mod tests {
                     index: None,
                     swapped: false,
                     timer: None,
-                    generation: 1
+                    generation: 1,
+                    session: session.clone()
                 },
                 message: None
             }
@@ -986,9 +1022,30 @@ mod tests {
                 index: None,
                 swapped: false,
                 timer: None,
-                generation: 1
+                generation: 1,
+                session
             }
         );
+    }
+
+    #[test]
+    fn sync_hub_session_is_stable_across_snapshots_and_polls() {
+        let hub = SyncHub::default();
+        let session = hub.snapshot().session;
+
+        hub.broadcast_sync_message(&SyncMessage::Index(SyncIndexMessage { index: 1 }));
+        let poll = hub.wait_after(0, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(poll.snapshot.session, session);
+        assert_eq!(hub.snapshot().session, session);
+    }
+
+    #[test]
+    fn sync_hub_generates_distinct_sessions_for_distinct_hubs() {
+        let first = SyncHub::default();
+        let second = SyncHub::default();
+
+        assert_ne!(first.snapshot().session, second.snapshot().session);
     }
 
     #[test]
@@ -1004,12 +1061,14 @@ mod tests {
                     at_ms: 98_000,
                 }),
                 generation: 9,
+                session: "session-a".to_owned(),
             },
             None,
         );
 
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(body.contains(r#""generation":9"#));
+        assert!(body.contains(r#""session":"session-a""#));
         assert!(body.contains(r#""message":null"#));
         assert!(body.contains(r#""index":2"#));
         assert!(body.contains(r#""swapped":true"#));
@@ -1017,6 +1076,24 @@ mod tests {
         assert_eq!(json["timer"]["elapsedMs"], 12_000);
         assert_eq!(json["timer"]["atMs"], 98_000);
         assert!(json["nowMs"].as_u64().unwrap() < 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn sync_response_body_includes_session() {
+        let body = sync_response_body(
+            SyncSnapshot {
+                seq: 4,
+                index: None,
+                swapped: false,
+                timer: None,
+                generation: 0,
+                session: "session-body".to_owned(),
+            },
+            None,
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["session"], "session-body");
     }
 
     #[test]
@@ -1028,6 +1105,7 @@ mod tests {
                 swapped: false,
                 timer: None,
                 generation: 0,
+                session: "session-a".to_owned(),
             },
             Some(r#"{"close":true}"#),
         );
