@@ -10,6 +10,7 @@ import {
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
+  isSessionChangedSyncMessage,
   isSyncedSyncMessage,
   isSwappedSyncMessage,
   isTimerReplaySyncMessage,
@@ -120,6 +121,9 @@ it("exports strict sync message guards", () => {
 
   expect(isSyncedSyncMessage({ synced: true })).toBe(true);
   expect(isSyncedSyncMessage({ synced: false })).toBe(false);
+
+  expect(isSessionChangedSyncMessage({ sessionChanged: true })).toBe(true);
+  expect(isSessionChangedSyncMessage({ sessionChanged: false })).toBe(false);
 
   expect(isGenerationSyncMessage({ generation: 1 })).toBe(true);
   expect(isGenerationSyncMessage({ generation: Number.NaN })).toBe(false);
@@ -379,6 +383,110 @@ it("server sync channel re-handshakes after a poll network error", async () => {
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith("/sync?seq=9", expect.objectContaining({ signal: expect.any(AbortSignal) }));
   expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  channel.close();
+});
+
+it("server sync channel stores the first handshake session without emitting sessionChanged", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 0, message: null, session: "session-a" }));
+    if (url === "/sync?seq=0") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  expect(received).not.toContainEqual({ sessionChanged: true });
+
+  channel.close();
+});
+
+it("server sync channel does not emit sessionChanged when re-handshake keeps the same session", async () => {
+  let handshakes = 0;
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      handshakes += 1;
+      return Promise.resolve(okJson({ seq: handshakes === 1 ? 9 : 0, message: null, session: "same-session" }));
+    }
+    if (url === "/sync?seq=9") return Promise.reject(new Error("connection reset"));
+    if (url === "/sync?seq=0") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({
+    fetcher,
+    retryMs: 0,
+    setTimeoutFn: ((callback: () => void) => window.setTimeout(callback, 0)) as Window["setTimeout"]
+  })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.anything()));
+  expect(received).not.toContainEqual({ sessionChanged: true });
+
+  channel.close();
+});
+
+it("server sync channel emits sessionChanged when re-handshake sees a different session", async () => {
+  let handshakes = 0;
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      handshakes += 1;
+      return Promise.resolve(
+        okJson({
+          seq: handshakes === 1 ? 9 : 0,
+          message: null,
+          session: handshakes === 1 ? "session-a" : "session-b",
+          generation: handshakes === 1 ? 1 : 2
+        })
+      );
+    }
+    if (url === "/sync?seq=9") return Promise.reject(new Error("connection reset"));
+    if (url === "/sync?seq=0") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({
+    fetcher,
+    retryMs: 0,
+    setTimeoutFn: ((callback: () => void) => window.setTimeout(callback, 0)) as Window["setTimeout"]
+  })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toContainEqual({ sessionChanged: true }));
+  await vi.waitFor(() => expect(received).toContainEqual({ generation: 2 }));
+  const changedIndex = received.findIndex(isSessionChangedSyncMessage);
+  const generationIndex = received.findIndex(
+    (message) => (message as { generation?: unknown }).generation === 2
+  );
+  expect(changedIndex).toBeGreaterThanOrEqual(0);
+  expect(changedIndex).toBeLessThan(generationIndex);
+
+  channel.close();
+});
+
+it("server sync channel never emits sessionChanged when handshake omits session", async () => {
+  let handshakes = 0;
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      handshakes += 1;
+      return Promise.resolve(okJson({ seq: handshakes === 1 ? 9 : 0, message: null }));
+    }
+    if (url === "/sync?seq=9") return Promise.reject(new Error("connection reset"));
+    if (url === "/sync?seq=0") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({
+    fetcher,
+    retryMs: 0,
+    setTimeoutFn: ((callback: () => void) => window.setTimeout(callback, 0)) as Window["setTimeout"]
+  })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.anything()));
+  expect(received).not.toContainEqual({ sessionChanged: true });
+
   channel.close();
 });
 

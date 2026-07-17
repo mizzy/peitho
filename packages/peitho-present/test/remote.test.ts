@@ -102,6 +102,7 @@ async function mountRemoteForTest(
     notes?: Notes;
     mountPresentShell?: (options: ShellOptions) => Promise<PresentShell>;
     autoSync?: boolean;
+    reload?: () => void;
   } = {}
 ): Promise<{ root: HTMLElement; channel: MockChannel; view: RemoteView }> {
   const root = document.createElement("main");
@@ -116,7 +117,8 @@ async function mountRemoteForTest(
     mountPresentShell: options.mountPresentShell ?? mockMountPresentShell(),
     window,
     document,
-    bus: window
+    bus: window,
+    reload: options.reload
   });
   views.push(view);
   if (options.autoSync !== false) {
@@ -853,7 +855,56 @@ it("remote ended state freezes the chase track", async () => {
   expect(delta.textContent).toBe(deltaText);
 });
 
-it("remote controller closes the sync channel and ignores clicks after ended", async () => {
+it("remote controller reloads when the sync session changes", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { reload }
+  );
+
+  channel.deliver({ sessionChanged: true });
+
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it("remote controller reloads on session change while ended", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { autoSync: false, reload }
+  );
+
+  channel.deliver({ synced: true });
+  channel.deliver({ close: true });
+  channel.deliver({ sessionChanged: true });
+
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+it("remote controller does not reload on ordinary sync messages", async () => {
+  const reload = vi.fn();
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { reload }
+  );
+
+  channel.deliver({ index: 1 });
+  channel.deliver({ swapped: true });
+  channel.deliver({ generation: 2 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 1_000, atMs: 1_000 },
+    nowMs: 1_000
+  });
+
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it("remote controller keeps the sync channel open after ended so it can re-handshake", async () => {
   const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro" }, { key: "end" }])
   );
@@ -862,7 +913,7 @@ it("remote controller closes the sync channel and ignores clicks after ended", a
   button(root, "next").click();
   button(root, "prev").click();
 
-  expect(channel.closed).toBe(true);
+  expect(channel.closed).toBe(false);
   expect(channel.sent).toEqual([]);
 });
 

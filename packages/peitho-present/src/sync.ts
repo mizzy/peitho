@@ -5,6 +5,7 @@ export type TimerSyncSnapshot = TimerSyncState & { atMs: number };
 export type TimerSyncMessage = { timer: TimerSyncState };
 export type TimerReplaySyncMessage = { timer: TimerSyncSnapshot; nowMs: number };
 export type SyncedSyncMessage = { synced: true };
+export type SessionChangedSyncMessage = { sessionChanged: true };
 
 export type SyncMessage =
   | { index: number }
@@ -42,6 +43,7 @@ type ServerSyncPollResponse = {
   index?: unknown;
   swapped?: unknown;
   generation?: unknown;
+  session?: unknown;
   timer?: unknown;
   nowMs?: unknown;
 };
@@ -69,6 +71,10 @@ export function isSwappedSyncMessage(value: unknown): value is { swapped: boolea
 
 export function isSyncedSyncMessage(value: unknown): value is SyncedSyncMessage {
   return isRecord(value) && value.synced === true;
+}
+
+export function isSessionChangedSyncMessage(value: unknown): value is SessionChangedSyncMessage {
+  return isRecord(value) && value.sessionChanged === true;
 }
 
 function isNonNegativeFiniteNumber(value: unknown): value is number {
@@ -146,6 +152,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
     let closed = false;
     let seq = 0;
     let synced = false;
+    let session: string | null = null;
     let highestAckedPostSeq = 0;
     let pendingTimerPosts = 0;
     let bufferedTimerReplay: BufferedTimerReplay | null = null;
@@ -212,6 +219,14 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           console.error("Invalid peitho sync handshake");
           await delay();
           return false;
+        }
+        if (typeof body.session === "string") {
+          if (session === null) {
+            session = body.session;
+          } else if (body.session !== session) {
+            session = body.session;
+            onmessage?.({ data: { sessionChanged: true } });
+          }
         }
         seq = body.seq;
         deliverReplayState(body, {
@@ -407,6 +422,9 @@ export function installSyncBridge(
       return;
     }
     if (isGenerationSyncMessage(data)) {
+      return;
+    }
+    if (isSessionChangedSyncMessage(data)) {
       return;
     }
     if (isTimerReplaySyncMessage(data)) {

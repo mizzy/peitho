@@ -258,6 +258,9 @@ function isIndexSyncMessage(value) {
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
 }
+function isSessionChangedSyncMessage(value) {
+  return isRecord(value) && value.sessionChanged === true;
+}
 function isNonNegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
@@ -282,6 +285,7 @@ function serverSyncChannelFactory(options = {}) {
     let closed = false;
     let seq = 0;
     let synced = false;
+    let session = null;
     let highestAckedPostSeq = 0;
     let pendingTimerPosts = 0;
     let bufferedTimerReplay = null;
@@ -340,6 +344,14 @@ function serverSyncChannelFactory(options = {}) {
           console.error("Invalid peitho sync handshake");
           await delay();
           return false;
+        }
+        if (typeof body.session === "string") {
+          if (session === null) {
+            session = body.session;
+          } else if (body.session !== session) {
+            session = body.session;
+            onmessage?.({ data: { sessionChanged: true } });
+          }
         }
         seq = body.seq;
         deliverReplayState(body, {
@@ -530,6 +542,7 @@ async function mountPreviewShell(options) {
 function installPreviewReload(shell, channelFactory = serverSyncChannelFactory(), reload = () => window.location.reload()) {
   const channel = channelFactory("peitho-sync");
   channel.onmessage = (event) => {
+    if (isSessionChangedSyncMessage(event.data)) return;
     if (!isGenerationSyncMessage(event.data)) return;
     if (event.data.generation === shell.generation) return;
     shell.saveState();

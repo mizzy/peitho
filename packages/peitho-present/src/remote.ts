@@ -12,6 +12,7 @@ import {
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
+  isSessionChangedSyncMessage,
   isSyncedSyncMessage,
   isSwappedSyncMessage,
   isTimerReplaySyncMessage,
@@ -61,6 +62,7 @@ export type RemoteViewOptions = {
   bus?: EventTarget;
   console?: Pick<Console, "error">;
   now?: () => number;
+  reload?: () => void;
 };
 
 export type RemoteControlsOptions = {
@@ -80,6 +82,7 @@ export type RemoteSyncBridgeOptions = {
   setTimerState(state: RemoteTimerAnchor): void;
   setSynced(): void;
   setEnded(): void;
+  onSessionChange(): void;
   console?: Pick<Console, "error">;
 };
 
@@ -285,6 +288,10 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
       });
       return;
     }
+    if (isSessionChangedSyncMessage(data)) {
+      options.onSessionChange();
+      return;
+    }
     if (
       isSwappedSyncMessage(data) ||
       isGenerationSyncMessage(data) ||
@@ -320,6 +327,7 @@ class RemoteController implements RemoteView {
   private readonly previewBus = new EventTarget();
   private readonly log: Pick<Console, "error">;
   private readonly now: () => number;
+  private readonly reload: () => void;
   private synced = false;
   private notes: Notes = { version: 1, notes: {} };
   private renderedNotesValue: string | null = null;
@@ -343,6 +351,7 @@ class RemoteController implements RemoteView {
     this.bus = options.bus ?? this.win;
     this.log = options.console ?? console;
     this.now = options.now ?? Date.now;
+    this.reload = options.reload ?? (() => this.win.location.reload());
   }
 
   async load(): Promise<void> {
@@ -386,6 +395,7 @@ class RemoteController implements RemoteView {
         setTimerState: (state) => this.setTimerState(state),
         setSynced: () => this.setSynced(),
         setEnded: () => this.setEnded(),
+        onSessionChange: () => this.reload(),
         console: this.log
       });
     } catch (error) {
@@ -440,9 +450,6 @@ class RemoteController implements RemoteView {
   }
 
   private setEnded(): void {
-    const cleanup = this.syncCleanup;
-    this.syncCleanup = null;
-    cleanup?.();
     this.ended = true;
     this.clearTimerInterval();
     this.render();

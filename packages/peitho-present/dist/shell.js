@@ -1106,6 +1106,9 @@ function isSwappedSyncMessage(value) {
 function isSyncedSyncMessage(value) {
   return isRecord(value) && value.synced === true;
 }
+function isSessionChangedSyncMessage(value) {
+  return isRecord(value) && value.sessionChanged === true;
+}
 function isNonNegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
@@ -1159,6 +1162,7 @@ function serverSyncChannelFactory(options = {}) {
     let closed = false;
     let seq = 0;
     let synced = false;
+    let session = null;
     let highestAckedPostSeq = 0;
     let pendingTimerPosts = 0;
     let bufferedTimerReplay = null;
@@ -1217,6 +1221,14 @@ function serverSyncChannelFactory(options = {}) {
           console.error("Invalid peitho sync handshake");
           await delay();
           return false;
+        }
+        if (typeof body.session === "string") {
+          if (session === null) {
+            session = body.session;
+          } else if (body.session !== session) {
+            session = body.session;
+            onmessage?.({ data: { sessionChanged: true } });
+          }
         }
         seq = body.seq;
         deliverReplayState(body, {
@@ -1397,6 +1409,9 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       return;
     }
     if (isGenerationSyncMessage(data)) {
+      return;
+    }
+    if (isSessionChangedSyncMessage(data)) {
       return;
     }
     if (isTimerReplaySyncMessage(data)) {

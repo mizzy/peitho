@@ -556,6 +556,9 @@ function isSwappedSyncMessage(value) {
 function isSyncedSyncMessage(value) {
   return isRecord(value) && value.synced === true;
 }
+function isSessionChangedSyncMessage(value) {
+  return isRecord(value) && value.sessionChanged === true;
+}
 function isNonNegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
@@ -580,6 +583,7 @@ function serverSyncChannelFactory(options = {}) {
     let closed = false;
     let seq = 0;
     let synced = false;
+    let session = null;
     let highestAckedPostSeq = 0;
     let pendingTimerPosts = 0;
     let bufferedTimerReplay = null;
@@ -638,6 +642,14 @@ function serverSyncChannelFactory(options = {}) {
           console.error("Invalid peitho sync handshake");
           await delay();
           return false;
+        }
+        if (typeof body.session === "string") {
+          if (session === null) {
+            session = body.session;
+          } else if (body.session !== session) {
+            session = body.session;
+            onmessage?.({ data: { sessionChanged: true } });
+          }
         }
         seq = body.seq;
         deliverReplayState(body, {
@@ -961,6 +973,10 @@ function installRemoteSyncBridge(options) {
       });
       return;
     }
+    if (isSessionChangedSyncMessage(data)) {
+      options.onSessionChange();
+      return;
+    }
     if (isSwappedSyncMessage(data) || isGenerationSyncMessage(data) || isTimerSyncMessage(data)) {
       return;
     }
@@ -990,6 +1006,7 @@ var RemoteController = class {
   previewBus = new EventTarget();
   log;
   now;
+  reload;
   synced = false;
   notes = { version: 1, notes: {} };
   renderedNotesValue = null;
@@ -1012,6 +1029,7 @@ var RemoteController = class {
     this.bus = options.bus ?? this.win;
     this.log = options.console ?? console;
     this.now = options.now ?? Date.now;
+    this.reload = options.reload ?? (() => this.win.location.reload());
   }
   async load() {
     try {
@@ -1054,6 +1072,7 @@ var RemoteController = class {
         setTimerState: (state) => this.setTimerState(state),
         setSynced: () => this.setSynced(),
         setEnded: () => this.setEnded(),
+        onSessionChange: () => this.reload(),
         console: this.log
       });
     } catch (error) {
@@ -1101,9 +1120,6 @@ var RemoteController = class {
     this.render();
   }
   setEnded() {
-    const cleanup = this.syncCleanup;
-    this.syncCleanup = null;
-    cleanup?.();
     this.ended = true;
     this.clearTimerInterval();
     this.render();
