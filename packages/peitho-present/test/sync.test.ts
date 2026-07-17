@@ -172,7 +172,7 @@ it("server sync channel polls and forwards long-poll messages", async () => {
   channel.close();
 });
 
-it("server sync channel replays poll response state after the poll message", async () => {
+it("server sync channel replays poll response state before the poll message", async () => {
   const fetcher = vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
     if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
@@ -188,9 +188,9 @@ it("server sync channel replays poll response state after the poll message", asy
   await vi.waitFor(() =>
     expect(received).toEqual([
       { synced: true },
-      { index: 1 },
       { index: 2 },
-      { swapped: true }
+      { swapped: true },
+      { index: 1 }
     ])
   );
 
@@ -234,11 +234,11 @@ it("server sync channel replays timer state from handshake and poll responses", 
         nowMs: 4500
       },
       { synced: true },
-      { timer: { running: false, elapsedMs: 3000 } },
       {
         timer: { running: false, elapsedMs: 3000, atMs: 9000 },
         nowMs: 9500
-      }
+      },
+      { timer: { running: false, elapsedMs: 3000 } }
     ])
   );
 
@@ -549,6 +549,44 @@ it("server sync channel delivers synced only once across a successful poll", asy
   expect(received.filter(isSyncedSyncMessage)).toHaveLength(1);
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith("/sync?seq=0", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+
+  channel.close();
+});
+
+it("server sync channel poll delivers replay state before message so {close:true} is not clobbered by trailing replay", async () => {
+  const initialTimer = {
+    timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
+    nowMs: 1000
+  };
+  const pollTimer = {
+    timer: { running: true, elapsedMs: 15_000, atMs: 6000 },
+    nowMs: 6000
+  };
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(okJson({ seq: 0, message: null, index: 5, ...initialTimer }));
+    }
+    if (url === "/sync?seq=0") {
+      return Promise.resolve(okJson({ seq: 1, message: { close: true }, index: 5, ...pollTimer }));
+    }
+    if (url === "/sync?seq=1") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { timer: initialTimer.timer, nowMs: initialTimer.nowMs },
+      { index: 5 },
+      { synced: true },
+      { timer: pollTimer.timer, nowMs: pollTimer.nowMs },
+      { index: 5 },
+      { close: true }
+    ])
+  );
+  expect(received.at(-1)).toEqual({ close: true });
 
   channel.close();
 });

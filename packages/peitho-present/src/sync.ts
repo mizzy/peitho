@@ -266,13 +266,13 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
             continue;
           }
           seq = body.seq;
-          if (body.message != null) {
-            onmessage?.({ data: body.message });
-          }
           deliverReplayState(body, {
             skipAbsoluteState: body.seq < highestAckedPostSeq,
             deferTimerReplay: pendingTimerPosts > 0
           });
+          if (body.message != null) {
+            onmessage?.({ data: body.message });
+          }
         } catch (error: unknown) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
