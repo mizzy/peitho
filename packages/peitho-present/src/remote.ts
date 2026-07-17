@@ -674,11 +674,15 @@ function remoteButton(doc: Document, action: "prev" | "next", label: string): HT
   button.dataset.peithoDirection = action;
   const arrow = doc.createElement("span");
   arrow.className = "peitho-remote-action-arrow";
+  arrow.setAttribute("aria-hidden", "true");
   arrow.textContent = action === "prev" ? "‹" : "›";
+  const labelSpan = doc.createElement("span");
+  labelSpan.className = "peitho-remote-action-label";
+  labelSpan.textContent = label;
   if (action === "prev") {
-    button.append(arrow, doc.createTextNode(` ${label}`));
+    button.append(arrow, labelSpan);
   } else {
-    button.append(doc.createTextNode(`${label} `), arrow);
+    button.append(labelSpan, arrow);
   }
   return button;
 }
