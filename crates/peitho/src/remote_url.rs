@@ -24,13 +24,13 @@ pub struct RemoteUrlCandidate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteUrlLabel {
-    Tailscale,
+    Vpn,
 }
 
 impl RemoteUrlLabel {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Tailscale => "Tailscale",
+            Self::Vpn => "VPN",
         }
     }
 }
@@ -71,7 +71,7 @@ fn matches_bound_wildcard_family(address: IpAddr, bound_wildcard: Option<IpAddr>
 }
 
 fn candidate_rank(address: IpAddr, default_route: Option<IpAddr>) -> u8 {
-    if is_tailscale_addr(address) {
+    if is_mesh_vpn_addr(address) {
         0
     } else if Some(address) == default_route {
         1
@@ -80,8 +80,8 @@ fn candidate_rank(address: IpAddr, default_route: Option<IpAddr>) -> u8 {
     }
 }
 
-fn remote_url_label(address: IpAddr) -> Option<RemoteUrlLabel> {
-    is_tailscale_addr(address).then_some(RemoteUrlLabel::Tailscale)
+pub fn remote_url_label(address: IpAddr) -> Option<RemoteUrlLabel> {
+    is_mesh_vpn_addr(address).then_some(RemoteUrlLabel::Vpn)
 }
 
 pub fn remote_url_for_addr(address: IpAddr, port: u16) -> RemoteUrl {
@@ -108,13 +108,15 @@ fn is_link_local_addr(address: IpAddr) -> bool {
     }
 }
 
-fn is_tailscale_addr(address: IpAddr) -> bool {
+fn is_mesh_vpn_addr(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
+            // Tailscale's CGNAT range; other mesh VPNs can share this heuristic range.
             let octets = address.octets();
             octets[0] == 100 && (64..=127).contains(&octets[1])
         }
         IpAddr::V6(address) => {
+            // Tailscale's ULA prefix; label remains generic because this is heuristic.
             let segments = address.segments();
             segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
         }
@@ -155,25 +157,25 @@ mod tests {
     }
 
     #[test]
-    fn remote_url_candidates_label_cgnat_as_tailscale() {
+    fn remote_url_candidates_label_cgnat_as_vpn() {
         let candidates =
             remote_url_candidates(&[v4(100, 64, 0, 1), v4(100, 127, 255, 254)], None, 80, None);
 
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Tailscale));
-        assert_eq!(candidates[1].label, Some(RemoteUrlLabel::Tailscale));
+        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Vpn));
+        assert_eq!(candidates[1].label, Some(RemoteUrlLabel::Vpn));
     }
 
     #[test]
-    fn remote_url_candidates_label_tailscale_ipv6_ula() {
+    fn remote_url_candidates_label_mesh_vpn_ipv6_ula() {
         let candidates =
             remote_url_candidates(&["fd7a:115c:a1e0::1".parse().unwrap()], None, 80, None);
 
-        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Tailscale));
+        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Vpn));
     }
 
     #[test]
-    fn remote_url_candidates_order_tailscale_then_default_route_then_rest() {
+    fn remote_url_candidates_order_vpn_then_default_route_then_rest() {
         let candidates = remote_url_candidates(
             &[v4(192, 168, 1, 20), v4(100, 100, 10, 5), v4(10, 0, 0, 15)],
             Some(v4(10, 0, 0, 15)),
@@ -192,11 +194,11 @@ mod tests {
                 "http://192.168.1.20:3000/remote"
             ]
         );
-        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Tailscale));
+        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Vpn));
     }
 
     #[test]
-    fn remote_url_candidates_order_default_route_first_without_tailscale() {
+    fn remote_url_candidates_order_default_route_first_without_vpn() {
         let candidates = remote_url_candidates(
             &[v4(192, 168, 1, 20), v4(10, 0, 0, 15), v4(172, 16, 0, 7)],
             Some(v4(10, 0, 0, 15)),
@@ -218,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_url_candidates_order_tailscale_ipv6_before_rest() {
+    fn remote_url_candidates_order_vpn_ipv6_before_rest() {
         let candidates = remote_url_candidates(
             &[
                 "2001:db8::5".parse().unwrap(),
@@ -239,7 +241,7 @@ mod tests {
                 "http://[2001:db8::5]:3000/remote"
             ]
         );
-        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Tailscale));
+        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Vpn));
     }
 
     #[test]

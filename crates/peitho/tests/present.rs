@@ -22,26 +22,21 @@ fn present_help_lists_no_presenter_flag() {
         .success()
         .stdout(predicate::str::contains("--no-presenter"))
         .stdout(predicate::str::contains("--host [<IP>]"))
-        .stdout(predicate::str::contains("bare --host uses 0.0.0.0"));
+        .stdout(predicate::str::contains(
+            "bare --host picks the best address automatically",
+        ))
+        .stdout(predicate::str::contains("VPN, e.g. Tailscale, preferred"));
 }
 
 #[test]
-fn present_bare_host_matches_explicit_wildcard_in_cli_path() {
+fn present_bare_host_requires_server_in_cli_path() {
     let bare = Command::cargo_bin("peitho")
         .unwrap()
         .args(["present", "--no-serve", "--host"])
         .output()
         .unwrap();
-    let explicit = Command::cargo_bin("peitho")
-        .unwrap()
-        .args(["present", "--no-serve", "--host", "0.0.0.0"])
-        .output()
-        .unwrap();
 
     assert!(!bare.status.success());
-    assert_eq!(bare.status.code(), explicit.status.code());
-    assert_eq!(bare.stdout, explicit.stdout);
-    assert_eq!(bare.stderr, explicit.stderr);
     assert!(String::from_utf8_lossy(&bare.stderr).contains("--host requires the present server"));
 }
 
@@ -744,72 +739,9 @@ fn present_no_open_server_prints_assigned_url() {
 
 #[test]
 fn present_host_prints_remote_qr_after_remote_control_lines() {
-    let dir = tempdir().unwrap();
-    let fixture = Fixture::write(dir.path());
-    let shell = dir.path().join("shell.js");
-    fs::write(
-        &shell,
-        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
-    )
-    .unwrap();
-
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
-        .current_dir(dir.path())
-        .args(fixture.present_args(&shell))
-        .args(["--no-open", "--port", "0", "--host", "0.0.0.0"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        for line in BufReader::new(stdout).lines() {
-            let line = line.unwrap();
-            let done =
-                line.contains('█') || line.contains("no non-loopback network addresses found");
-            lines.push(line);
-            if done {
-                tx.send(lines).unwrap();
-                break;
-            }
-        }
-    });
-    let lines = match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(lines) => lines,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.kill();
-            let status = child.wait().unwrap();
-            reader.join().unwrap();
-            let mut stderr_text = String::new();
-            stderr.read_to_string(&mut stderr_text).unwrap();
-            if !status.success() && stderr_text.contains("failed to bind present server") {
-                eprintln!("skipping QR assertion: present server bind blocked: {stderr_text}");
-                return;
-            }
-            panic!("present server exited before printing remote control output: {stderr_text}");
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            reader.join().unwrap();
-            panic!("present server did not print remote control output within 5 seconds");
-        }
-    };
-    child.kill().unwrap();
-    child.wait().unwrap();
-    reader.join().unwrap();
-
-    if lines
-        .iter()
-        .any(|line| line.contains("no non-loopback network addresses found"))
-    {
-        eprintln!("skipping QR assertion: no non-loopback network addresses found");
+    let Some(lines) = capture_present_remote_output(&["--host", "0.0.0.0"]) else {
         return;
-    }
+    };
 
     let remote_line_indexes = lines
         .iter()
@@ -823,10 +755,43 @@ fn present_host_prints_remote_qr_after_remote_control_lines() {
     let first_url = remote_control_url_from_line(&lines[remote_line_indexes[0]]);
     let blank_index = remote_line_indexes.last().unwrap() + 1;
     assert_eq!(lines[blank_index], "");
+    assert_eq!(
+        lines[blank_index + 1],
+        lines[remote_line_indexes[0]].replacen("remote control", "scan to open", 1)
+    );
 
     let expected_qr = peitho::qr::qr_unicode_lines(first_url).unwrap();
-    assert_eq!(lines[blank_index + 1], expected_qr[0]);
-    assert_eq!(lines[blank_index + 2], expected_qr[1]);
+    assert_eq!(lines[blank_index + 2], expected_qr[0]);
+    assert_eq!(lines[blank_index + 3], expected_qr[1]);
+}
+
+#[test]
+fn present_bare_host_prints_single_remote_line_caption_and_qr() {
+    let Some(lines) = capture_present_remote_output(&["--host"]) else {
+        return;
+    };
+
+    let remote_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with("remote control").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remote_line_indexes.len(),
+        1,
+        "bare --host should print exactly one remote control line: {lines:?}"
+    );
+    let first_url = remote_control_url_from_line(&lines[remote_line_indexes[0]]);
+    let blank_index = remote_line_indexes[0] + 1;
+    assert_eq!(lines[blank_index], "");
+    assert_eq!(
+        lines[blank_index + 1],
+        lines[remote_line_indexes[0]].replacen("remote control", "scan to open", 1)
+    );
+
+    let expected_qr = peitho::qr::qr_unicode_lines(first_url).unwrap();
+    assert_eq!(lines[blank_index + 2], expected_qr[0]);
+    assert_eq!(lines[blank_index + 3], expected_qr[1]);
 }
 
 #[test]
@@ -1093,6 +1058,82 @@ fn response_body(response: &str) -> &str {
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or(response)
+}
+
+fn capture_present_remote_output(host_args: &[&str]) -> Option<Vec<String>> {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-open", "--port", "0"])
+        .args(host_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            let done =
+                line.contains('█') || line.contains("no non-loopback network addresses found");
+            lines.push(line);
+            if done {
+                tx.send(lines).unwrap();
+                break;
+            }
+        }
+    });
+
+    let lines = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(lines) => lines,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            reader.join().unwrap();
+            let mut stderr_text = String::new();
+            stderr.read_to_string(&mut stderr_text).unwrap();
+            if !status.success()
+                && (stderr_text.contains("failed to bind present server")
+                    || stderr_text.contains("no non-loopback network address found for --host"))
+            {
+                eprintln!("skipping QR assertion: {stderr_text}");
+                return None;
+            }
+            panic!("present server exited before printing remote control output: {stderr_text}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            reader.join().unwrap();
+            panic!("present server did not print remote control output within 5 seconds");
+        }
+    };
+    child.kill().unwrap();
+    child.wait().unwrap();
+    reader.join().unwrap();
+
+    if lines
+        .iter()
+        .any(|line| line.contains("no non-loopback network addresses found"))
+    {
+        eprintln!("skipping QR assertion: no non-loopback network addresses found");
+        return None;
+    }
+
+    Some(lines)
 }
 
 fn join_present_server(handle: thread::JoinHandle<miette::Result<()>>, timeout: Duration) {
