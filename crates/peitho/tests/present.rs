@@ -213,6 +213,85 @@ fn present_server_serves_manifest_over_http() {
 }
 
 #[test]
+fn present_server_serves_remote_webmanifest_over_http() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind_with_remote_assets(
+        cache,
+        0,
+        "present.html",
+        None,
+        true,
+    )
+    .unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = get_http(addr, "/remote.webmanifest");
+    let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("application/manifest+json"));
+    assert_eq!(body["display"], "standalone");
+    assert_eq!(body["start_url"], "/remote");
+    assert_eq!(body["icons"][0]["src"], "remote-icon.png");
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_serves_remote_icon_over_http() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind_with_remote_assets(
+        cache,
+        0,
+        "present.html",
+        None,
+        true,
+    )
+    .unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || server.handle_one());
+
+    let response = get_http_bytes(addr, "/remote-icon.png");
+    let head = response_head(&response);
+    let body = response_body_bytes(&response);
+
+    assert!(head.contains("200 OK"));
+    assert!(head.contains("Content-Type: image/png"));
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn present_server_without_remote_assets_404s_remote_routes() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
+
+    let server = peitho::server::PresentServer::bind(cache, 0, "present.html").unwrap();
+    let addr = server.addr();
+    let handle = thread::spawn(move || {
+        server.handle_one();
+        server.handle_one();
+    });
+
+    let manifest = get_http(addr, "/remote.webmanifest");
+    let icon = get_http(addr, "/remote-icon.png");
+
+    assert!(manifest.contains("404 Not Found"));
+    assert!(icon.contains("404 Not Found"));
+    handle.join().unwrap();
+}
+
+#[test]
 fn present_server_extra_listener_serves_manifest_over_http() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache");
@@ -221,9 +300,14 @@ fn present_server_extra_listener_serves_manifest_over_http() {
     fs::write(cache.join("manifest.json"), r#"{"version":1}"#).unwrap();
 
     let host = IpAddr::V6(Ipv6Addr::LOCALHOST);
-    let server =
-        peitho::server::PresentServer::bind_with_host(cache, 0, "present.html", Some(host))
-            .unwrap();
+    let server = peitho::server::PresentServer::bind_with_remote_assets(
+        cache,
+        0,
+        "present.html",
+        Some(host),
+        false,
+    )
+    .unwrap();
     let primary_addr = server.addr();
     let extra_addr = SocketAddr::new(host, primary_addr.port());
     let handle = thread::spawn(move || server.serve_forever());
@@ -861,9 +945,14 @@ fn assert_dual_listener_shutdown(target: DualListenerCloseTarget) {
     fs::write(cache.join("present.html"), "<!doctype html>").unwrap();
 
     let host = IpAddr::V6(Ipv6Addr::LOCALHOST);
-    let server =
-        peitho::server::PresentServer::bind_with_host(cache, 0, "present.html", Some(host))
-            .unwrap();
+    let server = peitho::server::PresentServer::bind_with_remote_assets(
+        cache,
+        0,
+        "present.html",
+        Some(host),
+        false,
+    )
+    .unwrap();
     let primary_addr = server.addr();
     let extra_addr = SocketAddr::new(host, primary_addr.port());
     let close_addr = match target {
@@ -1046,18 +1135,37 @@ fn assert_sync_post_ack(response: &str, seq: u64) {
 }
 
 fn get_http(addr: SocketAddr, path: &str) -> String {
+    String::from_utf8(get_http_bytes(addr, path)).unwrap()
+}
+
+fn get_http_bytes(addr: SocketAddr, path: &str) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).unwrap();
     write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
     response
 }
 
 fn response_body(response: &str) -> &str {
+    let (_, body) = split_http_response(response.as_bytes());
+    std::str::from_utf8(body).unwrap()
+}
+
+fn response_head(response: &[u8]) -> String {
+    let (head, _) = split_http_response(response);
+    String::from_utf8_lossy(head).into_owned()
+}
+
+fn response_body_bytes(response: &[u8]) -> &[u8] {
+    split_http_response(response).1
+}
+
+fn split_http_response(response: &[u8]) -> (&[u8], &[u8]) {
     response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body)
-        .unwrap_or(response)
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (&response[..index], &response[index + 4..]))
+        .unwrap_or((response, response))
 }
 
 fn capture_present_remote_output(host_args: &[&str]) -> Option<Vec<String>> {

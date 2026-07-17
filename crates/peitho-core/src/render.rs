@@ -769,12 +769,18 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Peitho Remote">
+  <link rel="manifest" href="remote.webmanifest">
+  <link rel="apple-touch-icon" href="remote-icon.png">
   <title>Peitho Remote</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
     html, body { margin: 0; height: 100%; background: #101216; color: #f5f7fb; }
     body { height: 100vh; height: 100svh; height: 100dvh; overflow: hidden; }
-    #peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
+    #peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 18px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
     .peitho-remote-error { align-self: center; justify-self: center; max-width: 32rem; padding: 16px; border: 1px solid #7f1d1d; background: #2a1215; color: #ffd7d7; border-radius: 6px; line-height: 1.4; }
     .peitho-remote { width: 100%; max-width: 32rem; margin: 0 auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
     .peitho-remote-dim-on-end { transition: opacity 120ms ease; }
@@ -830,8 +836,8 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
     .peitho-remote-reset-button:disabled { opacity: 0.32; }
     .peitho-remote-action-arrow { font-size: 20px; font-weight: 400; line-height: 1; opacity: 0.85; }
     @media (orientation: landscape) and (max-height: 520px) {
-      #peitho-remote-root { padding: 12px 14px; padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
-      .peitho-remote { max-width: none; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) 96px; grid-template-columns: min(calc((100dvh - 151px - env(safe-area-inset-bottom, 0px)) * __PEITHO_CANVAS_ASPECT__), 52%) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }
+      #peitho-remote-root { padding: 12px 14px; padding-top: calc(12px + env(safe-area-inset-top, 0px)); padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+      .peitho-remote { max-width: none; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) 96px; grid-template-columns: min(calc((100dvh - 151px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) * __PEITHO_CANVAS_ASPECT__), 52%) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }
       .peitho-remote-preview { grid-area: 1 / 1 / 2 / 2; max-height: 100%; min-height: 0; }
       .peitho-remote-titlebar { grid-area: 2 / 1 / 3 / 2; }
       .peitho-remote-chase { grid-area: 3 / 1 / 4 / 2; align-self: end; }
@@ -1768,6 +1774,16 @@ Paragraph after heading.
         assert!(html.contains(
             r#"<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">"#
         ));
+        assert!(html.contains(r#"<meta name="apple-mobile-web-app-capable" content="yes">"#));
+        assert!(html.contains(r#"<meta name="mobile-web-app-capable" content="yes">"#));
+        assert!(html.contains(
+            r#"<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">"#
+        ));
+        assert!(
+            html.contains(r#"<meta name="apple-mobile-web-app-title" content="Peitho Remote">"#)
+        );
+        assert!(html.contains(r#"<link rel="manifest" href="remote.webmanifest">"#));
+        assert!(html.contains(r#"<link rel="apple-touch-icon" href="remote-icon.png">"#));
         assert!(html.contains("--peitho-canvas-width: 960px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
         assert!(html.contains("--peitho-canvas-aspect: 4 / 3;"));
@@ -1777,6 +1793,7 @@ Paragraph after heading.
         ));
         assert!(html
             .contains("body { height: 100vh; height: 100svh; height: 100dvh; overflow: hidden; }"));
+        assert!(html.contains("padding-top: calc(14px + env(safe-area-inset-top, 0px));"));
         assert!(html.contains("#peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 18px;"));
         assert!(html.contains(".peitho-remote-preview { position: relative; aspect-ratio: var(--peitho-canvas-aspect); border-radius: 10px; border: 1px solid #2a3240; background: #fff; overflow: hidden; flex: 0 1 auto; min-height: 0;"));
         assert!(html.contains(".peitho-remote-titlebar, .peitho-remote-chase, .peitho-remote-pace, .peitho-remote-status { flex: none; }"));
@@ -1823,9 +1840,9 @@ Paragraph after heading.
         assert!(html.contains(".peitho-remote-actions [data-peitho-direction=\"prev\"] { min-height: 48px; border: 1px solid #2f3644; background: transparent; color: #dde3ec; font-size: 15px;"));
         assert!(html.contains(".peitho-remote-actions [data-peitho-direction=\"next\"] { min-height: 60px; border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; font-size: 17px;"));
         assert!(html.contains("@media (orientation: landscape) and (max-height: 520px)"));
-        assert!(html.contains("#peitho-remote-root { padding: 12px 14px; padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }"));
+        assert!(html.contains("#peitho-remote-root { padding: 12px 14px; padding-top: calc(12px + env(safe-area-inset-top, 0px)); padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }"));
         assert!(html.contains(".peitho-remote { max-width: none; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) 96px;"));
-        assert!(html.contains("grid-template-columns: min(calc((100dvh - 151px - env(safe-area-inset-bottom, 0px)) * 4 / 3), 52%) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }"));
+        assert!(html.contains("grid-template-columns: min(calc((100dvh - 151px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) * 4 / 3), 52%) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }"));
         assert!(html.contains(
             ".peitho-remote-preview { grid-area: 1 / 1 / 2 / 2; max-height: 100%; min-height: 0; }"
         ));
