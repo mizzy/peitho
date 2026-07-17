@@ -20,7 +20,24 @@ fn present_help_lists_no_presenter_flag() {
         .args(["present", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--no-presenter"));
+        .stdout(predicate::str::contains("--no-presenter"))
+        .stdout(predicate::str::contains("--host [<IP>]"))
+        .stdout(predicate::str::contains(
+            "bare --host picks the best address automatically",
+        ))
+        .stdout(predicate::str::contains("VPN, e.g. Tailscale, preferred"));
+}
+
+#[test]
+fn present_bare_host_requires_server_in_cli_path() {
+    let bare = Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["present", "--no-serve", "--host"])
+        .output()
+        .unwrap();
+
+    assert!(!bare.status.success());
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("--host requires the present server"));
 }
 
 #[test]
@@ -682,27 +699,99 @@ fn present_no_open_server_prints_assigned_url() {
         .unwrap();
 
     let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
+    let (serving_tx, serving_rx) = mpsc::channel();
+    let (lines_tx, lines_rx) = mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut tx = Some(tx);
+        let mut lines = Vec::new();
+        let mut serving_tx = Some(serving_tx);
         for line in BufReader::new(stdout).lines() {
             let line = line.unwrap();
             if line.contains("serving presentation at") {
-                if let Some(tx) = tx.take() {
-                    tx.send(line).unwrap();
+                if let Some(tx) = serving_tx.take() {
+                    tx.send(line.clone()).unwrap();
                 }
             }
+            lines.push(line);
         }
+        lines_tx.send(lines).unwrap();
     });
-    let line = rx
+    let line = serving_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("present server did not print serving URL within 5 seconds");
     child.kill().unwrap();
     child.wait().unwrap();
     reader.join().unwrap();
+    let lines = lines_rx.recv().unwrap();
 
     assert!(line.contains("http://127.0.0.1:"));
     assert!(line.contains("/present.html"));
+    let serving_index = lines
+        .iter()
+        .position(|captured| captured == &line)
+        .expect("captured serving line");
+    assert!(
+        !lines[serving_index + 1..]
+            .iter()
+            .any(|line| contains_qr_half_block(line)),
+        "plain present without --host printed QR-looking output: {lines:?}"
+    );
+}
+
+#[test]
+fn present_host_prints_remote_qr_after_remote_control_lines() {
+    let Some(lines) = capture_present_remote_output(&["--host", "0.0.0.0"]) else {
+        return;
+    };
+
+    let remote_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with("remote control").then_some(index))
+        .collect::<Vec<_>>();
+    assert!(
+        !remote_line_indexes.is_empty(),
+        "expected remote control lines in {lines:?}"
+    );
+    let first_url = remote_control_url_from_line(&lines[remote_line_indexes[0]]);
+    let blank_index = remote_line_indexes.last().unwrap() + 1;
+    assert_eq!(lines[blank_index], "");
+    assert_eq!(
+        lines[blank_index + 1],
+        lines[remote_line_indexes[0]].replacen("remote control", "scan to open", 1)
+    );
+
+    let expected_qr = peitho::qr::qr_unicode_lines(first_url).unwrap();
+    assert_eq!(lines[blank_index + 2], expected_qr[0]);
+    assert_eq!(lines[blank_index + 3], expected_qr[1]);
+}
+
+#[test]
+fn present_bare_host_prints_single_remote_line_caption_and_qr() {
+    let Some(lines) = capture_present_remote_output(&["--host"]) else {
+        return;
+    };
+
+    let remote_line_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with("remote control").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remote_line_indexes.len(),
+        1,
+        "bare --host should print exactly one remote control line: {lines:?}"
+    );
+    let first_url = remote_control_url_from_line(&lines[remote_line_indexes[0]]);
+    let blank_index = remote_line_indexes[0] + 1;
+    assert_eq!(lines[blank_index], "");
+    assert_eq!(
+        lines[blank_index + 1],
+        lines[remote_line_indexes[0]].replacen("remote control", "scan to open", 1)
+    );
+
+    let expected_qr = peitho::qr::qr_unicode_lines(first_url).unwrap();
+    assert_eq!(lines[blank_index + 2], expected_qr[0]);
+    assert_eq!(lines[blank_index + 3], expected_qr[1]);
 }
 
 #[test]
@@ -971,6 +1060,82 @@ fn response_body(response: &str) -> &str {
         .unwrap_or(response)
 }
 
+fn capture_present_remote_output(host_args: &[&str]) -> Option<Vec<String>> {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-open", "--port", "0"])
+        .args(host_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            let done =
+                line.contains('█') || line.contains("no non-loopback network addresses found");
+            lines.push(line);
+            if done {
+                tx.send(lines).unwrap();
+                break;
+            }
+        }
+    });
+
+    let lines = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(lines) => lines,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            reader.join().unwrap();
+            let mut stderr_text = String::new();
+            stderr.read_to_string(&mut stderr_text).unwrap();
+            if !status.success()
+                && (stderr_text.contains("failed to bind present server")
+                    || stderr_text.contains("no non-loopback network address found for --host"))
+            {
+                eprintln!("skipping QR assertion: {stderr_text}");
+                return None;
+            }
+            panic!("present server exited before printing remote control output: {stderr_text}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            reader.join().unwrap();
+            panic!("present server did not print remote control output within 5 seconds");
+        }
+    };
+    child.kill().unwrap();
+    child.wait().unwrap();
+    reader.join().unwrap();
+
+    if lines
+        .iter()
+        .any(|line| line.contains("no non-loopback network addresses found"))
+    {
+        eprintln!("skipping QR assertion: no non-loopback network addresses found");
+        return None;
+    }
+
+    Some(lines)
+}
+
 fn join_present_server(handle: thread::JoinHandle<miette::Result<()>>, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while !handle.is_finished() {
@@ -992,4 +1157,15 @@ fn serving_addr(line: &str) -> SocketAddr {
         .strip_suffix("/present.html")
         .unwrap_or_else(|| panic!("unexpected serving URL line: {line}"));
     host_port.parse().unwrap()
+}
+
+fn remote_control_url_from_line(line: &str) -> &str {
+    let start = line
+        .find("http://")
+        .unwrap_or_else(|| panic!("remote control line did not contain a URL: {line}"));
+    &line[start..]
+}
+
+fn contains_qr_half_block(line: &str) -> bool {
+    line.contains('█') || line.contains('▀') || line.contains('▄')
 }

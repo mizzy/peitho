@@ -324,7 +324,7 @@ struct PresentOptions {
     no_serve: bool,
     no_presenter: bool,
     presenter_windowed: bool,
-    host: Option<IpAddr>,
+    host: Option<Option<IpAddr>>,
 }
 
 struct PreviewOptions {
@@ -406,8 +406,13 @@ enum Command {
         no_presenter: bool,
         #[arg(long)]
         presenter_windowed: bool,
-        #[arg(long, value_name = "IP")]
-        host: Option<IpAddr>,
+        #[arg(
+            long,
+            value_name = "IP",
+            num_args = 0..=1,
+            help = "Expose /remote on an optional IP; bare --host picks the best address automatically (VPN, e.g. Tailscale, preferred)"
+        )]
+        host: Option<Option<IpAddr>>,
     },
     Publish {
         #[arg(long, default_value = "dist")]
@@ -2448,6 +2453,7 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
 
 fn present(options: PresentOptions) -> miette::Result<()> {
     validate_present_options(&options)?;
+    let resolved_host = resolve_present_host(options.host)?;
 
     let cache = PathBuf::from(PRESENT_CACHE);
     if cache.exists() {
@@ -2466,7 +2472,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         cache.clone(),
         options.port,
         "present.html",
-        options.host,
+        resolved_host.bind_host(),
     )?;
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
@@ -2487,15 +2493,29 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         .is_some_and(|plan| plan.opens_presenter);
     emit_present_cache(&cache, &artifacts, options.shell.as_deref(), presenter_open)?;
     println!("serving presentation at {url}");
-    if let Some(host) = options.host {
-        let port = server.addr().port();
-        let target = if host.is_unspecified() {
-            RemoteControlTarget::Candidates(remote_url_candidates_from_interfaces(port, host))
-        } else {
-            RemoteControlTarget::Specific(host)
-        };
-        for line in format_remote_control_lines(target, port) {
+    if let Some(target) =
+        remote_control_target_for_resolved_host(&resolved_host, server.addr().port())
+    {
+        let output = remote_control_output(&target);
+        for line in output.lines {
             println!("{line}");
+        }
+        if let Some(qr) = output.qr {
+            match peitho::qr::qr_unicode_lines(qr.url.as_str()) {
+                Ok(lines) => {
+                    println!();
+                    println!("{}", qr.caption);
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to render remote control QR for {}: {err}",
+                        qr.url
+                    );
+                }
+            }
         }
     }
     std::io::stdout().flush().into_diagnostic()?;
@@ -2518,35 +2538,187 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
             "--host requires the present server\nhelp: remove --no-serve or omit --host"
         ));
     }
-    if host.is_loopback() {
+    if host.is_some_and(|host| host.is_loopback()) {
         return Err(miette::miette!(
-            "--host must be non-loopback\nhelp: use the default loopback server without --host, or pass a reachable Tailscale/LAN IP address"
+            "--host must be non-loopback\nhelp: use the default loopback server without --host, or pass a reachable VPN/LAN IP address"
         ));
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutoHostCandidate {
+    address: IpAddr,
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+}
+
+enum ResolvedPresentHost {
+    None,
+    Explicit(IpAddr),
+    Auto(AutoHostCandidate),
+}
+
+impl ResolvedPresentHost {
+    fn bind_host(&self) -> Option<IpAddr> {
+        match self {
+            Self::None => None,
+            Self::Explicit(host) => Some(*host),
+            Self::Auto(candidate) => Some(candidate.address),
+        }
+    }
+}
+
+struct RemoteControlEndpoint {
+    url: peitho::remote_url::RemoteUrl,
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+}
+
 enum RemoteControlTarget {
-    Specific(IpAddr),
+    Specific(RemoteControlEndpoint),
     Candidates(Vec<peitho::remote_url::RemoteUrlCandidate>),
 }
 
-fn format_remote_control_lines(target: RemoteControlTarget, port: u16) -> Vec<String> {
+struct RemoteControlOutput<'a> {
+    lines: Vec<String>,
+    qr: Option<RemoteControlQr<'a>>,
+}
+
+struct RemoteControlQr<'a> {
+    url: &'a peitho::remote_url::RemoteUrl,
+    caption: String,
+}
+
+fn resolve_present_host(host: Option<Option<IpAddr>>) -> miette::Result<ResolvedPresentHost> {
+    match host {
+        None => Ok(ResolvedPresentHost::None),
+        Some(Some(host)) => Ok(ResolvedPresentHost::Explicit(host)),
+        Some(None) => Ok(ResolvedPresentHost::Auto(
+            auto_host_candidate_from_interfaces()?,
+        )),
+    }
+}
+
+fn auto_host_candidate_from_interfaces() -> miette::Result<AutoHostCandidate> {
+    let addrs = if_addrs::get_if_addrs()
+        .into_diagnostic()
+        .map_err(|err| {
+            miette::miette!(
+                "failed to enumerate network interfaces for --host\nhelp: pass --host <IP> explicitly or check the network\ncaused by: {err}"
+            )
+        })?
+        .into_iter()
+        .map(|addr| addr.ip())
+        .collect::<Vec<_>>();
+    auto_host_candidate_from_addresses(&addrs, default_route_ipv4())
+}
+
+fn auto_host_candidate_from_addresses(
+    addrs: &[IpAddr],
+    default_route: Option<IpAddr>,
+) -> miette::Result<AutoHostCandidate> {
+    let candidate = peitho::remote_url::remote_url_candidates(addrs, default_route, 0, None)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            miette::miette!(
+                "no non-loopback network address found for --host\nhelp: pass --host <IP> explicitly or check the network"
+            )
+        })?;
+    Ok(AutoHostCandidate {
+        address: candidate.address,
+        label: candidate.label,
+    })
+}
+
+fn remote_control_target_for_resolved_host(
+    host: &ResolvedPresentHost,
+    port: u16,
+) -> Option<RemoteControlTarget> {
+    match host {
+        ResolvedPresentHost::None => None,
+        ResolvedPresentHost::Explicit(host) => Some(remote_control_target_for_host(*host, port)),
+        ResolvedPresentHost::Auto(candidate) => Some(RemoteControlTarget::Specific(
+            remote_control_endpoint(candidate.address, port, candidate.label),
+        )),
+    }
+}
+
+fn remote_control_target_for_host(host: IpAddr, port: u16) -> RemoteControlTarget {
+    if host.is_unspecified() {
+        RemoteControlTarget::Candidates(remote_url_candidates_from_interfaces(port, host))
+    } else {
+        RemoteControlTarget::Specific(remote_control_endpoint(
+            host,
+            port,
+            peitho::remote_url::remote_url_label(host),
+        ))
+    }
+}
+
+fn remote_control_endpoint(
+    host: IpAddr,
+    port: u16,
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+) -> RemoteControlEndpoint {
+    RemoteControlEndpoint {
+        url: peitho::remote_url::remote_url_for_addr(host, port),
+        label,
+    }
+}
+
+fn remote_control_output(target: &RemoteControlTarget) -> RemoteControlOutput<'_> {
     match target {
-        RemoteControlTarget::Specific(host) => vec![format!(
-            "remote control: {}",
-            peitho::remote_url::remote_url_for_addr(host, port)
-        )],
+        RemoteControlTarget::Specific(endpoint) => RemoteControlOutput {
+            lines: vec![format_remote_control_line(endpoint.label, &endpoint.url)],
+            qr: Some(remote_control_qr(endpoint.label, &endpoint.url)),
+        },
         RemoteControlTarget::Candidates(candidates) if candidates.is_empty() => {
-            vec!["remote control: no non-loopback network addresses found".to_owned()]
+            RemoteControlOutput {
+                lines: vec!["remote control: no non-loopback network addresses found".to_owned()],
+                qr: None,
+            }
         }
-        RemoteControlTarget::Candidates(candidates) => candidates
-            .iter()
-            .map(|candidate| match candidate.label {
-                Some(label) => format!("remote control ({}): {}", label.as_str(), candidate.url),
-                None => format!("remote control: {}", candidate.url),
-            })
-            .collect(),
+        RemoteControlTarget::Candidates(candidates) => {
+            let mut lines = Vec::with_capacity(candidates.len());
+            let mut qr = None;
+            for candidate in candidates {
+                if qr.is_none() {
+                    qr = Some(remote_control_qr(candidate.label, &candidate.url));
+                }
+                lines.push(format_remote_control_line(candidate.label, &candidate.url));
+            }
+            RemoteControlOutput { lines, qr }
+        }
+    }
+}
+
+fn format_remote_control_line(
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+    url: &peitho::remote_url::RemoteUrl,
+) -> String {
+    match label {
+        Some(label) => format!("remote control ({}): {url}", label.as_str()),
+        None => format!("remote control: {url}"),
+    }
+}
+
+fn remote_control_qr(
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+    url: &peitho::remote_url::RemoteUrl,
+) -> RemoteControlQr<'_> {
+    RemoteControlQr {
+        url,
+        caption: format_qr_caption(label, url),
+    }
+}
+
+fn format_qr_caption(
+    label: Option<peitho::remote_url::RemoteUrlLabel>,
+    url: &peitho::remote_url::RemoteUrl,
+) -> String {
+    match label {
+        Some(label) => format!("scan to open ({}): {url}", label.as_str()),
+        None => format!("scan to open: {url}"),
     }
 }
 
@@ -4829,7 +5001,7 @@ contexts:
         match cli.command {
             Command::Present { input, host, .. } => {
                 assert_eq!(input, PathBuf::from("deck.md"));
-                assert_eq!(host, Some("100.64.0.5".parse().unwrap()));
+                assert_eq!(host, Some(Some("100.64.0.5".parse().unwrap())));
             }
             Command::Build { .. }
             | Command::Lint { .. }
@@ -4843,6 +5015,20 @@ contexts:
                 panic!("expected present command");
             }
         }
+    }
+
+    #[test]
+    fn present_command_accepts_bare_host_as_auto_select() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--host"]);
+
+        assert_eq!(present_host_from_cli(cli), Some(None));
+    }
+
+    #[test]
+    fn present_command_without_host_keeps_host_none() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md"]);
+
+        assert_eq!(present_host_from_cli(cli), None);
     }
 
     #[test]
@@ -4863,7 +5049,7 @@ contexts:
             no_serve: true,
             no_presenter: false,
             presenter_windowed: false,
-            host: Some("100.64.0.5".parse().unwrap()),
+            host: Some(Some("100.64.0.5".parse().unwrap())),
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -4884,7 +5070,7 @@ contexts:
             no_serve: false,
             no_presenter: false,
             presenter_windowed: false,
-            host: Some("127.0.0.1".parse().unwrap()),
+            host: Some(Some("127.0.0.1".parse().unwrap())),
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -4894,25 +5080,115 @@ contexts:
     }
 
     #[test]
-    fn remote_control_lines_format_specific_host() {
-        let lines = format_remote_control_lines(
-            RemoteControlTarget::Specific("100.64.0.5".parse().unwrap()),
-            3000,
-        );
+    fn auto_host_candidate_selects_vpn_over_lan_default_route() {
+        let candidate = auto_host_candidate_from_addresses(
+            &[
+                "192.168.1.20".parse().unwrap(),
+                "100.100.10.5".parse().unwrap(),
+            ],
+            Some("192.168.1.20".parse().unwrap()),
+        )
+        .unwrap();
 
-        assert_eq!(lines, vec!["remote control: http://100.64.0.5:3000/remote"]);
+        assert_eq!(candidate.address, "100.100.10.5".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            candidate.label,
+            Some(peitho::remote_url::RemoteUrlLabel::Vpn)
+        );
+    }
+
+    #[test]
+    fn auto_host_candidate_selects_lan_default_route_without_vpn() {
+        let candidate = auto_host_candidate_from_addresses(
+            &[
+                "192.168.1.20".parse().unwrap(),
+                "10.0.0.15".parse().unwrap(),
+            ],
+            Some("10.0.0.15".parse().unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.address, "10.0.0.15".parse::<IpAddr>().unwrap());
+        assert_eq!(candidate.label, None);
+    }
+
+    #[test]
+    fn auto_host_candidate_errors_without_non_loopback_addresses() {
+        let err = auto_host_candidate_from_addresses(
+            &[
+                "127.0.0.1".parse().unwrap(),
+                "169.254.10.20".parse().unwrap(),
+                "::1".parse().unwrap(),
+                "fe80::1".parse().unwrap(),
+            ],
+            None,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("no non-loopback network address"));
+        assert!(message.contains("help: pass --host <IP>"));
+        assert!(message.contains("check the network"));
+    }
+
+    #[test]
+    fn remote_control_lines_label_specific_vpn_host() {
+        let target = remote_control_target_for_host("100.64.0.5".parse().unwrap(), 3000);
+        let output = remote_control_output(&target);
+
+        assert_eq!(
+            output.lines,
+            vec!["remote control (VPN): http://100.64.0.5:3000/remote"]
+        );
+        assert_eq!(
+            output.qr.as_ref().unwrap().url.as_str(),
+            remote_url_from_control_line(&output.lines[0])
+        );
+        assert_eq!(
+            output.qr.unwrap().caption,
+            "scan to open (VPN): http://100.64.0.5:3000/remote"
+        );
+    }
+
+    #[test]
+    fn remote_control_lines_leave_specific_lan_host_unlabeled() {
+        let target = remote_control_target_for_host("192.168.1.20".parse().unwrap(), 3000);
+        let output = remote_control_output(&target);
+
+        assert_eq!(
+            output.lines,
+            vec!["remote control: http://192.168.1.20:3000/remote"]
+        );
+        assert_eq!(
+            output.qr.as_ref().unwrap().url.as_str(),
+            remote_url_from_control_line(&output.lines[0])
+        );
+        assert_eq!(
+            output.qr.unwrap().caption,
+            "scan to open: http://192.168.1.20:3000/remote"
+        );
     }
 
     #[test]
     fn remote_control_lines_bracket_specific_ipv6_host() {
-        let lines = format_remote_control_lines(
-            RemoteControlTarget::Specific("2001:db8::5".parse().unwrap()),
-            3000,
-        );
+        let target = remote_control_target_for_host("2001:db8::5".parse().unwrap(), 3000);
+        let output = remote_control_output(&target);
 
         assert_eq!(
-            lines,
+            output.lines,
             vec!["remote control: http://[2001:db8::5]:3000/remote"]
+        );
+        assert_eq!(
+            output.qr.as_ref().unwrap().url.as_str(),
+            "http://[2001:db8::5]:3000/remote"
+        );
+        assert_eq!(
+            output.qr.as_ref().unwrap().url.as_str(),
+            remote_url_from_control_line(&output.lines[0])
+        );
+        assert_eq!(
+            output.qr.unwrap().caption,
+            "scan to open: http://[2001:db8::5]:3000/remote"
         );
     }
 
@@ -4929,26 +5205,61 @@ contexts:
             None,
         );
 
-        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(candidates), 3000);
+        let target = RemoteControlTarget::Candidates(candidates);
+        let output = remote_control_output(&target);
 
         assert_eq!(
-            lines,
+            output.lines,
             vec![
+                "remote control (VPN): http://100.100.10.5:3000/remote",
                 "remote control: http://10.0.0.15:3000/remote",
-                "remote control (Tailscale): http://100.100.10.5:3000/remote",
                 "remote control: http://192.168.1.20:3000/remote"
             ]
+        );
+        assert_eq!(
+            output.qr.as_ref().unwrap().url.as_str(),
+            remote_url_from_control_line(&output.lines[0])
+        );
+        assert_eq!(
+            output.qr.unwrap().caption,
+            "scan to open (VPN): http://100.100.10.5:3000/remote"
         );
     }
 
     #[test]
     fn remote_control_lines_show_when_unspecified_host_has_no_candidates() {
-        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(Vec::new()), 3000);
+        let target = RemoteControlTarget::Candidates(Vec::new());
+        let output = remote_control_output(&target);
 
         assert_eq!(
-            lines,
+            output.lines,
             vec!["remote control: no non-loopback network addresses found"]
         );
+        assert!(output.qr.is_none());
+    }
+
+    fn remote_url_from_control_line(line: &str) -> &str {
+        let start = line
+            .find("http://")
+            .unwrap_or_else(|| panic!("remote control line did not contain a URL: {line}"));
+        &line[start..]
+    }
+
+    fn present_host_from_cli(cli: Cli) -> Option<Option<IpAddr>> {
+        match cli.command {
+            Command::Present { host, .. } => host,
+            Command::Build { .. }
+            | Command::Lint { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
     }
 
     #[test]
