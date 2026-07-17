@@ -282,6 +282,8 @@ it("remote controller treats a null replay index as the first non-skipped slide"
 });
 
 it("remote renders preview title section notes and section-aware chase chrome", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
   const previewNavigations: unknown[] = [];
   const manifest = manifestWithSlides(
     [
@@ -757,6 +759,8 @@ it("remote chase puts the last-slide rabbit at the slide goal", async () => {
 });
 
 it("remote chase pins the single-slide rabbit at the slide goal", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
   const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "only" }], { plannedDurationMs: 60_000 })
   );
