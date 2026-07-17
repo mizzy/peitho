@@ -593,6 +593,12 @@ function serverSyncChannelFactory(options = {}) {
         onmessage?.({ data: replay.data });
       }
     };
+    const resetSessionState = () => {
+      synced = false;
+      highestAckedPostSeq = 0;
+      bufferedTimerReplay = null;
+      pendingTimerPosts = 0;
+    };
     const deliverReplayState = (body, options2 = {}) => {
       const skipAbsoluteState = options2.skipAbsoluteState === true;
       const responseSeq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : 0;
@@ -695,6 +701,7 @@ function serverSyncChannelFactory(options = {}) {
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
             needsHandshake = true;
+            resetSessionState();
             await delay();
           }
         }
@@ -1098,13 +1105,12 @@ var RemoteController = class {
   }
   setSynced() {
     this.synced = true;
+    if (this.ended) this.ended = false;
     this.render();
   }
   setEnded() {
-    const cleanup = this.syncCleanup;
-    this.syncCleanup = null;
-    cleanup?.();
     this.ended = true;
+    this.timerState = null;
     this.clearTimerInterval();
     this.render();
   }

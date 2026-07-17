@@ -161,6 +161,13 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
       }
     };
 
+    const resetSessionState = (): void => {
+      synced = false;
+      highestAckedPostSeq = 0;
+      bufferedTimerReplay = null;
+      pendingTimerPosts = 0;
+    };
+
     const deliverReplayState = (
       body: Partial<ServerSyncPollResponse>,
       options: { skipAbsoluteState?: boolean; deferTimerReplay?: boolean } = {}
@@ -270,6 +277,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           if (!closed) {
             console.error(`Failed to poll sync message: ${String(error)}`);
             needsHandshake = true;
+            resetSessionState();
             await delay();
           }
         }

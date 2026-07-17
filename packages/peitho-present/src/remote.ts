@@ -436,14 +436,13 @@ class RemoteController implements RemoteView {
 
   private setSynced(): void {
     this.synced = true;
+    if (this.ended) this.ended = false;
     this.render();
   }
 
   private setEnded(): void {
-    const cleanup = this.syncCleanup;
-    this.syncCleanup = null;
-    cleanup?.();
     this.ended = true;
+    this.timerState = null;
     this.clearTimerInterval();
     this.render();
   }
