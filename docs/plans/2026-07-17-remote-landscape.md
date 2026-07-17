@@ -154,6 +154,31 @@ from CLAUDE.md.
   667×375, ~7px at the 844×390 design target) — accepted; nothing clips or
   overlaps.
 
+## Real-device amendments (2026-07-17, iPhone Safari screenshots from the author)
+
+- **`100dvh` cascade** (`height: 100vh; height: 100svh; height: 100dvh;` on
+  `body` and `#peitho-remote-root`): iOS Safari in landscape with the tab bar
+  visible reports `svh` ~45px smaller than the actual visible area (measured
+  on the author's phone — portrait reports correctly), which left a dead band
+  below the grid. `dvh` tracks the current chrome state, and also expands the
+  layout when the user hides Safari's toolbar. `svh` stays in the cascade as
+  the no-`dvh` fallback.
+- **Landscape column 1 tracks the preview's real width**: on short
+  real-device viewports the aspect-fit preview used only ~154px of its fixed
+  `1.55fr` (~290px) column, wasting ~130px that belongs to the notes column.
+  The column is now
+  `min(calc((100dvh - 151px - env(safe-area-inset-bottom, 0px)) * <aspect>), 52%)`
+  (progressive second declaration; the `1.55fr` line remains as the no-`dvh`
+  fallback). 151px = the column's fixed vertical overhead (padding-top 12 +
+  titlebar ~19 + chase 34 + pace 44 + three 10px row gaps + padding-bottom
+  base 12); `<aspect>` is the canvas token, so the calc reads
+  `* 16 / 9` etc. The 52% cap equals the old 1.55fr share at the 844×390
+  design size, so the approved-mock rendering is unchanged there.
+- **Portrait stays untouched** (author decision): the portrait cramped-notes
+  feedback is chrome tax (~130px) + preview + buttons; revisit together with
+  the standalone/add-to-home-screen follow-up (Issue #306) rather than
+  shrinking the preview now.
+
 ## Non-goals
 
 - Tablet-specific layouts.
