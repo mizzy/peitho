@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, HashSet},
     env,
+    error::Error,
     ffi::{OsStr, OsString},
-    fs,
+    fmt, fs,
     io::{self, IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Component, Path, PathBuf},
@@ -319,7 +320,7 @@ impl WatchController for NotifyWatchController<'_> {
 struct PresentOptions {
     input: PathBuf,
     shell: Option<PathBuf>,
-    port: u16,
+    port: Option<u16>,
     no_open: bool,
     no_serve: bool,
     no_presenter: bool,
@@ -396,8 +397,8 @@ enum Command {
         input: PathBuf,
         #[arg(long, help = "shell bundle path (default: built-in present shell)")]
         shell: Option<PathBuf>,
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+        #[arg(long, help = present_port_help())]
+        port: Option<u16>,
         #[arg(long)]
         no_open: bool,
         #[arg(long)]
@@ -452,6 +453,14 @@ const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/di
 const BUILTIN_PREVIEW_JS: &str = include_str!("../../../packages/peitho-present/dist/preview.js");
 const BUILTIN_REMOTE_JS: &str = include_str!("../../../packages/peitho-present/dist/remote.js");
 
+const REMOTE_DEFAULT_PORT: u16 = 6173;
+
+fn present_port_help() -> String {
+    format!(
+        "Port for the present server (default: random; with --host and no --port: {}; pass 0 for an OS-assigned random port)",
+        REMOTE_DEFAULT_PORT
+    )
+}
 const PRESENT_CACHE: &str = ".peitho/present-cache";
 const PREVIEW_CACHE: &str = ".peitho/preview-cache";
 const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
@@ -2454,6 +2463,7 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
 fn present(options: PresentOptions) -> miette::Result<()> {
     validate_present_options(&options)?;
     let resolved_host = resolve_present_host(options.host)?;
+    let resolved_port = resolve_present_port(options.port, &resolved_host);
 
     let cache = PathBuf::from(PRESENT_CACHE);
     if cache.exists() {
@@ -2468,12 +2478,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         return Ok(());
     }
 
-    let server = server::PresentServer::bind_with_host(
-        cache.clone(),
-        options.port,
-        "present.html",
-        resolved_host.bind_host(),
-    )?;
+    let server = bind_present_server(cache.clone(), resolved_port, "present.html", &resolved_host)?;
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
     let browser_plan = if options.no_open {
@@ -2544,6 +2549,106 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedPresentPort {
+    port: u16,
+    source: PresentPortSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentPortSource {
+    Explicit,
+    RandomDefault,
+    RemoteDefault,
+}
+
+fn resolve_present_port(port: Option<u16>, host: &ResolvedPresentHost) -> ResolvedPresentPort {
+    match port {
+        Some(port) => ResolvedPresentPort {
+            port,
+            source: PresentPortSource::Explicit,
+        },
+        None if !matches!(host, ResolvedPresentHost::None) => ResolvedPresentPort {
+            port: REMOTE_DEFAULT_PORT,
+            source: PresentPortSource::RemoteDefault,
+        },
+        None => ResolvedPresentPort {
+            port: 0,
+            source: PresentPortSource::RandomDefault,
+        },
+    }
+}
+
+fn bind_present_server(
+    root: PathBuf,
+    port: ResolvedPresentPort,
+    default_document: &'static str,
+    resolved_host: &ResolvedPresentHost,
+) -> miette::Result<server::PresentServer> {
+    server::PresentServer::bind_with_remote_assets(
+        root,
+        port.port,
+        default_document,
+        resolved_host.bind_host(),
+        true,
+    )
+    .map_err(|err| annotate_present_bind_error(port, err))
+}
+
+fn annotate_present_bind_error(port: ResolvedPresentPort, err: miette::Report) -> miette::Report {
+    if port.source == PresentPortSource::RemoteDefault
+        && present_server_bind_error_kind(&err) == Some(io::ErrorKind::AddrInUse)
+    {
+        return miette::Report::new(RemoteDefaultPortInUseError {
+            port: port.port,
+            source: err,
+        });
+    }
+    err
+}
+
+fn present_server_bind_error_kind(err: &miette::Report) -> Option<io::ErrorKind> {
+    err.downcast_ref::<server::PresentServerBindError>()
+        .map(server::PresentServerBindError::io_kind)
+}
+
+#[derive(Debug)]
+struct RemoteDefaultPortInUseError {
+    port: u16,
+    source: miette::Report,
+}
+
+#[cfg(test)]
+impl RemoteDefaultPortInUseError {
+    fn source_io_kind(&self) -> Option<io::ErrorKind> {
+        present_server_bind_error_kind(&self.source)
+    }
+}
+
+impl fmt::Display for RemoteDefaultPortInUseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to bind default --host port {}", self.port)
+    }
+}
+
+impl Error for RemoteDefaultPortInUseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(<miette::Report as AsRef<dyn Error>>::as_ref(&self.source))
+    }
+}
+
+impl miette::Diagnostic for RemoteDefaultPortInUseError {
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        Some(Box::new(
+            "another `peitho present --host` is probably running; pass `--port` to choose another port, or close the other instance",
+        ))
+    }
+
+    fn diagnostic_source(&self) -> Option<&dyn miette::Diagnostic> {
+        Some(self.source.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5025,6 +5130,72 @@ contexts:
     }
 
     #[test]
+    fn present_command_without_port_preserves_unspecified_state() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--host"]);
+
+        assert_eq!(present_port_from_cli(cli), None);
+    }
+
+    #[test]
+    fn present_command_accepts_explicit_zero_port() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--host", "--port", "0"]);
+
+        assert_eq!(present_port_from_cli(cli), Some(0));
+    }
+
+    #[test]
+    fn present_port_resolution_matrix_keeps_explicit_ports_and_defaults_host() {
+        let host = ResolvedPresentHost::Explicit("100.64.0.5".parse().unwrap());
+        let auto_host = ResolvedPresentHost::Auto(AutoHostCandidate {
+            address: "100.64.0.5".parse().unwrap(),
+            label: Some(peitho::remote_url::RemoteUrlLabel::Vpn),
+        });
+
+        assert_eq!(
+            resolve_present_port(Some(4321), &ResolvedPresentHost::None),
+            ResolvedPresentPort {
+                port: 4321,
+                source: PresentPortSource::Explicit,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(Some(6174), &host),
+            ResolvedPresentPort {
+                port: 6174,
+                source: PresentPortSource::Explicit,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(Some(0), &host),
+            ResolvedPresentPort {
+                port: 0,
+                source: PresentPortSource::Explicit,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(None, &host),
+            ResolvedPresentPort {
+                port: REMOTE_DEFAULT_PORT,
+                source: PresentPortSource::RemoteDefault,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(None, &auto_host),
+            ResolvedPresentPort {
+                port: REMOTE_DEFAULT_PORT,
+                source: PresentPortSource::RemoteDefault,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(None, &ResolvedPresentHost::None),
+            ResolvedPresentPort {
+                port: 0,
+                source: PresentPortSource::RandomDefault,
+            }
+        );
+    }
+
+    #[test]
     fn present_command_without_host_keeps_host_none() {
         let cli = Cli::parse_from(["peitho", "present", "deck.md"]);
 
@@ -5044,7 +5215,7 @@ contexts:
         let options = PresentOptions {
             input: PathBuf::from("deck.md"),
             shell: None,
-            port: 0,
+            port: None,
             no_open: true,
             no_serve: true,
             no_presenter: false,
@@ -5065,7 +5236,7 @@ contexts:
         let options = PresentOptions {
             input: PathBuf::from("deck.md"),
             shell: None,
-            port: 0,
+            port: None,
             no_open: true,
             no_serve: false,
             no_presenter: false,
@@ -5077,6 +5248,71 @@ contexts:
 
         assert!(err.to_string().contains("--host must be non-loopback"));
         assert!(err.to_string().contains("use the default loopback server"));
+    }
+
+    #[test]
+    fn binding_busy_remote_default_port_reports_host_specific_help() {
+        let listener = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping bind-busy assertion: TCP bind is denied in this sandbox");
+                return;
+            }
+            Err(err) => panic!("failed to reserve an ephemeral port for bind-busy test: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = bind_present_server(
+            dir.path().to_path_buf(),
+            ResolvedPresentPort {
+                port,
+                source: PresentPortSource::RemoteDefault,
+            },
+            "present.html",
+            &ResolvedPresentHost::None,
+        )
+        .err()
+        .unwrap();
+        let err = err
+            .downcast_ref::<RemoteDefaultPortInUseError>()
+            .expect("expected remote default port-in-use diagnostic");
+
+        assert_eq!(err.port, port);
+        assert_eq!(err.source_io_kind(), Some(std::io::ErrorKind::AddrInUse));
+        assert!(miette::Diagnostic::help(err)
+            .unwrap()
+            .to_string()
+            .contains("pass `--port`"));
+    }
+
+    #[test]
+    fn remote_default_bind_help_is_limited_to_addr_in_use() {
+        let remote_default = ResolvedPresentPort {
+            port: REMOTE_DEFAULT_PORT,
+            source: PresentPortSource::RemoteDefault,
+        };
+
+        let in_use = annotate_present_bind_error(
+            remote_default,
+            synthesized_bind_error(std::io::ErrorKind::AddrInUse),
+        );
+        let in_use = in_use
+            .downcast_ref::<RemoteDefaultPortInUseError>()
+            .expect("expected remote default port-in-use diagnostic");
+        assert_eq!(in_use.source_io_kind(), Some(std::io::ErrorKind::AddrInUse));
+
+        let addr_not_available = annotate_present_bind_error(
+            remote_default,
+            synthesized_bind_error(std::io::ErrorKind::AddrNotAvailable),
+        );
+        let addr_not_available = addr_not_available
+            .downcast_ref::<server::PresentServerBindError>()
+            .expect("non-conflict bind failures should pass through unchanged");
+        assert_eq!(
+            addr_not_available.io_kind(),
+            std::io::ErrorKind::AddrNotAvailable
+        );
     }
 
     #[test]
@@ -5260,6 +5496,30 @@ contexts:
                 panic!("expected present command");
             }
         }
+    }
+
+    fn present_port_from_cli(cli: Cli) -> Option<u16> {
+        match cli.command {
+            Command::Present { port, .. } => port,
+            Command::Build { .. }
+            | Command::Lint { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
+    }
+
+    fn synthesized_bind_error(kind: std::io::ErrorKind) -> miette::Report {
+        miette::Report::new(server::PresentServerBindError::new(
+            std::net::SocketAddr::from(([127, 0, 0, 1], REMOTE_DEFAULT_PORT)),
+            std::io::Error::from(kind),
+        ))
     }
 
     #[test]

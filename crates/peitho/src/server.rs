@@ -1,6 +1,7 @@
 use std::{
-    fs,
-    io::{Read, Write},
+    error::Error,
+    fmt, fs,
+    io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
@@ -13,6 +14,45 @@ use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 static SERVER_CLOCK_START: OnceLock<Instant> = OnceLock::new();
+const REMOTE_WEBMANIFEST: &str = r##"{"name":"Peitho Remote","short_name":"Remote","start_url":"/remote","display":"standalone","background_color":"#101216","theme_color":"#101216","icons":[{"src":"remote-icon.png","sizes":"180x180","type":"image/png"}]}"##;
+const REMOTE_ICON_PNG: &[u8] = include_bytes!("../assets/remote-icon.png");
+
+#[derive(Debug)]
+pub struct PresentServerBindError {
+    addr: SocketAddr,
+    source: io::Error,
+}
+
+impl PresentServerBindError {
+    pub fn new(addr: SocketAddr, source: io::Error) -> Self {
+        Self { addr, source }
+    }
+
+    fn from_boxed(addr: SocketAddr, source: Box<dyn Error + Send + Sync + 'static>) -> Self {
+        match source.downcast::<io::Error>() {
+            Ok(source) => Self::new(addr, *source),
+            Err(source) => Self::new(addr, io::Error::other(source.to_string())),
+        }
+    }
+
+    pub fn io_kind(&self) -> io::ErrorKind {
+        self.source.kind()
+    }
+}
+
+impl fmt::Display for PresentServerBindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to bind present server at {}", self.addr)
+    }
+}
+
+impl Error for PresentServerBindError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl miette::Diagnostic for PresentServerBindError {}
 
 #[derive(Clone, Default)]
 pub(crate) struct SyncHub {
@@ -192,6 +232,7 @@ fn bind_plan(host: Option<IpAddr>) -> BindPlan {
 pub struct PresentServer {
     root: Arc<RwLock<PathBuf>>,
     default_document: String,
+    serve_remote_assets: bool,
     server: Arc<Server>,
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
@@ -199,29 +240,35 @@ pub struct PresentServer {
 
 impl PresentServer {
     pub fn bind(root: PathBuf, port: u16, default_document: &'static str) -> miette::Result<Self> {
-        Self::bind_with_host(root, port, default_document, None)
+        Self::bind_with_remote_assets(root, port, default_document, None, false)
     }
 
-    pub fn bind_with_host(
+    pub fn bind_with_remote_assets(
         root: PathBuf,
         port: u16,
         default_document: &'static str,
         host: Option<IpAddr>,
+        serve_remote_assets: bool,
     ) -> miette::Result<Self> {
         match bind_plan(host) {
             BindPlan::LoopbackOnly => Self::bind_addr(
                 root,
                 SocketAddr::from(([127, 0, 0, 1], port)),
                 default_document,
+                serve_remote_assets,
             ),
-            BindPlan::WildcardOnly(host) => {
-                Self::bind_addr(root, SocketAddr::new(host, port), default_document)
-            }
+            BindPlan::WildcardOnly(host) => Self::bind_addr(
+                root,
+                SocketAddr::new(host, port),
+                default_document,
+                serve_remote_assets,
+            ),
             BindPlan::LoopbackPlusExtra(host) => {
                 let server = Self::bind_addr(
                     root,
                     SocketAddr::from(([127, 0, 0, 1], port)),
                     default_document,
+                    serve_remote_assets,
                 )?;
                 server.add_listener(host)?;
                 Ok(server)
@@ -233,13 +280,15 @@ impl PresentServer {
         root: PathBuf,
         addr: SocketAddr,
         default_document: &'static str,
+        serve_remote_assets: bool,
     ) -> miette::Result<Self> {
         let server = Server::http(addr)
-            .map_err(|err| miette::miette!("failed to bind present server at {addr}: {err}"))?;
+            .map_err(|err| miette::Report::new(PresentServerBindError::from_boxed(addr, err)))?;
         let server = Arc::new(server);
         Ok(Self {
             root: Arc::new(RwLock::new(root)),
             default_document: default_document.to_owned(),
+            serve_remote_assets,
             server: server.clone(),
             listeners: Arc::new(Mutex::new(vec![server])),
             sync: SyncHub::default(),
@@ -250,7 +299,7 @@ impl PresentServer {
         validate_extra_listener_host(host)?;
         let addr = SocketAddr::new(host, self.addr().port());
         let server = Server::http(addr)
-            .map_err(|err| miette::miette!("failed to bind present server at {addr}: {err}"))?;
+            .map_err(|err| miette::Report::new(PresentServerBindError::from_boxed(addr, err)))?;
         let server = Arc::new(server);
         let bound_addr = server
             .server_addr()
@@ -344,6 +393,19 @@ impl PresentServer {
         if request.method() != &Method::Get {
             send_response(request, Response::empty(StatusCode(405)));
             return;
+        }
+        if self.serve_remote_assets {
+            match path {
+                "/remote.webmanifest" => {
+                    send_remote_webmanifest_response(request);
+                    return;
+                }
+                "/remote-icon.png" => {
+                    send_remote_icon_response(request);
+                    return;
+                }
+                _ => {}
+            }
         }
         self.respond_static(request);
     }
@@ -587,11 +649,30 @@ fn server_clock_ms() -> u64 {
 }
 
 fn send_json_response(request: tiny_http::Request, body: String) {
-    let Ok(header) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") else {
+    send_bytes_response(request, "application/json; charset=utf-8", body.as_bytes());
+}
+
+fn send_remote_webmanifest_response(request: tiny_http::Request) {
+    send_bytes_response(
+        request,
+        "application/manifest+json",
+        REMOTE_WEBMANIFEST.as_bytes(),
+    );
+}
+
+fn send_remote_icon_response(request: tiny_http::Request) {
+    send_bytes_response(request, "image/png", REMOTE_ICON_PNG);
+}
+
+fn send_bytes_response(request: tiny_http::Request, content_type: &str, body: &[u8]) {
+    let Ok(header) = Header::from_bytes("Content-Type", content_type) else {
         eprintln!("warning: failed to build Content-Type header");
         return;
     };
-    send_response(request, Response::from_string(body).with_header(header));
+    send_response(
+        request,
+        Response::from_data(body.to_vec()).with_header(header),
+    );
 }
 
 fn send_response<R>(request: tiny_http::Request, response: Response<R>)
@@ -682,6 +763,30 @@ mod tests {
         assert!(err
             .to_string()
             .contains("bind the wildcard as the primary listener"));
+    }
+
+    #[derive(Debug)]
+    struct NonIoBindError;
+
+    impl fmt::Display for NonIoBindError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "non-io bind failure")
+        }
+    }
+
+    impl Error for NonIoBindError {}
+
+    #[test]
+    fn bind_error_fallback_preserves_message_without_chaining_same_error() {
+        let err = PresentServerBindError::from_boxed(
+            SocketAddr::from(([127, 0, 0, 1], 6173)),
+            Box::new(NonIoBindError),
+        );
+        let source = err.source().unwrap();
+
+        assert_eq!(err.io_kind(), io::ErrorKind::Other);
+        assert_eq!(source.to_string(), "non-io bind failure");
+        assert!(source.source().is_none());
     }
 
     #[test]

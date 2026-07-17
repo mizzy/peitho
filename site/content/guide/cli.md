@@ -85,6 +85,11 @@ as the IP value, so use `peitho present deck.md --host` rather than
 top-ranked remote URL, and the top line plus QR prefer VPN (e.g. Tailscale)
 when available.
 
+For Add to Home Screen, run `peitho present --host` so the remote keeps a
+stable `http://<ip>:6173/remote` URL. Scan the QR once, open the share sheet,
+choose Add to Home Screen, and later `peitho present --host` runs reuse the
+same home-screen URL.
+
 ## `peitho export`
 
 Export a PDF:

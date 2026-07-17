@@ -83,6 +83,8 @@ Press `o`, `Enter`, or `Esc` to flip between the single-slide view and a tile ov
 
 `Space` starts/pauses the timer, arrows navigate, `S` swaps the two windows if the displays were misidentified, and `Esc` closes everything. For debugging (or a single display), `--presenter-windowed` opens normal windows instead of full screen.
 
+To use a phone as a persistent remote, run `peitho present --host`. Peitho prints a stable `http://<ip>:6173/remote` URL and QR code; scan it once in Safari, use the share sheet's Add to Home Screen action, and later `peitho present --host` runs reuse the same URL.
+
 ### Ship it
 
 ```sh
