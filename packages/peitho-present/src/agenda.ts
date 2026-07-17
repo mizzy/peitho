@@ -98,6 +98,12 @@ export function installAgenda(options: AgendaOptions): () => void {
       log.error("Invalid peitho:timeradopt event");
       return;
     }
+    if (!detail.running && detail.elapsedMs === 0) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      render();
+      return;
+    }
     if (options.shell.startedAt() !== null) {
       const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
       if (sectionIndex >= 0) {

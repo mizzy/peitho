@@ -451,6 +451,38 @@ it("rebases elapsed after timer adoption without attributing the adopted delta",
   expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 1:00");
 });
 
+it("clears actuals immediately when a timer reset is adopted", () => {
+  let elapsed = 0;
+  const root = document.createElement("div");
+  const bus = new EventTarget();
+  const cleanup = installAgenda({
+    root,
+    shell: {
+      currentIndex: 0,
+      elapsedMs: () => elapsed,
+      startedAt: () => 100
+    },
+    sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  elapsed = 1_000;
+  vi.advanceTimersByTime(250);
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:01 / 1:00");
+
+  elapsed = 0;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timeradopt", {
+      detail: { running: false, previousElapsedMs: 1_000, elapsedMs: 0 }
+    })
+  );
+
+  expect(root.querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:00 / 1:00");
+});
+
 it("attributes pending elapsed time before continuous timer adopt rebases", () => {
   const root = document.createElement("div");
   const bus = new EventTarget();

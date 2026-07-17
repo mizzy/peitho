@@ -5,7 +5,6 @@ import {
   expectedElapsedAtSlide,
   installRemoteControls,
   mountRemoteView,
-  plannedProgressAtElapsed,
   remotePaceState,
   type RemoteView
 } from "../src/remote";
@@ -173,6 +172,9 @@ it("remote controls mount disabled before the synced event arrives", () => {
   expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
     true
   );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
 });
 
 it("remote controller resolves next and prev across skipped slides and posts absolute indexes", async () => {
@@ -199,12 +201,19 @@ it("remote controls are disabled and silent before the initial sync snapshot is 
   expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
     true
   );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
 
   button(root, "next").click();
   root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.click();
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   window.dispatchEvent(
     new CustomEvent("peitho:timercontrol", { detail: { action: "start" } })
+  );
+  window.dispatchEvent(
+    new CustomEvent("peitho:timercontrol", { detail: { action: "reset" } })
   );
 
   expect(channel.sent).toEqual([]);
@@ -224,6 +233,9 @@ it("remote controls enable after synced replay is reported", async () => {
   expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
     false
   );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
   button(root, "next").click();
   expect(channel.sent).toEqual([{ index: 1 }]);
 });
@@ -282,7 +294,7 @@ it("remote renders preview title section notes and section-aware chase chrome", 
   expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Architecture");
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("2 / 3");
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
-    "41.67%"
+    "27.78%"
   );
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
     "50%"
@@ -291,11 +303,11 @@ it("remote renders preview title section notes and section-aware chase chrome", 
     root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.transform
   ).toBe("translateX(-50%)");
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
-    "41.67%"
+    "27.78%"
   );
   expect(
     root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.transform
-  ).toBe("translateX(-41.67%)");
+  ).toBe("translateX(-27.78%)");
   expect(root.querySelector('[data-peitho-remote="section"]')?.textContent).toBe(
     "Architecture · slide 1 / 2 in section"
   );
@@ -431,6 +443,44 @@ it("remote timer button emits requests while the bridge posts absolute timer sta
   ]);
 });
 
+it("remote reset button emits a reset request and bridge posts zero timer state", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "end", title: "End" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+  const requests: unknown[] = [];
+  const onTimerControl = (event: Event): void => {
+    requests.push((event as CustomEvent).detail);
+  };
+  window.addEventListener("peitho:timercontrol", onTimerControl);
+  cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
+  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')!;
+
+  expect(reset.disabled).toBe(true);
+  expect(reset.getAttribute("aria-label")).toBe("Reset timer");
+  expect(reset.textContent).toBe("↺");
+
+  timer.click();
+  expect(reset.disabled).toBe(false);
+  vi.setSystemTime(3_500);
+  reset.click();
+
+  expect(requests).toEqual([{ action: "start" }, { action: "reset" }]);
+  expect(channel.sent).toEqual([
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 0 } }
+  ]);
+  expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
+  expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:00");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(reset.disabled).toBe(true);
+});
+
 it("remote timer states render stopped running and paused rows", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
@@ -444,21 +494,27 @@ it("remote timer states render stopped running and paused rows", async () => {
 
   expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    true
+  );
 
   channel.deliver({
     timer: { running: true, elapsedMs: 35_000, atMs: 10_000 },
     nowMs: 10_000
   });
   expect(timer.querySelector('[data-peitho-icon="pause"]')).not.toBeNull();
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    false
+  );
   expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toContain("behind");
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
     "0%"
   );
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
-    "100%"
+    "58.33%"
   );
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
-    "100%"
+    "58.33%"
   );
 
   channel.deliver({
@@ -467,9 +523,12 @@ it("remote timer states render stopped running and paused rows", async () => {
   });
   expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
   expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe("Paused");
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    false
+  );
 });
 
-it("remote chase renders behind and overrun states", async () => {
+it("remote chase renders on-pace behind and overrun states", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
   const { root, channel } = await mountRemoteForTest(
@@ -489,11 +548,22 @@ it("remote chase renders behind and overrun states", async () => {
     "50%"
   );
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
-    "62.5%"
+    "41.67%"
   );
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
-    "62.5%"
+    "41.67%"
   );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "on pace"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "onpace"
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 45_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
   expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
     "0:05 behind"
   );
@@ -590,10 +660,102 @@ it("remote timer interval updates turtle fill and delta in place without touchin
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')).toBe(turtleElement);
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')).toBe(fillElement);
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')).toBe(deltaElement);
-  expect(turtle.style.left).toBe("6.67%");
-  expect(fill.style.width).toBe("6.67%");
-  expect(delta.textContent).toBe("0:02 behind");
+  expect(turtle.style.left).toBe("3.33%");
+  expect(fill.style.width).toBe("3.33%");
+  expect(delta.textContent).toBe("on pace");
   expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:02");
+});
+
+it("remote chase keeps presenter-exact marker semantics on uneven sections", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const manifest = manifestWithSlides(
+    [
+      { key: "s1" },
+      { key: "s2" },
+      { key: "s3" },
+      { key: "s4" },
+      { key: "s5" },
+      { key: "s6" },
+      { key: "s7" },
+      { key: "s8" },
+      { key: "s9" },
+      { key: "s10" }
+    ],
+    {
+      plannedDurationMs: 30 * 60_000,
+      sections: [
+        { name: "Fast", startIndex: 0, endIndex: 4, plannedDurationMs: 5 * 60_000 },
+        { name: "Deep", startIndex: 5, endIndex: 9, plannedDurationMs: 25 * 60_000 }
+      ]
+    }
+  );
+  const { root, channel } = await mountRemoteForTest(manifest);
+
+  channel.deliver({ index: 5 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 8 * 60_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "26.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "26.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "55.56%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "on pace"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "onpace"
+  );
+});
+
+it("remote chase puts the last-slide rabbit at the slide goal", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro" }, { key: "middle" }, { key: "end" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+
+  channel.deliver({ index: 2 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 60_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "100%"
+  );
+});
+
+it("remote chase pins the single-slide rabbit at the slide goal", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "only" }], { plannedDurationMs: 60_000 })
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 15_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "25%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "25%"
+  );
 });
 
 it("remote controller no-ops at the ends", async () => {
@@ -633,6 +795,9 @@ it("remote controller disables buttons and shows ended state on close", async ()
   expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
     true
   );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
   expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
   expect(root.querySelector<HTMLElement>(".peitho-remote")?.dataset.peithoEnded).toBe("true");
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
@@ -694,6 +859,7 @@ it("pace math uses section piecewise timing", () => {
   expect(expectedElapsedAtSlide(manifest, 1)).toBe(10_000);
   expect(expectedElapsedAtSlide(manifest, 2)).toBe(20_000);
   expect(expectedElapsedAtSlide(manifest, 3)).toBe(40_000);
+  expect(expectedElapsedAtSlide(manifest, 4)).toBe(60_000);
 });
 
 it("pace math falls back to whole-deck timing without sections", () => {
@@ -704,32 +870,30 @@ it("pace math falls back to whole-deck timing without sections", () => {
   expect(expectedElapsedAtSlide(manifest, 0)).toBe(0);
   expect(expectedElapsedAtSlide(manifest, 1)).toBe(20_000);
   expect(expectedElapsedAtSlide(manifest, 2)).toBe(40_000);
+  expect(expectedElapsedAtSlide(manifest, 3)).toBe(60_000);
 });
 
-it("plannedProgressAtElapsed clamps the chase turtle fraction", () => {
-  const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
-    plannedDurationMs: 60_000
-  });
-
-  expect(plannedProgressAtElapsed(manifest, -10_000)).toBe(0);
-  expect(plannedProgressAtElapsed(manifest, 0)).toBe(0);
-  expect(plannedProgressAtElapsed(manifest, 30_000)).toBe(0.75);
-  expect(plannedProgressAtElapsed(manifest, 90_000)).toBe(1);
-});
-
-it("pace state selection covers ahead behind overrun paused and null planned time", () => {
+it("pace state selection covers ahead on-pace behind overrun paused and null planned time", () => {
   const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
     plannedDurationMs: 60_000
   });
   const unplanned = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }]);
 
-  expect(remotePaceState(manifest, 1, 25_000, true)).toEqual({
-    kind: "behind",
-    label: "0:05 behind"
-  });
   expect(remotePaceState(manifest, 1, 15_000, true)).toEqual({
     kind: "ahead",
     label: "0:05 ahead"
+  });
+  expect(remotePaceState(manifest, 1, 20_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 1, 25_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 1, 45_000, true)).toEqual({
+    kind: "behind",
+    label: "0:05 behind"
   });
   expect(remotePaceState(manifest, 1, 70_000, true)).toEqual({
     kind: "overrun",
@@ -740,6 +904,43 @@ it("pace state selection covers ahead behind overrun paused and null planned tim
     label: "Paused"
   });
   expect(remotePaceState(unplanned, 1, 15_000, true)).toBeNull();
+});
+
+it("pace state selection uses uneven-section slide windows", () => {
+  const manifest = manifestWithSlides(
+    [
+      { key: "s1" },
+      { key: "s2" },
+      { key: "s3" },
+      { key: "s4" },
+      { key: "s5" },
+      { key: "s6" },
+      { key: "s7" },
+      { key: "s8" },
+      { key: "s9" },
+      { key: "s10" }
+    ],
+    {
+      plannedDurationMs: 30 * 60_000,
+      sections: [
+        { name: "Fast", startIndex: 0, endIndex: 4, plannedDurationMs: 5 * 60_000 },
+        { name: "Deep", startIndex: 5, endIndex: 9, plannedDurationMs: 25 * 60_000 }
+      ]
+    }
+  );
+
+  expect(remotePaceState(manifest, 5, 4 * 60_000, true)).toEqual({
+    kind: "ahead",
+    label: "1:00 ahead"
+  });
+  expect(remotePaceState(manifest, 5, 8 * 60_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 5, 12 * 60_000, true)).toEqual({
+    kind: "behind",
+    label: "2:00 behind"
+  });
 });
 
 it("remote manifest fetch failure is visible", async () => {

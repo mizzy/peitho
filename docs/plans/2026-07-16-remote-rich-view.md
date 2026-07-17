@@ -259,13 +259,35 @@ presenter-style chase track, mirroring the PC presenter's time tracker
   positioned with `left: X%; transform: translateX(-X%)` — the same
   edge-safe placement as the presenter's `setMarker`).
 - **Fill follows 🐢 (time)**, like the presenter: `rgba(56,189,248,0.55)`.
-- **🐰 position** = slide fraction `index / (slideCount - 1)` (unchanged).
-  **🐢 position** = the existing `plannedProgressAtElapsed` fraction (the old
-  plan tick's position). Deliberate deviation from the presenter's linear
-  `elapsed / planned`: the piecewise mapping is what the behind/ahead number
-  uses, so markers and text can never contradict each other on decks with
-  uneven section times; without sections both definitions coincide at the
-  endpoints and the piecewise one is used throughout.
+- **Marker semantics: presenter-exact, by deliberate division of labor**
+  (settled 2026-07-17 after two live-tested iterations on the author's phone).
+  **🐰 position** = slide-consumption fraction `index / (slideCount - 1)`;
+  **🐢 position** = time-consumption fraction `elapsed / planned` — both
+  linear, identical to the PC presenter's time tracker. 🐰 reaches the flag on
+  the last slide; 🐢 reaches it exactly when the planned time is up.
+  The two channels intentionally measure different things: the **markers** are
+  the macro volume comparison (share of slides shown vs share of time used,
+  the same mental model as the presenter), while the **delta text** is the
+  section-aware pace figure built on the piecewise `expectedElapsedAtSlide`.
+  **Delta anchoring: the current slide's planned window is a neutral band**
+  (settled 2026-07-17, third live iteration — arrival anchoring read "behind"
+  the whole time you legitimately spent on a slide, even from second one of
+  the talk). With `window = [expected(index), expected(index + 1)]` (closed at
+  both ends; `expected(slideCount)` = the full planned time): elapsed before
+  the window → green `m:ss ahead` (early by that much); elapsed inside the
+  window → neutral gray `on pace`; elapsed strictly past the window → amber
+  `m:ss behind` (overstayed by that much). Overrun (`elapsed > planned`) still wins with `+m:ss over`, and
+  Paused still wins over everything while stopped. On decks with uneven section budgets the marker
+  order and the delta sign can therefore disagree — that is two indicators
+  reporting two truths (e.g. "half the slides shown but only a quarter of the
+  time used" while "3:00 behind on the light section"), not a contradiction.
+  Marker order must NOT be read as behind/ahead; the number owns that.
+  Rejected alternatives, both live-tested: a slide-arrival axis (🐢 reached
+  the flag before time was up — "turtle at the flag" must mean time is up) and
+  a time axis with 🐰 at the current slide's planned start (🐰 trailed 🐢 even
+  when perfectly on pace, and hopped unevenly). `plannedProgressAtElapsed`
+  (used by the old plan tick and the first chase cut) has no remaining
+  consumer and stays removed.
 - **Overrun** (`isOverrun`, i.e. elapsed > planned): the fill turns red
   (`rgba(239,68,68,0.6)`), the track gets a red ring
   (`box-shadow: 0 0 0 1px rgba(239,68,68,0.35)`), 🐢 pins at 100%.
@@ -273,6 +295,19 @@ presenter-style chase track, mirroring the PC presenter's time tracker
   the right end of the pace row (`13px/600`): behind = `#e8c07a`
   `m:ss behind`, ahead = `#8fd9a0` `m:ss ahead`, overrun = `#e8c07a`
   `+m:ss over` (delta = elapsed − planned), paused = `#aab3c2` `Paused`.
+- **Timer reset button** (added 2026-07-17, author-approved mock update): a
+  40px ghost circle (`border: 1px solid #2f3644`, transparent background,
+  `#aab3c2`, ↺ U+21BA at 18px) right of the play/pause button, pace-row gap
+  10px. Deliberately quieter than the tonal play/pause because reset zeroes
+  the shared timer on every window. One-tap for now (author decision; a
+  two-step confirm state is the fallback if accidental taps prove common).
+  Emits `peitho:timercontrol {action:"reset"}` (§16); the remote bridge posts
+  the absolute `{timer:{running:false,elapsedMs:0}}`. Disabled while
+  pre-synced, ended, or the timer is stopped at 0 (nothing to reset).
+  A reset adopted from sync (running:false, elapsedMs:0 — the same shape the
+  shell already treats as full reset) also zeroes the presenter agenda's
+  per-section actuals, matching what a presenter-local reset does — the two
+  reset paths must stay equivalent.
 - **No time-scale labels** (presenter has them; too cramped on a phone).
 - **Decks without `time`**: the chase degrades to the plain slide-progress
   fill (solid accent, as before) with no markers and no delta text.

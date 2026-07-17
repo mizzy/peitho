@@ -794,9 +794,10 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
     .peitho-remote-chase.peitho-remote-chase-overrun .peitho-remote-chase-fill { background: rgba(239,68,68,0.6); }
     .peitho-remote-chase-marker { position: absolute; bottom: 8px; font-size: 17px; line-height: 1; filter: saturate(0.9); transition: left 120ms linear, transform 120ms linear; }
     .peitho-remote-chase-marker[hidden] { display: none; }
-    .peitho-remote-pace { display: flex; align-items: center; gap: 12px; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .peitho-remote-pace { display: flex; align-items: center; gap: 10px; font-size: 14px; font-variant-numeric: tabular-nums; }
     .peitho-remote-timer-button { width: 44px; height: 44px; border-radius: 50%; border: 0; background: #232935; color: #fff; display: inline-grid; place-items: center; flex: 0 0 auto; touch-action: manipulation; }
     .peitho-remote-timer-button[data-peitho-running="true"] { background: rgba(56,189,248,0.18); color: #38bdf8; }
+    .peitho-remote-reset-button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #2f3644; background: transparent; color: #aab3c2; font-size: 18px; display: inline-grid; place-items: center; flex: 0 0 auto; touch-action: manipulation; }
     .peitho-remote-timer-icon { display: inline-block; position: relative; width: 16px; height: 16px; }
     .peitho-remote-timer-icon[data-peitho-icon="play"] { width: 0; height: 0; margin-left: 3px; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 11px solid currentColor; }
     .peitho-remote-timer-icon[data-peitho-icon="pause"]::before,
@@ -812,6 +813,7 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
     .peitho-remote-pace-delta[data-peitho-pace="overrun"] { color: #e8c07a; }
     .peitho-remote-pace-delta[data-peitho-pace="ahead"] { color: #8fd9a0; }
     .peitho-remote-pace-delta[data-peitho-pace="paused"] { color: #aab3c2; }
+    .peitho-remote-pace-delta[data-peitho-pace="onpace"] { color: #aab3c2; }
     .peitho-remote-section { font-size: 12.5px; color: #aab3c2; line-height: 1.35; }
     .peitho-remote-section b { color: #dde3ec; font-weight: 600; }
     .peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -824,7 +826,8 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
     .peitho-remote-actions [data-peitho-direction="prev"] { border: 1px solid #2f3644; background: transparent; color: #dde3ec; }
     .peitho-remote-actions [data-peitho-direction="next"] { border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; }
     .peitho-remote-actions button:disabled,
-    .peitho-remote-timer-button:disabled { opacity: 0.32; }
+    .peitho-remote-timer-button:disabled,
+    .peitho-remote-reset-button:disabled { opacity: 0.32; }
     .peitho-remote-action-arrow { font-size: 20px; font-weight: 400; line-height: 1; opacity: 0.85; }
   </style>
 </head>
@@ -1770,10 +1773,14 @@ Paragraph after heading.
         assert!(html.contains(".peitho-remote-chase-overrun .peitho-remote-chase-track { box-shadow: 0 0 0 1px rgba(239,68,68,0.35);"));
         assert!(html.contains(".peitho-remote-chase.peitho-remote-chase-overrun .peitho-remote-chase-fill { background: rgba(239,68,68,0.6);"));
         assert!(html.contains(".peitho-remote-chase-marker { position: absolute; bottom: 8px; font-size: 17px; line-height: 1; filter: saturate(0.9);"));
+        assert!(
+            html.contains(".peitho-remote-pace { display: flex; align-items: center; gap: 10px;")
+        );
         assert!(html.contains(
             ".peitho-remote-timer-button { width: 44px; height: 44px; border-radius: 50%;"
         ));
         assert!(html.contains(".peitho-remote-timer-button[data-peitho-running=\"true\"] { background: rgba(56,189,248,0.18);"));
+        assert!(html.contains(".peitho-remote-reset-button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #2f3644; background: transparent; color: #aab3c2; font-size: 18px;"));
         assert!(html.contains(
             ".peitho-remote-pace-delta { flex: 0 0 auto; font-size: 13px; font-weight: 600;"
         ));
@@ -1784,6 +1791,8 @@ Paragraph after heading.
             .contains(".peitho-remote-pace-delta[data-peitho-pace=\"ahead\"] { color: #8fd9a0;"));
         assert!(html
             .contains(".peitho-remote-pace-delta[data-peitho-pace=\"paused\"] { color: #aab3c2;"));
+        assert!(html
+            .contains(".peitho-remote-pace-delta[data-peitho-pace=\"onpace\"] { color: #aab3c2;"));
         assert!(html.contains(".peitho-remote-section { font-size: 12.5px; color: #aab3c2;"));
         assert!(html.contains(".peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px;"));
         assert!(html.contains(".peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto;"));

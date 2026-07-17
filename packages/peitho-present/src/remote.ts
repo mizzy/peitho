@@ -39,7 +39,7 @@ type RemoteTimerAnchor = {
 type TimerVisualState = "stopped" | "running" | "paused";
 
 export type RemotePaceState =
-  | { kind: "ahead" | "behind" | "overrun"; label: string }
+  | { kind: "ahead" | "behind" | "onpace" | "overrun"; label: string }
   | { kind: "paused"; label: "Paused" };
 
 export type RemoteView = {
@@ -153,6 +153,13 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   timerIcon.className = "peitho-remote-timer-icon";
   timerIcon.dataset.peithoIcon = "play";
   timerButton.append(timerIcon);
+  const resetButton = doc.createElement("button");
+  resetButton.type = "button";
+  resetButton.className = "peitho-remote-reset-button";
+  resetButton.dataset.peithoAction = "timer-reset";
+  resetButton.disabled = true;
+  resetButton.setAttribute("aria-label", "Reset timer");
+  resetButton.textContent = "↺";
   const elapsedRow = doc.createElement("div");
   elapsedRow.className = "peitho-remote-elapsed-row";
   elapsedRow.dataset.peithoRemote = "elapsed-row";
@@ -174,7 +181,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   delta.className = "peitho-remote-pace-delta";
   delta.dataset.peithoRemote = "pace-delta";
   delta.hidden = true;
-  pace.append(timerButton, elapsedRow, delta);
+  pace.append(timerButton, resetButton, elapsedRow, delta);
 
   const notesPanel = doc.createElement("section");
   notesPanel.className = "peitho-remote-notes peitho-remote-dim-on-end";
@@ -204,9 +211,11 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
       dispatchTimerControl(bus, action);
     }
   };
+  const onReset = (): void => dispatchTimerControl(bus, "reset");
   prev.addEventListener("click", onPrev);
   next.addEventListener("click", onNext);
   timerButton.addEventListener("click", onTimer);
+  resetButton.addEventListener("click", onReset);
 
   container.append(preview, titlebar, chase, pace, notesPanel, status, actions);
   root.append(container);
@@ -215,6 +224,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
     prev.removeEventListener("click", onPrev);
     next.removeEventListener("click", onNext);
     timerButton.removeEventListener("click", onTimer);
+    resetButton.removeEventListener("click", onReset);
     container.remove();
   };
 }
@@ -486,12 +496,16 @@ class RemoteController implements RemoteView {
 
   private renderTimeDependentChrome(manifest: Manifest, currentIndex: number | null): void {
     const timerButton = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]');
+    const resetButton = this.root.querySelector<HTMLButtonElement>(
+      '[data-peitho-action="timer-reset"]'
+    );
     const elapsed = this.root.querySelector<HTMLElement>('[data-peitho-remote="elapsed"]');
-    if (timerButton == null || elapsed == null) return;
+    if (timerButton == null || resetButton == null || elapsed == null) return;
 
     const elapsedMs = this.currentElapsedMs();
     const state = timerVisualState(this.timerState, elapsedMs);
     timerButton.disabled = this.ended || !this.synced;
+    resetButton.disabled = this.ended || !this.synced || state === "stopped";
     timerButton.dataset.peithoRunning = state === "running" ? "true" : "false";
     timerButton.dataset.peithoTimerAction = playpauseActionFor(state);
     timerButton.setAttribute("aria-label", timerAriaLabel(state));
@@ -534,9 +548,9 @@ class RemoteController implements RemoteView {
     turtle.hidden = false;
     const overrun = isOverrun(elapsedMs, plannedDurationMs);
     chase.classList.toggle("peitho-remote-chase-overrun", overrun);
-    const turtleFraction = overrun ? 1 : plannedProgressAtElapsed(manifest, elapsedMs);
-    setChaseMarker(turtle, turtleFraction ?? 0);
-    setChaseFill(fill, turtleFraction ?? 0);
+    const turtleFraction = clamp01(elapsedMs / plannedDurationMs);
+    setChaseMarker(turtle, turtleFraction);
+    setChaseFill(fill, turtleFraction);
 
     if (currentIndex == null) {
       delta.hidden = true;
@@ -732,12 +746,14 @@ export function expectedElapsedAtSlide(manifest: Manifest, index: number): numbe
   const plannedDurationMs = validPlannedDurationMs(manifest);
   if (plannedDurationMs == null) return null;
   const slideCount = Math.max(1, manifest.slideCount);
-  const clampedIndex = Math.max(0, Math.min(Math.trunc(index), slideCount - 1));
+  const requestedIndex = Number.isFinite(index) ? Math.trunc(index) : 0;
+  if (requestedIndex <= 0) return 0;
+  if (requestedIndex >= slideCount) return plannedDurationMs;
   if (manifest.sections.length === 0) {
-    return (plannedDurationMs * clampedIndex) / slideCount;
+    return (plannedDurationMs * requestedIndex) / slideCount;
   }
-  const sectionIndex = sectionIndexForSlide(manifest.sections, clampedIndex);
-  if (sectionIndex < 0) return (plannedDurationMs * clampedIndex) / slideCount;
+  const sectionIndex = sectionIndexForSlide(manifest.sections, requestedIndex);
+  if (sectionIndex < 0) return (plannedDurationMs * requestedIndex) / slideCount;
   let elapsed = 0;
   for (let i = 0; i < sectionIndex; i += 1) {
     elapsed += manifest.sections[i].plannedDurationMs;
@@ -746,31 +762,8 @@ export function expectedElapsedAtSlide(manifest: Manifest, index: number): numbe
   const sectionSlideCount = section.endIndex - section.startIndex + 1;
   return (
     elapsed +
-    section.plannedDurationMs * ((clampedIndex - section.startIndex) / sectionSlideCount)
+    section.plannedDurationMs * ((requestedIndex - section.startIndex) / sectionSlideCount)
   );
-}
-
-export function plannedProgressAtElapsed(manifest: Manifest, elapsedMs: number): number | null {
-  const plannedDurationMs = validPlannedDurationMs(manifest);
-  if (plannedDurationMs == null) return null;
-  if (manifest.slideCount <= 1) return 1;
-  const elapsed = clamp01(elapsedMs / plannedDurationMs) * plannedDurationMs;
-  if (manifest.sections.length === 0) {
-    return clamp01(((elapsed / plannedDurationMs) * manifest.slideCount) / (manifest.slideCount - 1));
-  }
-  let elapsedBefore = 0;
-  for (const section of manifest.sections) {
-    const duration = section.plannedDurationMs;
-    const elapsedAfter = elapsedBefore + duration;
-    if (elapsed <= elapsedAfter) {
-      const sectionSlideCount = section.endIndex - section.startIndex + 1;
-      const ratio = duration === 0 ? 0 : (elapsed - elapsedBefore) / duration;
-      const slidePosition = section.startIndex + ratio * sectionSlideCount;
-      return clamp01(slidePosition / (manifest.slideCount - 1));
-    }
-    elapsedBefore = elapsedAfter;
-  }
-  return 1;
 }
 
 export function remotePaceState(
@@ -779,8 +772,9 @@ export function remotePaceState(
   elapsedMs: number,
   running: boolean
 ): RemotePaceState | null {
-  const expected = expectedElapsedAtSlide(manifest, index);
-  if (expected == null) return null;
+  const expectedStart = expectedElapsedAtSlide(manifest, index);
+  const expectedEnd = expectedElapsedAtSlide(manifest, index + 1);
+  if (expectedStart == null || expectedEnd == null) return null;
   if (!running) {
     return elapsedMs > 0 ? { kind: "paused", label: "Paused" } : null;
   }
@@ -791,16 +785,18 @@ export function remotePaceState(
       label: `+${formatMinuteSeconds(elapsedMs - plannedDurationMs)} over`
     };
   }
-  const delta = elapsedMs - expected;
-  if (delta >= 0) {
+  if (elapsedMs < expectedStart) {
     return {
-      kind: "behind",
-      label: `${formatMinuteSeconds(delta)} behind`
+      kind: "ahead",
+      label: `${formatMinuteSeconds(expectedStart - elapsedMs)} ahead`
     };
   }
+  if (elapsedMs <= expectedEnd) {
+    return { kind: "onpace", label: "on pace" };
+  }
   return {
-    kind: "ahead",
-    label: `${formatMinuteSeconds(Math.abs(delta))} ahead`
+    kind: "behind",
+    label: `${formatMinuteSeconds(elapsedMs - expectedEnd)} behind`
   };
 }
 
