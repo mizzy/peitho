@@ -1110,6 +1110,7 @@ var RemoteController = class {
   }
   setEnded() {
     this.ended = true;
+    this.currentIndex = null;
     this.timerState = null;
     this.clearTimerInterval();
     this.render();

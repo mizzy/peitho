@@ -442,6 +442,7 @@ class RemoteController implements RemoteView {
 
   private setEnded(): void {
     this.ended = true;
+    this.currentIndex = null;
     this.timerState = null;
     this.clearTimerInterval();
     this.render();

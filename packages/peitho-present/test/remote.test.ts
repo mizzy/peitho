@@ -858,6 +858,7 @@ it("remote controller clears ended state when synced re-fires after close", asyn
     timer: { running: true, elapsedMs: 12_000, atMs: 21_000 },
     nowMs: 21_000
   });
+  channel.deliver({ index: 1 });
   channel.deliver({ synced: true });
 
   expect(button(root, "prev").disabled).toBe(false);
@@ -902,6 +903,35 @@ it("remote controller discards stale timer state across ended and re-synced", as
   expect(timer.dataset.peithoTimerAction).toBe("start");
   expect(elapsed.textContent).toBe("0:00");
   expect(reset.disabled).toBe(true);
+});
+
+it("remote controller discards stale slide index across ended and re-synced when fresh server has no index", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([
+      { key: "intro", title: "intro" },
+      { key: "middle", title: "middle" },
+      { key: "late", title: "late" },
+      { key: "end", title: "end" }
+    ]),
+    mockChannel(),
+    { autoSync: false }
+  );
+  const container = root.querySelector<HTMLElement>(".peitho-remote")!;
+  const title = root.querySelector<HTMLElement>('[data-peitho-remote="title"]')!;
+  const counter = root.querySelector<HTMLElement>('[data-peitho-remote="counter"]')!;
+
+  channel.deliver({ synced: true });
+  channel.deliver({ index: 2 });
+  expect(title.textContent).toBe("late");
+  expect(counter.textContent).toBe("3 / 4");
+
+  channel.deliver({ close: true });
+  channel.deliver({ synced: true });
+
+  expect(container.dataset.peithoEnded).toBe("false");
+  expect(title.textContent).toBe("Untitled slide");
+  expect(title.textContent).not.toBe("late");
+  expect(counter.textContent).toBe("– / 4");
 });
 
 it("remote controller stays ended when a same-session poll message arrives after close", async () => {
