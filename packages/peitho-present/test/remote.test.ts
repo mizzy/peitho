@@ -163,6 +163,25 @@ it("remote buttons dispatch navigate request events only", () => {
   expect(requests).toEqual([{ to: "prev" }, { to: "next" }]);
 });
 
+it("remote action buttons wrap labels and keep directional child order", () => {
+  const root = document.createElement("main");
+  cleanups.push(installRemoteControls({ root, document, bus: new EventTarget() }));
+
+  const prev = button(root, "prev");
+  const next = button(root, "next");
+  const prevArrow = prev.querySelector(".peitho-remote-action-arrow");
+  const nextArrow = next.querySelector(".peitho-remote-action-arrow");
+  const prevLabel = prev.querySelector(".peitho-remote-action-label");
+  const nextLabel = next.querySelector(".peitho-remote-action-label");
+
+  expect(prevLabel?.textContent).toBe("Previous");
+  expect(nextLabel?.textContent).toBe("Next");
+  expect(prevArrow?.getAttribute("aria-hidden")).toBe("true");
+  expect(nextArrow?.getAttribute("aria-hidden")).toBe("true");
+  expect(Array.from(prev.children)).toEqual([prevArrow, prevLabel]);
+  expect(Array.from(next.children)).toEqual([nextLabel, nextArrow]);
+});
+
 it("remote controls mount disabled before the synced event arrives", () => {
   const root = document.createElement("main");
   cleanups.push(installRemoteControls({ root, document, bus: new EventTarget() }));

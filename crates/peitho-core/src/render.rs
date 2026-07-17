@@ -821,14 +821,31 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
     .peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto; min-height: 0; }
     .peitho-remote-notes-body[data-peitho-empty="true"] { color: #5a6473; font-size: 14px; font-style: italic; }
     .peitho-remote-status { min-height: 1.4em; text-align: center; color: #aab3c2; font-size: 13px; line-height: 1.4; }
-    .peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none; }
-    .peitho-remote-actions button { min-height: 60px; border-radius: 999px; font: 600 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; touch-action: manipulation; }
-    .peitho-remote-actions [data-peitho-direction="prev"] { border: 1px solid #2f3644; background: transparent; color: #dde3ec; }
-    .peitho-remote-actions [data-peitho-direction="next"] { border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; }
+    .peitho-remote-actions { display: flex; flex-direction: column; gap: 10px; flex: none; }
+    .peitho-remote-actions button { border-radius: 999px; font: 600 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; touch-action: manipulation; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .peitho-remote-actions [data-peitho-direction="prev"] { min-height: 48px; border: 1px solid #2f3644; background: transparent; color: #dde3ec; font-size: 15px; }
+    .peitho-remote-actions [data-peitho-direction="next"] { min-height: 60px; border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; font-size: 17px; }
     .peitho-remote-actions button:disabled,
     .peitho-remote-timer-button:disabled,
     .peitho-remote-reset-button:disabled { opacity: 0.32; }
     .peitho-remote-action-arrow { font-size: 20px; font-weight: 400; line-height: 1; opacity: 0.85; }
+    @media (orientation: landscape) and (max-height: 520px) {
+      #peitho-remote-root { padding: 12px 14px; padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+      .peitho-remote { max-width: none; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }
+      .peitho-remote-preview { grid-area: 1 / 1 / 2 / 2; max-height: 100%; min-height: 0; }
+      .peitho-remote-titlebar { grid-area: 2 / 1 / 3 / 2; }
+      .peitho-remote-chase { grid-area: 3 / 1 / 4 / 2; align-self: end; }
+      .peitho-remote-pace { grid-area: 4 / 1 / 5 / 2; flex-wrap: wrap; }
+      .peitho-remote-notes { grid-area: 1 / 2 / 3 / 3; }
+      .peitho-remote-status { grid-area: 3 / 2 / 4 / 3; }
+      .peitho-remote-section { grid-area: 4 / 2 / 5 / 3; align-self: end; }
+      .peitho-remote-actions { grid-area: 1 / 3 / 5 / 4; min-height: 0; }
+      .peitho-remote-actions button { flex-direction: column; border-radius: 20px; }
+      .peitho-remote-actions [data-peitho-direction="prev"] { flex: 1; min-height: 0; }
+      .peitho-remote-actions [data-peitho-direction="next"] { flex: 1.35; min-height: 0; }
+      .peitho-remote-action-arrow { order: -1; font-size: 26px; }
+      .peitho-remote-action-label { font-size: 13px; font-weight: 600; }
+    }
   </style>
 </head>
 <body>
@@ -1797,9 +1814,43 @@ Paragraph after heading.
         assert!(html.contains(".peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px;"));
         assert!(html.contains(".peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto;"));
         assert!(html.contains(
-            ".peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none;"
+            ".peitho-remote-actions { display: flex; flex-direction: column; gap: 10px; flex: none;"
         ));
-        assert!(html.contains(".peitho-remote-actions button { min-height: 60px; border-radius: 999px; font: 600 17px"));
+        assert!(
+            html.contains(".peitho-remote-actions button { border-radius: 999px; font: 600 17px")
+        );
+        assert!(html.contains(".peitho-remote-actions [data-peitho-direction=\"prev\"] { min-height: 48px; border: 1px solid #2f3644; background: transparent; color: #dde3ec; font-size: 15px;"));
+        assert!(html.contains(".peitho-remote-actions [data-peitho-direction=\"next\"] { min-height: 60px; border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; font-size: 17px;"));
+        assert!(html.contains("@media (orientation: landscape) and (max-height: 520px)"));
+        assert!(html.contains("#peitho-remote-root { padding: 12px 14px; padding-left: calc(14px + env(safe-area-inset-left, 0px)); padding-right: calc(14px + env(safe-area-inset-right, 0px)); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }"));
+        assert!(html.contains(".peitho-remote { max-width: none; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) 96px; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 10px 14px; }"));
+        assert!(html.contains(
+            ".peitho-remote-preview { grid-area: 1 / 1 / 2 / 2; max-height: 100%; min-height: 0; }"
+        ));
+        assert!(html.contains(".peitho-remote-titlebar { grid-area: 2 / 1 / 3 / 2; }"));
+        assert!(
+            html.contains(".peitho-remote-chase { grid-area: 3 / 1 / 4 / 2; align-self: end; }")
+        );
+        assert!(html.contains(".peitho-remote-pace { grid-area: 4 / 1 / 5 / 2; flex-wrap: wrap; }"));
+        assert!(html.contains(".peitho-remote-notes { grid-area: 1 / 2 / 3 / 3; }"));
+        assert!(html.contains(".peitho-remote-status { grid-area: 3 / 2 / 4 / 3; }"));
+        assert!(
+            html.contains(".peitho-remote-section { grid-area: 4 / 2 / 5 / 3; align-self: end; }")
+        );
+        assert!(
+            html.contains(".peitho-remote-actions { grid-area: 1 / 3 / 5 / 4; min-height: 0; }")
+        );
+        assert!(html.contains(
+            ".peitho-remote-actions button { flex-direction: column; border-radius: 20px; }"
+        ));
+        assert!(html.contains(
+            ".peitho-remote-actions [data-peitho-direction=\"prev\"] { flex: 1; min-height: 0; }"
+        ));
+        assert!(html.contains(
+            ".peitho-remote-actions [data-peitho-direction=\"next\"] { flex: 1.35; min-height: 0; }"
+        ));
+        assert!(html.contains(".peitho-remote-action-arrow { order: -1; font-size: 26px; }"));
+        assert!(html.contains(".peitho-remote-action-label { font-size: 13px; font-weight: 600; }"));
         assert!(html.contains(
             ".peitho-remote[data-peitho-ended=\"true\"] .peitho-remote-dim-on-end { opacity: 0.35;"
         ));
