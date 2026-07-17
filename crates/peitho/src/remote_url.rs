@@ -1,10 +1,25 @@
-use std::{collections::HashSet, net::IpAddr};
+use std::{collections::HashSet, fmt, net::IpAddr};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteUrl(String);
+
+impl RemoteUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RemoteUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteUrlCandidate {
     pub address: IpAddr,
     pub label: Option<RemoteUrlLabel>,
-    pub url: String,
+    pub url: RemoteUrl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +84,11 @@ fn remote_url_label(address: IpAddr) -> Option<RemoteUrlLabel> {
     is_tailscale_addr(address).then_some(RemoteUrlLabel::Tailscale)
 }
 
-pub fn remote_url_for_addr(address: IpAddr, port: u16) -> String {
-    match address {
+pub fn remote_url_for_addr(address: IpAddr, port: u16) -> RemoteUrl {
+    RemoteUrl(match address {
         IpAddr::V4(address) => format!("http://{address}:{port}/remote"),
         IpAddr::V6(address) => format!("http://[{address}]:{port}/remote"),
-    }
+    })
 }
 
 fn is_excluded_addr(address: IpAddr) -> bool {
@@ -274,6 +289,9 @@ mod tests {
     fn remote_url_candidates_bracket_ipv6_urls() {
         let candidates = remote_url_candidates(&["2001:db8::5".parse().unwrap()], None, 8080, None);
 
-        assert_eq!(candidates[0].url, "http://[2001:db8::5]:8080/remote");
+        assert_eq!(
+            candidates[0].url.as_str(),
+            "http://[2001:db8::5]:8080/remote"
+        );
     }
 }

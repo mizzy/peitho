@@ -78,7 +78,8 @@ The local slides and presenter windows still use loopback. A specific
 `--host` adds a listener for that address and prints exactly one `/remote`
 URL. A wildcard host (`0.0.0.0`/`::`) becomes the single listener, still
 covering loopback, and prints non-loopback `/remote` URL candidates for the
-phone. A Tailscale address is the recommended host when available.
+phone. Peitho also renders a terminal QR code for the top-ranked remote URL.
+A Tailscale address is the recommended host when available.
 
 ## `peitho export`
 

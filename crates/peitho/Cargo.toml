@@ -17,6 +17,7 @@ miette.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 peitho-core = { path = "../peitho-core" }
+qrcodegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"

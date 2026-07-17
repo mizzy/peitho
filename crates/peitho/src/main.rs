@@ -2489,13 +2489,23 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     println!("serving presentation at {url}");
     if let Some(host) = options.host {
         let port = server.addr().port();
-        let target = if host.is_unspecified() {
-            RemoteControlTarget::Candidates(remote_url_candidates_from_interfaces(port, host))
-        } else {
-            RemoteControlTarget::Specific(host)
-        };
-        for line in format_remote_control_lines(target, port) {
+        let target = remote_control_target_for_host(host, port);
+        let (lines, qr_url) = remote_control_output(&target);
+        for line in lines {
             println!("{line}");
+        }
+        if let Some(url) = qr_url {
+            match peitho::qr::qr_unicode_lines(url.as_str()) {
+                Ok(lines) => {
+                    println!();
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("warning: failed to render remote control QR for {url}: {err}");
+                }
+            }
         }
     }
     std::io::stdout().flush().into_diagnostic()?;
@@ -2527,26 +2537,43 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
 }
 
 enum RemoteControlTarget {
-    Specific(IpAddr),
+    Specific(peitho::remote_url::RemoteUrl),
     Candidates(Vec<peitho::remote_url::RemoteUrlCandidate>),
 }
 
-fn format_remote_control_lines(target: RemoteControlTarget, port: u16) -> Vec<String> {
+fn remote_control_target_for_host(host: IpAddr, port: u16) -> RemoteControlTarget {
+    if host.is_unspecified() {
+        RemoteControlTarget::Candidates(remote_url_candidates_from_interfaces(port, host))
+    } else {
+        RemoteControlTarget::Specific(peitho::remote_url::remote_url_for_addr(host, port))
+    }
+}
+
+fn remote_control_output(
+    target: &RemoteControlTarget,
+) -> (Vec<String>, Option<&peitho::remote_url::RemoteUrl>) {
     match target {
-        RemoteControlTarget::Specific(host) => vec![format!(
-            "remote control: {}",
-            peitho::remote_url::remote_url_for_addr(host, port)
-        )],
-        RemoteControlTarget::Candidates(candidates) if candidates.is_empty() => {
-            vec!["remote control: no non-loopback network addresses found".to_owned()]
+        RemoteControlTarget::Specific(url) => (vec![format!("remote control: {url}")], Some(url)),
+        RemoteControlTarget::Candidates(candidates) if candidates.is_empty() => (
+            vec!["remote control: no non-loopback network addresses found".to_owned()],
+            None,
+        ),
+        RemoteControlTarget::Candidates(candidates) => {
+            let mut lines = Vec::with_capacity(candidates.len());
+            let mut qr_url = None;
+            for candidate in candidates {
+                if qr_url.is_none() {
+                    qr_url = Some(&candidate.url);
+                }
+                lines.push(match candidate.label {
+                    Some(label) => {
+                        format!("remote control ({}): {}", label.as_str(), candidate.url)
+                    }
+                    None => format!("remote control: {}", candidate.url),
+                });
+            }
+            (lines, qr_url)
         }
-        RemoteControlTarget::Candidates(candidates) => candidates
-            .iter()
-            .map(|candidate| match candidate.label {
-                Some(label) => format!("remote control ({}): {}", label.as_str(), candidate.url),
-                None => format!("remote control: {}", candidate.url),
-            })
-            .collect(),
     }
 }
 
@@ -4895,24 +4922,29 @@ contexts:
 
     #[test]
     fn remote_control_lines_format_specific_host() {
-        let lines = format_remote_control_lines(
-            RemoteControlTarget::Specific("100.64.0.5".parse().unwrap()),
-            3000,
-        );
+        let target = remote_control_target_for_host("100.64.0.5".parse().unwrap(), 3000);
+        let (lines, qr_url) = remote_control_output(&target);
 
         assert_eq!(lines, vec!["remote control: http://100.64.0.5:3000/remote"]);
+        assert_eq!(
+            qr_url.unwrap().as_str(),
+            remote_url_from_control_line(&lines[0])
+        );
     }
 
     #[test]
     fn remote_control_lines_bracket_specific_ipv6_host() {
-        let lines = format_remote_control_lines(
-            RemoteControlTarget::Specific("2001:db8::5".parse().unwrap()),
-            3000,
-        );
+        let target = remote_control_target_for_host("2001:db8::5".parse().unwrap(), 3000);
+        let (lines, qr_url) = remote_control_output(&target);
 
         assert_eq!(
             lines,
             vec!["remote control: http://[2001:db8::5]:3000/remote"]
+        );
+        assert_eq!(qr_url.unwrap().as_str(), "http://[2001:db8::5]:3000/remote");
+        assert_eq!(
+            qr_url.unwrap().as_str(),
+            remote_url_from_control_line(&lines[0])
         );
     }
 
@@ -4929,7 +4961,8 @@ contexts:
             None,
         );
 
-        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(candidates), 3000);
+        let target = RemoteControlTarget::Candidates(candidates);
+        let (lines, qr_url) = remote_control_output(&target);
 
         assert_eq!(
             lines,
@@ -4939,16 +4972,29 @@ contexts:
                 "remote control: http://192.168.1.20:3000/remote"
             ]
         );
+        assert_eq!(
+            qr_url.unwrap().as_str(),
+            remote_url_from_control_line(&lines[0])
+        );
     }
 
     #[test]
     fn remote_control_lines_show_when_unspecified_host_has_no_candidates() {
-        let lines = format_remote_control_lines(RemoteControlTarget::Candidates(Vec::new()), 3000);
+        let target = RemoteControlTarget::Candidates(Vec::new());
+        let (lines, qr_url) = remote_control_output(&target);
 
         assert_eq!(
             lines,
             vec!["remote control: no non-loopback network addresses found"]
         );
+        assert!(qr_url.is_none());
+    }
+
+    fn remote_url_from_control_line(line: &str) -> &str {
+        let start = line
+            .find("http://")
+            .unwrap_or_else(|| panic!("remote control line did not contain a URL: {line}"));
+        &line[start..]
     }
 
     #[test]
