@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
-import { installRemoteControls, mountRemoteView, type RemoteView } from "../src/remote";
+import type { Notes } from "../../../bindings/Notes";
+import {
+  expectedElapsedAtSlide,
+  installRemoteControls,
+  mountRemoteView,
+  remotePaceState,
+  type RemoteView
+} from "../src/remote";
+import type { PresentShell, ShellOptions } from "../src/shell";
 import type { SyncChannel } from "../src/sync";
 
 type MockChannel = SyncChannel & {
@@ -17,7 +25,10 @@ function fail(status: number): Response {
   return { ok: false, status, json: async () => ({}) } as Response;
 }
 
-function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): Manifest {
+function manifestWithSlides(
+  slides: Array<{ key: string; skip?: boolean; title?: string }>,
+  overrides: Partial<Manifest> = {}
+): Manifest {
   return {
     version: 1,
     peithoVersion: "0.1.0",
@@ -34,15 +45,17 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): Man
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
-      text: { title: "", body: "", code: "" }
+      text: { title: slide.title ?? "", body: "", code: "" }
     })),
-    images: []
+    images: [],
+    ...overrides
   };
 }
 
-function fetchManifest(manifest: Manifest): typeof fetch {
+function fetchManifest(manifest: Manifest, notes: Notes = { version: 1, notes: {} }): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
+    if (url === "notes.json") return okJson(notes);
     return fail(404);
   }) as typeof fetch;
 }
@@ -72,6 +85,7 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (views.length > 0) views.pop()?.destroy();
   document.body.replaceChildren();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -83,21 +97,53 @@ function button(root: HTMLElement, action: "prev" | "next"): HTMLButtonElement {
 
 async function mountRemoteForTest(
   manifest: Manifest,
-  channel = mockChannel()
+  channel = mockChannel(),
+  options: {
+    notes?: Notes;
+    mountPresentShell?: (options: ShellOptions) => Promise<PresentShell>;
+    autoSync?: boolean;
+  } = {}
 ): Promise<{ root: HTMLElement; channel: MockChannel; view: RemoteView }> {
   const root = document.createElement("main");
   document.body.appendChild(root);
   const view = await mountRemoteView({
     root,
     manifestUrl: "manifest.json",
-    fetcher: fetchManifest(manifest),
+    notesUrl: "notes.json",
+    fetcher: fetchManifest(manifest, options.notes),
     channelFactory: () => channel,
+    syncChannelFactory: () => channel,
+    mountPresentShell: options.mountPresentShell ?? mockMountPresentShell(),
     window,
     document,
     bus: window
   });
   views.push(view);
+  if (options.autoSync !== false) {
+    channel.deliver({ synced: true });
+  }
   return { root, channel, view };
+}
+
+function mockMountPresentShell(navigations: unknown[] = []): (options: ShellOptions) => Promise<PresentShell> {
+  return vi.fn(async (options: ShellOptions) => {
+    const marker = document.createElement("div");
+    marker.dataset.previewShell = "mounted";
+    options.root.append(marker);
+    options.bus?.addEventListener("peitho:navigate", (event) => {
+      navigations.push((event as CustomEvent).detail);
+    });
+    return {
+      manifest: null,
+      currentIndex: 0,
+      navigate: vi.fn(),
+      elapsedMs: () => 0,
+      isPaused: () => false,
+      startedAt: () => null,
+      adoptTimerState: vi.fn(),
+      destroy: vi.fn()
+    };
+  });
 }
 
 it("remote buttons dispatch navigate request events only", () => {
@@ -109,10 +155,26 @@ it("remote buttons dispatch navigate request events only", () => {
   });
   cleanups.push(installRemoteControls({ root, document, bus }));
 
+  button(root, "prev").disabled = false;
+  button(root, "next").disabled = false;
   button(root, "prev").click();
   button(root, "next").click();
 
   expect(requests).toEqual([{ to: "prev" }, { to: "next" }]);
+});
+
+it("remote controls mount disabled before the synced event arrives", () => {
+  const root = document.createElement("main");
+  cleanups.push(installRemoteControls({ root, document, bus: new EventTarget() }));
+
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(true);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
+    true
+  );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
 });
 
 it("remote controller resolves next and prev across skipped slides and posts absolute indexes", async () => {
@@ -125,6 +187,57 @@ it("remote controller resolves next and prev across skipped slides and posts abs
   button(root, "prev").click();
 
   expect(channel.sent).toEqual([{ index: 2 }, { index: 0 }]);
+});
+
+it("remote controls are disabled and silent before the initial sync snapshot is applied", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { autoSync: false }
+  );
+
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(true);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
+    true
+  );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
+
+  button(root, "next").click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.click();
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.click();
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  window.dispatchEvent(
+    new CustomEvent("peitho:timercontrol", { detail: { action: "start" } })
+  );
+  window.dispatchEvent(
+    new CustomEvent("peitho:timercontrol", { detail: { action: "reset" } })
+  );
+
+  expect(channel.sent).toEqual([]);
+});
+
+it("remote controls enable after synced replay is reported", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { autoSync: false }
+  );
+
+  channel.deliver({ synced: true });
+
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(false);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
+    false
+  );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
+  button(root, "next").click();
+  expect(channel.sent).toEqual([{ index: 1 }]);
 });
 
 it("remote controller advances optimistically across rapid taps", async () => {
@@ -147,6 +260,502 @@ it("remote controller treats a null replay index as the first non-skipped slide"
   button(root, "next").click();
 
   expect(channel.sent).toEqual([{ index: 2 }]);
+});
+
+it("remote renders preview title section notes and section-aware chase chrome", async () => {
+  const previewNavigations: unknown[] = [];
+  const manifest = manifestWithSlides(
+    [
+      { key: "intro", title: "Opening" },
+      { key: "arch", title: "Architecture" },
+      { key: "end", title: "Summary" }
+    ],
+    {
+      plannedDurationMs: 90_000,
+      sections: [
+        { name: "Intro", startIndex: 0, endIndex: 0, plannedDurationMs: 30_000 },
+        { name: "Architecture", startIndex: 1, endIndex: 2, plannedDurationMs: 60_000 }
+      ]
+    }
+  );
+  const { root, channel } = await mountRemoteForTest(manifest, mockChannel(), {
+    notes: { version: 1, notes: { arch: "Use the typed shell.\nNo shortcuts." } },
+    mountPresentShell: mockMountPresentShell(previewNavigations)
+  });
+
+  channel.deliver({ index: 1 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 20_000, atMs: 1_000_000 },
+    nowMs: 1_005_000
+  });
+
+  expect(root.querySelector('[data-preview-shell="mounted"]')).not.toBeNull();
+  expect(previewNavigations.at(-1)).toEqual({ to: { index: 1 } });
+  expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Architecture");
+  expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("2 / 3");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "27.78%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "50%"
+  );
+  expect(
+    root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.transform
+  ).toBe("translateX(-50%)");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "27.78%"
+  );
+  expect(
+    root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.transform
+  ).toBe("translateX(-27.78%)");
+  expect(root.querySelector('[data-peitho-remote="section"]')?.textContent).toBe(
+    "Architecture · slide 1 / 2 in section"
+  );
+  expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
+    "Use the typed shell.\nNo shortcuts."
+  );
+  expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:25");
+  expect(root.querySelector('[data-peitho-remote="planned"]')?.textContent).toBe("1:30");
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "0:05 ahead"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "ahead"
+  );
+});
+
+it("remote mounts with empty notes placeholders when notes fetch fails", async () => {
+  const manifest = manifestWithSlides([
+    { key: "intro", title: "Intro" },
+    { key: "details", title: "Details" }
+  ]);
+  const channel = mockChannel();
+  const error = vi.fn();
+  const fetcher = vi.fn(async (url: string) => {
+    if (url === "manifest.json") return okJson(manifest);
+    if (url === "notes.json") throw new Error("offline");
+    return fail(404);
+  }) as typeof fetch;
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  const view = await mountRemoteView({
+    root,
+    manifestUrl: "manifest.json",
+    notesUrl: "notes.json",
+    fetcher,
+    channelFactory: () => channel,
+    syncChannelFactory: () => channel,
+    mountPresentShell: mockMountPresentShell(),
+    window,
+    document,
+    bus: window,
+    console: { error }
+  });
+  views.push(view);
+  channel.deliver({ synced: true });
+
+  expect(root.querySelector(".peitho-remote")).not.toBeNull();
+  expect(root.querySelector('[data-preview-shell="mounted"]')).not.toBeNull();
+  expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
+    "No notes for this slide"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="notes"]')?.dataset.peithoEmpty).toBe(
+    "true"
+  );
+
+  channel.deliver({ index: 1 });
+
+  expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Details");
+  expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
+    "No notes for this slide"
+  );
+  expect(error).toHaveBeenCalledTimes(1);
+  expect(error).toHaveBeenCalledWith("Failed to load notes.json: offline");
+});
+
+it("remote omits planned and section rows when the deck has no time or sections", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro", title: "Intro" }, { key: "end", title: "End" }])
+  );
+  channel.deliver({ index: 1 });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="planned"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.dataset.peithoChase).toBe(
+    "slide"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "100%"
+  );
+  expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:00");
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')).not.toBeNull();
+});
+
+it("remote disables previous and next based on first and last non-skipped slides", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([
+      { key: "intro" },
+      { key: "skip", skip: true },
+      { key: "middle" },
+      { key: "backup", skip: true }
+    ])
+  );
+
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(false);
+
+  channel.deliver({ index: 2 });
+  expect(button(root, "prev").disabled).toBe(false);
+  expect(button(root, "next").disabled).toBe(true);
+});
+
+it("remote timer button emits requests while the bridge posts absolute timer states", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "end", title: "End" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+  const requests: unknown[] = [];
+  const onTimerControl = (event: Event): void => {
+    requests.push((event as CustomEvent).detail);
+  };
+  window.addEventListener("peitho:timercontrol", onTimerControl);
+  cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
+
+  timer.click();
+  vi.setSystemTime(3_500);
+  timer.click();
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe("Paused");
+  timer.click();
+
+  expect(requests).toEqual([{ action: "start" }, { action: "pause" }, { action: "resume" }]);
+  expect(channel.sent).toEqual([
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 2500 } },
+    { timer: { running: true, elapsedMs: 2500 } }
+  ]);
+});
+
+it("remote reset button emits a reset request and bridge posts zero timer state", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "end", title: "End" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+  const requests: unknown[] = [];
+  const onTimerControl = (event: Event): void => {
+    requests.push((event as CustomEvent).detail);
+  };
+  window.addEventListener("peitho:timercontrol", onTimerControl);
+  cleanups.push(() => window.removeEventListener("peitho:timercontrol", onTimerControl));
+  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
+  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')!;
+
+  expect(reset.disabled).toBe(true);
+  expect(reset.getAttribute("aria-label")).toBe("Reset timer");
+  expect(reset.textContent).toBe("↺");
+
+  timer.click();
+  expect(reset.disabled).toBe(false);
+  vi.setSystemTime(3_500);
+  reset.click();
+
+  expect(requests).toEqual([{ action: "start" }, { action: "reset" }]);
+  expect(channel.sent).toEqual([
+    { timer: { running: true, elapsedMs: 0 } },
+    { timer: { running: false, elapsedMs: 0 } }
+  ]);
+  expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
+  expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:00");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(reset.disabled).toBe(true);
+});
+
+it("remote timer states render stopped running and paused rows", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "end", title: "End" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')!;
+
+  expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    true
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 35_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  expect(timer.querySelector('[data-peitho-icon="pause"]')).not.toBeNull();
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    false
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toContain("behind");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "0%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "58.33%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "58.33%"
+  );
+
+  channel.deliver({
+    timer: { running: false, elapsedMs: 20_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  expect(timer.querySelector('[data-peitho-icon="play"]')).not.toBeNull();
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe("Paused");
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled).toBe(
+    false
+  );
+});
+
+it("remote chase renders on-pace behind and overrun states", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "middle", title: "Middle" }, { key: "end" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+
+  channel.deliver({ index: 1 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 25_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "50%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "41.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "41.67%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "on pace"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "onpace"
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 45_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "0:05 behind"
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 70_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
+    "peitho-remote-chase-overrun"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "100%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "+0:10 over"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "overrun"
+  );
+});
+
+it("remote preview shell reuses the already loaded manifest", async () => {
+  const manifest = manifestWithSlides([{ key: "intro", title: "Intro" }, { key: "end" }]);
+  let manifestFetches = 0;
+  const fetcher = vi.fn(async (url: string) => {
+    if (url === "manifest.json") {
+      manifestFetches += 1;
+      if (manifestFetches > 1) return fail(500);
+      return okJson(manifest);
+    }
+    if (url === "notes.json") return okJson({ version: 1, notes: {} });
+    if (url === "peitho.css") return { ok: true, status: 200, text: async () => "" } as Response;
+    const slide = manifest.slides.find((item) => item.src === url);
+    if (slide) return { ok: true, status: 200, text: async () => "<section></section>" } as Response;
+    return fail(404);
+  }) as typeof fetch;
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  const channel = mockChannel();
+  const view = await mountRemoteView({
+    root,
+    manifestUrl: "manifest.json",
+    notesUrl: "notes.json",
+    fetcher,
+    channelFactory: () => channel,
+    syncChannelFactory: () => channel,
+    window,
+    document,
+    bus: window
+  });
+  views.push(view);
+
+  expect(root.className).not.toContain("peitho-remote-error");
+  expect(manifestFetches).toBe(1);
+  expect(root.querySelector('[data-peitho-remote="preview"] .peitho-slide')).not.toBeNull();
+});
+
+it("remote timer interval updates turtle fill and delta in place without touching rabbit or notes", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro", title: "Intro" }, { key: "end" }],
+      { plannedDurationMs: 60_000 }
+    ),
+    mockChannel(),
+    { notes: { version: 1, notes: { intro: "Long note" } } }
+  );
+  const notes = root.querySelector<HTMLElement>('[data-peitho-remote="notes"]')!;
+  const firstTextNode = notes.firstChild;
+  const rabbit = root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')!;
+  const turtle = root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')!;
+  const fill = root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')!;
+  const delta = root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')!;
+  channel.deliver({
+    timer: { running: true, elapsedMs: 1_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  const rabbitLeft = rabbit.style.left;
+  const turtleElement = turtle;
+  const fillElement = fill;
+  const deltaElement = delta;
+
+  vi.advanceTimersByTime(1000);
+
+  expect(notes.firstChild).toBe(firstTextNode);
+  expect(notes.textContent).toBe("Long note");
+  expect(rabbit.style.left).toBe(rabbitLeft);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')).toBe(turtleElement);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')).toBe(fillElement);
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')).toBe(deltaElement);
+  expect(turtle.style.left).toBe("3.33%");
+  expect(fill.style.width).toBe("3.33%");
+  expect(delta.textContent).toBe("on pace");
+  expect(root.querySelector('[data-peitho-remote="elapsed"]')?.textContent).toBe("0:02");
+});
+
+it("remote chase keeps presenter-exact marker semantics on uneven sections", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const manifest = manifestWithSlides(
+    [
+      { key: "s1" },
+      { key: "s2" },
+      { key: "s3" },
+      { key: "s4" },
+      { key: "s5" },
+      { key: "s6" },
+      { key: "s7" },
+      { key: "s8" },
+      { key: "s9" },
+      { key: "s10" }
+    ],
+    {
+      plannedDurationMs: 30 * 60_000,
+      sections: [
+        { name: "Fast", startIndex: 0, endIndex: 4, plannedDurationMs: 5 * 60_000 },
+        { name: "Deep", startIndex: 5, endIndex: 9, plannedDurationMs: 25 * 60_000 }
+      ]
+    }
+  );
+  const { root, channel } = await mountRemoteForTest(manifest);
+
+  channel.deliver({ index: 5 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 8 * 60_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "26.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "26.67%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "55.56%"
+  );
+  expect(root.querySelector('[data-peitho-remote="pace-delta"]')?.textContent).toBe(
+    "on pace"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
+    "onpace"
+  );
+});
+
+it("remote chase puts the last-slide rabbit at the slide goal", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides(
+      [{ key: "intro" }, { key: "middle" }, { key: "end" }],
+      { plannedDurationMs: 60_000 }
+    )
+  );
+
+  channel.deliver({ index: 2 });
+  channel.deliver({
+    timer: { running: true, elapsedMs: 60_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "100%"
+  );
+});
+
+it("remote chase pins the single-slide rabbit at the slide goal", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "only" }], { plannedDurationMs: 60_000 })
+  );
+
+  channel.deliver({
+    timer: { running: true, elapsedMs: 15_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-rabbit"]')?.style.left).toBe(
+    "100%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.left).toBe(
+    "25%"
+  );
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
+    "25%"
+  );
 });
 
 it("remote controller no-ops at the ends", async () => {
@@ -183,7 +792,42 @@ it("remote controller disables buttons and shows ended state on close", async ()
 
   expect(button(root, "prev").disabled).toBe(true);
   expect(button(root, "next").disabled).toBe(true);
+  expect(root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]')?.disabled).toBe(
+    true
+  );
+  expect(
+    root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
+  ).toBe(true);
   expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
+  expect(root.querySelector<HTMLElement>(".peitho-remote")?.dataset.peithoEnded).toBe("true");
+  expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
+    "peitho-remote-dim-on-end"
+  );
+});
+
+it("remote ended state freezes the chase track", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }], { plannedDurationMs: 60_000 })
+  );
+  channel.deliver({
+    timer: { running: true, elapsedMs: 10_000, atMs: 10_000 },
+    nowMs: 10_000
+  });
+  const turtle = root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')!;
+  const fill = root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')!;
+  const delta = root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')!;
+
+  channel.deliver({ close: true });
+  const turtleLeft = turtle.style.left;
+  const fillWidth = fill.style.width;
+  const deltaText = delta.textContent;
+  vi.advanceTimersByTime(1000);
+
+  expect(turtle.style.left).toBe(turtleLeft);
+  expect(fill.style.width).toBe(fillWidth);
+  expect(delta.textContent).toBe(deltaText);
 });
 
 it("remote controller closes the sync channel and ignores clicks after ended", async () => {
@@ -197,6 +841,106 @@ it("remote controller closes the sync channel and ignores clicks after ended", a
 
   expect(channel.closed).toBe(true);
   expect(channel.sent).toEqual([]);
+});
+
+it("pace math uses section piecewise timing", () => {
+  const manifest = manifestWithSlides(
+    [{ key: "a" }, { key: "b" }, { key: "c" }, { key: "d" }],
+    {
+      plannedDurationMs: 60_000,
+      sections: [
+        { name: "One", startIndex: 0, endIndex: 1, plannedDurationMs: 20_000 },
+        { name: "Two", startIndex: 2, endIndex: 3, plannedDurationMs: 40_000 }
+      ]
+    }
+  );
+
+  expect(expectedElapsedAtSlide(manifest, 0)).toBe(0);
+  expect(expectedElapsedAtSlide(manifest, 1)).toBe(10_000);
+  expect(expectedElapsedAtSlide(manifest, 2)).toBe(20_000);
+  expect(expectedElapsedAtSlide(manifest, 3)).toBe(40_000);
+  expect(expectedElapsedAtSlide(manifest, 4)).toBe(60_000);
+});
+
+it("pace math falls back to whole-deck timing without sections", () => {
+  const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
+    plannedDurationMs: 60_000
+  });
+
+  expect(expectedElapsedAtSlide(manifest, 0)).toBe(0);
+  expect(expectedElapsedAtSlide(manifest, 1)).toBe(20_000);
+  expect(expectedElapsedAtSlide(manifest, 2)).toBe(40_000);
+  expect(expectedElapsedAtSlide(manifest, 3)).toBe(60_000);
+});
+
+it("pace state selection covers ahead on-pace behind overrun paused and null planned time", () => {
+  const manifest = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }], {
+    plannedDurationMs: 60_000
+  });
+  const unplanned = manifestWithSlides([{ key: "a" }, { key: "b" }, { key: "c" }]);
+
+  expect(remotePaceState(manifest, 1, 15_000, true)).toEqual({
+    kind: "ahead",
+    label: "0:05 ahead"
+  });
+  expect(remotePaceState(manifest, 1, 20_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 1, 25_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 1, 45_000, true)).toEqual({
+    kind: "behind",
+    label: "0:05 behind"
+  });
+  expect(remotePaceState(manifest, 1, 70_000, true)).toEqual({
+    kind: "overrun",
+    label: "+0:10 over"
+  });
+  expect(remotePaceState(manifest, 1, 15_000, false)).toEqual({
+    kind: "paused",
+    label: "Paused"
+  });
+  expect(remotePaceState(unplanned, 1, 15_000, true)).toBeNull();
+});
+
+it("pace state selection uses uneven-section slide windows", () => {
+  const manifest = manifestWithSlides(
+    [
+      { key: "s1" },
+      { key: "s2" },
+      { key: "s3" },
+      { key: "s4" },
+      { key: "s5" },
+      { key: "s6" },
+      { key: "s7" },
+      { key: "s8" },
+      { key: "s9" },
+      { key: "s10" }
+    ],
+    {
+      plannedDurationMs: 30 * 60_000,
+      sections: [
+        { name: "Fast", startIndex: 0, endIndex: 4, plannedDurationMs: 5 * 60_000 },
+        { name: "Deep", startIndex: 5, endIndex: 9, plannedDurationMs: 25 * 60_000 }
+      ]
+    }
+  );
+
+  expect(remotePaceState(manifest, 5, 4 * 60_000, true)).toEqual({
+    kind: "ahead",
+    label: "1:00 ahead"
+  });
+  expect(remotePaceState(manifest, 5, 8 * 60_000, true)).toEqual({
+    kind: "onpace",
+    label: "on pace"
+  });
+  expect(remotePaceState(manifest, 5, 12 * 60_000, true)).toEqual({
+    kind: "behind",
+    label: "2:00 behind"
+  });
 });
 
 it("remote manifest fetch failure is visible", async () => {

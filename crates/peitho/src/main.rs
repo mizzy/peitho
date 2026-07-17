@@ -2789,7 +2789,7 @@ fn emit_present_cache(
     .into_diagnostic()?;
     fs::write(
         cache.join("remote.html"),
-        peitho_core::render_remote_index(),
+        peitho_core::render_remote_index(artifacts.rendered.settings().aspect_ratio()),
     )
     .into_diagnostic()?;
     fs::write(cache.join("remote.js"), BUILTIN_REMOTE_JS).into_diagnostic()?;

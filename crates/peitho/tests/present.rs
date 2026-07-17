@@ -63,9 +63,9 @@ fn present_no_serve_writes_clean_present_cache() {
     assert!(fs::read_to_string(cache.join("present.json"))
         .unwrap()
         .contains(r#""presenterOpen": false"#));
-    assert!(fs::read_to_string(cache.join("present.html"))
-        .unwrap()
-        .contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
+    let present_html = fs::read_to_string(cache.join("present.html")).unwrap();
+    assert!(present_html.contains("peitho.installSyncBridge("));
+    assert!(present_html.contains("adoptTimerState: (state) => shell.adoptTimerState(state)"));
     assert!(fs::read_to_string(cache.join("present.html"))
         .unwrap()
         .contains("installCloseOnEscape(window)"));
@@ -213,7 +213,8 @@ fn present_server_extra_listener_serves_manifest_over_http() {
 
     let primary = get_http(primary_addr, "/manifest.json");
     let extra = get_http(extra_addr, "/manifest.json");
-    assert!(post_sync(primary_addr, r#"{"close":true}"#).contains("204 No Content"));
+    let close_response = post_sync(primary_addr, r#"{"close":true}"#);
+    assert_sync_post_ack(&close_response, 1);
     join_present_server(handle, Duration::from_secs(3));
 
     assert!(primary.contains("200 OK"));
@@ -270,7 +271,7 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
         .unwrap();
 
     let post_response = post_sync(addr, r#"{"index":1}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     let event = read_until_contains(&mut poll, r#""swapped":false"#);
     assert!(event.contains("200 OK"));
@@ -296,14 +297,16 @@ fn present_server_poll_response_includes_current_replay_state() {
     let addr = server.addr();
     let handle = thread::spawn(move || server.serve_forever());
 
-    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
+    let swap_response = post_sync(addr, r#"{"swapped":true}"#);
+    assert_sync_post_ack(&swap_response, 1);
 
     let mut poll = TcpStream::connect(addr).unwrap();
     poll.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     poll.write_all(b"GET /sync?seq=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
 
-    assert!(post_sync(addr, r#"{"index":3}"#).contains("204 No Content"));
+    let index_response = post_sync(addr, r#"{"index":3}"#);
+    assert_sync_post_ack(&index_response, 2);
 
     let event = read_until_contains(&mut poll, r#""swapped":true"#);
     assert!(event.contains("200 OK"));
@@ -335,7 +338,7 @@ fn present_server_relays_swap_sync_post_to_long_poll_subscriber() {
         .unwrap();
 
     let post_response = post_sync(addr, r#"{"swapped":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     let event = read_until_contains(&mut poll, r#""index":null"#);
     assert!(event.contains("200 OK"));
@@ -367,7 +370,7 @@ fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
         .unwrap();
 
     let post_response = post_sync(addr, r#"{"close":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     let event = read_until_contains(&mut poll, r#""message":{"close":true}"#);
     assert!(event.contains("200 OK"));
@@ -440,7 +443,7 @@ fn present_server_shuts_down_after_close_sync_post() {
     let handle = thread::spawn(move || server.serve_forever());
 
     let post_response = post_sync(addr, r#"{"close":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     join_present_server(handle, Duration::from_secs(3));
 }
@@ -470,7 +473,7 @@ fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_me
     });
 
     let post_response = post_sync(addr, r#"{"close":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
@@ -526,8 +529,10 @@ fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
         server.handle_one();
     });
 
-    assert!(post_sync(addr, r#"{"index":2}"#).contains("204 No Content"));
-    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
+    let index_response = post_sync(addr, r#"{"index":2}"#);
+    assert_sync_post_ack(&index_response, 1);
+    let swap_response = post_sync(addr, r#"{"swapped":true}"#);
+    assert_sync_post_ack(&swap_response, 2);
     let response = get_http(addr, "/sync");
     let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
 
@@ -555,9 +560,12 @@ fn present_server_sync_close_does_not_clobber_replay_state() {
         server.handle_one();
     });
 
-    assert!(post_sync(addr, r#"{"index":2}"#).contains("204 No Content"));
-    assert!(post_sync(addr, r#"{"swapped":true}"#).contains("204 No Content"));
-    assert!(post_sync(addr, r#"{"close":true}"#).contains("204 No Content"));
+    let index_response = post_sync(addr, r#"{"index":2}"#);
+    assert_sync_post_ack(&index_response, 1);
+    let swap_response = post_sync(addr, r#"{"swapped":true}"#);
+    assert_sync_post_ack(&swap_response, 2);
+    let close_response = post_sync(addr, r#"{"close":true}"#);
+    assert_sync_post_ack(&close_response, 3);
     let response = get_http(addr, "/sync?seq=");
     let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
 
@@ -735,7 +743,7 @@ fn present_process_exits_after_close_sync_post() {
     let addr = serving_addr(&line);
 
     let post_response = post_sync(addr, r#"{"close":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -776,7 +784,7 @@ fn assert_dual_listener_shutdown(target: DualListenerCloseTarget) {
     let handle = thread::spawn(move || server.serve_forever());
 
     let post_response = post_sync(close_addr, r#"{"close":true}"#);
-    assert!(post_response.contains("204 No Content"));
+    assert_sync_post_ack(&post_response, 1);
 
     join_present_server(handle, Duration::from_secs(3));
 }
@@ -939,6 +947,13 @@ fn post_sync(addr: SocketAddr, body: &str) -> String {
     let mut response = String::new();
     post.read_to_string(&mut response).unwrap();
     response
+}
+
+fn assert_sync_post_ack(response: &str, seq: u64) {
+    assert!(response.contains("200 OK"));
+    assert!(response.contains("application/json"));
+    let body: serde_json::Value = serde_json::from_str(response_body(response)).unwrap();
+    assert_eq!(body["seq"], seq);
 }
 
 fn get_http(addr: SocketAddr, path: &str) -> String {

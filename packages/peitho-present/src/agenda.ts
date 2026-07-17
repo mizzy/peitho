@@ -1,6 +1,11 @@
 import type { ManifestSection } from "../../../bindings/ManifestSection";
 import { sectionIndexForSlide } from "./sections";
-import type { PresentShell, SlideChangeDetail, TimerControlDetail } from "./shell";
+import type {
+  PresentShell,
+  SlideChangeDetail,
+  TimerAdoptDetail,
+  TimerControlDetail,
+} from "./shell";
 import { formatMinuteSeconds, isValidDurationMs } from "./timeTracker";
 
 const EM_DASH = "—";
@@ -79,6 +84,36 @@ export function installAgenda(options: AgendaOptions): () => void {
     render();
   }
 
+  function onTimerAdopt(event: Event): void {
+    const detail = (event as CustomEvent<TimerAdoptDetail>).detail;
+    if (
+      typeof detail?.running !== "boolean" ||
+      typeof detail.elapsedMs !== "number" ||
+      !Number.isFinite(detail.elapsedMs) ||
+      detail.elapsedMs < 0 ||
+      typeof detail.previousElapsedMs !== "number" ||
+      !Number.isFinite(detail.previousElapsedMs) ||
+      detail.previousElapsedMs < 0
+    ) {
+      log.error("Invalid peitho:timeradopt event");
+      return;
+    }
+    if (!detail.running && detail.elapsedMs === 0) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      render();
+      return;
+    }
+    if (options.shell.startedAt() !== null) {
+      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
+      if (sectionIndex >= 0) {
+        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
+      }
+    }
+    lastElapsedMs = detail.elapsedMs;
+    render();
+  }
+
   function tick(): void {
     if (options.shell.startedAt() === null) {
       // Reset events zero actuals immediately in onTimerControl; this branch keeps
@@ -96,12 +131,14 @@ export function installAgenda(options: AgendaOptions): () => void {
   render();
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
   const interval = win.setInterval(tick, 250);
 
   return () => {
     win.clearInterval(interval);
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
     host.remove();
   };
 }

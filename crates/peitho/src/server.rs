@@ -3,13 +3,16 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, RwLock},
+    sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+static SERVER_CLOCK_START: OnceLock<Instant> = OnceLock::new();
 
 #[derive(Clone, Default)]
 pub(crate) struct SyncHub {
@@ -22,7 +25,16 @@ struct SyncState {
     latest: Option<String>,
     index: Option<usize>,
     swapped: bool,
+    timer: Option<TimerSyncState>,
     generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimerSyncState {
+    running: bool,
+    elapsed_ms: u64,
+    at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +48,7 @@ struct SyncSnapshot {
     seq: u64,
     index: Option<usize>,
     swapped: bool,
+    timer: Option<TimerSyncState>,
     generation: u64,
 }
 
@@ -46,6 +59,13 @@ impl SyncHub {
         match message {
             SyncMessage::Index(message) => state.index = Some(message.index),
             SyncMessage::Swap(message) => state.swapped = message.swapped,
+            SyncMessage::Timer(message) => {
+                state.timer = Some(TimerSyncState {
+                    running: message.timer.running,
+                    elapsed_ms: message.timer.elapsed_ms,
+                    at_ms: server_clock_ms(),
+                });
+            }
             SyncMessage::Close(_) => {}
         }
         let json = serde_json::to_string(message).expect("SyncMessage serializes");
@@ -81,6 +101,7 @@ impl SyncHub {
                 seq: state.seq,
                 index: state.index,
                 swapped: state.swapped,
+                timer: state.timer,
                 generation: state.generation,
             },
             message: state.latest.clone(),
@@ -94,6 +115,7 @@ impl SyncHub {
             seq: state.seq,
             index: state.index,
             swapped: state.swapped,
+            timer: state.timer,
             generation: state.generation,
         }
     }
@@ -375,8 +397,8 @@ impl PresentServer {
             );
             return;
         }
-        self.sync.broadcast_sync_message(&message);
-        send_response(request, Response::empty(StatusCode(204)));
+        let seq = self.sync.broadcast_sync_message(&message);
+        send_json_response(request, sync_post_response_body(seq));
         if matches!(message, SyncMessage::Close(_)) {
             if let Some(shutdown) = shutdown {
                 shutdown.start();
@@ -453,6 +475,7 @@ impl ShutdownHandle {
 enum SyncMessage {
     Index(SyncIndexMessage),
     Swap(SyncSwapMessage),
+    Timer(SyncTimerMessage),
     Close(SyncCloseMessage),
 }
 
@@ -470,6 +493,19 @@ struct SyncSwapMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SyncTimerMessage {
+    timer: SyncTimerPayload,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncTimerPayload {
+    running: bool,
+    elapsed_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SyncCloseMessage {
     close: bool,
 }
@@ -478,7 +514,7 @@ impl SyncMessage {
     fn is_valid(&self) -> bool {
         match self {
             Self::Close(message) => message.close,
-            Self::Index(_) | Self::Swap(_) => true,
+            Self::Index(_) | Self::Swap(_) | Self::Timer(_) => true,
         }
     }
 }
@@ -510,17 +546,44 @@ fn sync_get(url: &str) -> Option<SyncGet> {
 }
 
 fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
-    let index = snapshot
-        .index
-        .map_or_else(|| "null".to_owned(), |index| index.to_string());
-    format!(
-        r#"{{"seq":{},"message":{},"index":{},"swapped":{},"generation":{}}}"#,
-        snapshot.seq,
-        message.unwrap_or("null"),
-        index,
-        snapshot.swapped,
-        snapshot.generation
-    )
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SyncResponseBody {
+        seq: u64,
+        message: Option<Value>,
+        index: Option<usize>,
+        swapped: bool,
+        generation: u64,
+        timer: Option<TimerSyncState>,
+        now_ms: u64,
+    }
+
+    let message = message
+        .map(|message| serde_json::from_str(message).expect("sync message is serialized JSON"));
+    serde_json::to_string(&SyncResponseBody {
+        seq: snapshot.seq,
+        message,
+        index: snapshot.index,
+        swapped: snapshot.swapped,
+        generation: snapshot.generation,
+        timer: snapshot.timer,
+        now_ms: server_clock_ms(),
+    })
+    .expect("sync response serializes")
+}
+
+fn sync_post_response_body(seq: u64) -> String {
+    #[derive(Serialize)]
+    struct SyncPostResponseBody {
+        seq: u64,
+    }
+
+    serde_json::to_string(&SyncPostResponseBody { seq }).expect("sync post response serializes")
+}
+
+fn server_clock_ms() -> u64 {
+    let duration = SERVER_CLOCK_START.get_or_init(Instant::now).elapsed();
+    u64::try_from(duration.as_millis()).expect("monotonic milliseconds fit in u64")
 }
 
 fn send_json_response(request: tiny_http::Request, body: String) {
@@ -718,12 +781,77 @@ mod tests {
                     seq: 1,
                     index: Some(2),
                     swapped: false,
+                    timer: None,
                     generation: 0
                 },
                 message: Some(r#"{"index":2}"#.to_owned())
             }
         );
         assert!(hub.wait_after(1, Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn sync_hub_stores_and_replays_timer_state() {
+        let hub = SyncHub::default();
+
+        let message = SyncMessage::Timer(SyncTimerMessage {
+            timer: SyncTimerPayload {
+                running: true,
+                elapsed_ms: 12_345,
+            },
+        });
+        let seq = hub.broadcast_sync_message(&message);
+
+        assert_eq!(seq, 1);
+        let poll = hub.wait_after(0, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            poll.snapshot
+                .timer
+                .map(|timer| (timer.running, timer.elapsed_ms)),
+            Some((true, 12_345))
+        );
+        assert!(poll.snapshot.timer.unwrap().at_ms <= server_clock_ms());
+        assert_eq!(
+            poll.message,
+            Some(r#"{"timer":{"running":true,"elapsedMs":12345}}"#.to_owned())
+        );
+        assert_eq!(
+            hub.snapshot()
+                .timer
+                .map(|timer| (timer.running, timer.elapsed_ms)),
+            Some((true, 12_345))
+        );
+    }
+
+    #[test]
+    fn sync_hub_coalesces_to_latest_absolute_timer_state() {
+        let hub = SyncHub::default();
+
+        hub.broadcast_sync_message(&SyncMessage::Timer(SyncTimerMessage {
+            timer: SyncTimerPayload {
+                running: true,
+                elapsed_ms: 1_000,
+            },
+        }));
+        hub.broadcast_sync_message(&SyncMessage::Timer(SyncTimerMessage {
+            timer: SyncTimerPayload {
+                running: false,
+                elapsed_ms: 4_000,
+            },
+        }));
+
+        let poll = hub.wait_after(0, Duration::from_secs(1)).unwrap();
+        assert_eq!(poll.snapshot.seq, 2);
+        assert_eq!(
+            poll.snapshot
+                .timer
+                .map(|timer| (timer.running, timer.elapsed_ms)),
+            Some((false, 4_000))
+        );
+        assert_eq!(
+            poll.message,
+            Some(r#"{"timer":{"running":false,"elapsedMs":4000}}"#.to_owned())
+        );
     }
 
     #[test]
@@ -740,6 +868,7 @@ mod tests {
                     seq: 1,
                     index: None,
                     swapped: false,
+                    timer: None,
                     generation: 1
                 },
                 message: None
@@ -751,6 +880,7 @@ mod tests {
                 seq: 1,
                 index: None,
                 swapped: false,
+                timer: None,
                 generation: 1
             }
         );
@@ -763,20 +893,72 @@ mod tests {
                 seq: 4,
                 index: Some(2),
                 swapped: true,
+                timer: Some(TimerSyncState {
+                    running: true,
+                    elapsed_ms: 12_000,
+                    at_ms: 98_000,
+                }),
                 generation: 9,
             },
             None,
         );
 
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(body.contains(r#""generation":9"#));
         assert!(body.contains(r#""message":null"#));
         assert!(body.contains(r#""index":2"#));
         assert!(body.contains(r#""swapped":true"#));
+        assert_eq!(json["timer"]["running"], true);
+        assert_eq!(json["timer"]["elapsedMs"], 12_000);
+        assert_eq!(json["timer"]["atMs"], 98_000);
+        assert!(json["nowMs"].as_u64().unwrap() < 24 * 60 * 60 * 1000);
+    }
+
+    #[test]
+    fn sync_response_body_preserves_message_as_json() {
+        let body = sync_response_body(
+            SyncSnapshot {
+                seq: 7,
+                index: Some(2),
+                swapped: false,
+                timer: None,
+                generation: 0,
+            },
+            Some(r#"{"close":true}"#),
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["message"], serde_json::json!({"close": true}));
+    }
+
+    #[test]
+    fn sync_post_response_body_carries_assigned_sequence() {
+        let body = sync_post_response_body(42);
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["seq"], 42);
     }
 
     #[test]
     fn reload_is_not_accepted_as_a_posted_sync_message() {
         assert!(serde_json::from_str::<SyncMessage>(r#"{"reload":true}"#).is_err());
+    }
+
+    #[test]
+    fn invalid_timer_sync_messages_are_rejected() {
+        assert!(serde_json::from_str::<SyncMessage>(r#"{"timer":{"running":true}}"#).is_err());
+        assert!(serde_json::from_str::<SyncMessage>(
+            r#"{"timer":{"running":true,"elapsedMs":1000,"extra":1}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SyncMessage>(
+            r#"{"timer":{"running":true,"elapsedMs":-1}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SyncMessage>(
+            r#"{"timer":{"running":true,"elapsedMs":1000},"index":1}"#
+        )
+        .is_err());
     }
 
     #[test]

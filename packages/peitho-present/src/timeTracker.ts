@@ -17,7 +17,7 @@ export type TimeTrackerOptions = {
   variant?: "present" | "presenter";
 };
 
-const clamp01 = (ratio: number): number => Math.min(Math.max(ratio, 0), 1);
+export const clamp01 = (ratio: number): number => Math.min(Math.max(ratio, 0), 1);
 
 export function isOverrun(elapsedMs: number, plannedDurationMs: number): boolean {
   return elapsedMs > plannedDurationMs;

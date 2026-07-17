@@ -667,7 +667,15 @@ pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
         peitho.installSwipeNavigation({ root, window });
         peitho.installFullscreenShortcut({ window, document });
         const shell = await peitho.mountPresentShell({ root });
-        peitho.installSyncBridge(window, peitho.serverSyncChannelFactory());
+        if (typeof shell.adoptTimerState !== 'function') {
+          throw new Error("shell bundle does not provide adoptTimerState; run npm run build or provide a current --shell bundle");
+        }
+        peitho.installSyncBridge(
+          window,
+          peitho.serverSyncChannelFactory(),
+          window,
+          { adoptTimerState: (state) => shell.adoptTimerState(state) }
+        );
         const config = await configPromise;
         if (config != null && config.presenterOpen) {
           if (typeof peitho.installSwapShortcut === 'function') {
@@ -755,25 +763,72 @@ pub fn render_preview_index(aspect_ratio: AspectRatio) -> String {
     fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
-pub fn render_remote_index() -> String {
-    r#"<!doctype html>
+pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
+    const TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Peitho Remote</title>
   <style>
-    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    html, body { margin: 0; min-height: 100%; background: #101216; color: #f5f7fb; }
-    body { min-height: 100vh; min-height: 100svh; }
-    #peitho-remote-root { min-height: 100vh; min-height: 100svh; display: grid; align-items: stretch; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
+    html, body { margin: 0; height: 100%; background: #101216; color: #f5f7fb; }
+    body { height: 100vh; height: 100svh; overflow: hidden; }
+    #peitho-remote-root { height: 100vh; height: 100svh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 18px; padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
     .peitho-remote-error { align-self: center; justify-self: center; max-width: 32rem; padding: 16px; border: 1px solid #7f1d1d; background: #2a1215; color: #ffd7d7; border-radius: 6px; line-height: 1.4; }
-    .peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); min-height: calc(100svh - 40px); }
-    .peitho-remote-counter { align-self: start; justify-self: center; font-size: clamp(2rem, 11vw, 4.5rem); font-weight: 700; }
-    .peitho-remote-status { min-height: 1.5em; text-align: center; color: #aab3c2; }
-    .peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-self: end; }
-    .peitho-remote button { min-height: 88px; border: 1px solid #384252; border-radius: 8px; background: #f5f7fb; color: #101216; font: inherit; font-size: 1.4rem; font-weight: 700; touch-action: manipulation; }
-    .peitho-remote button:disabled { opacity: 0.45; }
+    .peitho-remote { width: 100%; max-width: 32rem; margin: 0 auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+    .peitho-remote-dim-on-end { transition: opacity 120ms ease; }
+    .peitho-remote[data-peitho-ended="true"] .peitho-remote-dim-on-end { opacity: 0.35; }
+    .peitho-remote-preview { position: relative; aspect-ratio: var(--peitho-canvas-aspect); border-radius: 10px; border: 1px solid #2a3240; background: #fff; overflow: hidden; flex: 0 1 auto; min-height: 0; }
+    .peitho-remote-preview > * { position: absolute; inset: 0; }
+    .peitho-remote-titlebar, .peitho-remote-chase, .peitho-remote-pace, .peitho-remote-status { flex: none; }
+    .peitho-remote-titlebar { display: flex; align-items: baseline; gap: 12px; }
+    .peitho-remote-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; line-height: 1.2; color: #f5f7fb; }
+    .peitho-remote-counter { flex: 0 0 auto; margin-left: auto; font-size: 16px; font-weight: 700; line-height: 1.2; color: #aab3c2; font-variant-numeric: tabular-nums; }
+    .peitho-remote-chase { position: relative; height: 34px; overflow: visible; }
+    .peitho-remote-chase[data-peitho-chase="slide"] { height: 6px; }
+    .peitho-remote-chase-track { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; border-radius: 999px; background: #232935; overflow: hidden; }
+    .peitho-remote-chase-fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: inherit; background: #38bdf8; }
+    .peitho-remote-chase[data-peitho-chase="time"] .peitho-remote-chase-fill { background: rgba(56,189,248,0.55); }
+    .peitho-remote-chase-overrun .peitho-remote-chase-track { box-shadow: 0 0 0 1px rgba(239,68,68,0.35); }
+    .peitho-remote-chase.peitho-remote-chase-overrun .peitho-remote-chase-fill { background: rgba(239,68,68,0.6); }
+    .peitho-remote-chase-marker { position: absolute; bottom: 8px; font-size: 17px; line-height: 1; filter: saturate(0.9); transition: left 120ms linear, transform 120ms linear; }
+    .peitho-remote-chase-marker[hidden] { display: none; }
+    .peitho-remote-pace { display: flex; align-items: center; gap: 10px; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .peitho-remote-timer-button { width: 44px; height: 44px; border-radius: 50%; border: 0; background: #232935; color: #fff; display: inline-grid; place-items: center; flex: 0 0 auto; touch-action: manipulation; }
+    .peitho-remote-timer-button[data-peitho-running="true"] { background: rgba(56,189,248,0.18); color: #38bdf8; }
+    .peitho-remote-reset-button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #2f3644; background: transparent; color: #aab3c2; font-size: 18px; display: inline-grid; place-items: center; flex: 0 0 auto; touch-action: manipulation; }
+    .peitho-remote-timer-icon { display: inline-block; position: relative; width: 16px; height: 16px; }
+    .peitho-remote-timer-icon[data-peitho-icon="play"] { width: 0; height: 0; margin-left: 3px; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 11px solid currentColor; }
+    .peitho-remote-timer-icon[data-peitho-icon="pause"]::before,
+    .peitho-remote-timer-icon[data-peitho-icon="pause"]::after { content: ""; position: absolute; top: 1px; width: 3px; height: 13px; border-radius: 2px; background: currentColor; }
+    .peitho-remote-timer-icon[data-peitho-icon="pause"]::before { left: 4px; }
+    .peitho-remote-timer-icon[data-peitho-icon="pause"]::after { right: 4px; }
+    .peitho-remote-elapsed-row { flex: 1; min-width: 0; color: #f5f7fb; }
+    .peitho-remote-elapsed { font-weight: 600; }
+    .peitho-remote-time-separator { color: #6b7484; margin: 0 4px; }
+    .peitho-remote-planned { color: #c3ccd9; font-weight: 500; }
+    .peitho-remote-pace-delta { flex: 0 0 auto; font-size: 13px; font-weight: 600; line-height: 1.2; white-space: nowrap; color: #aab3c2; }
+    .peitho-remote-pace-delta[data-peitho-pace="behind"],
+    .peitho-remote-pace-delta[data-peitho-pace="overrun"] { color: #e8c07a; }
+    .peitho-remote-pace-delta[data-peitho-pace="ahead"] { color: #8fd9a0; }
+    .peitho-remote-pace-delta[data-peitho-pace="paused"] { color: #aab3c2; }
+    .peitho-remote-pace-delta[data-peitho-pace="onpace"] { color: #aab3c2; }
+    .peitho-remote-section { font-size: 12.5px; color: #aab3c2; line-height: 1.35; }
+    .peitho-remote-section b { color: #dde3ec; font-weight: 600; }
+    .peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+    .peitho-remote-notes-caption { flex: 0 0 auto; font-size: 11px; font-weight: 600; line-height: 1.2; letter-spacing: 0.08em; color: #6b7484; text-transform: uppercase; }
+    .peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto; min-height: 0; }
+    .peitho-remote-notes-body[data-peitho-empty="true"] { color: #5a6473; font-size: 14px; font-style: italic; }
+    .peitho-remote-status { min-height: 1.4em; text-align: center; color: #aab3c2; font-size: 13px; line-height: 1.4; }
+    .peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none; }
+    .peitho-remote-actions button { min-height: 60px; border-radius: 999px; font: 600 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; touch-action: manipulation; }
+    .peitho-remote-actions [data-peitho-direction="prev"] { border: 1px solid #2f3644; background: transparent; color: #dde3ec; }
+    .peitho-remote-actions [data-peitho-direction="next"] { border: 1px solid transparent; background: rgba(56,189,248,0.14); color: #38bdf8; }
+    .peitho-remote-actions button:disabled,
+    .peitho-remote-timer-button:disabled,
+    .peitho-remote-reset-button:disabled { opacity: 0.32; }
+    .peitho-remote-action-arrow { font-size: 20px; font-weight: 400; line-height: 1; opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -790,10 +845,17 @@ pub fn render_remote_index() -> String {
     async function main() {
       const root = document.getElementById('peitho-remote-root');
       try {
-        if (typeof peitho.mountRemoteView === 'function') {
+        if (
+          typeof peitho.mountRemoteView === 'function' &&
+          typeof peitho.mountPresentShell === 'function' &&
+          typeof peitho.serverSyncChannelFactory === 'function'
+        ) {
           await peitho.mountRemoteView({
             root,
-            manifestUrl: 'manifest.json'
+            manifestUrl: 'manifest.json',
+            notesUrl: 'notes.json',
+            mountPresentShell: peitho.mountPresentShell,
+            syncChannelFactory: peitho.serverSyncChannelFactory()
           });
         } else {
           throw new Error("remote bundle does not provide mountRemoteView; run npm run build");
@@ -806,8 +868,9 @@ pub fn render_remote_index() -> String {
     main();
   </script>
 </body>
-</html>"#
-        .to_owned()
+</html>"#;
+
+    fill_canvas_tokens(TEMPLATE, aspect_ratio)
 }
 
 pub fn render_preview_error_index(generation: u64, error: &str) -> String {
@@ -1607,8 +1670,13 @@ Paragraph after heading.
         assert!(html.contains("installCloseOnEscape(window)"));
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(html.contains("await peitho.mountPresentShell({ root })"));
+        assert!(html.contains("typeof shell.adoptTimerState !== 'function'"));
+        assert!(html.contains(
+            r#""shell bundle does not provide adoptTimerState; run npm run build or provide a current --shell bundle""#
+        ));
         assert!(html.contains("installKeyboardNavigation(window)"));
-        assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
+        assert!(html.contains("peitho.installSyncBridge("));
+        assert!(html.contains("adoptTimerState: (state) => shell.adoptTimerState(state)"));
         assert!(html.contains("typeof peitho.installSwapShortcut === 'function'"));
         assert!(html.contains("config != null && config.presenterOpen"));
         assert!(html.contains("peitho.installSwapShortcut(window)"));
@@ -1622,9 +1690,7 @@ Paragraph after heading.
         let mount_index = html
             .find("await peitho.mountPresentShell({ root })")
             .unwrap();
-        let sync_index = html
-            .find("peitho.installSyncBridge(window, peitho.serverSyncChannelFactory())")
-            .unwrap();
+        let sync_index = html.find("peitho.installSyncBridge(").unwrap();
         let swap_index = html.find("peitho.installSwapShortcut(window)").unwrap();
         assert!(controls_index < mount_index);
         assert!(mount_index < sync_index);
@@ -1668,9 +1734,7 @@ Paragraph after heading.
         let mount_index = html
             .find("await peitho.mountPresentShell({ root })")
             .unwrap();
-        let sync_index = html
-            .find("peitho.installSyncBridge(window, peitho.serverSyncChannelFactory())")
-            .unwrap();
+        let sync_index = html.find("peitho.installSyncBridge(").unwrap();
         let config_fetch_index = html
             .find("const configPromise = fetchOk('present.json')")
             .unwrap();
@@ -1681,17 +1745,63 @@ Paragraph after heading.
     }
 
     #[test]
-    fn remote_index_mounts_remote_bundle_with_feature_detection() {
-        let html = render_remote_index();
+    fn remote_index_mounts_remote_bundle_with_feature_detection_and_canvas_tokens() {
+        let html = render_remote_index(AspectRatio::Ratio4To3);
 
         assert!(html.contains(
             r#"<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">"#
         ));
+        assert!(html.contains("--peitho-canvas-width: 960px;"));
+        assert!(html.contains("--peitho-canvas-height: 720px;"));
+        assert!(html.contains("--peitho-canvas-aspect: 4 / 3;"));
         assert!(html.contains("100svh"));
-        assert!(html.contains("body { min-height: 100vh; min-height: 100svh; }"));
-        assert!(html.contains("#peitho-remote-root { min-height: 100vh; min-height: 100svh;"));
         assert!(html.contains(
-            ".peitho-remote { width: min(100%, 32rem); margin: 0 auto; display: grid; grid-template-rows: auto 1fr auto; gap: 20px; min-height: calc(100vh - 40px); min-height: calc(100svh - 40px);"
+            "html, body { margin: 0; height: 100%; background: #101216; color: #f5f7fb; }"
+        ));
+        assert!(html.contains("body { height: 100vh; height: 100svh; overflow: hidden; }"));
+        assert!(html.contains("#peitho-remote-root { height: 100vh; height: 100svh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 18px;"));
+        assert!(html.contains(".peitho-remote-preview { position: relative; aspect-ratio: var(--peitho-canvas-aspect); border-radius: 10px; border: 1px solid #2a3240; background: #fff; overflow: hidden; flex: 0 1 auto; min-height: 0;"));
+        assert!(html.contains(".peitho-remote-titlebar, .peitho-remote-chase, .peitho-remote-pace, .peitho-remote-status { flex: none; }"));
+        assert!(html.contains(
+            ".peitho-remote-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700;"
+        ));
+        assert!(html.contains(".peitho-remote-chase { position: relative; height: 34px;"));
+        assert!(html.contains(".peitho-remote-chase[data-peitho-chase=\"slide\"] { height: 6px;"));
+        assert!(html.contains(".peitho-remote-chase-track { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; border-radius: 999px; background: #232935;"));
+        assert!(html.contains(".peitho-remote-chase-fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: inherit; background: #38bdf8;"));
+        assert!(html.contains(".peitho-remote-chase[data-peitho-chase=\"time\"] .peitho-remote-chase-fill { background: rgba(56,189,248,0.55);"));
+        assert!(html.contains(".peitho-remote-chase-overrun .peitho-remote-chase-track { box-shadow: 0 0 0 1px rgba(239,68,68,0.35);"));
+        assert!(html.contains(".peitho-remote-chase.peitho-remote-chase-overrun .peitho-remote-chase-fill { background: rgba(239,68,68,0.6);"));
+        assert!(html.contains(".peitho-remote-chase-marker { position: absolute; bottom: 8px; font-size: 17px; line-height: 1; filter: saturate(0.9);"));
+        assert!(
+            html.contains(".peitho-remote-pace { display: flex; align-items: center; gap: 10px;")
+        );
+        assert!(html.contains(
+            ".peitho-remote-timer-button { width: 44px; height: 44px; border-radius: 50%;"
+        ));
+        assert!(html.contains(".peitho-remote-timer-button[data-peitho-running=\"true\"] { background: rgba(56,189,248,0.18);"));
+        assert!(html.contains(".peitho-remote-reset-button { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #2f3644; background: transparent; color: #aab3c2; font-size: 18px;"));
+        assert!(html.contains(
+            ".peitho-remote-pace-delta { flex: 0 0 auto; font-size: 13px; font-weight: 600;"
+        ));
+        assert!(html.contains(".peitho-remote-pace-delta[data-peitho-pace=\"behind\"],"));
+        assert!(html
+            .contains(".peitho-remote-pace-delta[data-peitho-pace=\"overrun\"] { color: #e8c07a;"));
+        assert!(html
+            .contains(".peitho-remote-pace-delta[data-peitho-pace=\"ahead\"] { color: #8fd9a0;"));
+        assert!(html
+            .contains(".peitho-remote-pace-delta[data-peitho-pace=\"paused\"] { color: #aab3c2;"));
+        assert!(html
+            .contains(".peitho-remote-pace-delta[data-peitho-pace=\"onpace\"] { color: #aab3c2;"));
+        assert!(html.contains(".peitho-remote-section { font-size: 12.5px; color: #aab3c2;"));
+        assert!(html.contains(".peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px;"));
+        assert!(html.contains(".peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto;"));
+        assert!(html.contains(
+            ".peitho-remote-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none;"
+        ));
+        assert!(html.contains(".peitho-remote-actions button { min-height: 60px; border-radius: 999px; font: 600 17px"));
+        assert!(html.contains(
+            ".peitho-remote[data-peitho-ended=\"true\"] .peitho-remote-dim-on-end { opacity: 0.35;"
         ));
         assert!(html.contains("env(safe-area-inset-bottom"));
         assert!(html.contains("import * as peitho from './remote.js';"));
@@ -1699,8 +1809,12 @@ Paragraph after heading.
         assert!(
             html.contains(r#""remote bundle does not provide mountRemoteView; run npm run build""#)
         );
+        assert!(html.contains("typeof peitho.mountPresentShell === 'function'"));
         assert!(html.contains("showError"));
         assert!(html.contains("manifestUrl: 'manifest.json'"));
+        assert!(html.contains("notesUrl: 'notes.json'"));
+        assert!(html.contains("mountPresentShell: peitho.mountPresentShell"));
+        assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
         assert!(html.contains("await peitho.mountRemoteView({"));
         assert!(!html.contains("import { mountRemoteView }"));
     }
@@ -1888,7 +2002,8 @@ Paragraph after heading.
         let html = render_present_index(AspectRatio::Ratio16To9);
 
         assert!(html.contains("serverSyncChannelFactory"));
-        assert!(html.contains("installSyncBridge(window, peitho.serverSyncChannelFactory())"));
+        assert!(html.contains("peitho.installSyncBridge("));
+        assert!(html.contains("adoptTimerState: (state) => shell.adoptTimerState(state)"));
         assert!(!html.contains("installSyncBridge(window);"));
     }
 
