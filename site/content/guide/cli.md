@@ -75,11 +75,14 @@ peitho present --host 100.64.0.5
 ```
 
 The local slides and presenter windows still use loopback. A specific
-`--host` adds a listener for that address and prints exactly one `/remote`
-URL. A wildcard host (`0.0.0.0`/`::`) becomes the single listener, still
-covering loopback, and prints non-loopback `/remote` URL candidates for the
-phone. Peitho also renders a terminal QR code for the top-ranked remote URL.
-A Tailscale address is the recommended host when available.
+`--host <IP>` adds a listener for that address and prints exactly one
+`/remote` URL; bare `--host` is shorthand for `--host 0.0.0.0`, binding all
+IPv4 interfaces, while `--host ::` binds the IPv6 dual-stack wildcard where
+the OS supports it. With the bare form, a token immediately after `--host` is
+read as the IP value, so use `peitho present deck.md --host` rather than
+`peitho present --host deck.md`. Peitho renders a terminal QR code for the
+top-ranked remote URL, and the top line plus QR prefer Tailscale when
+available.
 
 ## `peitho export`
 

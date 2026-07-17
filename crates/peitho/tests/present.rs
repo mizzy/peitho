@@ -20,7 +20,29 @@ fn present_help_lists_no_presenter_flag() {
         .args(["present", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--no-presenter"));
+        .stdout(predicate::str::contains("--no-presenter"))
+        .stdout(predicate::str::contains("--host [<IP>]"))
+        .stdout(predicate::str::contains("bare --host uses 0.0.0.0"));
+}
+
+#[test]
+fn present_bare_host_matches_explicit_wildcard_in_cli_path() {
+    let bare = Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["present", "--no-serve", "--host"])
+        .output()
+        .unwrap();
+    let explicit = Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["present", "--no-serve", "--host", "0.0.0.0"])
+        .output()
+        .unwrap();
+
+    assert!(!bare.status.success());
+    assert_eq!(bare.status.code(), explicit.status.code());
+    assert_eq!(bare.stdout, explicit.stdout);
+    assert_eq!(bare.stderr, explicit.stderr);
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("--host requires the present server"));
 }
 
 #[test]

@@ -406,7 +406,13 @@ enum Command {
         no_presenter: bool,
         #[arg(long)]
         presenter_windowed: bool,
-        #[arg(long, value_name = "IP")]
+        #[arg(
+            long,
+            value_name = "IP",
+            num_args = 0..=1,
+            default_missing_value = "0.0.0.0",
+            help = "Expose /remote on an optional IP; bare --host uses 0.0.0.0"
+        )]
         host: Option<IpAddr>,
     },
     Publish {
@@ -4873,6 +4879,23 @@ contexts:
     }
 
     #[test]
+    fn present_command_accepts_bare_host_as_ipv4_wildcard() {
+        let bare = Cli::parse_from(["peitho", "present", "deck.md", "--host"]);
+        let explicit = Cli::parse_from(["peitho", "present", "deck.md", "--host", "0.0.0.0"]);
+        let bare_host = present_host_from_cli(bare);
+
+        assert_eq!(bare_host, Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(present_host_from_cli(explicit), bare_host);
+    }
+
+    #[test]
+    fn present_command_without_host_keeps_host_none() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md"]);
+
+        assert_eq!(present_host_from_cli(cli), None);
+    }
+
+    #[test]
     fn present_command_rejects_invalid_host_ip() {
         let err = Cli::try_parse_from(["peitho", "present", "deck.md", "--host", "not-an-ip"])
             .unwrap_err();
@@ -4967,8 +4990,8 @@ contexts:
         assert_eq!(
             lines,
             vec![
-                "remote control: http://10.0.0.15:3000/remote",
                 "remote control (Tailscale): http://100.100.10.5:3000/remote",
+                "remote control: http://10.0.0.15:3000/remote",
                 "remote control: http://192.168.1.20:3000/remote"
             ]
         );
@@ -4995,6 +5018,23 @@ contexts:
             .find("http://")
             .unwrap_or_else(|| panic!("remote control line did not contain a URL: {line}"));
         &line[start..]
+    }
+
+    fn present_host_from_cli(cli: Cli) -> Option<IpAddr> {
+        match cli.command {
+            Command::Present { host, .. } => host,
+            Command::Build { .. }
+            | Command::Lint { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
     }
 
     #[test]

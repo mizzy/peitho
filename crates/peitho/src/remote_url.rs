@@ -71,9 +71,9 @@ fn matches_bound_wildcard_family(address: IpAddr, bound_wildcard: Option<IpAddr>
 }
 
 fn candidate_rank(address: IpAddr, default_route: Option<IpAddr>) -> u8 {
-    if Some(address) == default_route {
+    if is_tailscale_addr(address) {
         0
-    } else if is_tailscale_addr(address) {
+    } else if Some(address) == default_route {
         1
     } else {
         2
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_url_candidates_order_default_route_then_tailscale_then_rest() {
+    fn remote_url_candidates_order_tailscale_then_default_route_then_rest() {
         let candidates = remote_url_candidates(
             &[v4(192, 168, 1, 20), v4(100, 100, 10, 5), v4(10, 0, 0, 15)],
             Some(v4(10, 0, 0, 15)),
@@ -187,12 +187,34 @@ mod tests {
                 .map(|candidate| candidate.url.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "http://10.0.0.15:3000/remote",
                 "http://100.100.10.5:3000/remote",
+                "http://10.0.0.15:3000/remote",
                 "http://192.168.1.20:3000/remote"
             ]
         );
-        assert_eq!(candidates[1].label, Some(RemoteUrlLabel::Tailscale));
+        assert_eq!(candidates[0].label, Some(RemoteUrlLabel::Tailscale));
+    }
+
+    #[test]
+    fn remote_url_candidates_order_default_route_first_without_tailscale() {
+        let candidates = remote_url_candidates(
+            &[v4(192, 168, 1, 20), v4(10, 0, 0, 15), v4(172, 16, 0, 7)],
+            Some(v4(10, 0, 0, 15)),
+            3000,
+            None,
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "http://10.0.0.15:3000/remote",
+                "http://192.168.1.20:3000/remote",
+                "http://172.16.0.7:3000/remote"
+            ]
+        );
     }
 
     #[test]
