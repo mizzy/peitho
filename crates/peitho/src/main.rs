@@ -35,7 +35,6 @@ struct BuildArtifacts {
     slide_count: usize,
     rendered: peitho_core::Deck<peitho_core::Rendered>,
     manifest_json: String,
-    css: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
     fonts_source: Option<PathBuf>,
 }
@@ -1471,7 +1470,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = core(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
-    let css = core(peitho_core::build_theme_css(
+    let theme_css = core(peitho_core::build_theme_css(
         &css_files,
         &checked.slide_slot_classes(),
         &layouts.slot_classes(),
@@ -1483,13 +1482,12 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
     }))?;
     let manifest = peitho_core::build_manifest(&resolved, &image_assets);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
-    let rendered = core(peitho_core::render_deck(resolved, &highlighter))?;
+    let rendered = core(peitho_core::render_deck(resolved, &highlighter, theme_css))?;
 
     Ok(BuildArtifacts {
         slide_count,
         rendered,
         manifest_json,
-        css,
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
     })
@@ -1520,9 +1518,10 @@ fn emit_pdf_workspace(workspace: &Path, artifacts: &BuildArtifacts) -> miette::R
 
 fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
     fs::create_dir_all(dir).into_diagnostic()?;
-    fs::write(dir.join("peitho.css"), &artifacts.css).into_diagnostic()?;
+    fs::write(dir.join("peitho.css"), artifacts.rendered.css()).into_diagnostic()?;
     write_image_assets(dir, &artifacts.image_assets)?;
-    write_fonts_assets(dir, artifacts.fonts_source.as_deref())
+    write_fonts_assets(dir, artifacts.fonts_source.as_deref())?;
+    write_katex_fonts_assets(dir, artifacts.rendered.math_assets())
 }
 
 fn write_fonts_assets(out: &Path, fonts_source: Option<&Path>) -> miette::Result<()> {
@@ -1591,6 +1590,25 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> miette::Result<()> {
                 source_path.display()
             ));
         }
+    }
+    Ok(())
+}
+
+fn write_katex_fonts_assets(
+    out: &Path,
+    math_assets: Option<peitho_core::MathAssets>,
+) -> miette::Result<()> {
+    let fonts_dir = out.join("katex-fonts");
+    if fonts_dir.exists() {
+        fs::remove_dir_all(&fonts_dir).into_diagnostic()?;
+    }
+    let Some(math_assets) = math_assets else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(&fonts_dir).into_diagnostic()?;
+    for font in math_assets.fonts() {
+        fs::write(fonts_dir.join(font.file_name()), font.bytes()).into_diagnostic()?;
     }
     Ok(())
 }
@@ -3035,10 +3053,11 @@ fn emit_present_cache(
     if let Some(shell) = shell {
         ensure_shell_bundle(shell)?;
     }
-    fs::write(cache.join("peitho.css"), &artifacts.css).into_diagnostic()?;
+    fs::write(cache.join("peitho.css"), artifacts.rendered.css()).into_diagnostic()?;
     write_slide_fragments(cache, &artifacts.rendered)?;
     write_image_assets(cache, &artifacts.image_assets)?;
     write_fonts_assets(cache, artifacts.fonts_source.as_deref())?;
+    write_katex_fonts_assets(cache, artifacts.rendered.math_assets())?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         cache.join("notes.json"),
@@ -3515,8 +3534,35 @@ contexts:
 
         assert_eq!(artifacts.slide_count, 1);
         assert!(artifacts
-            .css
+            .rendered
+            .css()
             .contains("width: var(--peitho-canvas-width, 1280px);"));
+    }
+
+    #[test]
+    fn build_artifacts_prepends_katex_css_only_for_math_decks() {
+        let math = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
+        let plain = WatchFixture::new("# Plain\n\nBody\n");
+
+        let math_artifacts = build_artifacts(&math.options.input).unwrap();
+        let plain_artifacts = build_artifacts(&plain.options.input).unwrap();
+        let math_css = math_artifacts.rendered.css();
+        let plain_css = plain_artifacts.rendered.css();
+
+        assert!(math_css.contains(".katex"));
+        assert!(math_css.contains("url(katex-fonts/"));
+        assert!(!math_css.contains("url(fonts/KaTeX_"));
+        let katex_index = math_css.find("url(katex-fonts/").unwrap();
+        let theme_index = math_css.find(".slot-title { font-weight: 700; }").unwrap();
+        assert!(
+            katex_index < theme_index,
+            "KaTeX CSS must come before author/theme CSS so author rules win"
+        );
+        assert!(math_artifacts.rendered.slides()[0]
+            .html()
+            .contains(r#"<div class="peitho-math"><span class="katex-display""#));
+        assert!(!plain_css.contains(".katex"));
+        assert!(!plain_css.contains("katex-fonts"));
     }
 
     #[test]
@@ -3630,6 +3676,46 @@ contexts:
             fs::read(out.join("fonts/deck-font.woff2")).unwrap(),
             b"single font bytes"
         );
+    }
+
+    #[test]
+    fn write_shared_assets_writes_katex_fonts_for_math_without_touching_user_fonts() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("fonts");
+        let out = dir.path().join("dist-math-assets");
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(fonts.join("deck-font.woff2"), b"font bytes").unwrap();
+        fs::write(
+            &deck,
+            "---\nfonts: ./fonts\n---\n# Math\n\n```math\n\\frac{1}{2}\n```\n",
+        )
+        .unwrap();
+        let artifacts = build_artifacts(&deck).unwrap();
+
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(out.join("fonts/deck-font.woff2")).unwrap(),
+            b"font bytes"
+        );
+        assert_eq!(
+            fs::read(out.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
+            katex_font_bytes("KaTeX_Main-Regular.woff2")
+        );
+    }
+
+    #[test]
+    fn write_shared_assets_removes_stale_katex_fonts_when_deck_has_no_math() {
+        let fixture = WatchFixture::new("# Plain\n\nBody\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let out = fixture._dir.path().join("dist");
+        fs::create_dir_all(out.join("katex-fonts")).unwrap();
+        fs::write(out.join("katex-fonts/stale.woff2"), b"stale").unwrap();
+
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert!(!out.join("katex-fonts").exists());
     }
 
     #[test]
@@ -5688,6 +5774,23 @@ contexts:
     }
 
     #[test]
+    fn emit_pdf_workspace_writes_katex_fonts_for_math_deck() {
+        let fixture = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_pdf_workspace(&workspace, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(workspace.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
+            katex_font_bytes("KaTeX_Main-Regular.woff2")
+        );
+        assert!(fs::read_to_string(workspace.join("peitho.css"))
+            .unwrap()
+            .contains("url(katex-fonts/"));
+    }
+
+    #[test]
     fn emit_pdf_workspace_allows_note_text_that_also_appears_in_slide_html() {
         let fixture = WatchFixture::new("# PDF Export\n\n<!-- PDF -->\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -6324,6 +6427,24 @@ printf '0 bytes written to file %s\n' "$out" >&2
     }
 
     #[test]
+    fn present_cache_writes_katex_fonts_for_math_deck() {
+        let fixture = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let cache = fixture._dir.path().join("present-cache");
+
+        fs::create_dir_all(&cache).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+
+        assert_eq!(
+            fs::read(cache.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
+            katex_font_bytes("KaTeX_Main-Regular.woff2")
+        );
+        assert!(fs::read_to_string(cache.join("peitho.css"))
+            .unwrap()
+            .contains("url(katex-fonts/"));
+    }
+
+    #[test]
     fn emit_preview_cache_writes_preview_only_files_in_generation_dir() {
         let fixture = WatchFixture::new("# Intro\n\n<!-- speaker note -->\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -6350,6 +6471,23 @@ printf '0 bytes written to file %s\n' "$out" >&2
         assert!(index.contains("mountPreviewShell"));
         assert!(index.contains("installPreviewKeyboard"));
         assert!(index.contains("installPreviewReload"));
+    }
+
+    #[test]
+    fn preview_cache_generation_writes_katex_fonts_for_math_deck() {
+        let fixture = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+
+        let generation_dir = emit_preview_cache_generation(&cache, 0, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read(generation_dir.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
+            katex_font_bytes("KaTeX_Main-Regular.woff2")
+        );
+        assert!(fs::read_to_string(generation_dir.join("peitho.css"))
+            .unwrap()
+            .contains("url(katex-fonts/"));
     }
 
     #[test]
@@ -7289,6 +7427,15 @@ printf '0 bytes written to file %s\n' "$out" >&2
                 targets,
             }
         }
+    }
+
+    fn katex_font_bytes(file_name: &str) -> &'static [u8] {
+        peitho_core::MathAssets::katex()
+            .fonts()
+            .iter()
+            .find(|font| font.file_name() == file_name)
+            .map(peitho_core::MathFontAsset::bytes)
+            .expect("expected embedded KaTeX font")
     }
 
     fn watch_state_with_fonts() -> (tempfile::TempDir, WatchState, PathBuf) {

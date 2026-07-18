@@ -27,6 +27,7 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                         FragmentKind::Paragraph | FragmentKind::List => {
                             body_fragment_text(fragment.markdown())
                         }
+                        FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
                         FragmentKind::Image { .. }
                         | FragmentKind::Code
                         | FragmentKind::SlotGroup { .. } => return None,

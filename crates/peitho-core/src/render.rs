@@ -14,6 +14,7 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     layout::Layout,
+    math::MathAssets,
     phase::{Checked, CheckedSlot, Deck, Rendered},
 };
 
@@ -28,11 +29,14 @@ const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 pub fn render_deck(
     deck: Deck<Checked<ResolvedImagePath>>,
     highlighter: &Highlighter,
+    theme_css: String,
 ) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let breaks = settings.breaks();
     let mut slides = Vec::new();
+    let mut uses_math = false;
     for slide in checked_slides {
+        uses_math |= slide_uses_math(slide.slots());
         let html = render_slide(
             slide.key(),
             slide.slots(),
@@ -48,7 +52,25 @@ pub fn render_deck(
             notes,
         ));
     }
-    Ok(Deck::rendered(settings, slides, String::new()))
+    let math_assets = uses_math.then_some(MathAssets::katex());
+    let css = if let Some(assets) = math_assets {
+        let mut css = String::with_capacity(assets.css().len() + 1 + theme_css.len());
+        css.push_str(assets.css());
+        css.push('\n');
+        css.push_str(&theme_css);
+        css
+    } else {
+        theme_css
+    };
+    Ok(Deck::rendered(settings, slides, css, math_assets))
+}
+
+fn slide_uses_math(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
+    slots.values().any(|slot| {
+        slot.fragments()
+            .iter()
+            .any(|fragment| matches!(fragment.kind(), FragmentKind::Math { .. }))
+    })
 }
 
 fn render_slide(
@@ -187,18 +209,40 @@ fn render_block_slot(
     for fragment in fragments {
         ensure_fragment_matches_contract(accepts, fragment)?;
     }
-    let markdown = fragments
-        .iter()
-        .map(SourceFragment::markdown)
-        .collect::<Vec<_>>()
-        .join("\n\n");
     let mut body = String::new();
+    let mut markdown_run = Vec::new();
+    for fragment in fragments {
+        match fragment.kind() {
+            FragmentKind::Math { html } => {
+                render_markdown_run(&mut body, &markdown_run, breaks);
+                markdown_run.clear();
+                body.push_str(r#"<div class="peitho-math">"#);
+                body.push_str(html);
+                body.push_str("</div>");
+            }
+            FragmentKind::Heading { .. }
+            | FragmentKind::Paragraph
+            | FragmentKind::Text
+            | FragmentKind::List => markdown_run.push(fragment.markdown()),
+            FragmentKind::Code | FragmentKind::Image { .. } | FragmentKind::SlotGroup { .. } => {
+                unreachable!("validated by contract guard")
+            }
+        }
+    }
+    render_markdown_run(&mut body, &markdown_run, breaks);
+    Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
+}
+
+fn render_markdown_run(body: &mut String, markdown_run: &[&str], breaks: bool) {
+    if markdown_run.is_empty() {
+        return;
+    }
+    let markdown = markdown_run.join("\n\n");
     let events = Parser::new_ext(&markdown, Options::empty()).map(|event| match (breaks, event) {
         (true, Event::SoftBreak) => Event::HardBreak,
         (_, event) => event,
     });
-    html::push_html(&mut body, events);
-    Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
+    html::push_html(body, events);
 }
 
 fn render_heading_inline_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
@@ -234,6 +278,7 @@ fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result
         | FragmentKind::Paragraph
         | FragmentKind::Text
         | FragmentKind::Code
+        | FragmentKind::Math { .. }
         | FragmentKind::List
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
     }
@@ -273,6 +318,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::Heading { .. })
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
             | (Accepts::Image, FragmentKind::Image { .. })
@@ -1212,9 +1258,13 @@ mod tests {
             )],
         );
 
-        render_deck(checked, &crate::highlight::Highlighter::defaults())
-            .unwrap()
-            .slides()[0]
+        render_deck(
+            checked,
+            &crate::highlight::Highlighter::defaults(),
+            String::new(),
+        )
+        .unwrap()
+        .slides()[0]
             .html()
             .to_owned()
     }
@@ -1275,6 +1325,96 @@ mod tests {
 
         assert!(!html.contains("<br"), "{html}");
         assert!(html.contains("<p>first\nsecond</p>"), "{html}");
+    }
+
+    #[test]
+    fn block_slot_without_math_renders_byte_identical_markdown_run() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "First paragraph."),
+            SourceFragment::list(5, "- One\n- Two"),
+            SourceFragment::paragraph(8, "Final paragraph."),
+        ]);
+
+        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, false).unwrap();
+
+        assert_eq!(
+            html,
+            "<div class=\"slot-body\"><p>First paragraph.</p>\n<ul>\n<li>One</li>\n<li>Two</li>\n</ul>\n<p>Final paragraph.</p>\n</div>"
+        );
+    }
+
+    #[test]
+    fn block_slot_splices_math_between_markdown_runs() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "Before."),
+            SourceFragment::math(
+                5,
+                r#"<span class="katex-display">math html</span>"#,
+                r#"\frac{1}{2}"#,
+            ),
+            SourceFragment::paragraph(8, "After."),
+        ]);
+
+        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, false).unwrap();
+
+        assert_eq!(
+            html,
+            concat!(
+                r#"<div class="slot-body"><p>Before.</p>"#,
+                "\n",
+                r#"<div class="peitho-math"><span class="katex-display">math html</span></div><p>After.</p>"#,
+                "\n",
+                "</div>"
+            )
+        );
+    }
+
+    #[test]
+    fn block_slot_breaks_true_applies_to_markdown_runs_around_math() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "first\nsecond"),
+            SourceFragment::math(
+                5,
+                r#"<span class="katex-display">math html</span>"#,
+                r#"\frac{1}{2}"#,
+            ),
+            SourceFragment::paragraph(8, "third\nfourth"),
+        ]);
+
+        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, true).unwrap();
+
+        assert!(html.contains("<p>first<br />\nsecond</p>"), "{html}");
+        assert!(html.contains("<p>third<br />\nfourth</p>"), "{html}");
+        assert!(
+            html.contains(
+                r#"<div class="peitho-math"><span class="katex-display">math html</span></div>"#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn rendered_deck_exposes_math_assets_only_when_math_is_present() {
+        let with_math = render_checked(checked_deck_with_math_body());
+        let without_math = render_checked_deck_with_layout("# Intro\n\nBody", title_body_layout());
+
+        assert!(with_math.math_assets().is_some());
+        assert!(without_math.math_assets().is_none());
+    }
+
+    #[test]
+    fn rendered_deck_prepends_katex_css_before_theme_css_only_for_math_decks() {
+        let theme_css = ".katex { font-size: 1.6em; }\n.peitho-slide { color: red; }\n";
+        let with_math = render_checked_with_css(checked_deck_with_math_body(), theme_css);
+        let without_math = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+
+        assert!(with_math.css().starts_with(MathAssets::katex().css()));
+        assert!(with_math.css().ends_with(theme_css));
+        assert_eq!(without_math.css(), theme_css);
     }
 
     #[test]
@@ -2292,6 +2432,14 @@ Paragraph after heading.
     }
 
     fn render_checked_deck_with_layout(markdown: &str, layout: Layout) -> Deck<Rendered> {
+        render_checked_deck_with_layout_and_css(markdown, layout, "")
+    }
+
+    fn render_checked_deck_with_layout_and_css(
+        markdown: &str,
+        layout: Layout,
+        theme_css: &str,
+    ) -> Deck<Rendered> {
         let checked = check_deck(
             map_by_convention(
                 parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
@@ -2300,7 +2448,7 @@ Paragraph after heading.
             .unwrap(),
         )
         .unwrap();
-        render_checked(checked)
+        render_checked_with_css(checked, theme_css)
     }
 
     fn title_body_layout() -> Layout {
@@ -2311,7 +2459,60 @@ Paragraph after heading.
         .unwrap()
     }
 
+    fn resolve_fragments(fragments: Vec<SourceFragment>) -> Vec<SourceFragment<ResolvedImagePath>> {
+        fragments
+            .into_iter()
+            .map(|fragment| {
+                fragment.try_map_image_src(|raw| -> Result<ResolvedImagePath> {
+                    Ok(ResolvedImagePath::from_string(raw.as_str().to_owned()))
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn checked_deck_with_math_body() -> Deck<Checked> {
+        let layout = title_body_layout();
+        let title = SlotName::new("title").unwrap();
+        let body = SlotName::new("body").unwrap();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            title,
+            CheckedSlot::new(
+                layout.slot("title").unwrap().clone(),
+                vec![SourceFragment::heading(1, 1, "# Intro", "Intro")],
+            ),
+        );
+        slots.insert(
+            body,
+            CheckedSlot::new(
+                layout.slot("body").unwrap().clone(),
+                vec![SourceFragment::math(
+                    3,
+                    r#"<span class="katex-display">math html</span>"#,
+                    r#"\frac{1}{2}"#,
+                )],
+            ),
+        );
+        Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                false,
+                None,
+            )],
+        )
+    }
+
     fn render_checked(checked: Deck<Checked>) -> Deck<Rendered> {
+        render_checked_with_css(checked, "")
+    }
+
+    fn render_checked_with_css(checked: Deck<Checked>, theme_css: &str) -> Deck<Rendered> {
         let (resolved, assets) = crate::phase::resolve_image_paths(checked, |request| {
             panic!(
                 "unexpected image resolver call for {} on slide {}",
@@ -2321,6 +2522,11 @@ Paragraph after heading.
         })
         .unwrap();
         assert!(assets.is_empty());
-        render_deck(resolved, &crate::highlight::Highlighter::defaults()).unwrap()
+        render_deck(
+            resolved,
+            &crate::highlight::Highlighter::defaults(),
+            theme_css.to_owned(),
+        )
+        .unwrap()
     }
 }

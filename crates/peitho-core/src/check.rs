@@ -115,6 +115,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::Heading { .. })
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
             | (Accepts::Image, FragmentKind::Image { .. })
@@ -187,6 +188,7 @@ mod tests {
         layout::parse_layout,
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
+        phase::{DeckSettings, MappedSlide, MappedSlot},
     };
 
     fn parse_markdown(
@@ -195,6 +197,42 @@ mod tests {
     ) -> crate::error::Result<crate::phase::Deck<crate::phase::Parsed>> {
         let frontmatter = parse_frontmatter(source)?;
         parse_markdown_impl(source, frontmatter, highlighter)
+    }
+
+    fn mapped_deck_with_math_slot(
+        slot_name: &str,
+        accepts: &str,
+    ) -> crate::phase::Deck<crate::phase::Mapped> {
+        let layout = parse_layout(
+            "math-layout",
+            &format!(
+                r#"<section><slot name="{slot_name}" accepts="{accepts}" arity="1"></slot></section>"#
+            ),
+        )
+        .unwrap();
+        let slot = SlotName::new(slot_name).unwrap();
+        let mut mapped_slot = MappedSlot::new(layout.slot(slot_name).unwrap().clone());
+        mapped_slot.push(SourceFragment::math(
+            7,
+            r#"<span class="katex-display">math html</span>"#,
+            r#"\frac{1}{2}"#,
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert(slot, mapped_slot);
+
+        Deck::mapped(
+            DeckSettings::default(),
+            vec![MappedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                unassigned: Vec::new(),
+                skip: false,
+                notes: None,
+            }],
+        )
     }
 
     #[test]
@@ -247,6 +285,31 @@ mod tests {
         let checked = check_deck(mapped).unwrap();
 
         assert!(checked.checked_slides()[0].skip());
+    }
+
+    #[test]
+    fn accepts_math_fragment_in_blocks_slot() {
+        let checked = check_deck(mapped_deck_with_math_slot("body", "blocks")).unwrap();
+
+        assert_eq!(checked.checked_slides()[0].slots().len(), 1);
+        let body = SlotName::new("body").unwrap();
+        assert!(matches!(
+            checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
+            FragmentKind::Math { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_math_fragment_in_code_slot_with_contract_error() {
+        let err = check_deck(mapped_deck_with_math_slot("code", "code")).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(7));
+        assert!(err.to_string().contains("slot 'code' accepts code"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
     }
 
     #[test]

@@ -152,15 +152,26 @@ Unclosed or nested blocks, unknown slot names, and contract violations inside th
 
 Fenced `mermaid` blocks render to SVG at build time with Peitho's built-in Mermaid renderer. The generated SVG is cached and then routed as a normal image, so the slide still needs a layout with an `accepts="image"` slot.
 
+### Math
+
+Fenced `math` blocks render to KaTeX HTML+MathML at build time. The result is body content, not an image, and Peitho embeds the required KaTeX CSS and fonts only for decks that use math:
+
+````markdown
+```math
+\int_0^1 x^2\,dx = \frac{1}{3}
+```
+````
+
 Use `code_images:` for other diagram tags, or to override the built-in Mermaid renderer with an external command. Peitho pipes the fence source to the declared command, expects SVG on stdout, caches the result, and then routes it as a normal image:
 
 ```yaml
 code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
+  math: latex-to-svg              # optional override
 ```
 
-See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images) and the [Code Images example](https://peitho.gosu.ke/examples/code-images/) for built-in Mermaid behavior and a Mermaid/Graphviz deck.
+See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images), the [Code Images example](https://peitho.gosu.ke/examples/code-images/), and the [Math example](https://peitho.gosu.ke/examples/math/).
 
 ### Deck frontmatter
 
@@ -176,7 +187,7 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
 | `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
-| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid is built in unless overridden) |
+| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid and math are built in unless overridden) |
 
 Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
@@ -289,6 +300,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/layout-pin/` | Explicit layout pin demo | Two looks: light `statement`, dark `spotlight` | Both layouts declare the same slot contract, so structural dispatch can never decide — every slide carries a `{"layout":"…"}` pin |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
 | `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid uses the built-in renderer; `code_images:` declares the Graphviz command and any explicit overrides |
+| `examples/math/` | Build-time LaTeX equations | Default theme | Fenced `math` blocks render as KaTeX HTML+MathML body content with embedded KaTeX assets |
 | `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/toml.sublime-syntax` turns an unknown-language build error into build-time TOML highlighting |
 | `examples/custom-fonts/` | Bundled webfonts demo | Playfair Display + JetBrains Mono, all local `.woff2` | Zero-config `fonts/` auto-detect; files (including licenses) are copied verbatim into every output |
 | `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |

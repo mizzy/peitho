@@ -48,21 +48,26 @@ with exactly one unambiguous `accepts="image"` slot.
 
 ## Code images
 
+Fenced `math` blocks render to KaTeX HTML+MathML at build time and flow into
+body slots. No client-side math JavaScript or `code_images:` entry is needed.
+
 Fenced `mermaid` source becomes an SVG image during the build with Peitho's
-built-in Mermaid renderer. For other diagram tags, or to override Mermaid with
-an external renderer, add `code_images:` frontmatter. Each mapping entry uses
-the fence language tag as the key and a command string as the value; Peitho
-sends the fenced source to stdin and reads SVG from stdout.
+built-in Mermaid renderer. For other diagram tags, or to override Mermaid or
+math with an external SVG renderer, add `code_images:` frontmatter. Each mapping
+entry uses the fence language tag as the key and a command string as the value;
+Peitho sends the fenced source to stdin and reads SVG from stdout.
 
 ```yaml
 code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
+  math: latex-to-svg              # optional override
 ```
 
-After conversion, those blocks behave like normal images and need an
-`accepts="image"` slot. See [Frontmatter](@/guide/frontmatter.md#code-images)
-and the [Code Images example](@/examples/code-images.md).
+After external conversion, those blocks behave like normal images and need an
+`accepts="image"` slot. See [Frontmatter](@/guide/frontmatter.md#code-images),
+the [Code Images example](@/examples/code-images.md), and the
+[Math example](@/examples/math.md).
 
 ## Explicit slot syntax
 

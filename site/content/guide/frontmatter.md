@@ -46,9 +46,15 @@ resolution: 1920x1080
 
 ## Code images
 
+Fenced `math` blocks are rendered by Peitho's built-in KaTeX renderer into
+HTML+MathML body content. They need no frontmatter. When a deck uses math,
+Peitho prepends KaTeX CSS to `peitho.css` and writes fonts under
+`katex-fonts/`.
+
 Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
 then treated as images. Use `code_images` for other diagram tags, or when a
-deck needs to override the built-in Mermaid renderer with an external command.
+deck needs to override the built-in Mermaid or math renderer with an external
+command.
 
 Each `code_images` entry maps a language tag to a command string. Peitho
 shell-splits the string into argv and executes the program directly; it does
@@ -59,6 +65,7 @@ not run the command through `sh -c`.
 code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
+  math: latex-to-svg              # optional override
 ---
 
 # Flow
@@ -72,10 +79,11 @@ graph TD
 The command receives the code block text on stdin and must write an SVG document
 to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
 then flows through the normal image resolver, so layouts should provide an
-`accepts="image"` slot.
+`accepts="image"` slot. This also applies to `code_images.math` overrides; the
+built-in math renderer is the body-inline HTML path.
 
-Bare boolean values such as `mermaid: false` and `mermaid: true` are reserved
-for possible future built-in opt-out syntax and are rejected with a line-numbered
+Bare boolean values such as `mermaid: false` and `math: true` are reserved for
+possible future built-in opt-out syntax and are rejected with a line-numbered
 error. Use a command string when you want an override.
 
 Preview watches the deck, layout, CSS, syntax, and font roots. It does not watch
@@ -83,7 +91,7 @@ files read by the command itself, such as Mermaid theme files or config JSON.
 Restart preview or touch the deck after changing those command inputs.
 
 See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
-and Graphviz example deck.
+and Graphviz example deck, and [Math](@/examples/math.md) for built-in math.
 
 ## Asset resolution order
 

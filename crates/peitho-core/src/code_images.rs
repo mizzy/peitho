@@ -20,6 +20,7 @@ use crate::{
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
+    math::{KatexRenderer, MathOutput, MathRenderer},
     parser::{parse_markdown, ParsedFrontmatter},
     phase::{Deck, Parsed},
 };
@@ -30,6 +31,13 @@ static BUILTIN_MERMAID_RENDERER: LazyLock<merman::render::HeadlessRenderer> =
 
 pub trait SvgRunner {
     fn run(&self, command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>>;
+}
+
+/// Typed narrowing that keeps the SVG tail unable to see BuiltinMath; a future
+/// SVG-emitting built-in must extend this seam explicitly.
+enum SvgCodeImageRenderer<'a> {
+    External(&'a CodeImageCommand),
+    BuiltinMermaid,
 }
 
 pub fn parse_deck_and_transform<R: SvgRunner>(
@@ -74,11 +82,22 @@ fn transform_fragment<R: SvgRunner>(
     if let Some(tag) = fragment.language() {
         if matches!(fragment.kind(), FragmentKind::Code) {
             if let Some(renderer) = config.renderer_for(tag) {
+                let renderer = match renderer {
+                    CodeImageRenderer::External(command) => SvgCodeImageRenderer::External(command),
+                    CodeImageRenderer::BuiltinMermaid => SvgCodeImageRenderer::BuiltinMermaid,
+                    CodeImageRenderer::BuiltinMath => {
+                        return transform_builtin_math_fragment(
+                            fragment.line(),
+                            tag,
+                            fragment.code_text(),
+                        );
+                    }
+                };
                 let key = match &renderer {
-                    CodeImageRenderer::External(command) => {
+                    SvgCodeImageRenderer::External(command) => {
                         code_image_cache_key(command, fragment.code_text())
                     }
-                    CodeImageRenderer::BuiltinMermaid => {
+                    SvgCodeImageRenderer::BuiltinMermaid => {
                         builtin_mermaid_cache_key(fragment.code_text())
                     }
                 };
@@ -94,14 +113,14 @@ fn transform_fragment<R: SvgRunner>(
                 let cache_hit = valid_cached_svg(&cache_path);
                 if !cache_hit {
                     let (bytes, output_context) = match &renderer {
-                        CodeImageRenderer::External(command) => {
+                        SvgCodeImageRenderer::External(command) => {
                             let bytes =
                                 runner.run(command, fragment.code_text()).map_err(|err| {
                                     code_image_error(fragment.line(), tag, err.message, err.help)
                                 })?;
                             (bytes, CodeImageOutputContext::ExternalCommand)
                         }
-                        CodeImageRenderer::BuiltinMermaid => {
+                        SvgCodeImageRenderer::BuiltinMermaid => {
                             let bytes = render_builtin_mermaid(fragment.code_text()).map_err(
                                 |message| {
                                     code_image_error(
@@ -154,6 +173,7 @@ fn transform_fragment<R: SvgRunner>(
         | FragmentKind::Paragraph
         | FragmentKind::Text
         | FragmentKind::Code
+        | FragmentKind::Math { .. }
         | FragmentKind::Image { .. }
         | FragmentKind::List => Ok(fragment),
     }
@@ -161,6 +181,41 @@ fn transform_fragment<R: SvgRunner>(
 
 fn render_builtin_mermaid(code_text: &str) -> std::result::Result<Vec<u8>, String> {
     render_builtin_mermaid_with(|| BUILTIN_MERMAID_RENDERER.render_svg_sync(code_text))
+}
+
+fn transform_builtin_math_fragment(line: usize, tag: &str, latex: &str) -> Result<SourceFragment> {
+    if latex.trim().is_empty() {
+        return Err(code_image_error(
+            line,
+            tag,
+            "math block is empty",
+            builtin_math_override_help(),
+        ));
+    }
+    let html = render_builtin_math(latex)
+        .map_err(|message| code_image_error(line, tag, message, builtin_math_override_help()))?;
+    Ok(SourceFragment::math(line, html, latex.to_owned()))
+}
+
+fn render_builtin_math(latex: &str) -> std::result::Result<String, String> {
+    render_builtin_math_with(|| KatexRenderer.render(latex, true))
+}
+
+fn render_builtin_math_with<F>(render: F) -> std::result::Result<String, String>
+where
+    F: FnOnce() -> std::result::Result<MathOutput, crate::math::MathError>,
+{
+    // AssertUnwindSafe is limited to the captured static KatexContext: no interior mutability in katex-rs 0.2.4 (the only RefCell in the render path is the per-call Settings.macros, constructed inside the closure and dropped on unwind); re-verify on katex-rs upgrades.
+    let result = catch_unwind(AssertUnwindSafe(render)).map_err(|payload| {
+        format!(
+            "built-in math renderer panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )
+    })?;
+    match result {
+        Ok(MathOutput::HtmlFragment(html)) => Ok(html),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn render_builtin_mermaid_with<F>(render: F) -> std::result::Result<Vec<u8>, String>
@@ -201,6 +256,10 @@ fn builtin_mermaid_non_diagram_message() -> &'static str {
 
 fn builtin_mermaid_override_help() -> &'static str {
     "fix the mermaid source, or set code_images.mermaid to an external command like mmdc -i - -o - -e svg"
+}
+
+fn builtin_math_override_help() -> &'static str {
+    "fix the LaTeX source, or set code_images.math to an external command"
 }
 
 fn valid_cached_svg(path: &Path) -> bool {
@@ -907,20 +966,21 @@ fn code_image_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_mermaid_cache_key, builtin_mermaid_override_help, code_image_cache_key, hex_encode,
-        is_svg_output, render_builtin_mermaid_with, svg_empty_output_error,
-        svg_has_usable_intrinsic_size, svg_intrinsic_size_error, svg_not_document_error,
-        svg_root_not_found_error, transform_code_images, CodeImageOutputContext, SvgRunner,
+        builtin_math_override_help, builtin_mermaid_cache_key, builtin_mermaid_override_help,
+        code_image_cache_key, hex_encode, is_svg_output, render_builtin_math_with,
+        render_builtin_mermaid_with, svg_empty_output_error, svg_has_usable_intrinsic_size,
+        svg_intrinsic_size_error, svg_not_document_error, svg_root_not_found_error,
+        transform_code_images, CodeImageOutputContext, SvgRunner,
     };
     use crate::error::ErrorKind;
     use crate::{
         check::check_deck,
         domain::{
             CodeImageCommand, CodeImagesConfig, FragmentKind, ResolvedImageAsset,
-            ResolvedImagePath, SourceFragment,
+            ResolvedImagePath, SlotName, SourceFragment,
         },
         layout::{parse_layout, Layouts},
-        mapping::dispatch_by_convention,
+        mapping::{dispatch_by_convention, map_by_convention},
         parser::{parse_frontmatter, parse_markdown},
         phase::{resolve_image_paths, Deck, DeckSettings, KeySource, Parsed, ParsedSlide},
         BuildError, Result,
@@ -975,6 +1035,18 @@ mod tests {
         }
     }
 
+    fn math_config() -> CodeImagesConfig {
+        CodeImagesConfig {
+            entries: BTreeMap::from([(
+                "math".to_owned(),
+                CodeImageCommand {
+                    argv: vec!["math-to-svg".to_owned()],
+                },
+            )]),
+            key_line: Some(2),
+        }
+    }
+
     fn deck_with_mermaid(code: &str) -> Deck<Parsed> {
         Deck::parsed(
             DeckSettings::default(),
@@ -992,6 +1064,44 @@ mod tests {
                 skip: false,
                 notes: None,
             }],
+        )
+    }
+
+    fn deck_with_math(latex: &str) -> Deck<Parsed> {
+        Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: crate::domain::SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![SourceFragment::code(
+                    7,
+                    Some("math".to_owned()),
+                    latex.to_owned(),
+                )],
+                skip: false,
+                notes: None,
+            }],
+        )
+    }
+
+    fn transform_markdown_with_code_images(markdown: &str) -> Result<Deck<Parsed>> {
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let config = frontmatter.settings().code_images().clone();
+        let parsed = parse_markdown(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        transform_code_images(
+            parsed,
+            &config,
+            &FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#),
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
         )
     }
 
@@ -1198,6 +1308,37 @@ mod tests {
     }
 
     #[test]
+    fn transforms_bare_math_with_builtin_renderer_to_html_fragment_without_cache() {
+        let latex = r#"\frac{1}{2}"#;
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let deck = transform_code_images(
+            deck_with_math(latex),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[0];
+
+        assert_eq!(runner.calls.get(), 0);
+        assert_eq!(fragment.line(), 7);
+        assert_eq!(fragment.markdown(), latex);
+        assert_eq!(fragment.plain_text(), "");
+        assert_eq!(fragment.code_text(), latex);
+        match fragment.kind() {
+            FragmentKind::Math { html } => {
+                assert!(html.starts_with(r#"<span class="katex-display""#), "{html}");
+                assert!(html.contains("mfrac"), "{html}");
+            }
+            other => panic!("expected math fragment, got {other:?}"),
+        }
+        assert!(!cache_dir.exists());
+    }
+
+    #[test]
     fn explicit_mermaid_entry_overrides_builtin_renderer() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
@@ -1216,6 +1357,36 @@ mod tests {
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
             br#"<svg viewBox="0 0 10 10" width="10" height="10">external override</svg>"#
         );
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn explicit_math_entry_overrides_builtin_renderer_with_external_svg_path() {
+        let latex = r#"\frac{1}{2}"#;
+        let key = code_image_cache_key(math_config().entries.get("math").unwrap(), latex);
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external math</svg>"#);
+
+        let deck =
+            transform_code_images(deck_with_math(latex), &math_config(), &runner, &cache_dir)
+                .unwrap();
+
+        assert_eq!(runner.calls.get(), 1);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.svg"))).unwrap(),
+            br#"<svg viewBox="0 0 10 10" width="10" height="10">external math</svg>"#
+        );
+        match deck.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "diagram (math)");
+                assert_eq!(
+                    src.as_str(),
+                    format!("{}/{key}.svg", crate::CODE_IMAGES_CACHE_DIR)
+                );
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
         assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
     }
 
@@ -1241,6 +1412,55 @@ mod tests {
         assert!(err.message.contains("code_images 'mermaid' failed"));
         assert!(err.message.contains("Unterminated node label"));
         assert_eq!(err.help, builtin_mermaid_override_help());
+    }
+
+    #[test]
+    fn builtin_math_render_error_reports_line_and_override_help() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let err = match transform_code_images(
+            deck_with_math(r#"\frac{1}{"#),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        ) {
+            Ok(_) => panic!("expected built-in math render failure"),
+            Err(err) => err,
+        };
+
+        assert_eq!(runner.calls.get(), 0);
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("code_images 'math' failed"));
+        assert!(err.message.contains("KaTeX parse error"));
+        assert!(err.message.contains("expected '}'"));
+        assert_eq!(err.help, builtin_math_override_help());
+        assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn empty_builtin_math_fences_are_line_numbered_errors_but_comment_input_is_allowed() {
+        for markdown in [
+            "# Intro\n\n```math\n```\n",
+            "# Intro\n\n```math\n  \n\t\n```\n",
+        ] {
+            let err = match transform_markdown_with_code_images(markdown) {
+                Ok(_) => panic!("expected empty built-in math render failure"),
+                Err(err) => err,
+            };
+
+            assert_eq!(err.kind, ErrorKind::Asset);
+            assert_eq!(err.line, Some(3));
+            assert_eq!(
+                err.message,
+                "code_images 'math' failed: math block is empty"
+            );
+            assert_eq!(err.help, builtin_math_override_help());
+        }
+
+        transform_markdown_with_code_images("# Intro\n\n```math\n% note\n```\n").unwrap();
     }
 
     #[test]
@@ -1279,6 +1499,16 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "built-in mermaid renderer panicked: boom");
+    }
+
+    #[test]
+    fn builtin_math_renderer_panic_becomes_error_message() {
+        let err = render_builtin_math_with(|| {
+            panic!("boom");
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "built-in math renderer panicked: boom");
     }
 
     #[test]
@@ -1911,6 +2141,65 @@ mod tests {
             FragmentKind::Image { alt, .. } => assert_eq!(alt, "diagram (mermaid)"),
             other => panic!("expected slot group child image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn math_inside_explicit_slot_group_maps_and_checks_as_math_fragment() {
+        let layout = parse_layout(
+            "explicit-slots",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="code" accepts="code" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">unused</svg>"#);
+
+        let body_markdown = "# Intro\n\n::: {slot=body}\n\n```math\n\\frac{1}{2}\n```\n:::\n";
+        let body_frontmatter = parse_frontmatter(body_markdown).unwrap();
+        let body_config = body_frontmatter.settings().code_images().clone();
+        let body_parsed = parse_markdown(
+            body_markdown,
+            body_frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let body_transformed =
+            transform_code_images(body_parsed, &body_config, &runner, &cache_dir).unwrap();
+        let body_checked =
+            check_deck(map_by_convention(body_transformed, &layout).unwrap()).unwrap();
+        let body = SlotName::new("body").unwrap();
+
+        match body_checked.checked_slides()[0].slots()[&body].fragments()[0].kind() {
+            FragmentKind::Math { html } => {
+                assert!(html.starts_with(r#"<span class="katex-display""#));
+            }
+            other => panic!("expected body slot math fragment, got {other:?}"),
+        }
+
+        let code_markdown = "# Intro\n\n::: {slot=code}\n\n```math\n\\frac{1}{2}\n```\n:::\n";
+        let code_frontmatter = parse_frontmatter(code_markdown).unwrap();
+        let code_config = code_frontmatter.settings().code_images().clone();
+        let code_parsed = parse_markdown(
+            code_markdown,
+            code_frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let code_transformed =
+            transform_code_images(code_parsed, &code_config, &runner, &cache_dir).unwrap();
+        let err = check_deck(map_by_convention(code_transformed, &layout).unwrap()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(5));
+        assert!(err.to_string().contains("slot 'code' accepts code"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
     }
 
     #[test]

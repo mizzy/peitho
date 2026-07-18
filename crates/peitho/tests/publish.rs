@@ -131,6 +131,40 @@ fn publish_rejects_remote_presentation_only_file() {
 }
 
 #[test]
+fn publish_accepts_math_build_distribution_with_katex_fonts() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let dist = dir.path().join("dist");
+    fs::write(&deck, "# Math\n\n```math\n\\frac{1}{2}\n```\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            dist.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(dist.join("katex-fonts/KaTeX_Main-Regular.woff2").is_file());
+    assert!(!dist.join("notes.json").exists());
+    assert!(!dist.join("present.html").exists());
+    assert!(!dist.join("presenter.html").exists());
+    assert!(!dist.join("preview.js").exists());
+    assert!(!dist.join("shell.js").exists());
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn publish_rejects_missing_manifest_slide_reference() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");
