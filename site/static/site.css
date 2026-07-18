@@ -480,28 +480,31 @@ hr {
 }
 
 .remote-shots p {
+  flex: 0 1 auto;
   margin: 0;
+}
+
+.remote-shots p:nth-of-type(1) {
+  flex: 0 0 240px;
+}
+
+.remote-shots p:nth-of-type(2) {
+  flex: 1 1 380px;
+  max-width: 560px;
 }
 
 .remote-shots img {
   border-radius: 12px;
   display: block;
   height: auto;
-  max-width: 100%;
-}
-
-.remote-shots p:first-child img {
-  width: 240px;
-}
-
-.remote-shots p:nth-child(2) img {
-  width: 520px;
+  width: 100%;
 }
 
 @media (max-width: 700px) {
-  .remote-shots p:first-child img,
-  .remote-shots p:nth-child(2) img {
-    width: 100%;
+  .remote-shots p:nth-of-type(1),
+  .remote-shots p:nth-of-type(2) {
+    flex: 1 1 100%;
+    max-width: none;
   }
 }
 

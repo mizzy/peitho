@@ -94,6 +94,7 @@ bar, in portrait or landscape, with iOS safe-area insets already accounted for:
 <div class="remote-shots">
 
 ![Peitho remote in portrait: preview on top, speaker notes and stacked Previous/Next below](/guide-shots/remote-portrait.png)
+
 ![Peitho remote in landscape: preview on the left, notes in the center, Previous and Next on the right edge rail](/guide-shots/remote-landscape.png)
 
 </div>
