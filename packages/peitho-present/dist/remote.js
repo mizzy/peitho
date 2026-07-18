@@ -1018,6 +1018,7 @@ var RemoteController = class {
   notes = { version: 1, notes: {} };
   renderedNotesValue = null;
   slides = [];
+  viewportTrackerCleanup = null;
   timerState = null;
   controlsCleanup = null;
   syncCleanup = null;
@@ -1040,6 +1041,7 @@ var RemoteController = class {
   async load() {
     try {
       const manifest = await this.fetchJson(this.manifestUrl);
+      this.viewportTrackerCleanup = installViewportHeightTracker(this.win, this.doc);
       this.manifest = manifest;
       this.notes = await this.fetchNotes();
       this.slides = manifest.slides.map((slide) => ({
@@ -1087,6 +1089,8 @@ var RemoteController = class {
   }
   destroy() {
     this.clearTimerInterval();
+    this.viewportTrackerCleanup?.();
+    this.viewportTrackerCleanup = null;
     this.syncCleanup?.();
     this.syncCleanup = null;
     this.previewShell?.destroy();
@@ -1290,6 +1294,22 @@ var RemoteController = class {
     this.root.textContent = message;
   }
 };
+function installViewportHeightTracker(win, doc) {
+  const write = () => {
+    const height = win.visualViewport?.height ?? win.innerHeight;
+    doc.documentElement.style.setProperty("--peitho-viewport-height", `${height}px`);
+  };
+  const resizeTarget = win.visualViewport ?? win;
+  write();
+  resizeTarget.addEventListener("resize", write);
+  win.addEventListener("orientationchange", write);
+  const animationFrame = win.requestAnimationFrame(() => write());
+  return () => {
+    resizeTarget.removeEventListener("resize", write);
+    win.removeEventListener("orientationchange", write);
+    win.cancelAnimationFrame(animationFrame);
+  };
+}
 function remoteButton(doc, action, label) {
   const button = doc.createElement("button");
   button.type = "button";

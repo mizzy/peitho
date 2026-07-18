@@ -18,6 +18,8 @@ type MockChannel = SyncChannel & {
   deliver(message: unknown): void;
 };
 
+type MockVisualViewport = EventTarget & { height: number };
+
 function okJson(value: unknown): Response {
   return { ok: true, status: 200, json: async () => value } as Response;
 }
@@ -230,6 +232,56 @@ it("remote controls compose dimmable rows and actions in fixed order", () => {
     expect(element?.classList).toContain("peitho-remote-dim-on-end");
   }
   expect(actions?.classList).not.toContain("peitho-remote-dim-on-end");
+});
+
+it("remote view tracks visual viewport height until destroyed", async () => {
+  const originalVisualViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+  const visualViewport = new EventTarget() as MockVisualViewport;
+  visualViewport.height = 812;
+  Object.defineProperty(window, "visualViewport", {
+    configurable: true,
+    value: visualViewport
+  });
+  cleanups.push(() => {
+    if (originalVisualViewport == null) {
+      delete (window as Window & { visualViewport?: VisualViewport }).visualViewport;
+    } else {
+      Object.defineProperty(window, "visualViewport", originalVisualViewport);
+    }
+    document.documentElement.style.removeProperty("--peitho-viewport-height");
+  });
+  let rafCallback: FrameRequestCallback | null = null;
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    rafCallback = callback;
+    return 1;
+  });
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+
+  const { view } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }])
+  );
+
+  expect(document.documentElement.style.getPropertyValue("--peitho-viewport-height")).toBe(
+    "812px"
+  );
+  visualViewport.height = 820;
+  rafCallback?.(0);
+  expect(document.documentElement.style.getPropertyValue("--peitho-viewport-height")).toBe(
+    "820px"
+  );
+  visualViewport.height = 760;
+  visualViewport.dispatchEvent(new Event("resize"));
+  expect(document.documentElement.style.getPropertyValue("--peitho-viewport-height")).toBe(
+    "760px"
+  );
+
+  view.destroy();
+  visualViewport.height = 700;
+  visualViewport.dispatchEvent(new Event("resize"));
+
+  expect(document.documentElement.style.getPropertyValue("--peitho-viewport-height")).toBe(
+    "760px"
+  );
 });
 
 it("remote controller resolves next and prev across skipped slides and posts absolute indexes", async () => {

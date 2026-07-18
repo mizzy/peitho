@@ -779,8 +779,8 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
   <style>
     :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --peitho-canvas-width: __PEITHO_CANVAS_WIDTH__px; --peitho-canvas-height: __PEITHO_CANVAS_HEIGHT__px; --peitho-canvas-aspect: __PEITHO_CANVAS_ASPECT__; }
     html, body { margin: 0; height: 100%; background: #101216; color: #f5f7fb; }
-    body { height: 100vh; height: 100svh; height: 100dvh; overflow: hidden; }
-    #peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 8px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
+    body { height: 100vh; height: 100svh; height: 100dvh; height: var(--peitho-viewport-height, 100dvh); overflow: hidden; }
+    #peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; height: var(--peitho-viewport-height, 100dvh); display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 8px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); box-sizing: border-box; }
     .peitho-remote-error { align-self: center; justify-self: center; max-width: 32rem; padding: 16px; border: 1px solid #7f1d1d; background: #2a1215; color: #ffd7d7; border-radius: 6px; line-height: 1.4; }
     .peitho-remote { width: 100%; max-width: 32rem; margin: 0 auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
     .peitho-remote-dim-on-end { transition: opacity 120ms ease; }
@@ -1786,10 +1786,14 @@ Paragraph after heading.
         assert!(html.contains(
             "html, body { margin: 0; height: 100%; background: #101216; color: #f5f7fb; }"
         ));
-        assert!(html
-            .contains("body { height: 100vh; height: 100svh; height: 100dvh; overflow: hidden; }"));
+        assert!(html.contains("body { height: 100vh; height: 100svh; height: 100dvh; height: var(--peitho-viewport-height, 100dvh); overflow: hidden; }"));
+        assert_eq!(
+            html.matches("height: var(--peitho-viewport-height, 100dvh);")
+                .count(),
+            2
+        );
         assert!(html.contains("padding-top: calc(14px + env(safe-area-inset-top, 0px));"));
-        assert!(html.contains("#peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 8px;"));
+        assert!(html.contains("#peitho-remote-root { height: 100vh; height: 100svh; height: 100dvh; height: var(--peitho-viewport-height, 100dvh); display: flex; flex-direction: column; gap: 12px; padding: 14px 14px 8px;"));
         assert!(html.contains("padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));"));
         assert!(html.contains(".peitho-remote-preview { position: relative; aspect-ratio: var(--peitho-canvas-aspect); border-radius: 10px; border: 1px solid #2a3240; background: #fff; overflow: hidden; flex: 0 1 auto; min-height: 0;"));
         assert!(html.contains(
