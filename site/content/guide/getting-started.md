@@ -104,5 +104,20 @@ For debugging, open the presenter in a normal window instead of full-screen:
 peitho present --presenter-windowed
 ```
 
+## Drive the deck from your phone
+
+To use a phone as a clicker, run:
+
+```sh
+peitho present --host
+```
+
+Peitho binds `/remote` on your LAN with a stable `:6173` port, prints a terminal
+QR code, and prefers a VPN address (such as Tailscale) when one is available.
+Scan the QR once in Safari, use the share sheet's Add to Home Screen action, and
+later `peitho present --host` runs reuse the same home-screen URL. See
+[`peitho present`](@/guide/cli.md#peitho-present) for `--host <IP>` binding and
+`--port` overrides.
+
 Next, learn the deck syntax in [Writing Decks](@/guide/writing-decks.md);
 for diagrams-as-code, see [Frontmatter](@/guide/frontmatter.md#code-images).

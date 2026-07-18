@@ -1,5 +1,5 @@
 ---
-time: 20m
+time: 21m
 ---
 
 <!-- {"key":"cover","section":"Intro","time":"3m"} -->
@@ -211,7 +211,7 @@ A slide with a `key` gets a `data-slide-key` attribute in the HTML, so CSS can s
 
 ---
 
-<!-- {"key":"preview","section":"Run","time":"4m"} -->
+<!-- {"key":"preview","section":"Run","time":"5m"} -->
 # The edit loop lives in peitho preview
 
 Preview watches the deck, its layouts, and its CSS. Every save triggers a rebuild and a browser reload. The currently visible slide and the overview state survive the reload, so the slide you were tweaking does not disappear on you.
@@ -235,6 +235,19 @@ Preview watches the deck, its layouts, and its CSS. Every save triggers a rebuil
 Present places slides fullscreen on the external display and drops the presenter view on the machine you drive. Current slide, next slide, speaker notes, timer, and per-section plan-vs-actuals all live on one screen. Space starts the timer, Esc closes everything.
 
 ![Presenter view: current and next slides, notes, timer, and agenda](img/presenter.png)
+
+---
+
+<!-- {"key":"remote"} -->
+# Drive the deck from your phone
+
+`peitho present --host` exposes `/remote` on your LAN (VPN like Tailscale is preferred), prints a terminal QR code, and pins the port to `6173` so the URL stays stable across runs. Scan it once in Safari, tap Add to Home Screen, and the remote opens chrome-free the next time you present.
+
+```sh
+peitho present --host
+```
+
+<!-- The bare form auto-picks the best non-loopback address; pass `--host 100.64.0.5` (or `0.0.0.0`) to bind a specific one. `--port` overrides the fixed default when 6173 is taken. -->
 
 ---
 
