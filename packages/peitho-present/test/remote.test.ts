@@ -244,15 +244,15 @@ it("remote view tracks visual viewport height until destroyed", async () => {
   });
   cleanups.push(() => {
     if (originalVisualViewport == null) {
-      delete (window as Window & { visualViewport?: VisualViewport }).visualViewport;
+      delete (window as unknown as { visualViewport?: VisualViewport }).visualViewport;
     } else {
       Object.defineProperty(window, "visualViewport", originalVisualViewport);
     }
     document.documentElement.style.removeProperty("--peitho-viewport-height");
   });
-  let rafCallback: FrameRequestCallback | null = null;
+  const raf = { callback: null as FrameRequestCallback | null };
   vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
-    rafCallback = callback;
+    raf.callback = callback;
     return 1;
   });
   vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
@@ -265,7 +265,8 @@ it("remote view tracks visual viewport height until destroyed", async () => {
     "812px"
   );
   visualViewport.height = 820;
-  rafCallback?.(0);
+  if (raf.callback == null) throw new Error("missing viewport animation frame callback");
+  raf.callback(0);
   expect(document.documentElement.style.getPropertyValue("--peitho-viewport-height")).toBe(
     "820px"
   );

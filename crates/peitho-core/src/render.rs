@@ -1837,9 +1837,7 @@ Paragraph after heading.
         assert!(html.contains(
             ".peitho-remote-section { font-size: 12.5px; color: #aab3c2; line-height: 1.35; }"
         ));
-        assert!(
-            html.contains(".peitho-remote-section b { color: #dde3ec; font-weight: 600; }")
-        );
+        assert!(html.contains(".peitho-remote-section b { color: #dde3ec; font-weight: 600; }"));
         assert!(html.contains(".peitho-remote-notes { flex: 1; min-height: 0; background: #181c23; border: 1px solid #2a3240; border-radius: 12px; padding: 14px 16px;"));
         assert!(html.contains(".peitho-remote-notes-body { font-size: 15px; line-height: 1.65; color: #dde3ec; white-space: pre-wrap; overflow-y: auto;"));
         assert!(html.contains(
@@ -1863,9 +1861,9 @@ Paragraph after heading.
         );
         assert!(html.contains(".peitho-remote-pace { grid-area: 4 / 1 / 5 / 2; flex-wrap: wrap; }"));
         assert!(html.contains(".peitho-remote-notes { grid-area: 1 / 2 / 4 / 3; }"));
-        assert!(html.contains(
-            ".peitho-remote-section { grid-area: 4 / 2 / 5 / 3; align-self: end; }"
-        ));
+        assert!(
+            html.contains(".peitho-remote-section { grid-area: 4 / 2 / 5 / 3; align-self: end; }")
+        );
         assert!(
             html.contains(".peitho-remote-actions { grid-area: 1 / 3 / 5 / 4; min-height: 0; }")
         );
