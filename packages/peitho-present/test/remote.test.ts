@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
 import {
+  createDimmableRow,
   expectedElapsedAtSlide,
   installRemoteControls,
   mountRemoteView,
@@ -198,6 +199,39 @@ it("remote controls mount disabled before the synced event arrives", () => {
   ).toBe(true);
 });
 
+it("remote controls compose dimmable rows and actions in fixed order", () => {
+  const root = document.createElement("main");
+  cleanups.push(installRemoteControls({ root, document, bus: new EventTarget() }));
+
+  const row = createDimmableRow(document, "section", "peitho-test-row");
+  expect(row.classList).toContain("peitho-remote-dim-on-end");
+  expect(row.classList).toContain("peitho-test-row");
+
+  const container = root.querySelector<HTMLElement>(".peitho-remote");
+  if (container == null) throw new Error("missing remote container");
+  const preview = root.querySelector<HTMLElement>('[data-peitho-remote="preview"]');
+  const titlebar = root.querySelector<HTMLElement>(".peitho-remote-titlebar");
+  const chase = root.querySelector<HTMLElement>('[data-peitho-remote="chase"]');
+  const pace = root.querySelector<HTMLElement>(".peitho-remote-pace");
+  const notesPanel = root.querySelector<HTMLElement>(".peitho-remote-notes");
+  const actions = root.querySelector<HTMLElement>(".peitho-remote-actions");
+  const dimmableRows = [preview, titlebar, chase, pace, notesPanel];
+
+  expect(Array.from(container.children)).toEqual([
+    preview,
+    titlebar,
+    chase,
+    pace,
+    notesPanel,
+    actions
+  ]);
+  expect(dimmableRows).toHaveLength(5);
+  for (const element of dimmableRows) {
+    expect(element?.classList).toContain("peitho-remote-dim-on-end");
+  }
+  expect(actions?.classList).not.toContain("peitho-remote-dim-on-end");
+});
+
 it("remote controller resolves next and prev across skipped slides and posts absolute indexes", async () => {
   const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro" }, { key: "skip", skip: true }, { key: "end" }])
@@ -259,6 +293,40 @@ it("remote controls enable after synced replay is reported", async () => {
   ).toBe(true);
   button(root, "next").click();
   expect(channel.sent).toEqual([{ index: 1 }]);
+});
+
+it("remote controller transitions from loading to active to read-only ended", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }]),
+    mockChannel(),
+    { autoSync: false }
+  );
+
+  const timer = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer"]');
+  const reset = root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]');
+  const container = root.querySelector<HTMLElement>(".peitho-remote");
+
+  expect(container?.dataset.peithoEnded).toBe("false");
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(true);
+  expect(timer?.disabled).toBe(true);
+  expect(reset?.disabled).toBe(true);
+
+  channel.deliver({ synced: true });
+
+  expect(container?.dataset.peithoEnded).toBe("false");
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(false);
+  expect(timer?.disabled).toBe(false);
+  expect(reset?.disabled).toBe(true);
+
+  channel.deliver({ close: true });
+
+  expect(container?.dataset.peithoEnded).toBe("true");
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(true);
+  expect(timer?.disabled).toBe(true);
+  expect(reset?.disabled).toBe(true);
 });
 
 it("remote controller advances optimistically across rapid taps", async () => {

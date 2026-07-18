@@ -39,6 +39,22 @@ type RemoteTimerAnchor = {
 
 type TimerVisualState = "stopped" | "running" | "paused";
 
+type RemoteViewState =
+  | { kind: "loading" }
+  | { kind: "active"; synced: true }
+  | { kind: "ended" };
+
+const isReadOnly = (state: RemoteViewState): state is { kind: "ended" } =>
+  state.kind === "ended";
+const canInteract = (state: RemoteViewState): state is { kind: "active"; synced: true } =>
+  state.kind === "active";
+
+type RemoteRowElement = HTMLElement & { readonly __peithoDimmable: true };
+
+type RemoteRow =
+  | { kind: "dimmable"; element: RemoteRowElement }
+  | { kind: "actions"; element: HTMLElement };
+
 export type RemotePaceState =
   | { kind: "ahead" | "behind" | "onpace" | "overrun"; label: string }
   | { kind: "paused"; label: "Paused" };
@@ -103,12 +119,10 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   container.className = "peitho-remote";
   container.dataset.peithoEnded = "false";
 
-  const preview = doc.createElement("div");
-  preview.className = "peitho-remote-preview peitho-remote-dim-on-end";
+  const preview = createDimmableRow(doc, "div", "peitho-remote-preview");
   preview.dataset.peithoRemote = "preview";
 
-  const titlebar = doc.createElement("div");
-  titlebar.className = "peitho-remote-titlebar peitho-remote-dim-on-end";
+  const titlebar = createDimmableRow(doc, "div", "peitho-remote-titlebar");
   const title = doc.createElement("div");
   title.className = "peitho-remote-title";
   title.dataset.peithoRemote = "title";
@@ -119,8 +133,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   counter.textContent = "– / –";
   titlebar.append(title, counter);
 
-  const chase = doc.createElement("div");
-  chase.className = "peitho-remote-chase peitho-remote-dim-on-end";
+  const chase = createDimmableRow(doc, "div", "peitho-remote-chase");
   chase.dataset.peithoRemote = "chase";
   chase.dataset.peithoChase = "slide";
   const chaseTrack = doc.createElement("div");
@@ -142,8 +155,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   turtle.textContent = "🐢";
   chase.append(chaseTrack, rabbit, turtle);
 
-  const pace = doc.createElement("div");
-  pace.className = "peitho-remote-pace peitho-remote-dim-on-end";
+  const pace = createDimmableRow(doc, "div", "peitho-remote-pace");
   const timerButton = doc.createElement("button");
   timerButton.type = "button";
   timerButton.className = "peitho-remote-timer-button";
@@ -186,8 +198,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   delta.hidden = true;
   pace.append(timerButton, resetButton, elapsedRow, delta);
 
-  const notesPanel = doc.createElement("section");
-  notesPanel.className = "peitho-remote-notes peitho-remote-dim-on-end";
+  const notesPanel = createDimmableRow(doc, "section", "peitho-remote-notes");
   const notesCaption = doc.createElement("div");
   notesCaption.className = "peitho-remote-notes-caption";
   notesCaption.textContent = "NOTES";
@@ -216,7 +227,20 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   timerButton.addEventListener("click", onTimer);
   resetButton.addEventListener("click", onReset);
 
-  container.append(preview, titlebar, chase, pace, notesPanel, actions);
+  /**
+   * This is the remote's vertical composition contract. Adding a row here is a
+   * design change: decide whether it dims on Ended, and whether it reserves
+   * vertical space even when it has no content.
+   */
+  const rows: RemoteRow[] = [
+    { kind: "dimmable", element: preview },
+    { kind: "dimmable", element: titlebar },
+    { kind: "dimmable", element: chase },
+    { kind: "dimmable", element: pace },
+    { kind: "dimmable", element: notesPanel },
+    { kind: "actions", element: actions }
+  ];
+  container.append(...rows.map((row) => row.element));
   root.append(container);
 
   return () => {
@@ -226,6 +250,16 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
     resetButton.removeEventListener("click", onReset);
     container.remove();
   };
+}
+
+export function createDimmableRow(
+  doc: Document,
+  tag: string,
+  ...classNames: string[]
+): RemoteRowElement {
+  const el = doc.createElement(tag);
+  el.classList.add("peitho-remote-dim-on-end", ...classNames);
+  return el as RemoteRowElement;
 }
 
 export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () => void {
@@ -324,11 +358,10 @@ class RemoteController implements RemoteView {
   private readonly log: Pick<Console, "error">;
   private readonly now: () => number;
   private readonly reload: () => void;
-  private synced = false;
+  private state: RemoteViewState = { kind: "loading" };
   private notes: Notes = { version: 1, notes: {} };
   private renderedNotesValue: string | null = null;
   private slides: RemoteSlide[] = [];
-  private ended = false;
   private timerState: RemoteTimerAnchor | null = null;
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
@@ -441,12 +474,13 @@ class RemoteController implements RemoteView {
   }
 
   private setSynced(): void {
-    this.synced = true;
+    if (this.state.kind !== "loading") return;
+    this.state = { kind: "active", synced: true };
     this.render();
   }
 
   private setEnded(): void {
-    this.ended = true;
+    this.state = { kind: "ended" };
     this.clearTimerInterval();
     this.render();
   }
@@ -456,7 +490,7 @@ class RemoteController implements RemoteView {
     if (manifest == null) return;
     const container = this.root.querySelector<HTMLElement>(".peitho-remote");
     if (container == null) return;
-    container.dataset.peithoEnded = this.ended ? "true" : "false";
+    container.dataset.peithoEnded = isReadOnly(this.state) ? "true" : "false";
     const currentIndex = this.currentIndex;
     const slide = currentIndex == null ? null : manifest.slides[currentIndex];
     const total = this.slides.length;
@@ -505,8 +539,8 @@ class RemoteController implements RemoteView {
 
     const elapsedMs = this.currentElapsedMs();
     const state = timerVisualState(this.timerState, elapsedMs);
-    timerButton.disabled = this.ended || !this.synced;
-    resetButton.disabled = this.ended || !this.synced || state === "stopped";
+    timerButton.disabled = !canInteract(this.state);
+    resetButton.disabled = !canInteract(this.state) || state === "stopped";
     timerButton.dataset.peithoRunning = state === "running" ? "true" : "false";
     timerButton.dataset.peithoTimerAction = playpauseActionFor(state);
     timerButton.setAttribute("aria-label", timerAriaLabel(state));
@@ -595,9 +629,9 @@ class RemoteController implements RemoteView {
     const next = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]');
     if (prev == null || next == null) return;
     prev.disabled =
-      this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
+      !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
     next.disabled =
-      this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
+      !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
   }
 
   private syncPreview(currentIndex: number | null): void {
@@ -612,7 +646,7 @@ class RemoteController implements RemoteView {
   }
 
   private updateTimerInterval(): void {
-    if (this.ended || this.timerState?.running !== true) {
+    if (isReadOnly(this.state) || this.timerState?.running !== true) {
       this.clearTimerInterval();
       return;
     }

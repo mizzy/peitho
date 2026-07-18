@@ -787,6 +787,8 @@ function formatMinuteSeconds(ms) {
 }
 
 // src/remote.ts
+var isReadOnly = (state) => state.kind === "ended";
+var canInteract = (state) => state.kind === "active";
 async function mountRemoteView(options) {
   const view = new RemoteController(options);
   await view.load();
@@ -801,11 +803,9 @@ function installRemoteControls(options) {
   const container = doc.createElement("section");
   container.className = "peitho-remote";
   container.dataset.peithoEnded = "false";
-  const preview = doc.createElement("div");
-  preview.className = "peitho-remote-preview peitho-remote-dim-on-end";
+  const preview = createDimmableRow(doc, "div", "peitho-remote-preview");
   preview.dataset.peithoRemote = "preview";
-  const titlebar = doc.createElement("div");
-  titlebar.className = "peitho-remote-titlebar peitho-remote-dim-on-end";
+  const titlebar = createDimmableRow(doc, "div", "peitho-remote-titlebar");
   const title = doc.createElement("div");
   title.className = "peitho-remote-title";
   title.dataset.peithoRemote = "title";
@@ -815,8 +815,7 @@ function installRemoteControls(options) {
   counter.dataset.peithoRemote = "counter";
   counter.textContent = "\u2013 / \u2013";
   titlebar.append(title, counter);
-  const chase = doc.createElement("div");
-  chase.className = "peitho-remote-chase peitho-remote-dim-on-end";
+  const chase = createDimmableRow(doc, "div", "peitho-remote-chase");
   chase.dataset.peithoRemote = "chase";
   chase.dataset.peithoChase = "slide";
   const chaseTrack = doc.createElement("div");
@@ -837,8 +836,7 @@ function installRemoteControls(options) {
   turtle.setAttribute("aria-label", "time progress");
   turtle.textContent = "\u{1F422}";
   chase.append(chaseTrack, rabbit, turtle);
-  const pace = doc.createElement("div");
-  pace.className = "peitho-remote-pace peitho-remote-dim-on-end";
+  const pace = createDimmableRow(doc, "div", "peitho-remote-pace");
   const timerButton = doc.createElement("button");
   timerButton.type = "button";
   timerButton.className = "peitho-remote-timer-button";
@@ -880,8 +878,7 @@ function installRemoteControls(options) {
   delta.dataset.peithoRemote = "pace-delta";
   delta.hidden = true;
   pace.append(timerButton, resetButton, elapsedRow, delta);
-  const notesPanel = doc.createElement("section");
-  notesPanel.className = "peitho-remote-notes peitho-remote-dim-on-end";
+  const notesPanel = createDimmableRow(doc, "section", "peitho-remote-notes");
   const notesCaption = doc.createElement("div");
   notesCaption.className = "peitho-remote-notes-caption";
   notesCaption.textContent = "NOTES";
@@ -907,7 +904,15 @@ function installRemoteControls(options) {
   next.addEventListener("click", onNext);
   timerButton.addEventListener("click", onTimer);
   resetButton.addEventListener("click", onReset);
-  container.append(preview, titlebar, chase, pace, notesPanel, actions);
+  const rows = [
+    { kind: "dimmable", element: preview },
+    { kind: "dimmable", element: titlebar },
+    { kind: "dimmable", element: chase },
+    { kind: "dimmable", element: pace },
+    { kind: "dimmable", element: notesPanel },
+    { kind: "actions", element: actions }
+  ];
+  container.append(...rows.map((row) => row.element));
   root.append(container);
   return () => {
     prev.removeEventListener("click", onPrev);
@@ -916,6 +921,11 @@ function installRemoteControls(options) {
     resetButton.removeEventListener("click", onReset);
     container.remove();
   };
+}
+function createDimmableRow(doc, tag, ...classNames) {
+  const el = doc.createElement(tag);
+  el.classList.add("peitho-remote-dim-on-end", ...classNames);
+  return el;
 }
 function installRemoteSyncBridge(options) {
   const bus = options.bus ?? window;
@@ -1004,11 +1014,10 @@ var RemoteController = class {
   log;
   now;
   reload;
-  synced = false;
+  state = { kind: "loading" };
   notes = { version: 1, notes: {} };
   renderedNotesValue = null;
   slides = [];
-  ended = false;
   timerState = null;
   controlsCleanup = null;
   syncCleanup = null;
@@ -1113,11 +1122,12 @@ var RemoteController = class {
     this.render();
   }
   setSynced() {
-    this.synced = true;
+    if (this.state.kind !== "loading") return;
+    this.state = { kind: "active", synced: true };
     this.render();
   }
   setEnded() {
-    this.ended = true;
+    this.state = { kind: "ended" };
     this.clearTimerInterval();
     this.render();
   }
@@ -1126,7 +1136,7 @@ var RemoteController = class {
     if (manifest == null) return;
     const container = this.root.querySelector(".peitho-remote");
     if (container == null) return;
-    container.dataset.peithoEnded = this.ended ? "true" : "false";
+    container.dataset.peithoEnded = isReadOnly(this.state) ? "true" : "false";
     const currentIndex = this.currentIndex;
     const slide = currentIndex == null ? null : manifest.slides[currentIndex];
     const total = this.slides.length;
@@ -1169,8 +1179,8 @@ var RemoteController = class {
     if (timerButton == null || resetButton == null || elapsed == null) return;
     const elapsedMs = this.currentElapsedMs();
     const state = timerVisualState(this.timerState, elapsedMs);
-    timerButton.disabled = this.ended || !this.synced;
-    resetButton.disabled = this.ended || !this.synced || state === "stopped";
+    timerButton.disabled = !canInteract(this.state);
+    resetButton.disabled = !canInteract(this.state) || state === "stopped";
     timerButton.dataset.peithoRunning = state === "running" ? "true" : "false";
     timerButton.dataset.peithoTimerAction = playpauseActionFor(state);
     timerButton.setAttribute("aria-label", timerAriaLabel(state));
@@ -1244,8 +1254,8 @@ var RemoteController = class {
     const prev = this.root.querySelector('[data-peitho-action="prev"]');
     const next = this.root.querySelector('[data-peitho-action="next"]');
     if (prev == null || next == null) return;
-    prev.disabled = this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
-    next.disabled = this.ended || !this.synced || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
+    prev.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
+    next.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
   }
   syncPreview(currentIndex) {
     if (currentIndex == null) return;
@@ -1257,7 +1267,7 @@ var RemoteController = class {
     return currentTimerElapsedMs(this.timerState, this.now());
   }
   updateTimerInterval() {
-    if (this.ended || this.timerState?.running !== true) {
+    if (isReadOnly(this.state) || this.timerState?.running !== true) {
       this.clearTimerInterval();
       return;
     }
@@ -1432,6 +1442,7 @@ function paneViewport(pane) {
   });
 }
 export {
+  createDimmableRow,
   expectedElapsedAtSlide,
   installRemoteControls,
   installRemoteSyncBridge,
