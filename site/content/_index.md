@@ -14,7 +14,7 @@ title = "Separation of content and design"
 meta = "Markdown owns the content; HTML and CSS own the layout and theme. Neither leaks into the other."
 
 [[extra.sections.rows]]
-title = "Git-manageable HTML/CSS layouts"
+title = "Version-controllable HTML/CSS layouts"
 meta = "Layouts and CSS are normal files that diff and review cleanly. The layout itself is the schema (<slot name accepts arity>)."
 
 [[extra.sections.rows]]

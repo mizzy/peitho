@@ -9,7 +9,7 @@ All written artifacts in this project must be in English. This includes: documen
 ## The three pillars (invariants that must not be broken)
 
 1. **Separation of content and design**: Content is Markdown, design is layout HTML+CSS. Do not mix them
-2. **Git-manageable HTML/CSS layouts**: The layout itself is the schema (`<slot name accepts arity>`). Do not split the contract into a separate file
+2. **Version-controllable HTML/CSS layouts**: The layout itself is the schema (`<slot name accepts arity>`). Do not split the contract into a separate file
 3. **Type-checked slot contracts and keyed overrides**: Slot excess/deficiency, type mismatches, broken references, and unassigned content are all build errors with line numbers + help. **Silent dropping is absolutely forbidden** (never let the parser swallow unknown structures with `_ => {}`)
 
 Other invariants:
