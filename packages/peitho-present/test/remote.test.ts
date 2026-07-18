@@ -283,7 +283,7 @@ it("remote controller treats a null replay index as the first non-skipped slide"
   expect(channel.sent).toEqual([{ index: 2 }]);
 });
 
-it("remote renders preview title section notes and section-aware chase chrome", async () => {
+it("remote renders preview title notes and section-aware chase chrome without a section row", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
   const previewNavigations: unknown[] = [];
@@ -331,9 +331,7 @@ it("remote renders preview title section notes and section-aware chase chrome", 
   expect(
     root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.transform
   ).toBe("translateX(-27.78%)");
-  expect(root.querySelector('[data-peitho-remote="section"]')?.textContent).toBe(
-    "Architecture · slide 1 / 2 in section"
-  );
+  expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
   expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
     "Use the typed shell.\nNo shortcuts."
   );
@@ -396,7 +394,7 @@ it("remote mounts with empty notes placeholders when notes fetch fails", async (
   expect(error).toHaveBeenCalledWith("Failed to load notes.json: offline");
 });
 
-it("remote omits planned and section rows when the deck has no time or sections", async () => {
+it("remote omits planned rows when the deck has no time", async () => {
   const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro", title: "Intro" }, { key: "end", title: "End" }])
   );
@@ -823,8 +821,9 @@ it("remote controller disables buttons and shows ended state on close", async ()
   expect(
     root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
   ).toBe(true);
-  expect(root.querySelector('[data-peitho-remote="status"]')?.textContent).toBe("Ended");
   expect(root.querySelector<HTMLElement>(".peitho-remote")?.dataset.peithoEnded).toBe("true");
+  expect(root.querySelector('[data-peitho-remote="status"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase"]')?.classList).toContain(
     "peitho-remote-dim-on-end"
   );
