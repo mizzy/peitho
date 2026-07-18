@@ -362,7 +362,6 @@ class RemoteController implements RemoteView {
   private notes: Notes = { version: 1, notes: {} };
   private renderedNotesValue: string | null = null;
   private slides: RemoteSlide[] = [];
-  private viewportTrackerCleanup: (() => void) | null = null;
   private timerState: RemoteTimerAnchor | null = null;
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
@@ -387,7 +386,6 @@ class RemoteController implements RemoteView {
   async load(): Promise<void> {
     try {
       const manifest = await this.fetchJson<Manifest>(this.manifestUrl);
-      this.viewportTrackerCleanup = installViewportHeightTracker(this.win, this.doc);
       this.manifest = manifest;
       this.notes = await this.fetchNotes();
       this.slides = manifest.slides.map((slide) => ({
@@ -436,8 +434,6 @@ class RemoteController implements RemoteView {
 
   destroy(): void {
     this.clearTimerInterval();
-    this.viewportTrackerCleanup?.();
-    this.viewportTrackerCleanup = null;
     this.syncCleanup?.();
     this.syncCleanup = null;
     this.previewShell?.destroy();
@@ -703,23 +699,6 @@ class RemoteController implements RemoteView {
     this.root.className = "peitho-remote-error";
     this.root.textContent = message;
   }
-}
-
-function installViewportHeightTracker(win: Window, doc: Document): () => void {
-  const write = (): void => {
-    const height = win.visualViewport?.height ?? win.innerHeight;
-    doc.documentElement.style.setProperty("--peitho-viewport-height", `${height}px`);
-  };
-  const resizeTarget = win.visualViewport ?? win;
-  write();
-  resizeTarget.addEventListener("resize", write);
-  win.addEventListener("orientationchange", write);
-  const animationFrame = win.requestAnimationFrame(() => write());
-  return () => {
-    resizeTarget.removeEventListener("resize", write);
-    win.removeEventListener("orientationchange", write);
-    win.cancelAnimationFrame(animationFrame);
-  };
 }
 
 function remoteButton(doc: Document, action: "prev" | "next", label: string): HTMLButtonElement {
