@@ -29,7 +29,7 @@ Content that doesn't fit the contract — missing or extra slots, type mismatche
 The three pillars, in short:
 
 - **Separation of content and design** — content is Markdown, design is layout HTML and CSS. While writing, you never think about design; the design carries over to your next deck
-- **Git-manageable layouts** — design artifacts are plain HTML/CSS. They diff and review cleanly
+- **Version-controllable layouts** — design artifacts are plain HTML/CSS. They diff and review cleanly
 - **Type-checked slot contracts** — the layout is the schema. Violations are build errors with line numbers and hints, never silent drops
 
 ## Quick start

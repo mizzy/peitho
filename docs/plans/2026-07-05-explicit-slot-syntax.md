@@ -8,7 +8,7 @@ Break the spec-final design down to implementable steps. Everything is done in T
 ## Alignment with the three pillars / invariants
 
 - **Pillar ① (separation of content and design)**: the new notation is a Markdown-side extension (`:::` + attribute). No HTML fragment is imposed on the author. ✅
-- **Pillar ② (Git-manageable HTML/CSS layouts)**: no layout-side changes. The slot contract stays single-sourced from the layout HTML. ✅
+- **Pillar ② (Version-controllable HTML/CSS layouts)**: no layout-side changes. The slot contract stays single-sourced from the layout HTML. ✅
 - **Pillar ③ (type-checked slot contract, no silent drop)**:
   - `ExplicitSlot(SlotName)` newtype separates convention-driven and explicit routing at the type level
   - All 11 validation rules (see spec) become line-numbered build errors with help

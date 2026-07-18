@@ -21,7 +21,7 @@ peitho's own requirements rather than by what similar tools use:
   this spec was first approved): monochrome palette, Mincho typography, black
   section rules, and hairline rows. Zola templates are plain HTML + CSS
   (Tera), so the identity extends naturally to the whole site. This also
-  matches peitho's own pillars: HTML-native, git-manageable HTML/CSS.
+  matches peitho's own pillars: HTML-native, version-controllable HTML/CSS.
 - **Rust toolchain.** Zola is a single Rust binary; CI installs one tool. No
   new package ecosystem is introduced for the site.
 - **syntect built in.** Zola highlights code with syntect — the same
@@ -54,7 +54,7 @@ Japanese can be added later non-destructively by dropping
 ### Content structure: three pillars
 
 1. **Landing page** (`/`) — hero (one-line statement of what peitho is), the
-   three pillars (separation of content and design; git-manageable HTML/CSS
+   three pillars (separation of content and design; version-controllable HTML/CSS
    layouts; type-checked slot contracts), install one-liner, and entry points
    into the guide and examples. Uses the https://gosu.ke visual identity by
    author decision on 2026-07-09.

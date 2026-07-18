@@ -20,8 +20,8 @@
 
 1. **Separation of content and design** (derived from k1LoW/deck)
    Content is Markdown, design is templates and CSS. The two are never mixed.
-2. **HTML-native, git-manageable templates**
-   Design artifacts are HTML/CSS. They can be managed with git, diffed, and reviewed. Whereas deck locks design into Google Slides' proprietary world, Peitho differentiates itself here.
+2. **HTML-native, version-controllable templates**
+   Design artifacts are HTML/CSS. They can be version-controlled, diffed, and reviewed. Whereas deck locks design into Google Slides' proprietary world, Peitho differentiates itself here.
 3. **Type-checked slot contracts and keyed overrides** (derived from Carina)
    Slot shortages/excesses, type mismatches, and broken references are detected at build time. The polar opposite of deck's "silently drops content when placeholders are insufficient."
 
@@ -168,7 +168,7 @@ Peitho stays a **pure renderer** (it does not adopt deck's stateful-target appro
 ```
 
 - The content (Markdown) is never touched. Adjustments are left to the cascade.
-- Everything is git-managed, diffable, and fully reproducible. Re-rendering naturally reapplies it (achieving "the adjustment survives" even though it's a pure function, via source-side CSS).
+- Everything is version-controlled, diffable, and fully reproducible. Re-rendering naturally reapplies it (achieving "the adjustment survives" even though it's a pure function, via source-side CSS).
 - This is only possible because it's HTML/CSS-native. Since deck's Google Slides has no cascade, it had no choice but to accumulate state on the target. Peitho produces the same result without accumulating state.
 - **Override checking**: an override targeting a nonexistent slot is a compile error. A reference to a nonexistent slide key is also an error. Even the escape hatch is protected by types.
 
@@ -244,10 +244,10 @@ peitho/
 
 ## 11. Positioning (Differentiation from Existing Tools)
 
-- **deck**: borrows the content/design separation concept. However deck depends on Google Slides (proprietary, OAuth, stateful). Peitho differentiates itself by being HTML-native, git-managed, and a pure renderer.
+- **deck**: borrows the content/design separation concept. However deck depends on Google Slides (proprietary, OAuth, stateful). Peitho differentiates itself by being HTML-native, version-controllable, and a pure renderer.
 - **Slidev / Marp**: part of the same lineage of Markdown-based, developer-oriented presentation tools. Peitho's distinctiveness is its **type-checked slot contracts + keyed overrides** (no silent drops, broken references rejected at build time) — bringing Carina's type philosophy into slides.
 
-In short: **deck's content/design separation × HTML-native, git-manageable templates × Carina-derived type-checked slot contracts and keyed overrides**.
+In short: **deck's content/design separation × HTML-native, version-controllable templates × Carina-derived type-checked slot contracts and keyed overrides**.
 
 ---
 
