@@ -241,7 +241,7 @@ Present places slides fullscreen on the external display and drops the presenter
 <!-- {"key":"remote"} -->
 # Drive the deck from your phone
 
-`peitho present --host` exposes `/remote` on your LAN (VPN like Tailscale is preferred), prints a terminal QR code, and pins the port to `6173` so the URL stays stable across runs. Scan it once in Safari, tap Add to Home Screen, and the remote opens chrome-free the next time you present.
+`peitho present --host` exposes `/remote` on your LAN (VPN like Tailscale is preferred), prints a terminal QR code, and pins the port to `6173` so the URL stays stable across runs. Scan it once in Safari, tap Add to Home Screen, and the remote opens full-screen without the Safari address bar the next time you present.
 
 ```sh
 peitho present --host
