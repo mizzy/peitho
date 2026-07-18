@@ -407,9 +407,11 @@ pub fn fragment_src(index: usize, key: &SlideKey) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{
         check::check_deck,
-        domain::{AspectRatio, ResolvedImageAsset, ResolvedImagePath, SlideKey},
+        code_images::{parse_deck_and_transform, SvgRunner},
+        domain::{AspectRatio, CodeImageCommand, ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown},
@@ -541,6 +543,20 @@ mod tests {
         assert_eq!(text.title(), "Peitho");
         assert_eq!(text.body(), "Body text");
         assert_eq!(text.code(), "fn main() {}\n");
+    }
+
+    #[test]
+    fn build_manifest_uses_trimmed_latex_source_for_math_text_from_parser() {
+        let checked = checked_deck_with_code_images(
+            "# Math\n\nBefore\n\n```math\n\\frac{1}{2}\n```\n\nAfter",
+            title_body_layout(),
+        );
+
+        let manifest = build_manifest(&checked, &[]);
+        let text = manifest.slides()[0].text();
+
+        assert_eq!(text.body(), "Before\n\\frac{1}{2}\nAfter");
+        assert!(!text.body().contains("katex-display"));
     }
 
     #[test]
@@ -977,6 +993,31 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    fn checked_deck_with_code_images(
+        markdown: &str,
+        layout: Layout,
+    ) -> crate::phase::Deck<crate::phase::Checked> {
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let parsed = parse_deck_and_transform(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+            &NoSvgRunner,
+            cache.path(),
+        )
+        .unwrap();
+        check_deck(map_by_convention(parsed, &layout).unwrap()).unwrap()
+    }
+
+    struct NoSvgRunner;
+
+    impl SvgRunner for NoSvgRunner {
+        fn run(&self, _command: &CodeImageCommand, _stdin: &str) -> crate::Result<Vec<u8>> {
+            panic!("math manifest test must not invoke external SVG runner");
+        }
     }
 
     fn title_body_layout() -> Layout {

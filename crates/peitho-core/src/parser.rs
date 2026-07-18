@@ -3759,6 +3759,32 @@ After list
     }
 
     #[test]
+    fn accepts_bare_math_language_as_builtin_code_image() {
+        let deck = parse_markdown(
+            "# Intro\n\n```math\n\\frac{1}{2}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::Code);
+        assert_eq!(fragment.language(), Some("math"));
+    }
+
+    #[test]
+    fn rejects_bare_notmath_language_without_code_images_entry() {
+        let err = parse_markdown(
+            "# Intro\n\n```notmath\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unknown code language 'notmath'"));
+    }
+
+    #[test]
     fn rejects_bare_plantuml_language_without_code_images_entry() {
         let err = parse_markdown(
             "# Intro\n\n```plantuml\n@startuml\n@enduml\n```",

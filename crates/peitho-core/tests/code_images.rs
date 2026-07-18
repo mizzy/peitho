@@ -50,7 +50,7 @@ fn renders_code_image_as_resolved_svg_img() {
         })
     })
     .unwrap();
-    let rendered = render_deck(resolved, &Highlighter::defaults()).unwrap();
+    let rendered = render_deck(resolved, &Highlighter::defaults(), String::new()).unwrap();
     let html = rendered.slides()[0].html();
 
     assert!(html.contains("<img"));

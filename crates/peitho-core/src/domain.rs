@@ -190,6 +190,7 @@ pub struct CodeImagesConfig {
 pub enum CodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
     BuiltinMermaid,
+    BuiltinMath,
 }
 
 impl CodeImagesConfig {
@@ -197,7 +198,11 @@ impl CodeImagesConfig {
         if let Some(command) = self.entries.get(tag) {
             return Some(CodeImageRenderer::External(command));
         }
-        (tag == "mermaid").then_some(CodeImageRenderer::BuiltinMermaid)
+        match tag {
+            "mermaid" => Some(CodeImageRenderer::BuiltinMermaid),
+            "math" => Some(CodeImageRenderer::BuiltinMath),
+            _ => None,
+        }
     }
 }
 
@@ -582,6 +587,9 @@ pub enum FragmentKind<S = RawImagePath> {
     Paragraph,
     Text,
     Code,
+    Math {
+        html: String,
+    },
     Image {
         alt: String,
         src: S,
@@ -602,6 +610,7 @@ impl<S> FragmentKind<S> {
             Self::Paragraph => Accepts::Blocks,
             Self::Text => Accepts::Text,
             Self::Code => Accepts::Code,
+            Self::Math { .. } => Accepts::Blocks,
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
             // SlotGroup is expanded in mapping, so its own accepts value never
@@ -617,6 +626,7 @@ impl<S> FragmentKind<S> {
             Self::Paragraph => "paragraph",
             Self::Text => "text block",
             Self::Code => "code block",
+            Self::Math { .. } => "math block",
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::SlotGroup { .. } => "slot group",
@@ -631,6 +641,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Paragraph => "paragraph",
             Self::Text => "text",
             Self::Code => "code",
+            Self::Math { .. } => "math",
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::SlotGroup { .. } => "slot group",
@@ -699,6 +710,22 @@ impl SourceFragment<RawImagePath> {
         }
     }
 
+    pub(crate) fn math(
+        line: usize,
+        html: impl Into<String>,
+        latex_source: impl Into<String>,
+    ) -> Self {
+        let latex_source = latex_source.into();
+        Self {
+            line,
+            kind: FragmentKind::Math { html: html.into() },
+            markdown: latex_source.clone(),
+            text: String::new(),
+            code: latex_source,
+            language: None,
+        }
+    }
+
     pub(crate) fn slot_group(
         line: usize,
         name: ExplicitSlot,
@@ -749,6 +776,7 @@ impl<S> SourceFragment<S> {
             FragmentKind::Paragraph => FragmentKind::Paragraph,
             FragmentKind::Text => FragmentKind::Text,
             FragmentKind::Code => FragmentKind::Code,
+            FragmentKind::Math { html } => FragmentKind::Math { html },
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
             FragmentKind::SlotGroup { name, children } => {
@@ -849,12 +877,16 @@ mod tests {
         let mermaid_command = CodeImageCommand {
             argv: vec!["mmdc".to_owned(), "-i".to_owned(), "-".to_owned()],
         };
+        let math_command = CodeImageCommand {
+            argv: vec!["math-to-svg".to_owned()],
+        };
         let dot_command = CodeImageCommand {
             argv: vec!["dot".to_owned(), "-Tsvg".to_owned()],
         };
         let config = CodeImagesConfig {
             entries: BTreeMap::from([
                 ("mermaid".to_owned(), mermaid_command.clone()),
+                ("math".to_owned(), math_command.clone()),
                 ("dot".to_owned(), dot_command.clone()),
             ]),
             key_line: Some(2),
@@ -870,10 +902,42 @@ mod tests {
             Some(CodeImageRenderer::External(&dot_command))
         );
         assert_eq!(
+            config.renderer_for("math"),
+            Some(CodeImageRenderer::External(&math_command))
+        );
+        assert_eq!(
             empty.renderer_for("mermaid"),
             Some(CodeImageRenderer::BuiltinMermaid)
         );
+        assert_eq!(
+            empty.renderer_for("math"),
+            Some(CodeImageRenderer::BuiltinMath)
+        );
         assert_eq!(empty.renderer_for("plantuml"), None);
+    }
+
+    #[test]
+    fn source_fragment_math_preserves_html_and_latex_source() {
+        let fragment = SourceFragment::math(
+            12,
+            r#"<span class="katex-display">math html</span>"#.to_owned(),
+            r#"\frac{1}{2}"#.to_owned(),
+        );
+
+        assert_eq!(fragment.line(), 12);
+        assert_eq!(fragment.markdown(), r#"\frac{1}{2}"#);
+        assert_eq!(fragment.plain_text(), "");
+        assert_eq!(fragment.code_text(), r#"\frac{1}{2}"#);
+        assert_eq!(fragment.language(), None);
+        match fragment.kind() {
+            FragmentKind::Math { html } => {
+                assert_eq!(html, r#"<span class="katex-display">math html</span>"#);
+            }
+            other => panic!("expected math fragment, got {other:?}"),
+        }
+        assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
+        assert_eq!(fragment.kind().removal_noun(), "math block");
+        assert_eq!(fragment.kind().to_string(), "math");
     }
 
     #[test]

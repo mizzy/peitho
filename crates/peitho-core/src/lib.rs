@@ -7,6 +7,7 @@ mod json;
 pub mod layout;
 pub mod manifest;
 pub mod mapping;
+pub mod math;
 pub mod notes;
 pub mod parser;
 pub mod phase;
@@ -30,6 +31,7 @@ pub use mapping::{
     dispatch_by_convention, explain_dispatch, map_by_convention, Candidate, CandidateOutcome,
     DispatchResult, DispatchTrace,
 };
+pub use math::{MathAssets, MathFontAsset};
 pub use notes::{notes_json, Notes};
 pub use parser::{parse_frontmatter, ParsedFrontmatter};
 pub use phase::{
@@ -48,7 +50,7 @@ pub use theme::{build_theme_css, CssFile};
 /// use peitho_core::*;
 ///
 /// fn raw_checked_deck_cannot_render(deck: Deck<Checked<RawImagePath>>) {
-///     let _ = render_deck(deck, &highlight::Highlighter::defaults());
+///     let _ = render_deck(deck, &highlight::Highlighter::defaults(), String::new());
 /// }
 /// ```
 pub fn render_deck_requires_resolved_image_paths() {}

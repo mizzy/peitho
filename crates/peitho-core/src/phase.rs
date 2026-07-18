@@ -10,6 +10,7 @@ use crate::{
     },
     error::{BuildError, Result},
     layout::Layout,
+    math::MathAssets,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +337,7 @@ pub struct ImageRequest<'a> {
 pub struct Rendered {
     slides: Vec<RenderedSlide>,
     css: String,
+    math_assets: Option<MathAssets>,
 }
 
 impl<P> Deck<P> {
@@ -595,10 +597,15 @@ impl Deck<Rendered> {
         settings: DeckSettings,
         slides: Vec<RenderedSlide>,
         css: String,
+        math_assets: Option<MathAssets>,
     ) -> Self {
         Self {
             settings,
-            phase: Rendered { slides, css },
+            phase: Rendered {
+                slides,
+                css,
+                math_assets,
+            },
         }
     }
 
@@ -612,6 +619,10 @@ impl Deck<Rendered> {
 
     pub fn css(&self) -> &str {
         &self.phase.css
+    }
+
+    pub fn math_assets(&self) -> Option<MathAssets> {
+        self.phase.math_assets
     }
 }
 

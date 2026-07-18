@@ -261,6 +261,37 @@ fn build_with_builtin_mermaid_writes_svg_asset_and_references_it() {
 }
 
 #[test]
+fn build_with_builtin_math_writes_html_css_and_katex_fonts() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Math\n\n```math\n\\frac{1}{2}\n```\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let slide = fs::read_to_string(out.join("slides/000-math.html")).unwrap();
+    assert!(slide.contains(r#"<div class="peitho-math"><span class="katex-display""#));
+    assert!(slide.contains("mfrac"));
+    assert!(!slide.contains("<img "));
+
+    let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+    assert!(css.contains(".katex"));
+    assert!(css.contains("url(katex-fonts/"));
+    assert!(!css.contains("url(fonts/KaTeX_"));
+    assert!(out.join("katex-fonts/KaTeX_Main-Regular.woff2").is_file());
+}
+
+#[test]
 fn build_with_missing_code_images_command_reports_code_block_line() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
