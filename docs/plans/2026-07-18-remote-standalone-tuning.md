@@ -140,8 +140,10 @@ Each: failing test first, then implementation, then the full gate list.
 - `peitho present --host` on a deck with a `time:` frontmatter and sections;
   scan QR, open in Safari, Add to Home Screen. Launch:
   - Portrait: notes taller than before by ~50px; no gap between notes and
-    Previous; no gap between Next and the home indicator.
-  - Landscape: notes fills the full right column; no Section line below.
+    Previous; no gap between Next and the home indicator — including on a
+    cold start without rotating the phone first (the dvh pitfall below).
+  - Landscape: notes extends down through the old status band (rows 1–3);
+    the Section line stays at the bottom of the column (row 4).
   - End the deck (kill `peitho present`): whole remote surface dims to a
     heavier grey, every button is unpressable. No "Ended" text anywhere.
 - Screenshot evidence in the PR.
@@ -150,11 +152,36 @@ Each: failing test first, then implementation, then the full gate list.
 
 - Any tablet-specific layout.
 - Any changes to how the presenter view (not /remote) handles Ended.
-- Section context on the phone remote — deliberately dropped in favor of
-  notes-first; the presenter view still shows section context properly.
 - Portrait `.peitho-remote-chase` height, pace row layout, or button sizes —
   none of these were in the author's item list and touching them would be
   scope creep.
+
+## Real-device amendments (2026-07-18, author's phone)
+
+- **Landscape Section line restored.** The first implementation deleted the
+  Section line along with the Status row, reading the issue's "if the
+  status/section placement is rethought" as license to drop it. The author
+  corrected this: removal was never requested. The Section line is back at
+  landscape row 4 (bottom-aligned, built via `createDimmableRow` so it keeps
+  `dim-on-end`), and notes spans rows 1–3 (`grid-area: 1/2/4/3`) — gaining
+  exactly the old status band, not the section band. Portrait is unaffected
+  (the section line only renders in the landscape grid).
+- **`100dvh` is stale on iOS standalone cold start** (measured on the
+  author's device: portrait launch leaves a dead band at the bottom, and one
+  portrait→landscape→portrait rotation clears it — matching the documented
+  WebKit behavior that dynamic-viewport units are only initialized once the
+  viewport is "exercised" by a geometry change). Reading
+  `visualViewport.height` / `window.innerHeight` from JS at startup returns
+  the same stale value, so a first-attempt JS tracker that mirrored
+  `visualViewport.height` into a CSS variable did not help and was removed —
+  do not retry that approach. The fix is CSS-only: standalone mode has no UA
+  chrome, so `100vh` is correct from launch and always equal to the real
+  viewport there. `@media (display-mode: standalone)` overrides `body` /
+  `#peitho-remote-root` heights to `100vh`, plus a companion override of the
+  landscape preview-column formula (`100vh` in place of `100dvh`). In-browser
+  pages keep the `vh → svh → dvh` cascade — the `dvh` remains load-bearing
+  for Safari's landscape tab-bar under-report
+  (docs/plans/2026-07-17-remote-landscape.md).
 
 ## Design record (mock iteration)
 
