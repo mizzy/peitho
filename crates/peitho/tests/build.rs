@@ -1247,20 +1247,20 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("built 21 slide(s)"));
+        .stdout(predicate::str::contains("built 23 slide(s)"));
 
     let manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
             .unwrap();
-    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(1_260_000));
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(1_380_000));
     let sections = manifest["sections"].as_array().unwrap();
     let expected = [
         ("Intro", 0, 3, 180_000),
         ("Install", 4, 4, 60_000),
         ("Write", 5, 10, 360_000),
         ("Design", 11, 14, 300_000),
-        ("Run", 15, 19, 300_000),
-        ("Close", 20, 20, 60_000),
+        ("Run", 15, 21, 420_000),
+        ("Close", 22, 22, 60_000),
     ];
     assert_eq!(sections.len(), expected.len());
     for (section, (name, start, end, planned)) in sections.iter().zip(expected) {

@@ -119,5 +119,12 @@ later `peitho present --host` runs reuse the same home-screen URL. See
 [`peitho present`](@/guide/cli.md#peitho-present) for `--host <IP>` binding and
 `--port` overrides.
 
+<div class="remote-shots">
+
+![Peitho remote in portrait: preview on top, speaker notes and stacked Previous/Next below](/guide-shots/remote-portrait.png)
+![Peitho remote in landscape: preview on the left, notes in the center, Previous and Next on the right edge rail](/guide-shots/remote-landscape.png)
+
+</div>
+
 Next, learn the deck syntax in [Writing Decks](@/guide/writing-decks.md);
 for diagrams-as-code, see [Frontmatter](@/guide/frontmatter.md#code-images).

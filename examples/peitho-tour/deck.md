@@ -1,5 +1,5 @@
 ---
-time: 21m
+time: 23m
 ---
 
 <!-- {"key":"cover","section":"Intro","time":"3m"} -->
@@ -211,7 +211,7 @@ A slide with a `key` gets a `data-slide-key` attribute in the HTML, so CSS can s
 
 ---
 
-<!-- {"key":"preview","section":"Run","time":"5m"} -->
+<!-- {"key":"preview","section":"Run","time":"7m"} -->
 # The edit loop lives in peitho preview
 
 Preview watches the deck, its layouts, and its CSS. Every save triggers a rebuild and a browser reload. The currently visible slide and the overview state survive the reload, so the slide you were tweaking does not disappear on you.
@@ -248,6 +248,20 @@ peitho present --host
 ```
 
 <!-- The bare form auto-picks the best non-loopback address; pass `--host 100.64.0.5` (or `0.0.0.0`) to bind a specific one. `--port` overrides the fixed default when 6173 is taken. -->
+
+---
+
+<!-- {"key":"remote-portrait"} -->
+# Portrait: preview above, notes and buttons below
+
+![Peitho remote in portrait: current slide preview on top, speaker notes and stacked Previous/Next buttons below](img/remote-portrait.png)
+
+---
+
+<!-- {"key":"remote-landscape"} -->
+# Landscape: preview left, notes center, buttons on the right rail
+
+![Peitho remote in landscape: preview on the left, notes in the center, Previous and Next stacked on the right edge rail](img/remote-landscape.png)
 
 ---
 

@@ -471,6 +471,40 @@ hr {
   }
 }
 
+.remote-shots {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 16px 0 24px;
+}
+
+.remote-shots p {
+  margin: 0;
+}
+
+.remote-shots img {
+  border-radius: 12px;
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+.remote-shots p:first-child img {
+  width: 240px;
+}
+
+.remote-shots p:nth-child(2) img {
+  width: 520px;
+}
+
+@media (max-width: 700px) {
+  .remote-shots p:first-child img,
+  .remote-shots p:nth-child(2) img {
+    width: 100%;
+  }
+}
+
 @media (max-width: 700px) {
   .wrapper,
   .site-header,
