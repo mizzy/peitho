@@ -18,7 +18,7 @@
 
   {% for landing_section in section.extra.sections %}
     {% for key, value in landing_section %}
-      {% if key != "title" and key != "code" and key != "rows" and key != "gallery_from" and key != "gallery_intro" %}
+      {% if key != "title" and key != "code" and key != "rows" and key != "gallery_from" and key != "gallery_intro" and key != "shots" and key != "shots_intro" %}
         {{ throw_unknown_landing_section_key }}
       {% endif %}
     {% endfor %}
@@ -30,6 +30,7 @@
       {% if landing_section.code %}{% set_global shape_flags = shape_flags | concat(with="code") %}{% endif %}
       {% if landing_section.rows %}{% set_global shape_flags = shape_flags | concat(with="rows") %}{% endif %}
       {% if landing_section.gallery_from %}{% set_global shape_flags = shape_flags | concat(with="gallery_from") %}{% endif %}
+      {% if landing_section.shots %}{% set_global shape_flags = shape_flags | concat(with="shots") %}{% endif %}
       {% if shape_flags | length > 1 %}
         {{ throw_landing_section_has_multiple_shapes }}
       {% endif %}
@@ -63,6 +64,29 @@
                   {% endif %}
                 </div>
               {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% elif landing_section.shots %}
+        {% if landing_section.shots_intro %}
+          <p class="gallery-intro">{{ landing_section.shots_intro }}</p>
+        {% endif %}
+        <ul class="shots" role="list">
+          {% for shot in landing_section.shots %}
+            {% for key, value in shot %}
+              {% if key != "shot" and key != "title" and key != "meta" and key != "alt" and key != "path" and key != "anchor" %}
+                {{ throw_unknown_landing_shot_key }}
+              {% endif %}
+            {% endfor %}
+
+            <li class="shot-tile">
+              <a href="{{ get_url(path=shot.path) }}{% if shot.anchor %}#{{ shot.anchor }}{% endif %}">
+                <img src="/guide-shots/{{ shot.shot }}.png" alt="{{ shot.alt }}" loading="lazy">
+                <span class="shot-caption">
+                  <span class="shot-title">{{ shot.title }}</span>
+                  <span class="shot-meta">{{ shot.meta }}</span>
+                </span>
+              </a>
             </li>
           {% endfor %}
         </ul>

@@ -239,6 +239,62 @@ table {
   font-size: 0.95rem;
 }
 
+.shots {
+  margin: 28px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.shot-tile:first-child {
+  grid-column: 1 / -1;
+}
+
+.shot-tile a {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 1px solid var(--hair);
+  background: var(--code-bg);
+  transition: border-color 0.15s ease;
+  text-decoration: none;
+  color: inherit;
+}
+
+.shot-tile a:hover {
+  border-color: var(--ink);
+}
+
+.shot-tile img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  object-fit: contain;
+  background: #0d1017;
+}
+
+.shot-caption {
+  display: block;
+  flex: 1;
+  padding: 10px 14px;
+  border-top: 1px solid var(--hair);
+  font-size: 0.95rem;
+}
+
+.shot-title {
+  display: block;
+}
+
+.shot-meta {
+  display: block;
+  margin-top: 2px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
 ul,
 ol {
   padding-left: 1.25rem;
@@ -505,6 +561,12 @@ hr {
   .remote-shots p:nth-of-type(2) {
     flex: 1 1 100%;
     max-width: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .shots {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

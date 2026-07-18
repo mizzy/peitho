@@ -26,6 +26,34 @@ title = "Install"
 code = "brew install mizzy/tap/peitho"
 
 [[extra.sections]]
+title = "Workflow"
+shots_intro = "Preview while you edit, a presenter view when you speak, and a phone remote in your pocket."
+
+[[extra.sections.shots]]
+shot = "preview-overview"
+title = "Preview overview"
+meta = "peitho preview rebuilds on every save; press o for a tile overview of the whole deck."
+alt = "The overview view: every slide as a tile in a scrollable grid"
+path = "@/guide/getting-started.md"
+anchor = "preview-while-editing"
+
+[[extra.sections.shots]]
+shot = "presenter-view"
+title = "Presenter view"
+meta = "Current and next slide, speaker notes, a timer with slide progress, and a per-section agenda."
+alt = "Presenter view with current and next slides, notes, a timer, and a per-section agenda"
+path = "@/guide/getting-started.md"
+anchor = "present"
+
+[[extra.sections.shots]]
+shot = "remote-landscape"
+title = "Phone remote"
+meta = "peitho present --host serves a remote with notes and navigation; scan the QR code once and add it to your Home Screen."
+alt = "Peitho remote in landscape: preview on the left, notes in the center, Previous and Next on the right edge rail"
+path = "@/guide/getting-started.md"
+anchor = "drive-the-deck-from-your-phone"
+
+[[extra.sections]]
 title = "Examples"
 gallery_intro = "Same tool, same Markdown conventions — different decks."
 gallery_from = "examples"
