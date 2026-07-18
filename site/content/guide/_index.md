@@ -32,5 +32,5 @@ belong.
 
 [Frontmatter](@/guide/frontmatter.md) lists the supported deck settings and
 asset resolution rules. [CLI](@/guide/cli.md) lists the default deck path and
-the `build`, `preview`, `present`, `export`, `publish`, and `completions`
-commands.
+the `build`, `preview`, `present` (including phone remote via `--host`),
+`export`, `publish`, and `completions` commands.

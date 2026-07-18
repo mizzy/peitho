@@ -83,7 +83,11 @@ Press `o`, `Enter`, or `Esc` to flip between the single-slide view and a tile ov
 
 `Space` starts/pauses the timer, arrows navigate, `S` swaps the two windows if the displays were misidentified, and `Esc` closes everything. For debugging (or a single display), `--presenter-windowed` opens normal windows instead of full screen.
 
-To use a phone as a persistent remote, run `peitho present --host`. Peitho prints a stable `http://<ip>:6173/remote` URL and QR code; scan it once in Safari, use the share sheet's Add to Home Screen action, and later `peitho present --host` runs reuse the same URL.
+To use a phone as a persistent remote, run `peitho present --host`. Peitho picks the best non-loopback address on your machine (a VPN address such as Tailscale is preferred), pins the port to `6173` so the URL stays the same across runs, and prints a terminal QR code alongside it. Scan the QR once in Safari, use the share sheet's Add to Home Screen action, and the remote opens full-screen without the Safari address bar — landscape or portrait, with iOS safe-area insets already accounted for — every subsequent `peitho present --host`. Pass `--host <IP>` (or `--host 0.0.0.0`) to bind a specific address, and `--port` to override the default when 6173 is taken.
+
+| | |
+|---|---|
+| <img src="docs/images/remote-portrait.png" alt="Peitho remote in portrait: current slide preview on top, speaker notes and Previous/Next in a stacked column below" width="320"> | <img src="docs/images/remote-landscape.png" alt="Peitho remote in landscape: preview on the left, notes in the center, Previous and Next stacked on the right edge rail" width="640"> |
 
 ### Ship it
 
@@ -243,6 +247,9 @@ peitho build --watch
 
 # Present (generates a volatile cache + local server + launches the browser. Auto-places across two displays)
 peitho present
+
+# Present with a phone remote (LAN-reachable /remote URL + terminal QR code + fixed :6173 port for Add to Home Screen)
+peitho present --host
 
 # Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
 peitho present --presenter-windowed

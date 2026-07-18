@@ -88,7 +88,16 @@ when available.
 For Add to Home Screen, run `peitho present --host` so the remote keeps a
 stable `http://<ip>:6173/remote` URL. Scan the QR once, open the share sheet,
 choose Add to Home Screen, and later `peitho present --host` runs reuse the
-same home-screen URL.
+same home-screen URL. The remote opens full-screen without the Safari address
+bar, in portrait or landscape, with iOS safe-area insets already accounted for:
+
+<div class="remote-shots">
+
+![Peitho remote in portrait: preview on top, speaker notes and stacked Previous/Next below](/guide-shots/remote-portrait.png)
+
+![Peitho remote in landscape: preview on the left, notes in the center, Previous and Next on the right edge rail](/guide-shots/remote-landscape.png)
+
+</div>
 
 ## `peitho export`
 
