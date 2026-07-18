@@ -411,7 +411,7 @@ it("remote controller treats a null replay index as the first non-skipped slide"
   expect(channel.sent).toEqual([{ index: 2 }]);
 });
 
-it("remote renders preview title notes and section-aware chase chrome without a section row", async () => {
+it("remote renders preview title section notes and section-aware chase chrome", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
   const previewNavigations: unknown[] = [];
@@ -459,7 +459,10 @@ it("remote renders preview title notes and section-aware chase chrome without a 
   expect(
     root.querySelector<HTMLElement>('[data-peitho-remote="marker-turtle"]')?.style.transform
   ).toBe("translateX(-27.78%)");
-  expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
+  const section = root.querySelector<HTMLElement>('[data-peitho-remote="section"]');
+  expect(section?.textContent).toBe("Architecture · slide 1 / 2 in section");
+  expect(section?.classList).toContain("peitho-remote-dim-on-end");
+  expect(section?.nextElementSibling).toBe(root.querySelector(".peitho-remote-notes"));
   expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
     "Use the typed shell.\nNo shortcuts."
   );
@@ -471,6 +474,22 @@ it("remote renders preview title notes and section-aware chase chrome without a 
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.dataset.peithoPace).toBe(
     "ahead"
   );
+});
+
+it("remote removes the section line when the current slide is outside every section", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "appendix" }], {
+      sections: [{ name: "Intro", startIndex: 0, endIndex: 0, plannedDurationMs: 30_000 }]
+    })
+  );
+
+  expect(root.querySelector('[data-peitho-remote="section"]')?.textContent).toBe(
+    "Intro · slide 1 / 1 in section"
+  );
+
+  channel.deliver({ index: 1 });
+
+  expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
 });
 
 it("remote mounts with empty notes placeholders when notes fetch fails", async () => {

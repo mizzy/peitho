@@ -505,6 +505,7 @@ class RemoteController implements RemoteView {
     this.renderChase(manifest, currentIndex);
     this.renderPaceStatic(manifest);
     this.renderTimeDependentChrome(manifest, currentIndex);
+    this.renderSection(manifest, currentIndex);
     this.renderNotes(slide?.key);
     this.renderButtons(currentIndex);
     this.syncPreview(currentIndex);
@@ -607,6 +608,34 @@ class RemoteController implements RemoteView {
     delta.hidden = false;
     delta.dataset.peithoPace = paceState.kind;
     delta.textContent = paceState.label;
+  }
+
+  private renderSection(manifest: Manifest, currentIndex: number | null): void {
+    const existing = this.root.querySelector<HTMLElement>('[data-peitho-remote="section"]');
+    if (currentIndex == null || manifest.sections.length === 0) {
+      existing?.remove();
+      return;
+    }
+    const sectionIndex = sectionIndexForSlide(manifest.sections, currentIndex);
+    if (sectionIndex < 0) {
+      existing?.remove();
+      return;
+    }
+    const section = manifest.sections[sectionIndex];
+    const sectionSlideCount = section.endIndex - section.startIndex + 1;
+    const sectionOffset = currentIndex - section.startIndex + 1;
+    const sectionLine = existing ?? createDimmableRow(this.doc, "div", "peitho-remote-section");
+    sectionLine.dataset.peithoRemote = "section";
+    const name = this.doc.createElement("b");
+    name.textContent = section.name;
+    sectionLine.replaceChildren(
+      name,
+      this.doc.createTextNode(` · slide ${sectionOffset} / ${sectionSlideCount} in section`)
+    );
+    if (existing == null) {
+      const notes = this.root.querySelector<HTMLElement>(".peitho-remote-notes");
+      notes?.before(sectionLine);
+    }
   }
 
   private renderNotes(slideKey: string | undefined): void {
