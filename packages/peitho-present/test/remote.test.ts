@@ -327,6 +327,14 @@ it("remote controller transitions from loading to active to read-only ended", as
   expect(button(root, "next").disabled).toBe(true);
   expect(timer?.disabled).toBe(true);
   expect(reset?.disabled).toBe(true);
+
+  channel.deliver({ synced: true });
+
+  expect(container?.dataset.peithoEnded).toBe("true");
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(true);
+  expect(timer?.disabled).toBe(true);
+  expect(reset?.disabled).toBe(true);
 });
 
 it("remote controller advances optimistically across rapid taps", async () => {
