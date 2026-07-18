@@ -253,7 +253,9 @@ table {
 }
 
 .shot-tile a {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   border: 1px solid var(--hair);
   background: var(--code-bg);
   transition: border-color 0.15s ease;
@@ -276,6 +278,7 @@ table {
 
 .shot-caption {
   display: block;
+  flex: 1;
   padding: 10px 14px;
   border-top: 1px solid var(--hair);
   font-size: 0.95rem;
