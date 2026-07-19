@@ -12,6 +12,24 @@
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.peitho-slide:where([data-peitho-page-number]) {
+  position: relative;
+}
+
+.peitho-slide[data-peitho-page-number]::after {
+  content: attr(data-peitho-page-number);
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  font-size: 18px;
+  color: #8a8578;
+  font-variant-numeric: tabular-nums;
+}
+
+.peitho-slide[data-peitho-page-total]::after {
+  content: attr(data-peitho-page-number) " / " attr(data-peitho-page-total);
+}
+
 .peitho-slide h1 {
   margin: 0;
   font-size: 56px;

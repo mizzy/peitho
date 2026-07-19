@@ -44,6 +44,7 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
             slide.layout,
             checked_slots,
             slide.skip,
+            slide.page_number_hidden,
             slide.notes,
         ));
     }
@@ -230,6 +231,7 @@ mod tests {
                 slots,
                 unassigned: Vec::new(),
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         )
@@ -469,6 +471,7 @@ mod tests {
             slots,
             unassigned: Vec::new(),
             skip: false,
+            page_number_hidden: false,
             notes: None,
         };
 
@@ -505,6 +508,7 @@ mod tests {
                 slots,
                 unassigned: Vec::new(),
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         );

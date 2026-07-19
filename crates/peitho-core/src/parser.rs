@@ -17,13 +17,13 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     phase::{
-        AssetPath, Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, Parsed, ParsedSlide,
-        PlannedTime,
+        AssetPath, Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, PageNumberFormat,
+        Parsed, ParsedSlide, PlannedTime,
     },
 };
 
 /// Page settings comment, deck-style:
-/// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true} -->`.
+/// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true,"page_number":false} -->`.
 /// Unknown fields are rejected so a typo never silently drops a setting.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +34,7 @@ struct PageComment {
     time: Option<PlannedTime>,
     draft: Option<bool>,
     skip: Option<bool>,
+    page_number: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,8 @@ struct DeckFrontmatter {
     resolution: Option<String>,
     #[serde(default)]
     breaks: bool,
+    #[serde(default, deserialize_with = "deserialize_optional_page_number_format")]
+    page_numbers: Option<PageNumberFormat>,
     #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
@@ -119,6 +122,7 @@ struct PageSettings {
     section: Option<PageSectionMarker>,
     draft: Option<bool>,
     skip: Option<bool>,
+    page_number_hidden: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -132,6 +136,7 @@ struct PendingSlide {
     slide: ParsedSlide,
     section: Option<PageSectionMarker>,
     draft: Option<PageFlag>,
+    page_number_hidden: Option<PageFlag>,
 }
 
 #[derive(Debug)]
@@ -242,6 +247,7 @@ pub(crate) fn parse_markdown(
             settings.code_images(),
         )?);
     }
+    reject_page_number_hidden_without_deck_setting(settings.page_numbers(), &pending)?;
     validate_unique_keys(pending.iter().map(|pending_slide| &pending_slide.slide))?;
     let first_draft_line = pending
         .iter()
@@ -314,6 +320,28 @@ fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRan
         .filter(|range| !source[range.start..range.end].trim().is_empty())
         .collect();
     Ok(ranges)
+}
+
+fn reject_page_number_hidden_without_deck_setting(
+    page_numbers: Option<PageNumberFormat>,
+    pending: &[PendingSlide],
+) -> Result<()> {
+    if page_numbers.is_some() {
+        return Ok(());
+    }
+    if let Some(flag) = pending
+        .iter()
+        .filter_map(|pending_slide| pending_slide.page_number_hidden.as_ref())
+        .find(|flag| flag.enabled)
+    {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(flag.line),
+            "page_number:false requires deck-level page_numbers",
+            r#"add page_numbers: current or page_numbers: current_of_total to frontmatter, or remove "page_number":false"#,
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_deck_sections(slides: &[PendingSlide]) -> Result<Vec<ResolvedSection>> {
@@ -426,6 +454,15 @@ where
     D: serde::Deserializer<'de>,
 {
     PlannedTime::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_page_number_format<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<PageNumberFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    PageNumberFormat::deserialize(deserializer).map(Some)
 }
 
 const ASSET_PATH_EMPTY_MESSAGE: &str = "value is empty";
@@ -602,6 +639,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         aspect_ratio,
         resolution,
         parsed.breaks,
+        parsed.page_numbers,
         Vec::new(),
         parsed.layouts,
         parsed.css,
@@ -735,6 +773,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "aspect_ratio",
             "resolution",
             "breaks",
+            "page_numbers",
             "layouts",
             "css",
             "syntaxes",
@@ -948,13 +987,17 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
         "set resolution to WxH pixels, like 1920x1080"
     } else if frontmatter_message_mentions_key(message, "breaks") {
         "set breaks to true or false"
+    } else if frontmatter_message_mentions_key(message, "page_numbers")
+        || message.contains(r#"use "current" or "current_of_total""#)
+    {
+        r#"use "current" or "current_of_total""#
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -1246,6 +1289,7 @@ fn parse_slide(
     let mut section_marker: Option<PageSectionMarker> = None;
     let mut draft_flag: Option<PageFlag> = None;
     let mut skip_flag: Option<bool> = None;
+    let mut page_number_hidden_flag: Option<PageFlag> = None;
     let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
     // Stack of open SlotGroups. Each frame owns the children collected so far
@@ -1327,6 +1371,7 @@ fn parse_slide(
                         &mut section_marker,
                         &mut draft_flag,
                         &mut skip_flag,
+                        &mut page_number_hidden_flag,
                         &mut page_settings_line,
                         &mut note_fragments,
                     )?;
@@ -1629,6 +1674,7 @@ fn parse_slide(
                         &mut section_marker,
                         &mut draft_flag,
                         &mut skip_flag,
+                        &mut page_number_hidden_flag,
                         &mut page_settings_line,
                         &mut note_fragments,
                     )?;
@@ -1717,10 +1763,15 @@ fn parse_slide(
             layout_request,
             fragments,
             skip: skip_flag.unwrap_or(false),
+            page_number_hidden: page_number_hidden_flag
+                .as_ref()
+                .map(|flag| flag.enabled)
+                .unwrap_or(false),
             notes,
         },
         section: section_marker,
         draft: draft_flag,
+        page_number_hidden: page_number_hidden_flag,
     })
 }
 
@@ -1785,6 +1836,7 @@ fn process_html_chunk(
     section_marker: &mut Option<PageSectionMarker>,
     draft_flag: &mut Option<PageFlag>,
     skip_flag: &mut Option<bool>,
+    page_number_hidden_flag: &mut Option<PageFlag>,
     page_settings_line: &mut Option<usize>,
     note_fragments: &mut Vec<String>,
 ) -> Result<()> {
@@ -1837,6 +1889,12 @@ fn process_html_chunk(
         }
         if let Some(skip) = settings.skip {
             *skip_flag = Some(skip);
+        }
+        if let Some(hidden) = settings.page_number_hidden {
+            *page_number_hidden_flag = Some(PageFlag {
+                enabled: hidden,
+                line,
+            });
         }
         return Ok(());
     }
@@ -1933,7 +1991,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             ErrorKind::Parse,
             Some(line),
             format!("invalid page settings comment: {err}"),
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true} --> (key/layout/draft/skip optional; section and time must appear together; no other fields)"#,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"page_number":false} --> (key/layout/draft/skip/page_number optional; section and time must appear together; no other fields)"#,
         )
     })?;
     if parsed.key.is_none()
@@ -1942,6 +2000,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         && parsed.time.is_none()
         && parsed.draft.is_none()
         && parsed.skip.is_none()
+        && parsed.page_number.is_none()
     {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -1990,6 +2049,22 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             r#"remove "skip":true because draft slides are excluded from the build"#,
         ));
     }
+    if parsed.page_number == Some(true) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "page_number can only be false",
+            r#"remove "page_number":true; enable page numbers with deck-level page_numbers frontmatter"#,
+        ));
+    }
+    if parsed.draft == Some(true) && parsed.page_number == Some(false) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "draft slide cannot hide a page number",
+            r#"remove "page_number":false because draft slides are excluded from the build"#,
+        ));
+    }
     if parsed.draft == Some(true) && section.is_some() {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -2017,6 +2092,11 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         section,
         draft: parsed.draft,
         skip: parsed.skip,
+        page_number_hidden: match parsed.page_number {
+            Some(false) => Some(true),
+            Some(true) => unreachable!("page_number:true is rejected above"),
+            None => None,
+        },
     }))
 }
 
@@ -2138,7 +2218,7 @@ mod tests {
     use crate::{
         domain::{AspectRatio, FragmentKind},
         error::ErrorKind,
-        phase::KeySource,
+        phase::{KeySource, PageNumberFormat},
     };
     use std::path::Path;
 
@@ -2178,6 +2258,76 @@ mod tests {
 
             assert_eq!(parsed.time.map(PlannedTime::as_millis), Some(expected));
         }
+    }
+
+    #[test]
+    fn parses_current_page_numbers_frontmatter() {
+        let parsed: DeckFrontmatter = serde_norway::from_str("page_numbers: current\n").unwrap();
+
+        assert_eq!(parsed.page_numbers, Some(PageNumberFormat::Current));
+    }
+
+    #[test]
+    fn parses_current_of_total_page_numbers_frontmatter() {
+        let parsed: DeckFrontmatter =
+            serde_norway::from_str("page_numbers: current_of_total\n").unwrap();
+
+        assert_eq!(parsed.page_numbers, Some(PageNumberFormat::CurrentOfTotal));
+    }
+
+    #[test]
+    fn rejects_unknown_page_numbers_frontmatter_with_line_and_help() {
+        let err = parse_markdown(
+            "---\npage_numbers: both\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("page_numbers"));
+        assert!(err.to_string().contains("current"));
+        assert!(err.to_string().contains("current_of_total"));
+        assert_eq!(err.help, r#"use "current" or "current_of_total""#);
+    }
+
+    #[test]
+    fn rejects_false_page_numbers_frontmatter_with_line_and_help() {
+        let err = parse_markdown(
+            "---\npage_numbers: false\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("page_numbers"));
+        assert!(err.to_string().contains("current"));
+        assert!(err.to_string().contains("current_of_total"));
+        assert_eq!(err.help, r#"use "current" or "current_of_total""#);
+    }
+
+    #[test]
+    fn rejects_true_page_numbers_frontmatter_with_line_and_help() {
+        let err = parse_markdown(
+            "---\npage_numbers: true\n---\n# Intro",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(2));
+        assert!(err.to_string().contains("page_numbers"));
+        assert!(err.to_string().contains("current"));
+        assert!(err.to_string().contains("current_of_total"));
+        assert_eq!(err.help, r#"use "current" or "current_of_total""#);
+    }
+
+    #[test]
+    fn omitted_page_numbers_frontmatter_defaults_to_none() {
+        let deck = parse_markdown("# Intro", &crate::highlight::Highlighter::defaults()).unwrap();
+
+        assert_eq!(deck.settings().page_numbers(), None);
     }
 
     #[test]
@@ -3423,6 +3573,42 @@ After list
     }
 
     #[test]
+    fn parses_false_page_number_page_settings_flag() {
+        let settings = parse_page_comment(r#"<!-- {"page_number":false} -->"#, 7)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(settings.page_number_hidden, Some(true));
+    }
+
+    #[test]
+    fn rejects_true_page_number_page_settings_flag() {
+        let err = parse_page_comment(r#"<!-- {"page_number":true} -->"#, 7).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(err.message, "page_number can only be false");
+        assert_eq!(
+            err.help,
+            r#"remove "page_number":true; enable page numbers with deck-level page_numbers frontmatter"#
+        );
+    }
+
+    #[test]
+    fn rejects_draft_and_page_number_hidden_on_same_slide() {
+        let err =
+            parse_page_comment(r#"<!-- {"draft":true,"page_number":false} -->"#, 3).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "draft slide cannot hide a page number");
+        assert_eq!(
+            err.help,
+            r#"remove "page_number":false because draft slides are excluded from the build"#
+        );
+    }
+
+    #[test]
     fn rejects_draft_and_skip_on_same_slide() {
         let err = parse_page_comment(r#"<!-- {"draft":true,"skip":true} -->"#, 3).unwrap_err();
 
@@ -3553,7 +3739,7 @@ After list
         assert!(err.to_string().contains("invalid page settings comment"));
         assert_eq!(
             err.help,
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true} --> (key/layout/draft/skip optional; section and time must appear together; no other fields)"#
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"page_number":false} --> (key/layout/draft/skip/page_number optional; section and time must appear together; no other fields)"#
         );
     }
 
@@ -3719,6 +3905,40 @@ After list
 
         assert!(slides[0].skip);
         assert!(!slides[1].skip);
+    }
+
+    #[test]
+    fn parsed_slide_accepts_page_number_hidden_on_skip_slide() {
+        let deck = parse_markdown(
+            "---\npage_numbers: current\n---\n\
+             <!-- {\"skip\":true,\"page_number\":false} -->\n# Appendix",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert!(slide.skip);
+        assert!(slide.page_number_hidden);
+    }
+
+    #[test]
+    fn rejects_page_number_hidden_without_deck_page_numbers() {
+        let err = parse_markdown(
+            "<!-- {\"page_number\":false} -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert_eq!(
+            err.message,
+            "page_number:false requires deck-level page_numbers"
+        );
+        assert_eq!(
+            err.help,
+            r#"add page_numbers: current or page_numbers: current_of_total to frontmatter, or remove "page_number":false"#
+        );
     }
 
     #[test]
@@ -4186,7 +4406,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -4387,7 +4607,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -4444,7 +4664,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
