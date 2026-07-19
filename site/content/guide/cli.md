@@ -99,6 +99,50 @@ bar, in portrait or landscape, with iOS safe-area insets already accounted for:
 
 </div>
 
+Rehearse a talk with `--rehearsal` on a deck that declares
+`{"section":...}` markers, and Peitho records each section's actual time
+into `.peitho/rehearsals/rehearsal-YYYYMMDD-HHMMSS.json` as you present:
+
+```sh
+peitho present --rehearsal
+```
+
+Records accumulate over runs (nothing is pruned automatically). During a
+talk the agenda's live Actual / Planned and delta are enough for pacing;
+review the recorded actuals afterward with `peitho rehearsal`.
+
+## `peitho rehearsal`
+
+Print the most recent rehearsal as an aligned section / planned / actual /
+delta table with a total row:
+
+```sh
+peitho rehearsal
+```
+
+```
+rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
+
+  section     planned   actual    delta
+  Setup          1:00     0:52    -0:08
+  Problem        1:00     1:10    +0:10
+  Approach       2:00     1:45    -0:15
+  Wrap-up        1:00     0:58    -0:02
+  total          5:00     4:35    -0:15
+```
+
+Pass `--all` to list every record oldest first, one table per run:
+
+```sh
+peitho rehearsal --all
+```
+
+Records live in the current directory's `.peitho/rehearsals/`; the
+command needs no deck argument. When there are no records it prints a
+short pointer at `peitho present --rehearsal` and exits 0. A corrupt or
+future-version record is a hard error naming the file so it can be
+moved or deleted.
+
 ## `peitho export`
 
 Export a PDF:

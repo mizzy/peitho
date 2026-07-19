@@ -265,6 +265,12 @@ peitho present --host
 # Debug: open in a normal window instead of full-screen (Chrome restores the previous position/size. On a single display the slides open in a window too)
 peitho present --presenter-windowed
 
+# Rehearse: record per-section actual times into .peitho/rehearsals/ while presenting (requires {"section":...} markers in the deck)
+peitho present --rehearsal
+
+# Review the most recent rehearsal as a section / planned / actual / delta table (pass --all to list every record)
+peitho rehearsal
+
 # Export a PDF
 peitho export pdf -o deck.pdf
 
