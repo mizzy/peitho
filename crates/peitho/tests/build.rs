@@ -62,6 +62,66 @@ fn build_writes_index_html_and_css() {
 }
 
 #[test]
+fn build_renders_footnote_reference_and_footnotes_block() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+
+    fs::write(
+        &deck,
+        "<!-- {\"key\":\"footnote-demo\"} -->\n# Title\n\nClaim[^a].\n\n[^a]: Supporting **note**.",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let slide = fs::read_to_string(out.join("slides/000-footnote-demo.html")).unwrap();
+    assert!(slide.contains(
+        r##"<sup class="peitho-footnote-ref"><a href="#fn-footnote-demo-1">1</a></sup>"##
+    ));
+    assert!(slide.contains(
+        r#"<div class="peitho-footnotes"><ol><li id="fn-footnote-demo-1"><p>Supporting <strong>note</strong>.</p>"#
+    ));
+}
+
+#[test]
+fn build_fails_for_undefined_footnote_reference_with_line_and_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+
+    fs::write(&deck, "# Title\n\nClaim[^missing].").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("line 3"))
+        .stderr(predicate::str::contains(
+            "undefined footnote reference `[^missing]`",
+        ))
+        .stderr(predicate::str::contains(
+            "help: add `[^missing]: ...` on the same slide",
+        ));
+}
+
+#[test]
 fn build_fails_for_root_class_width_override_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
@@ -1432,6 +1492,14 @@ fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
     assert!(css.contains("font-size: 56px;"));
     assert!(!css.contains("min-height: 100vh"));
     assert!(!css.contains("font-size: 1.4rem"));
+}
+
+#[test]
+fn base_theme_contains_footnote_rules() {
+    let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
+
+    assert!(css.contains(".peitho-footnotes"));
+    assert!(css.contains(".peitho-footnote-ref"));
 }
 
 #[test]

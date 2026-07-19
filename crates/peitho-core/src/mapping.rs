@@ -305,6 +305,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::Math { .. }
+            | FragmentKind::Footnotes { .. }
             | FragmentKind::List
             | FragmentKind::Text => {
                 SlotName::new("body").expect("conventional slot names are valid")
@@ -391,7 +392,14 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
         .iter()
         .filter_map(|fragment| match fragment.kind() {
             FragmentKind::Heading { level } => Some((level, fragment.line())),
-            _ => None,
+            FragmentKind::Paragraph
+            | FragmentKind::Text
+            | FragmentKind::Code
+            | FragmentKind::Math { .. }
+            | FragmentKind::Footnotes { .. }
+            | FragmentKind::Image { .. }
+            | FragmentKind::List
+            | FragmentKind::SlotGroup { .. } => None,
         })
         .min_by_key(|(level, line)| (*level, *line))
         .map(|(_level, line)| line)
@@ -402,7 +410,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{SlideKey, SlotName, SourceFragment},
+        domain::{FootnoteEntry, SlideKey, SlotName, SourceFragment},
         layout::parse_layout,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{DeckSettings, KeySource, ParsedSlide},
@@ -877,6 +885,52 @@ mod tests {
                 assert_eq!(html, r#"<span class="katex-display">math html</span>"#);
             }
             other => panic!("expected math fragment, got {other:?}"),
+        }
+        assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn maps_footnotes_fragment_to_body_slot_by_convention() {
+        let layout = parse_layout(
+            "title-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let parsed = Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![
+                    SourceFragment::heading(1, 1, "# Intro", "Intro"),
+                    SourceFragment::footnotes(
+                        7,
+                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+                    ),
+                ],
+                skip: false,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        );
+
+        let mapped = map_by_convention(parsed, &layout).unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let body = SlotName::new("body").unwrap();
+
+        assert_eq!(slide.slots[&body].fragments().len(), 1);
+        match slide.slots[&body].fragments()[0].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "note");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
         }
         assert!(slide.unassigned.is_empty());
     }

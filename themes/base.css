@@ -60,6 +60,39 @@
   padding-left: 34px;
 }
 
+.peitho-footnotes {
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid #8a8578;
+  font-size: 0.62em;
+  line-height: 1.35;
+  color: #8a8578;
+}
+
+.peitho-footnotes ol {
+  margin: 0;
+  padding-left: 1.45em;
+}
+
+.peitho-footnotes li {
+  padding-left: 0.25em;
+}
+
+.peitho-footnotes p {
+  margin: 0 0 10px;
+}
+
+.peitho-footnote-ref {
+  font-size: 0.62em;
+  line-height: 0;
+  vertical-align: super;
+}
+
+.peitho-footnote-ref a {
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
 .code {
   min-width: 0;
   margin: 0;

@@ -174,6 +174,7 @@ fn transform_fragment<R: SvgRunner>(
         | FragmentKind::Text
         | FragmentKind::Code
         | FragmentKind::Math { .. }
+        | FragmentKind::Footnotes { .. }
         | FragmentKind::Image { .. }
         | FragmentKind::List => Ok(fragment),
     }

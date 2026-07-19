@@ -580,6 +580,46 @@ impl ExplicitSlot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FootnoteEntry {
+    number: usize,
+    label: String,
+    markdown: String,
+    line: usize,
+}
+
+impl FootnoteEntry {
+    pub(crate) fn new(
+        number: usize,
+        label: impl Into<String>,
+        markdown: impl Into<String>,
+        line: usize,
+    ) -> Self {
+        Self {
+            number,
+            label: label.into(),
+            markdown: markdown.into(),
+            line,
+        }
+    }
+
+    pub fn number(&self) -> usize {
+        self.number
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn markdown(&self) -> &str {
+        &self.markdown
+    }
+
+    pub fn line(&self) -> usize {
+        self.line
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FragmentKind<S = RawImagePath> {
     Heading {
         level: u8,
@@ -589,6 +629,9 @@ pub enum FragmentKind<S = RawImagePath> {
     Code,
     Math {
         html: String,
+    },
+    Footnotes {
+        entries: Vec<FootnoteEntry>,
     },
     Image {
         alt: String,
@@ -611,6 +654,7 @@ impl<S> FragmentKind<S> {
             Self::Text => Accepts::Text,
             Self::Code => Accepts::Code,
             Self::Math { .. } => Accepts::Blocks,
+            Self::Footnotes { .. } => Accepts::Blocks,
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
             // SlotGroup is expanded in mapping, so its own accepts value never
@@ -627,6 +671,7 @@ impl<S> FragmentKind<S> {
             Self::Text => "text block",
             Self::Code => "code block",
             Self::Math { .. } => "math block",
+            Self::Footnotes { .. } => "footnote block",
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::SlotGroup { .. } => "slot group",
@@ -642,6 +687,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Text => "text",
             Self::Code => "code",
             Self::Math { .. } => "math",
+            Self::Footnotes { .. } => "footnotes",
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::SlotGroup { .. } => "slot group",
@@ -726,6 +772,17 @@ impl SourceFragment<RawImagePath> {
         }
     }
 
+    pub(crate) fn footnotes(line: usize, entries: Vec<FootnoteEntry>) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::Footnotes { entries },
+            markdown: String::new(),
+            text: String::new(),
+            code: String::new(),
+            language: None,
+        }
+    }
+
     pub(crate) fn slot_group(
         line: usize,
         name: ExplicitSlot,
@@ -777,6 +834,7 @@ impl<S> SourceFragment<S> {
             FragmentKind::Text => FragmentKind::Text,
             FragmentKind::Code => FragmentKind::Code,
             FragmentKind::Math { html } => FragmentKind::Math { html },
+            FragmentKind::Footnotes { entries } => FragmentKind::Footnotes { entries },
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
             FragmentKind::SlotGroup { name, children } => {
@@ -938,6 +996,34 @@ mod tests {
         assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
         assert_eq!(fragment.kind().removal_noun(), "math block");
         assert_eq!(fragment.kind().to_string(), "math");
+    }
+
+    #[test]
+    fn source_fragment_footnotes_preserves_entries() {
+        let entries = vec![
+            FootnoteEntry::new(1, "alpha", "Alpha **note**.", 12),
+            FootnoteEntry::new(2, "beta", "Beta note.", 15),
+        ];
+        let fragment = SourceFragment::footnotes(12, entries.clone());
+
+        assert_eq!(fragment.line(), 12);
+        assert_eq!(fragment.markdown(), "");
+        assert_eq!(fragment.plain_text(), "");
+        assert_eq!(fragment.code_text(), "");
+        assert_eq!(fragment.language(), None);
+        match fragment.kind() {
+            FragmentKind::Footnotes { entries: actual } => {
+                assert_eq!(actual, &entries);
+                assert_eq!(actual[0].number(), 1);
+                assert_eq!(actual[0].label(), "alpha");
+                assert_eq!(actual[0].markdown(), "Alpha **note**.");
+                assert_eq!(actual[0].line(), 12);
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+        assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
+        assert_eq!(fragment.kind().removal_noun(), "footnote block");
+        assert_eq!(fragment.kind().to_string(), "footnotes");
     }
 
     #[test]

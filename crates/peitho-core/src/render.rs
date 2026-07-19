@@ -8,8 +8,8 @@ use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
     domain::{
-        Accepts, AspectRatio, FragmentKind, RenderedSlide, ResolvedImagePath, SlideKey, SlotName,
-        SourceFragment,
+        Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
+        SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -95,6 +95,8 @@ fn render_slide(
 ) -> Result<String> {
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
+    let slide_key = key.clone();
+    let footnote_numbers = collect_footnote_numbers(slots);
     let page_number_value = page_number.map(|number| number.to_string());
     let page_total_value = page_total.map(|total| total.to_string());
     let slot_values = slots.clone();
@@ -153,6 +155,8 @@ fn render_slide(
                         checked_slot.contract().accepts,
                         checked_slot.fragments(),
                         breaks,
+                        &slide_key,
+                        &footnote_numbers,
                         highlighter,
                     )
                     .map_err(box_build_error)?;
@@ -183,6 +187,8 @@ fn render_slot(
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
     breaks: bool,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
     highlighter: &Highlighter,
 ) -> Result<String> {
     if fragments.is_empty() {
@@ -194,7 +200,9 @@ fn render_slot(
         Accepts::Inline => {
             let body = fragments
                 .iter()
-                .map(render_heading_inline_fragment)
+                .map(|fragment| {
+                    render_heading_inline_fragment(fragment, slide_key, footnote_numbers)
+                })
                 .collect::<Result<Vec<_>>>()?
                 .join(" ");
             format!(r#"<span class="{class_name}">{body}</span>"#)
@@ -215,10 +223,31 @@ fn render_slot(
                 .join("\n");
             format!(r#"<div class="{class_name}">{body}</div>"#)
         }
-        Accepts::Blocks | Accepts::Text | Accepts::List => {
-            render_block_slot(&class_name, accepts, fragments, breaks)?
-        }
+        Accepts::Blocks | Accepts::Text | Accepts::List => render_block_slot(
+            &class_name,
+            accepts,
+            fragments,
+            breaks,
+            slide_key,
+            footnote_numbers,
+        )?,
     })
+}
+
+fn collect_footnote_numbers(
+    slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
+) -> BTreeMap<String, usize> {
+    let mut numbers = BTreeMap::new();
+    for slot in slots.values() {
+        for fragment in slot.fragments() {
+            if let FragmentKind::Footnotes { entries } = fragment.kind() {
+                for entry in entries {
+                    numbers.insert(entry.label().to_owned(), entry.number());
+                }
+            }
+        }
+    }
+    numbers
 }
 
 fn render_block_slot(
@@ -226,6 +255,8 @@ fn render_block_slot(
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
     breaks: bool,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
 ) -> Result<String> {
     for fragment in fragments {
         ensure_fragment_matches_contract(accepts, fragment)?;
@@ -235,11 +266,28 @@ fn render_block_slot(
     for fragment in fragments {
         match fragment.kind() {
             FragmentKind::Math { html } => {
-                render_markdown_run(&mut body, &markdown_run, breaks);
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    slide_key,
+                    footnote_numbers,
+                )?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-math">"#);
                 body.push_str(html);
                 body.push_str("</div>");
+            }
+            FragmentKind::Footnotes { entries } => {
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    slide_key,
+                    footnote_numbers,
+                )?;
+                markdown_run.clear();
+                render_footnotes_block(&mut body, entries, breaks, slide_key, footnote_numbers)?;
             }
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
@@ -250,25 +298,88 @@ fn render_block_slot(
             }
         }
     }
-    render_markdown_run(&mut body, &markdown_run, breaks);
+    render_markdown_run(
+        &mut body,
+        &markdown_run,
+        breaks,
+        slide_key,
+        footnote_numbers,
+    )?;
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
 }
 
-fn render_markdown_run(body: &mut String, markdown_run: &[&str], breaks: bool) {
-    if markdown_run.is_empty() {
-        return;
+fn render_footnotes_block(
+    body: &mut String,
+    entries: &[FootnoteEntry],
+    breaks: bool,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<()> {
+    body.push_str(r#"<div class="peitho-footnotes"><ol>"#);
+    for entry in entries {
+        let id = footnote_id(slide_key, entry.number());
+        body.push_str(r#"<li id=""#);
+        body.push_str(&encode_double_quoted_attribute(&id));
+        body.push_str(r#"">"#);
+        render_markdown_run(
+            body,
+            &[entry.markdown()],
+            breaks,
+            slide_key,
+            footnote_numbers,
+        )?;
+        body.push_str("</li>");
     }
-    let markdown = markdown_run.join("\n\n");
-    let events = Parser::new_ext(&markdown, Options::empty()).map(|event| match (breaks, event) {
-        (true, Event::SoftBreak) => Event::HardBreak,
-        (_, event) => event,
-    });
-    html::push_html(body, events);
+    body.push_str("</ol></div>");
+    Ok(())
 }
 
-fn render_heading_inline_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+fn render_markdown_run(
+    body: &mut String,
+    markdown_run: &[&str],
+    breaks: bool,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<()> {
+    if markdown_run.is_empty() {
+        return Ok(());
+    }
+    let markdown = markdown_run.join("\n\n");
+    let mut events = Vec::new();
+    for event in Parser::new_ext(&markdown, Options::ENABLE_OLD_FOOTNOTES) {
+        let event = match (breaks, event) {
+            (true, Event::SoftBreak) => Event::HardBreak,
+            (_, event) => event,
+        };
+        match event {
+            Event::FootnoteReference(label) => {
+                let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
+                    return Err(missing_footnote_render_error(label.as_ref()));
+                };
+                events.push(Event::Html(
+                    render_footnote_reference(slide_key, number).into(),
+                ));
+            }
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                return Err(unexpected_footnote_definition_render_error(label.as_ref()));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => {
+                return Err(unexpected_footnote_definition_render_error(""));
+            }
+            event => events.push(event),
+        }
+    }
+    html::push_html(body, events.into_iter());
+    Ok(())
+}
+
+fn render_heading_inline_fragment(
+    fragment: &SourceFragment<ResolvedImagePath>,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<String> {
     ensure_fragment_matches_contract(Accepts::Inline, fragment)?;
-    Ok(render_heading_inline(fragment.markdown()))
+    render_heading_inline(fragment.markdown(), slide_key, footnote_numbers)
 }
 
 /// A tagged code block is highlighted at build time into `hl-*` classed
@@ -300,6 +411,7 @@ fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result
         | FragmentKind::Text
         | FragmentKind::Code
         | FragmentKind::Math { .. }
+        | FragmentKind::Footnotes { .. }
         | FragmentKind::List
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
     }
@@ -340,6 +452,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
+            | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
             | (Accepts::Image, FragmentKind::Image { .. })
@@ -347,20 +460,67 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
     )
 }
 
-fn render_heading_inline(markdown: &str) -> String {
+fn render_heading_inline(
+    markdown: &str,
+    slide_key: &SlideKey,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<String> {
     let mut events = Vec::new();
     let mut in_heading = false;
-    for event in Parser::new_ext(markdown, Options::empty()) {
+    for event in Parser::new_ext(markdown, Options::ENABLE_OLD_FOOTNOTES) {
         match event {
             Event::Start(Tag::Heading { .. }) => in_heading = true,
             Event::End(TagEnd::Heading(_)) => break,
+            Event::FootnoteReference(label) if in_heading => {
+                let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
+                    return Err(missing_footnote_render_error(label.as_ref()));
+                };
+                events.push(Event::Html(
+                    render_footnote_reference(slide_key, number).into(),
+                ));
+            }
             event if in_heading => events.push(event),
             _ => {}
         }
     }
     let mut rendered = String::new();
     html::push_html(&mut rendered, events.into_iter());
-    rendered
+    Ok(rendered)
+}
+
+fn render_footnote_reference(slide_key: &SlideKey, number: usize) -> String {
+    let href = format!("#{}", footnote_id(slide_key, number));
+    format!(
+        r#"<sup class="peitho-footnote-ref"><a href="{}">{number}</a></sup>"#,
+        encode_double_quoted_attribute(&href)
+    )
+}
+
+fn footnote_id(slide_key: &SlideKey, number: usize) -> String {
+    format!("fn-{}-{number}", slide_key.as_str())
+}
+
+fn missing_footnote_render_error(label: &str) -> BuildError {
+    BuildError::new(
+        ErrorKind::Layout,
+        None,
+        format!("footnote reference `[^{label}]` has no render mapping"),
+        "keep footnote references synchronized with parsed footnote definitions",
+    )
+}
+
+fn unexpected_footnote_definition_render_error(label: &str) -> BuildError {
+    let message = if label.is_empty() {
+        "unexpected footnote definition end during render".to_owned()
+    } else {
+        format!("unexpected footnote definition `[^{label}]` during render")
+    };
+    BuildError::new(
+        ErrorKind::Layout,
+        None,
+        message,
+        "keep footnote definitions collected by the parser before rendering",
+    )
 }
 
 fn box_build_error(err: BuildError) -> Box<dyn Error + Send + Sync> {
@@ -1240,7 +1400,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::AspectRatio,
+        domain::{AspectRatio, FootnoteEntry},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
@@ -1440,8 +1600,18 @@ mod tests {
             SourceFragment::list(5, "- One\n- Two"),
             SourceFragment::paragraph(8, "Final paragraph."),
         ]);
+        let slide_key = SlideKey::new("intro").unwrap();
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
 
-        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, false).unwrap();
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &slide_key,
+            &footnote_numbers,
+        )
+        .unwrap();
 
         assert_eq!(
             html,
@@ -1460,8 +1630,18 @@ mod tests {
             ),
             SourceFragment::paragraph(8, "After."),
         ]);
+        let slide_key = SlideKey::new("intro").unwrap();
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
 
-        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, false).unwrap();
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &slide_key,
+            &footnote_numbers,
+        )
+        .unwrap();
 
         assert_eq!(
             html,
@@ -1471,6 +1651,40 @@ mod tests {
                 r#"<div class="peitho-math"><span class="katex-display">math html</span></div><p>After.</p>"#,
                 "\n",
                 "</div>"
+            )
+        );
+    }
+
+    #[test]
+    fn block_slot_renders_footnotes_after_markdown_run() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "Before[^note]."),
+            SourceFragment::footnotes(
+                5,
+                vec![FootnoteEntry::new(1, "note", "Footnote **body**.", 5)],
+            ),
+        ]);
+        let slide_key = SlideKey::new("intro").unwrap();
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &slide_key,
+            &footnote_numbers,
+        )
+        .unwrap();
+
+        assert_eq!(
+            html,
+            concat!(
+                r##"<div class="slot-body"><p>Before<sup class="peitho-footnote-ref"><a href="#fn-intro-1">1</a></sup>.</p>"##,
+                "\n",
+                r#"<div class="peitho-footnotes"><ol><li id="fn-intro-1"><p>Footnote <strong>body</strong>.</p>"#,
+                "\n",
+                "</li></ol></div></div>"
             )
         );
     }
@@ -1486,8 +1700,18 @@ mod tests {
             ),
             SourceFragment::paragraph(8, "third\nfourth"),
         ]);
+        let slide_key = SlideKey::new("intro").unwrap();
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
 
-        let html = render_block_slot("slot-body", Accepts::Blocks, &fragments, true).unwrap();
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            true,
+            &slide_key,
+            &footnote_numbers,
+        )
+        .unwrap();
 
         assert!(html.contains("<p>first<br />\nsecond</p>"), "{html}");
         assert!(html.contains("<p>third<br />\nfourth</p>"), "{html}");
@@ -1497,6 +1721,93 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    #[test]
+    fn renders_body_footnote_references_and_block_with_slide_key_namespace() {
+        let rendered = render_checked_deck_with_layout(
+            "<!-- {\"key\":\"deck-one\"} -->\n# Title\n\nBody note[^alpha].\n\n[^alpha]: Footnote **body**.",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(
+            r##"<sup class="peitho-footnote-ref"><a href="#fn-deck-one-1">1</a></sup>"##
+        ));
+        assert!(html.contains(
+            r#"<div class="peitho-footnotes"><ol><li id="fn-deck-one-1"><p>Footnote <strong>body</strong>.</p>"#
+        ));
+    }
+
+    #[test]
+    fn deck_without_footnotes_renders_no_footnotes_block() {
+        let rendered =
+            render_checked_deck_with_layout("# Title\n\nBody only.", title_body_layout());
+        let html = rendered.slides()[0].html();
+
+        assert!(!html.contains("peitho-footnotes"), "{html}");
+        assert!(!html.contains("peitho-footnote-ref"), "{html}");
+    }
+
+    #[test]
+    fn breaks_true_applies_inside_footnote_bodies() {
+        let rendered = render_checked_deck_with_layout(
+            "---\nbreaks: true\n---\n<!-- {\"key\":\"breaks-note\"} -->\n# Title\n\nBody[^a].\n\n[^a]: first\nsecond",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(r#"<li id="fn-breaks-note-1"><p>first<br />"#),
+            "{html}"
+        );
+        assert!(html.contains("second</p>"), "{html}");
+    }
+
+    #[test]
+    fn renders_heading_footnote_reference_with_same_slide_map() {
+        let rendered = render_checked_deck_with_layout(
+            "<!-- {\"key\":\"heading-slide\"} -->\n# Heading[^h]\n\n[^h]: Heading note.",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(
+            r##"<span class="slot-title">Heading<sup class="peitho-footnote-ref"><a href="#fn-heading-slide-1">1</a></sup></span>"##
+        ));
+        assert!(html.contains(r#"<li id="fn-heading-slide-1"><p>Heading note.</p>"#));
+    }
+
+    #[test]
+    fn footnote_ids_are_unique_across_rendered_slides() {
+        let rendered = render_checked_deck_with_layout(
+            "<!-- {\"key\":\"one\"} -->\n# One\n\nSame label[^a].\n\n[^a]: First.\n\n---\n<!-- {\"key\":\"two\"} -->\n# Two\n\nSame label[^a].\n\n[^a]: Second.",
+            title_body_layout(),
+        );
+
+        let first = rendered.slides()[0].html();
+        let second = rendered.slides()[1].html();
+
+        assert!(first.contains(r##"href="#fn-one-1""##));
+        assert!(first.contains(r#"id="fn-one-1""#));
+        assert!(second.contains(r##"href="#fn-two-1""##));
+        assert!(second.contains(r#"id="fn-two-1""#));
+        assert!(!first.contains("fn-two-1"));
+        assert!(!second.contains("fn-one-1"));
+    }
+
+    #[test]
+    fn footnote_label_text_does_not_leak_into_rendered_html() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\nBody[^raw<label>].\n\n[^raw<label>]: Safe text.",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r##"href="#fn-title-1""##));
+        assert!(html.contains(r#"id="fn-title-1""#));
+        assert!(!html.contains("raw<label>"));
+        assert!(!html.contains("raw&lt;label&gt;"));
     }
 
     #[test]
@@ -2597,6 +2908,20 @@ Paragraph after heading.
             })
             .collect::<Result<Vec<_>>>()
             .unwrap()
+    }
+
+    fn footnote_numbers_for_fragments(
+        fragments: &[SourceFragment<ResolvedImagePath>],
+    ) -> BTreeMap<String, usize> {
+        let mut numbers = BTreeMap::new();
+        for fragment in fragments {
+            if let FragmentKind::Footnotes { entries } = fragment.kind() {
+                for entry in entries {
+                    numbers.insert(entry.label().to_owned(), entry.number());
+                }
+            }
+        }
+        numbers
     }
 
     fn checked_deck_with_math_body() -> Deck<Checked> {
