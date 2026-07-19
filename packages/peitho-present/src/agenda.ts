@@ -1,5 +1,4 @@
 import type { ManifestSection } from "../../../bindings/ManifestSection";
-import type { RehearsalBaseline } from "../../../bindings/RehearsalBaseline";
 import { sectionIndexForSlide, validateSections } from "./sections";
 import type { PresentShell } from "./shell";
 import type { SectionActuals } from "./sectionActuals";
@@ -23,11 +22,10 @@ export type AgendaOptions = {
   shell: Pick<PresentShell, "currentIndex" | "elapsedMs" | "startedAt">;
   sections: ManifestSection[];
   actuals: Pick<SectionActuals, "actualMs">;
-  rehearsal?: RehearsalBaseline;
   window?: Window;
   document?: Document;
   bus?: EventTarget;
-  log?: Pick<Console, "error"> & Partial<Pick<Console, "warn">>;
+  log?: Pick<Console, "error">;
 };
 
 export function installAgenda(options: AgendaOptions): () => void {
@@ -37,9 +35,8 @@ export function installAgenda(options: AgendaOptions): () => void {
   const doc = options.document ?? document;
   const bus = options.bus ?? win;
   const rawLog = options.log ?? console;
-  const log = { error: rawLog.error, warn: rawLog.warn ?? console.warn };
+  const log = { error: rawLog.error };
   if (!validateSections(options.sections, log)) return () => undefined;
-  const lastActuals = rehearsalActualsForSections(options.sections, options.rehearsal, log);
   const host = doc.createElement("section");
   host.dataset.peithoAgenda = "true";
   host.innerHTML = [
@@ -52,9 +49,7 @@ export function installAgenda(options: AgendaOptions): () => void {
   ].join("");
   options.root.appendChild(host);
   const list = host.querySelector<HTMLElement>("[data-peitho-agenda-list]")!;
-  const rows = options.sections.map((section, index) =>
-    createRow(doc, section, lastActuals?.[index] ?? null)
-  );
+  const rows = options.sections.map((section) => createRow(doc, section));
   list.append(...rows.map(({ row }) => row));
 
   function render(): void {
@@ -89,37 +84,7 @@ export function installAgenda(options: AgendaOptions): () => void {
   };
 }
 
-function rehearsalActualsForSections(
-  sections: ManifestSection[],
-  rehearsal: RehearsalBaseline | undefined,
-  log: Pick<Console, "warn">
-): number[] | null {
-  const lastRun = rehearsal?.lastRun ?? null;
-  if (lastRun === null) return null;
-  const matches =
-    lastRun.sections.length === sections.length &&
-    lastRun.sections.every((section, index) => {
-      const current = sections[index];
-      return (
-        current !== undefined &&
-        section.name === current.name &&
-        section.plannedDurationMs === current.plannedDurationMs
-      );
-    });
-  if (!matches) {
-    log.warn(
-      "Last rehearsal does not match the current agenda; deck may have been edited since the rehearsal"
-    );
-    return null;
-  }
-  return lastRun.sections.map((section) => section.actualMs);
-}
-
-function createRow(
-  doc: Document,
-  section: ManifestSection,
-  lastActualMs: number | null
-): AgendaRow {
+function createRow(doc: Document, section: ManifestSection): AgendaRow {
   const row = doc.createElement("div");
   row.dataset.peithoAgendaRow = "true";
   row.innerHTML = [
@@ -130,12 +95,6 @@ function createRow(
   ].join("");
   row.querySelector("[data-peitho-agenda-name]")!.textContent = section.name;
   row.querySelector("[data-peitho-agenda-range]")!.textContent = formatSlideRange(section);
-  if (lastActualMs !== null) {
-    const last = doc.createElement("span");
-    last.dataset.peithoAgendaLast = "true";
-    last.textContent = `(last ${formatMinuteSeconds(lastActualMs)})`;
-    row.querySelector("[data-peitho-agenda-label]")!.appendChild(last);
-  }
   return {
     row,
     section,

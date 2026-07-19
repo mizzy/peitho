@@ -1,5 +1,4 @@
 import type { Notes } from "../../../bindings/Notes";
-import type { RehearsalBaseline } from "../../../bindings/RehearsalBaseline";
 import { installAgenda } from "./agenda";
 import { installRehearsalBridge } from "./rehearsalBridge";
 import { installRehearsalReporter } from "./rehearsalReporter";
@@ -25,8 +24,7 @@ export type PresenterOptions = {
   document?: Document;
   now?: () => number;
   syncChannelFactory?: SyncChannelFactory;
-  rehearsal: RehearsalBaseline;
-  console?: Pick<Console, "error"> & Partial<Pick<Console, "warn">>;
+  console?: Pick<Console, "error">;
 };
 
 export type PresenterView = {
@@ -118,7 +116,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
   const rawLog = options.console ?? console;
-  const log = { error: rawLog.error, warn: rawLog.warn ?? console.warn };
+  const log = { error: rawLog.error };
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -320,7 +318,6 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     shell: mainShell,
     sections,
     actuals: sectionActuals,
-    rehearsal: options.rehearsal,
     bus,
     window: win,
     document: doc,

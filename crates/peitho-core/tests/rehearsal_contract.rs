@@ -1,7 +1,4 @@
-use peitho_core::{
-    rehearsal_baseline_json, rehearsal_record_json, RehearsalBaseline, RehearsalRecord,
-    RehearsalSection, RehearsalSnapshot,
-};
+use peitho_core::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
 
 #[test]
 fn deserializes_rehearsal_snapshot_wire_schema() {
@@ -47,28 +44,6 @@ fn serializes_rehearsal_record_schema_exactly() {
             "}\n"
         )
     );
-}
-
-#[test]
-fn serializes_rehearsal_baseline_with_null_last_run() {
-    let json = rehearsal_baseline_json(&RehearsalBaseline::empty()).unwrap();
-
-    assert_eq!(json, "{\n  \"version\": 1,\n  \"lastRun\": null\n}\n");
-}
-
-#[test]
-fn serializes_rehearsal_baseline_with_record() {
-    let baseline = RehearsalBaseline::new(Some(RehearsalRecord::new(
-        1_783_000_000_123,
-        12_345,
-        vec![RehearsalSection::new("Setup", 60_000, 52_000)],
-    )));
-
-    let json = rehearsal_baseline_json(&baseline).unwrap();
-
-    assert!(json.contains(r#""version": 1"#));
-    assert!(json.contains(r#""lastRun": {"#));
-    assert!(json.contains(r#""recordedAtMs": 1783000000123"#));
 }
 
 #[test]

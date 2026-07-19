@@ -3,7 +3,6 @@ import { mountPresenterView } from "../src/index";
 import type { PresenterView, SyncChannel, SyncChannelFactory } from "../src/index";
 import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
-import type { RehearsalBaseline } from "../../../bindings/RehearsalBaseline";
 
 function okJson(value: unknown): Response {
   return { ok: true, status: 200, json: async () => value } as Response;
@@ -45,7 +44,6 @@ const manifest: Manifest = {
 };
 
 const notes: Notes = { version: 1, notes: { intro: "Opening note" } };
-const rehearsal: RehearsalBaseline = { version: 1, lastRun: null };
 
 function standardFetch(overrides: Partial<typeof manifest> = {}): typeof fetch {
   const responseManifest = Object.assign({}, manifest, overrides) as Manifest;
@@ -155,7 +153,6 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => now,
@@ -213,7 +210,6 @@ it("loads legacy manifests without images at runtime", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: legacyManifestFetch(),
     window,
     now: () => 1000,
@@ -231,7 +227,6 @@ it("shows planned duration in presenter timer when manifest has time", async () 
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ plannedDurationMs: 60_000 }),
     window,
     now: () => now,
@@ -262,7 +257,6 @@ it("keeps legacy presenter timer text when manifest has no time", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ plannedDurationMs: null }),
     window,
     now: () => now,
@@ -293,7 +287,6 @@ it.each([
     const view = await mountPresenterView({
       root,
       notes,
-      rehearsal,
       fetcher: standardFetch({ plannedDurationMs }),
       window,
       now: () => now,
@@ -316,7 +309,6 @@ it("keeps agenda slot empty when manifest has no sections", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ sections: [] }),
     window,
     now: () => 1000,
@@ -333,7 +325,6 @@ it("mounts agenda between tracker and controls when manifest has sections", asyn
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({
       plannedDurationMs: 180_000,
       sections: [
@@ -363,7 +354,6 @@ it("shows the current section name in the status line and follows slide navigati
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({
       plannedDurationMs: 180_000,
       sections: [
@@ -396,7 +386,6 @@ it("hides the section chip in the status line when the manifest has no sections"
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ sections: [] }),
     window,
     now: () => 1000,
@@ -420,7 +409,6 @@ it("logs invalid planned duration and keeps presenter mounted without a tracker"
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ plannedDurationMs: 0 }),
     window,
     now: () => now,
@@ -445,7 +433,6 @@ it("marks presenter timer as overrun after the planned duration", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ plannedDurationMs: 60_000 }),
     window,
     now: () => now,
@@ -469,7 +456,6 @@ it("updates preview and shows end of deck on the last slide", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -493,7 +479,6 @@ it("next preview skips skipped slides while counters keep total slide count", as
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({
       ...manifestWithSlides([
         { key: "intro" },
@@ -529,7 +514,6 @@ it("next preview shows end when only skipped slides remain", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({
       ...manifestWithSlides([
         { key: "intro" },
@@ -556,7 +540,6 @@ it("scales current and next preview shells to their pane sizes", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -584,7 +567,6 @@ it("scales presenter previews from a 4 by 3 manifest canvas", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ aspectRatio: "4:3", canvasWidth: 960, canvasHeight: 720 }),
     window,
     now: () => 1000,
@@ -612,7 +594,6 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -679,7 +660,6 @@ it("posts presenter timer transitions and adopts replayed timer state", async ()
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => now,
@@ -719,7 +699,6 @@ it("maps presenter Space to timer playpause without navigating", async () => {
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -760,7 +739,6 @@ it("ignores repeated presenter Space keydown and keeps arrow navigation", async 
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -801,7 +779,6 @@ it("derives playpause action labels and chrome from shell timer state", async ()
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,
@@ -844,7 +821,6 @@ it("adds button ripple feedback and clears pending ripple timeout on destroy", a
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch(),
     window,
     now: () => 1000,

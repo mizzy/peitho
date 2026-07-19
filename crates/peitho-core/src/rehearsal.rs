@@ -47,18 +47,6 @@ pub struct RehearsalRecord {
     sections: Vec<RehearsalSection>,
 }
 
-#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
-#[cfg_attr(
-    any(test, feature = "ts-bindings"),
-    ts(export, export_to = "../../bindings/")
-)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RehearsalBaseline {
-    version: u8,
-    last_run: Option<RehearsalRecord>,
-}
-
 impl RehearsalSection {
     pub fn new(name: impl Into<String>, planned_duration_ms: u64, actual_ms: u64) -> Self {
         Self {
@@ -132,26 +120,6 @@ impl RehearsalRecord {
     }
 }
 
-impl RehearsalBaseline {
-    pub fn empty() -> Self {
-        Self {
-            version: 1,
-            last_run: None,
-        }
-    }
-
-    pub fn new(last_run: Option<RehearsalRecord>) -> Self {
-        Self {
-            version: 1,
-            last_run,
-        }
-    }
-
-    pub fn last_run(&self) -> Option<&RehearsalRecord> {
-        self.last_run.as_ref()
-    }
-}
-
 fn validate_version(version: u8) -> std::result::Result<(), String> {
     if version == 1 {
         Ok(())
@@ -176,21 +144,13 @@ pub fn rehearsal_record_json(record: &RehearsalRecord) -> Result<String> {
     )
 }
 
-pub fn rehearsal_baseline_json(baseline: &RehearsalBaseline) -> Result<String> {
-    pretty_json(
-        baseline,
-        "rehearsal baseline",
-        "keep rehearsal baseline fields serializable",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
 
     use ts_rs::{Config, TS};
 
-    use super::{RehearsalBaseline, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
+    use super::{RehearsalRecord, RehearsalSection, RehearsalSnapshot};
 
     #[test]
     fn exports_rehearsal_bindings() {
@@ -198,19 +158,15 @@ mod tests {
         RehearsalSection::export_all(&cfg).unwrap();
         RehearsalSnapshot::export_all(&cfg).unwrap();
         RehearsalRecord::export_all(&cfg).unwrap();
-        RehearsalBaseline::export_all(&cfg).unwrap();
 
         let bindings = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings");
         let section = fs::read_to_string(bindings.join("RehearsalSection.ts")).unwrap();
         let snapshot = fs::read_to_string(bindings.join("RehearsalSnapshot.ts")).unwrap();
         let record = fs::read_to_string(bindings.join("RehearsalRecord.ts")).unwrap();
-        let baseline = fs::read_to_string(bindings.join("RehearsalBaseline.ts")).unwrap();
 
         assert!(section.contains("plannedDurationMs: number"));
         assert!(section.contains("actualMs: number"));
         assert!(snapshot.contains("elapsedMs: number"));
         assert!(record.contains("recordedAtMs: number"));
-        assert!(baseline.contains(r#"import type { RehearsalRecord }"#));
-        assert!(baseline.contains("lastRun: RehearsalRecord | null"));
     }
 }

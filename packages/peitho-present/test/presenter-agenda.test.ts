@@ -1,6 +1,5 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
-import type { RehearsalBaseline } from "../../../bindings/RehearsalBaseline";
 import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
 import type { AgendaOptions } from "../src/agenda";
 import { afterEach, expect, it, vi } from "vitest";
@@ -65,11 +64,9 @@ it("delegates empty section handling to the agenda installer", async () => {
   vi.doMock("../src/agenda", () => ({ installAgenda }));
   const { mountPresenterView } = await import("../src/presenter");
   const root = document.createElement("main");
-  const rehearsal: RehearsalBaseline = { version: 1, lastRun: null };
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal,
     fetcher: standardFetch({ sections: [] }),
     window,
     now: () => 1000
@@ -77,7 +74,9 @@ it("delegates empty section handling to the agenda installer", async () => {
 
   expect(installAgenda).toHaveBeenCalledTimes(1);
   expect(installAgenda.mock.calls[0]?.[0].sections).toEqual([]);
-  expect(installAgenda.mock.calls[0]?.[0].rehearsal).toBe(rehearsal);
+  expect(
+    Object.prototype.hasOwnProperty.call(installAgenda.mock.calls[0]?.[0] ?? {}, "rehearsal")
+  ).toBe(false);
 
   view.destroy();
 });
@@ -107,7 +106,6 @@ it("shares one section actuals instance between agenda and rehearsal reporter", 
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal: { version: 1, lastRun: null },
     fetcher: standardFetch({ sections }),
     window,
     now: () => 1000
@@ -145,12 +143,11 @@ it("passes empty sections to all section-dependent installers when validation fa
   vi.doMock("../src/rehearsalReporter", () => ({ installRehearsalReporter }));
   vi.doMock("../src/rehearsalBridge", () => ({ installRehearsalBridge }));
   const { mountPresenterView } = await import("../src/presenter");
-  const log = { error: vi.fn(), warn: vi.fn() };
+  const log = { error: vi.fn() };
   const root = document.createElement("main");
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal: { version: 1, lastRun: null },
     fetcher: standardFetch({
       sections: [
         { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
@@ -178,12 +175,11 @@ it("treats invalid manifest sections as empty before installing agenda and rehea
   const onReport = (event: Event): void => {
     reports.push((event as CustomEvent).detail);
   };
-  const log = { error: vi.fn(), warn: vi.fn() };
+  const log = { error: vi.fn() };
   window.addEventListener("peitho:rehearsalreport", onReport);
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal: { version: 1, lastRun: null },
     fetcher: standardFetch({
       sections: [
         { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
@@ -221,7 +217,6 @@ it("attributes slidechange rehearsal reports to the previous section", async () 
   const view = await mountPresenterView({
     root,
     notes,
-    rehearsal: { version: 1, lastRun: null },
     fetcher: standardFetch({
       slideCount: 2,
       sections: [

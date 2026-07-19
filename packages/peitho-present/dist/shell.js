@@ -196,9 +196,8 @@ function installAgenda(options) {
   const doc = options.document ?? document;
   const bus = options.bus ?? win;
   const rawLog = options.log ?? console;
-  const log = { error: rawLog.error, warn: rawLog.warn ?? console.warn };
+  const log = { error: rawLog.error };
   if (!validateSections(options.sections, log)) return () => void 0;
-  const lastActuals = rehearsalActualsForSections(options.sections, options.rehearsal, log);
   const host = doc.createElement("section");
   host.dataset.peithoAgenda = "true";
   host.innerHTML = [
@@ -211,9 +210,7 @@ function installAgenda(options) {
   ].join("");
   options.root.appendChild(host);
   const list = host.querySelector("[data-peitho-agenda-list]");
-  const rows = options.sections.map(
-    (section, index) => createRow(doc, section, lastActuals?.[index] ?? null)
-  );
+  const rows = options.sections.map((section) => createRow(doc, section));
   list.append(...rows.map(({ row }) => row));
   function render() {
     const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
@@ -242,22 +239,7 @@ function installAgenda(options) {
     host.remove();
   };
 }
-function rehearsalActualsForSections(sections, rehearsal, log) {
-  const lastRun = rehearsal?.lastRun ?? null;
-  if (lastRun === null) return null;
-  const matches = lastRun.sections.length === sections.length && lastRun.sections.every((section, index) => {
-    const current = sections[index];
-    return current !== void 0 && section.name === current.name && section.plannedDurationMs === current.plannedDurationMs;
-  });
-  if (!matches) {
-    log.warn(
-      "Last rehearsal does not match the current agenda; deck may have been edited since the rehearsal"
-    );
-    return null;
-  }
-  return lastRun.sections.map((section) => section.actualMs);
-}
-function createRow(doc, section, lastActualMs) {
+function createRow(doc, section) {
   const row = doc.createElement("div");
   row.dataset.peithoAgendaRow = "true";
   row.innerHTML = [
@@ -268,12 +250,6 @@ function createRow(doc, section, lastActualMs) {
   ].join("");
   row.querySelector("[data-peitho-agenda-name]").textContent = section.name;
   row.querySelector("[data-peitho-agenda-range]").textContent = formatSlideRange(section);
-  if (lastActualMs !== null) {
-    const last = doc.createElement("span");
-    last.dataset.peithoAgendaLast = "true";
-    last.textContent = `(last ${formatMinuteSeconds(lastActualMs)})`;
-    row.querySelector("[data-peitho-agenda-label]").appendChild(last);
-  }
   return {
     row,
     section,
@@ -1672,7 +1648,7 @@ async function mountPresenterView(options) {
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
   const rawLog = options.console ?? console;
-  const log = { error: rawLog.error, warn: rawLog.warn ?? console.warn };
+  const log = { error: rawLog.error };
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -1864,7 +1840,6 @@ async function mountPresenterView(options) {
     shell: mainShell,
     sections,
     actuals: sectionActuals,
-    rehearsal: options.rehearsal,
     bus,
     window: win,
     document: doc,
