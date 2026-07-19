@@ -205,6 +205,7 @@ function installAgenda(options) {
     "<div data-peitho-agenda-head>",
     "<span data-peitho-agenda-title>Agenda</span>",
     "<span data-peitho-agenda-hint>Actual / Planned</span>",
+    '<span data-peitho-agenda-head-spacer aria-hidden="true"></span>',
     "</div>",
     "<div data-peitho-agenda-list></div>"
   ].join("");

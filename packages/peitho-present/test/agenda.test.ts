@@ -150,8 +150,18 @@ it("renders agenda header and rows with mock-compatible structure", () => {
   });
   cleanups.push(cleanup);
 
+  const head = root.querySelector<HTMLElement>("[data-peitho-agenda-head]")!;
+  const headAttributeNames = Array.from(head.children).map((child) =>
+    Array.from((child as HTMLElement).attributes).map((attr) => attr.name)
+  );
+  expect(headAttributeNames).toEqual([
+    ["data-peitho-agenda-title"],
+    ["data-peitho-agenda-hint"],
+    ["data-peitho-agenda-head-spacer", "aria-hidden"]
+  ]);
   expect(root.querySelector("[data-peitho-agenda-title]")?.textContent).toBe("Agenda");
   expect(root.querySelector("[data-peitho-agenda-hint]")?.textContent).toBe("Actual / Planned");
+  expect(root.querySelector("[data-peitho-agenda-head-spacer]")?.textContent).toBe("");
   const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
   expect(rows.map((row) => row.dataset.peithoAgendaState)).toEqual(["done", "current"]);
   expect(rows[0].children.length).toBe(4);
