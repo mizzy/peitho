@@ -16,6 +16,18 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannedTime(u64);
 
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageNumberFormat {
+    Current,
+    CurrentOfTotal,
+}
+
 impl PlannedTime {
     pub(crate) const GREATER_THAN_ZERO_MESSAGE: &'static str = "time must be greater than zero";
     pub(crate) const MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS: u64 = 9_007_199_254_740_991;
@@ -90,6 +102,7 @@ pub struct DeckSettings {
     aspect_ratio: AspectRatio,
     resolution: Resolution,
     breaks: bool,
+    page_numbers: Option<PageNumberFormat>,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -111,6 +124,7 @@ impl DeckSettings {
         aspect_ratio: AspectRatio,
         resolution: Option<Resolution>,
         breaks: bool,
+        page_numbers: Option<PageNumberFormat>,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
@@ -127,6 +141,7 @@ impl DeckSettings {
             aspect_ratio,
             resolution,
             breaks,
+            page_numbers,
             sections,
             layouts,
             css,
@@ -150,6 +165,10 @@ impl DeckSettings {
 
     pub fn breaks(&self) -> bool {
         self.breaks
+    }
+
+    pub fn page_numbers(&self) -> Option<PageNumberFormat> {
+        self.page_numbers
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -222,6 +241,7 @@ pub struct ParsedSlide {
     pub layout_request: Option<LayoutRequest>,
     pub fragments: Vec<SourceFragment>,
     pub skip: bool,
+    pub page_number_hidden: bool,
     pub notes: Option<String>,
 }
 
@@ -242,6 +262,7 @@ pub struct MappedSlide {
     pub(crate) slots: BTreeMap<SlotName, MappedSlot>,
     pub(crate) unassigned: Vec<UnassignedFragment>,
     pub(crate) skip: bool,
+    pub(crate) page_number_hidden: bool,
     pub(crate) notes: Option<String>,
 }
 
@@ -308,6 +329,7 @@ pub struct CheckedSlide<S = RawImagePath> {
     layout: Layout,
     slots: BTreeMap<SlotName, CheckedSlot<S>>,
     skip: bool,
+    page_number_hidden: bool,
     notes: Option<String>,
 }
 
@@ -381,6 +403,7 @@ impl Deck<Mapped> {
 }
 
 impl<S> CheckedSlide<S> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         index: usize,
         source_index: usize,
@@ -388,6 +411,7 @@ impl<S> CheckedSlide<S> {
         layout: Layout,
         slots: BTreeMap<SlotName, CheckedSlot<S>>,
         skip: bool,
+        page_number_hidden: bool,
         notes: Option<String>,
     ) -> Self {
         Self {
@@ -397,6 +421,7 @@ impl<S> CheckedSlide<S> {
             layout,
             slots,
             skip,
+            page_number_hidden,
             notes,
         }
     }
@@ -423,6 +448,10 @@ impl<S> CheckedSlide<S> {
 
     pub(crate) fn skip(&self) -> bool {
         self.skip
+    }
+
+    pub(crate) fn page_number_hidden(&self) -> bool {
+        self.page_number_hidden
     }
 
     pub(crate) fn title_text(&self) -> Option<String> {
@@ -523,6 +552,7 @@ where
             layout,
             slots,
             skip,
+            page_number_hidden,
             notes,
         } = slide;
         let slide_number = source_index + 1;
@@ -570,6 +600,7 @@ where
             layout,
             resolved_slots,
             skip,
+            page_number_hidden,
             notes,
         ));
     }
@@ -642,7 +673,10 @@ mod tests {
         domain::{RawImagePath, ResolvedImageAsset, ResolvedImagePath, SlideKey, SourceFragment},
         layout::parse_layout,
     };
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn planned_time_accepts_javascript_safe_integer_boundary() {
@@ -664,6 +698,20 @@ mod tests {
     }
 
     #[test]
+    fn exports_page_number_format_binding_with_frontmatter_values() {
+        use ts_rs::{Config, TS};
+
+        let cfg = Config::from_env();
+        PageNumberFormat::export_all(&cfg).unwrap();
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/PageNumberFormat.ts");
+        let ts = fs::read_to_string(path).unwrap();
+
+        assert!(ts.contains(r#""current""#));
+        assert!(ts.contains(r#""current_of_total""#));
+    }
+
+    #[test]
     fn deck_settings_carry_owned_sections() {
         let setup = DeckSection::new(
             "Setup".to_owned(),
@@ -676,6 +724,7 @@ mod tests {
             AspectRatio::default(),
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
+            None,
             vec![setup.clone()],
             None,
             None,
@@ -705,6 +754,7 @@ mod tests {
             AspectRatio::default(),
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
+            None,
             vec![setup.clone()],
             None,
             None,
@@ -726,6 +776,7 @@ mod tests {
             AspectRatio::Ratio4To3,
             None,
             false,
+            None,
             Vec::new(),
             None,
             None,
@@ -746,6 +797,7 @@ mod tests {
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("1024x768").unwrap()),
             false,
+            None,
             Vec::new(),
             None,
             None,
@@ -765,6 +817,7 @@ mod tests {
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("16x9").unwrap()),
             false,
+            None,
             Vec::new(),
             None,
             None,
@@ -792,6 +845,7 @@ mod tests {
                 layout_request: None,
                 fragments: vec![SourceFragment::paragraph(3, "body")],
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         );
@@ -827,6 +881,7 @@ mod tests {
                 SlideKey::new("gallery").unwrap(),
                 layout,
                 slots,
+                false,
                 false,
                 None,
             )],
@@ -878,6 +933,7 @@ mod tests {
                 layout,
                 slots,
                 true,
+                false,
                 None,
             )],
         );

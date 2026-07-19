@@ -1062,6 +1062,7 @@ mod tests {
                     code.to_owned(),
                 )],
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         )
@@ -1082,6 +1083,7 @@ mod tests {
                     latex.to_owned(),
                 )],
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         )

@@ -1435,6 +1435,57 @@ fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
 }
 
 #[test]
+fn build_emits_page_number_section_attributes_and_base_css_rules() {
+    fn build_page_number_mode(
+        dir: &TempDir,
+        deck: &Path,
+        out_name: &str,
+        frontmatter: &str,
+    ) -> (String, String) {
+        let out = dir.path().join(out_name);
+        fs::write(
+            deck,
+            format!("---\npage_numbers: {frontmatter}\n---\n# One\n\n---\n# Two"),
+        )
+        .unwrap();
+
+        Command::cargo_bin("peitho")
+            .unwrap()
+            .args([
+                "build",
+                deck.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        let first_slide = fs::read_to_string(out.join("slides/000-one.html")).unwrap();
+        let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+        (first_slide, css)
+    }
+
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let (current_first, current_css) =
+        build_page_number_mode(&dir, &deck, "dist-current", "current");
+
+    assert!(current_first.contains(r#"data-peitho-page-number="1""#));
+    assert!(!current_first.contains("data-peitho-page-total"));
+    assert!(current_css.contains(".peitho-slide[data-peitho-page-number]::after"));
+    assert!(current_css.contains("content: attr(data-peitho-page-number);"));
+
+    let (total_first, total_css) =
+        build_page_number_mode(&dir, &deck, "dist-total", "current_of_total");
+
+    assert!(total_first.contains(r#"data-peitho-page-number="1""#));
+    assert!(total_first.contains(r#"data-peitho-page-total="2""#));
+    assert!(total_css.contains(".peitho-slide[data-peitho-page-total]::after"));
+    assert!(total_css
+        .contains(r#"content: attr(data-peitho-page-number) " / " attr(data-peitho-page-total);"#));
+}
+
+#[test]
 fn build_reads_layouts_from_frontmatter() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

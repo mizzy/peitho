@@ -329,6 +329,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
         slots,
         unassigned,
         skip: slide.skip,
+        page_number_hidden: slide.page_number_hidden,
         notes: slide.notes.clone(),
     })
 }
@@ -861,6 +862,7 @@ mod tests {
                     ),
                 ],
                 skip: false,
+                page_number_hidden: false,
                 notes: None,
             }],
         );

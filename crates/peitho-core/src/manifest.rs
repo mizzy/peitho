@@ -1093,6 +1093,8 @@ mod ts_tests {
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
         assert!(slide.contains("skip: boolean"));
+        assert!(!slide.contains("page_number"));
+        assert!(!slide.contains("pageNumber"));
         assert!(slide.contains(r#"import type { ManifestSlideText } from "./ManifestSlideText";"#));
         assert!(slide.contains("text: ManifestSlideText"));
         assert!(slide_text.contains("title: string"));

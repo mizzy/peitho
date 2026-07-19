@@ -15,7 +15,7 @@ use crate::{
     highlight::Highlighter,
     layout::Layout,
     math::MathAssets,
-    phase::{Checked, CheckedSlot, Deck, Rendered},
+    phase::{Checked, CheckedSlot, Deck, PageNumberFormat, Rendered},
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
@@ -33,15 +33,26 @@ pub fn render_deck(
 ) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let breaks = settings.breaks();
+    let page_numbers = settings.page_numbers();
+    let slide_count = checked_slides.len();
     let mut slides = Vec::new();
     let mut uses_math = false;
     for slide in checked_slides {
         uses_math |= slide_uses_math(slide.slots());
+        let (page_number, page_total) = match (slide.page_number_hidden(), page_numbers) {
+            (true, _) | (false, None) => (None, None),
+            (false, Some(PageNumberFormat::Current)) => (Some(slide.index() + 1), None),
+            (false, Some(PageNumberFormat::CurrentOfTotal)) => {
+                (Some(slide.index() + 1), Some(slide_count))
+            }
+        };
         let html = render_slide(
             slide.key(),
             slide.slots(),
             slide.layout(),
             breaks,
+            page_number,
+            page_total,
             highlighter,
         )?;
         let notes = slide.notes().map(|s| s.to_owned());
@@ -78,16 +89,26 @@ fn render_slide(
     slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
     layout: &Layout,
     breaks: bool,
+    page_number: Option<usize>,
+    page_total: Option<usize>,
     highlighter: &Highlighter,
 ) -> Result<String> {
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
+    let page_number_value = page_number.map(|number| number.to_string());
+    let page_total_value = page_total.map(|total| total.to_string());
     let slot_values = slots.clone();
     let mut rewriter = HtmlRewriter::new(
         Settings {
             element_content_handlers: vec![
                 element!("section", move |el| {
                     el.set_attribute("data-slide-key", &key_value)?;
+                    if let Some(number) = &page_number_value {
+                        el.set_attribute("data-peitho-page-number", number)?;
+                    }
+                    if let Some(total) = &page_total_value {
+                        el.set_attribute("data-peitho-page-total", total)?;
+                    }
                     let existing = el.get_attribute("class").unwrap_or_default();
                     let class = if existing
                         .split_whitespace()
@@ -1255,6 +1276,7 @@ mod tests {
                 layout,
                 slots,
                 false,
+                false,
                 None,
             )],
         );
@@ -1303,6 +1325,89 @@ mod tests {
         // The tagged rust block is highlighted into hl-* classed spans.
         assert!(html.contains("hl-"));
         assert!(html.contains("main"));
+    }
+
+    #[test]
+    fn render_current_page_numbers_adds_number_attribute_to_each_slide() {
+        let rendered = render_checked_deck(
+            "---\npage_numbers: current\n---\n\
+             # One\n\n---\n# Two\n\n---\n# Three",
+        );
+
+        for (index, slide) in rendered.slides().iter().enumerate() {
+            assert!(slide
+                .html()
+                .contains(&format!(r#"data-peitho-page-number="{}""#, index + 1)));
+            assert!(!slide.html().contains("data-peitho-page-total"));
+        }
+    }
+
+    #[test]
+    fn render_current_of_total_page_numbers_adds_number_and_total_attributes() {
+        let rendered = render_checked_deck(
+            "---\npage_numbers: current_of_total\n---\n\
+             # One\n\n---\n# Two\n\n---\n# Three",
+        );
+
+        for (index, slide) in rendered.slides().iter().enumerate() {
+            assert!(slide
+                .html()
+                .contains(&format!(r#"data-peitho-page-number="{}""#, index + 1)));
+            assert!(slide.html().contains(r#"data-peitho-page-total="3""#));
+        }
+    }
+
+    #[test]
+    fn render_hidden_page_number_slide_has_no_page_number_attributes() {
+        let rendered = render_checked_deck(
+            "---\npage_numbers: current_of_total\n---\n\
+             # One\n\n---\n\
+             <!-- {\"page_number\":false} -->\n# Two\n\n---\n\
+             # Three",
+        );
+
+        let html = rendered.slides()[1].html();
+
+        assert!(!html.contains("data-peitho-page-number"));
+        assert!(!html.contains("data-peitho-page-total"));
+    }
+
+    #[test]
+    fn render_page_numbers_include_skip_slides_in_sequence_and_total() {
+        let rendered = render_checked_deck(
+            "---\npage_numbers: current_of_total\n---\n\
+             # One\n\n---\n\
+             <!-- {\"skip\":true} -->\n# Appendix\n\n---\n\
+             # Three",
+        );
+        let skip_html = rendered.slides()[1].html();
+
+        assert!(skip_html.contains(r#"data-peitho-page-number="2""#));
+        assert!(skip_html.contains(r#"data-peitho-page-total="3""#));
+    }
+
+    #[test]
+    fn render_page_numbers_exclude_draft_slides_from_total() {
+        let rendered = render_checked_deck(
+            "---\npage_numbers: current_of_total\n---\n\
+             # One\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Draft\n\n---\n\
+             # Three",
+        );
+
+        assert_eq!(rendered.slide_count(), 2);
+        assert!(rendered.slides()[0]
+            .html()
+            .contains(r#"data-peitho-page-number="1""#));
+        assert!(rendered.slides()[0]
+            .html()
+            .contains(r#"data-peitho-page-total="2""#));
+        assert!(rendered.slides()[1]
+            .html()
+            .contains(r#"data-peitho-page-number="2""#));
+        assert!(rendered.slides()[1]
+            .html()
+            .contains(r#"data-peitho-page-total="2""#));
     }
 
     #[test]
@@ -2525,6 +2630,7 @@ Paragraph after heading.
                 SlideKey::new("intro").unwrap(),
                 layout,
                 slots,
+                false,
                 false,
                 None,
             )],
