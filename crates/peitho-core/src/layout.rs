@@ -295,6 +295,7 @@ mod tests {
   <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
   <div><slot name="body" accepts="blocks" arity="0..*"></slot></div>
   <figure><slot name="code" accepts="code" arity="0..1"></slot></figure>
+  <footer><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
 </section>"#;
 
         let layout = parse_layout("title-body-code", html).unwrap();
@@ -302,6 +303,8 @@ mod tests {
         assert_eq!(layout.slot("title").unwrap().accepts, Accepts::Inline);
         assert_eq!(layout.slot("body").unwrap().arity, Arity::ZeroOrMore);
         assert_eq!(layout.slot("code").unwrap().accepts, Accepts::Code);
+        assert_eq!(layout.slot("footnotes").unwrap().accepts, Accepts::Blocks);
+        assert_eq!(layout.slot("footnotes").unwrap().arity, Arity::ZeroOrOne);
     }
 
     #[test]
@@ -462,6 +465,7 @@ mod tests {
                <slot name="title" accepts="inline" arity="1"></slot>
                <slot name="body" accepts="blocks" arity="0..*"></slot>
                <slot name="code" accepts="code" arity="0..1"></slot>
+               <slot name="footnotes" accepts="blocks" arity="0..1"></slot>
                </section>"#,
         )
         .unwrap();
@@ -489,6 +493,7 @@ mod tests {
             vec![
                 ("body", "blocks", "0..*"),
                 ("code", "code", "0..1"),
+                ("footnotes", "blocks", "0..1"),
                 ("title", "inline", "1")
             ]
         );

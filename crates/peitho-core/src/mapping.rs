@@ -302,6 +302,13 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
                 // through to body/block mapping.
                 image_slot_name(layout, fragment.line())?
             }
+            FragmentKind::Footnotes { .. } => {
+                if layout.slot("footnotes").is_some() {
+                    SlotName::new("footnotes").expect("conventional slot names are valid")
+                } else {
+                    SlotName::new("body").expect("conventional slot names are valid")
+                }
+            }
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::Math { .. }
@@ -391,7 +398,14 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
         .iter()
         .filter_map(|fragment| match fragment.kind() {
             FragmentKind::Heading { level } => Some((level, fragment.line())),
-            _ => None,
+            FragmentKind::Paragraph
+            | FragmentKind::Text
+            | FragmentKind::Code
+            | FragmentKind::Math { .. }
+            | FragmentKind::Footnotes { .. }
+            | FragmentKind::Image { .. }
+            | FragmentKind::List
+            | FragmentKind::SlotGroup { .. } => None,
         })
         .min_by_key(|(level, line)| (*level, *line))
         .map(|(_level, line)| line)
@@ -402,7 +416,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{SlideKey, SlotName, SourceFragment},
+        domain::{FootnoteEntry, SlideKey, SlotName, SourceFragment},
         layout::parse_layout,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{DeckSettings, KeySource, ParsedSlide},
@@ -879,6 +893,175 @@ mod tests {
             other => panic!("expected math fragment, got {other:?}"),
         }
         assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn maps_footnotes_fragment_to_footnotes_slot_when_layout_declares_one() {
+        let layout = parse_layout(
+            "title-body-footnotes",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="footnotes" accepts="blocks" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let parsed = Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![
+                    SourceFragment::heading(1, 1, "# Intro", "Intro"),
+                    SourceFragment::paragraph(3, "Body text."),
+                    SourceFragment::footnotes(
+                        7,
+                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+                    ),
+                ],
+                skip: false,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        );
+
+        let mapped = map_by_convention(parsed, &layout).unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let body = SlotName::new("body").unwrap();
+        let footnotes = SlotName::new("footnotes").unwrap();
+
+        assert_eq!(slide.slots[&body].fragments().len(), 1);
+        assert!(matches!(
+            slide.slots[&body].fragments()[0].kind(),
+            FragmentKind::Paragraph
+        ));
+        assert_eq!(slide.slots[&footnotes].fragments().len(), 1);
+        match slide.slots[&footnotes].fragments()[0].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "note");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+        assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn maps_footnotes_fragment_to_body_slot_when_layout_has_no_footnotes_slot() {
+        let layout = parse_layout(
+            "title-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let parsed = Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![
+                    SourceFragment::heading(1, 1, "# Intro", "Intro"),
+                    SourceFragment::paragraph(3, "Body text."),
+                    SourceFragment::footnotes(
+                        7,
+                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+                    ),
+                ],
+                skip: false,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        );
+
+        let mapped = map_by_convention(parsed, &layout).unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let body = SlotName::new("body").unwrap();
+
+        assert_eq!(slide.slots[&body].fragments().len(), 2);
+        assert!(matches!(
+            slide.slots[&body].fragments()[0].kind(),
+            FragmentKind::Paragraph
+        ));
+        match slide.slots[&body].fragments()[1].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "note");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+        assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn layout_without_body_or_footnotes_slot_reports_footnotes_as_residual_content() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "# Title[^note]\n\n[^note]: Footnote body.",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unassigned content remains for missing 'body' slot"));
+        assert_eq!(
+            err.help,
+            "add a 'body' slot to the layout or remove the footnote block"
+        );
+    }
+
+    #[test]
+    fn explicit_footnotes_slot_content_collides_with_collected_footnotes_by_arity() {
+        let layout = parse_layout(
+            "title-body-footnotes",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               <slot name="footnotes" accepts="blocks" arity="0..1"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "# Title\n\nClaim[^a].\n\n::: {slot=footnotes}\n\nManual footer paragraph.\n\n:::\n\n[^a]: Auto note.",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert_eq!(err.line, Some(7));
+        assert!(err.to_string().contains(
+            "slot 'footnotes' got 2 item(s), but layout 'title-body-footnotes' allows 0..1"
+        ));
+        assert_eq!(
+            err.help,
+            "use a layout with more footnotes capacity or remove one footnotes block"
+        );
     }
 
     #[test]

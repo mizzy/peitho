@@ -7870,6 +7870,10 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             stdout.contains("- title") && stdout.contains("accepts=inline arity=1"),
             "actual stdout: {stdout}"
         );
+        assert!(
+            stdout.contains("- footnotes") && stdout.contains("accepts=blocks arity=0..1"),
+            "actual stdout: {stdout}"
+        );
     }
 
     #[test]
@@ -7892,6 +7896,13 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         assert!(json["source"].get("path").is_none());
         assert_eq!(json["layouts"][0]["name"], "title-body-code");
         assert_eq!(json["layouts"][0]["slots"][0]["name"], "body");
+        assert!(json["layouts"][0]["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|slot| slot["name"] == "footnotes"
+                && slot["accepts"] == "blocks"
+                && slot["arity"] == "0..1"));
     }
 
     #[test]

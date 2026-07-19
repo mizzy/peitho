@@ -117,6 +117,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
+            | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
             | (Accepts::Image, FragmentKind::Image { .. })
@@ -184,7 +185,7 @@ fn check_no_unassigned(unassigned: &[UnassignedFragment]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        domain::{Arity, RawImagePath, SlideKey, SlotContract},
+        domain::{Arity, FootnoteEntry, RawImagePath, SlideKey, SlotContract},
         error::ErrorKind,
         layout::parse_layout,
         mapping::map_by_convention,
@@ -217,6 +218,42 @@ mod tests {
             7,
             r#"<span class="katex-display">math html</span>"#,
             r#"\frac{1}{2}"#,
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert(slot, mapped_slot);
+
+        Deck::mapped(
+            DeckSettings::default(),
+            vec![MappedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                unassigned: Vec::new(),
+                skip: false,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        )
+    }
+
+    fn mapped_deck_with_footnotes_slot(
+        slot_name: &str,
+        accepts: &str,
+    ) -> crate::phase::Deck<crate::phase::Mapped> {
+        let layout = parse_layout(
+            "footnotes-layout",
+            &format!(
+                r#"<section><slot name="{slot_name}" accepts="{accepts}" arity="1"></slot></section>"#
+            ),
+        )
+        .unwrap();
+        let slot = SlotName::new(slot_name).unwrap();
+        let mut mapped_slot = MappedSlot::new(layout.slot(slot_name).unwrap().clone());
+        mapped_slot.push(SourceFragment::footnotes(
+            7,
+            vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
         ));
         let mut slots = BTreeMap::new();
         slots.insert(slot, mapped_slot);
@@ -311,6 +348,61 @@ mod tests {
         assert_eq!(
             err.help,
             "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
+    }
+
+    #[test]
+    fn accepts_footnotes_fragment_in_blocks_slot() {
+        let checked = check_deck(mapped_deck_with_footnotes_slot("body", "blocks")).unwrap();
+
+        assert_eq!(checked.checked_slides()[0].slots().len(), 1);
+        let body = SlotName::new("body").unwrap();
+        assert!(matches!(
+            checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
+            FragmentKind::Footnotes { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_footnotes_fragment_in_code_slot_with_contract_error() {
+        let err = check_deck(mapped_deck_with_footnotes_slot("code", "code")).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(7));
+        assert!(err.to_string().contains("slot 'code' accepts code"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
+    }
+
+    #[test]
+    fn layout_without_body_slot_reports_footnotes_as_residual_content() {
+        let layout = parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "# Title[^note]\n\n[^note]: Footnote body.",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unassigned content remains for missing 'body' slot"));
+        assert_eq!(
+            err.help,
+            "add a 'body' slot to the layout or remove the footnote block"
         );
     }
 

@@ -28,6 +28,12 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                             body_fragment_text(fragment.markdown())
                         }
                         FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
+                        FragmentKind::Footnotes { entries } => entries
+                            .iter()
+                            .map(|entry| body_fragment_text(entry.markdown()))
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         FragmentKind::Image { .. }
                         | FragmentKind::Code
                         | FragmentKind::SlotGroup { .. } => return None,
@@ -58,11 +64,12 @@ fn body_fragment_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut in_image = false;
 
-    for event in Parser::new_ext(markdown, Options::empty()) {
+    for event in Parser::new_ext(markdown, Options::ENABLE_OLD_FOOTNOTES) {
         match event {
             Event::Start(Tag::Image { .. }) => in_image = true,
             Event::End(TagEnd::Image) => in_image = false,
             _ if in_image => {}
+            Event::FootnoteReference(_) => {}
             Event::Start(Tag::Item) if !text.is_empty() && !text.ends_with('\n') => {
                 text.push('\n');
             }
@@ -150,6 +157,13 @@ mod tests {
         let text = checked_slide_text("# Title\n\n`foo` bar");
 
         assert_eq!(text.body(), "foo bar");
+    }
+
+    #[test]
+    fn body_slot_drops_footnote_reference_marker_and_keeps_footnote_body() {
+        let text = checked_slide_text("# Title\n\nClaim[^a].\n\n[^a]: Supporting note.");
+
+        assert_eq!(text.body(), "Claim.\nSupporting note.");
     }
 
     #[test]

@@ -62,6 +62,74 @@ fn build_writes_index_html_and_css() {
 }
 
 #[test]
+fn build_renders_footnote_reference_and_footnotes_block() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+
+    fs::write(
+        &deck,
+        "<!-- {\"key\":\"footnote-demo\"} -->\n# Title\n\nClaim[^a].\n\n[^a]: Supporting **note**.",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built 1 slide"));
+
+    let slide = fs::read_to_string(out.join("slides/000-footnote-demo.html")).unwrap();
+    assert!(slide.contains(r#"<sup class="peitho-footnote-ref">1</sup>"#));
+    assert!(slide.contains(
+        r#"<div class="slot-footnotes"><div class="peitho-footnotes"><ol><li><p>Supporting <strong>note</strong>.</p>"#
+    ));
+    let body_start = slide.find(r#"<div class="body">"#).unwrap();
+    let figure_start = slide.find(r#"<figure class="code">"#).unwrap();
+    let footer_start = slide.find(r#"<footer class="footnotes">"#).unwrap();
+    let footnotes_start = slide.find(r#"<div class="slot-footnotes">"#).unwrap();
+    assert!(body_start < figure_start, "{slide}");
+    assert!(figure_start < footer_start, "{slide}");
+    assert!(footer_start < footnotes_start, "{slide}");
+    assert!(!slide[body_start..figure_start].contains("peitho-footnotes"));
+    assert!(!slide.contains("<a href=\"#fn-"), "{slide}");
+    assert!(!slide.contains(r#"<li id="fn-"#), "{slide}");
+}
+
+#[test]
+fn build_fails_for_undefined_footnote_reference_with_line_and_help() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+
+    fs::write(&deck, "# Title\n\nClaim[^missing].").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("line 3"))
+        .stderr(predicate::str::contains(
+            "undefined footnote reference `[^missing]`",
+        ))
+        .stderr(predicate::str::contains(
+            "help: add `[^missing]: ...` on the same slide",
+        ));
+}
+
+#[test]
 fn build_fails_for_root_class_width_override_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
@@ -1432,6 +1500,29 @@ fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
     assert!(css.contains("font-size: 56px;"));
     assert!(!css.contains("min-height: 100vh"));
     assert!(!css.contains("font-size: 1.4rem"));
+}
+
+#[test]
+fn base_theme_contains_footnote_rules() {
+    let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
+    let rule_block = |selector: &str| {
+        let start = css
+            .find(selector)
+            .unwrap_or_else(|| panic!("missing {selector} rule"));
+        let rest = &css[start..];
+        let open = rest.find('{').unwrap();
+        let close = rest[open..].find('}').unwrap() + open;
+        &rest[open + 1..close]
+    };
+
+    assert!(css.contains(".footnotes"));
+    assert!(css.contains("margin-top: auto;"));
+    assert!(rule_block(".footnotes:empty").contains("display: none;"));
+    assert!(css.contains(".peitho-footnotes"));
+    let footnote_ref = rule_block(".peitho-footnote-ref");
+    assert!(footnote_ref.contains("font-size: 0.62em;"));
+    assert!(!footnote_ref.contains("color:"), "{footnote_ref}");
+    assert!(!css.contains(".peitho-footnote-ref a"));
 }
 
 #[test]

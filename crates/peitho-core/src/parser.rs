@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FragmentKind, RawImagePath,
-        Resolution, SlideKey, SlotName, SourceFragment,
+        AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FootnoteEntry, FragmentKind,
+        RawImagePath, Resolution, SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -171,6 +171,180 @@ enum ParagraphInline {
         src: RawImagePath,
         open: bool,
     },
+}
+
+#[derive(Debug)]
+struct FootnoteReference {
+    label: String,
+    line: usize,
+}
+
+#[derive(Debug)]
+struct FootnoteDefinition {
+    label: String,
+    markdown: String,
+    line: usize,
+}
+
+#[derive(Debug)]
+struct DuplicateFootnoteDefinition {
+    label: String,
+    line: usize,
+}
+
+#[derive(Debug, Default)]
+struct FootnoteAccumulator {
+    references: Vec<FootnoteReference>,
+    reference_lines: BTreeMap<String, usize>,
+    definitions: Vec<FootnoteDefinition>,
+    definition_lines: BTreeMap<String, usize>,
+    duplicate: Option<DuplicateFootnoteDefinition>,
+}
+
+impl FootnoteAccumulator {
+    fn record_reference(&mut self, label: impl Into<String>, line: usize) {
+        let label = label.into();
+        if self.reference_lines.contains_key(&label) {
+            return;
+        }
+        self.reference_lines.insert(label.clone(), line);
+        self.references.push(FootnoteReference { label, line });
+    }
+
+    fn record_definition(&mut self, definition: FootnoteDefinition) {
+        if self
+            .definition_lines
+            .insert(definition.label.clone(), definition.line)
+            .is_some()
+        {
+            if self.duplicate.is_none() {
+                self.duplicate = Some(DuplicateFootnoteDefinition {
+                    label: definition.label,
+                    line: definition.line,
+                });
+            }
+            return;
+        }
+        self.definitions.push(definition);
+    }
+
+    fn into_fragment(self) -> Result<Option<SourceFragment>> {
+        if let Some(duplicate) = self.duplicate {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(duplicate.line),
+                format!("duplicate footnote definition `[^{}]`", duplicate.label),
+                format!(
+                    "keep only one `[^{}]: ...` definition on the slide",
+                    duplicate.label
+                ),
+            ));
+        }
+
+        let definitions = self
+            .definitions
+            .iter()
+            .map(|definition| (definition.label.as_str(), definition))
+            .collect::<BTreeMap<_, _>>();
+        for reference in &self.references {
+            if !definitions.contains_key(reference.label.as_str()) {
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(reference.line),
+                    format!("undefined footnote reference `[^{}]`", reference.label),
+                    format!("add `[^{}]: ...` on the same slide", reference.label),
+                ));
+            }
+        }
+        for definition in &self.definitions {
+            if !self.reference_lines.contains_key(&definition.label) {
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(definition.line),
+                    format!("unused footnote definition `[^{}]`", definition.label),
+                    format!("reference it with `[^{}]` or remove it", definition.label),
+                ));
+            }
+        }
+
+        if self.references.is_empty() {
+            return Ok(None);
+        }
+
+        let mut entries = Vec::with_capacity(self.references.len());
+        for (index, reference) in self.references.into_iter().enumerate() {
+            let definition = definitions
+                .get(reference.label.as_str())
+                .expect("undefined references were checked above");
+            entries.push(FootnoteEntry::new(
+                index + 1,
+                reference.label,
+                definition.markdown.clone(),
+                definition.line,
+            ));
+        }
+        let line = entries
+            .first()
+            .map(FootnoteEntry::line)
+            .expect("nonempty references produce entries");
+        Ok(Some(SourceFragment::footnotes(line, entries)))
+    }
+}
+
+#[derive(Debug)]
+struct FootnoteCapture {
+    label: String,
+    line: usize,
+    paragraph: Option<String>,
+    current_paragraph_start: Option<usize>,
+}
+
+impl FootnoteCapture {
+    fn new(label: impl Into<String>, line: usize) -> Self {
+        Self {
+            label: label.into(),
+            line,
+            paragraph: None,
+            current_paragraph_start: None,
+        }
+    }
+
+    fn start_paragraph(&mut self, start: usize, line: usize) -> Result<()> {
+        if self.current_paragraph_start.is_some() || self.paragraph.is_some() {
+            return Err(unsupported_footnote_block_error(line));
+        }
+        self.current_paragraph_start = Some(start);
+        Ok(())
+    }
+
+    fn finish_paragraph(&mut self, source: &str, end: usize) -> Result<()> {
+        let Some(start) = self.current_paragraph_start.take() else {
+            return Err(unsupported_footnote_block_error(line_for_offset(
+                source, end,
+            )));
+        };
+        let markdown = source_slice(source, start, end);
+        if !markdown.trim().is_empty() {
+            self.paragraph = Some(markdown);
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<FootnoteDefinition> {
+        let Some(markdown) = self.paragraph else {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                Some(self.line),
+                "footnote definition needs paragraph content",
+                "keep footnote bodies to one paragraph of inline Markdown and leave a blank line after the definition",
+            ));
+        };
+        Ok(FootnoteDefinition {
+            label: self.label,
+            markdown,
+            line: self.line,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1297,6 +1471,8 @@ fn parse_slide(
     let mut slot_group_stack: Vec<(usize, ExplicitSlot, Vec<SourceFragment>)> = Vec::new();
     let mut note_fragments: Vec<String> = Vec::new();
     let mut block: Option<OpenBlock> = None;
+    let mut footnotes = FootnoteAccumulator::default();
+    let mut footnote_capture: Option<FootnoteCapture> = None;
     let mut list_depth = 0usize;
     let mut list_start = None;
     let mut seen_content = false;
@@ -1310,6 +1486,121 @@ fn parse_slide(
         let global_start = range.start + local_range.start;
         let global_end = range.start + local_range.end;
         let line = line_for_offset(source, global_start);
+        if let Event::Start(Tag::FootnoteDefinition(label)) = &event {
+            if list_depth > 0 {
+                let err = unsupported_construct(line, "footnote definition inside list");
+                return Err(attach_slide_context(
+                    err,
+                    index,
+                    explicit_key.as_ref(),
+                    &fragments,
+                ));
+            }
+            if footnote_capture.is_some() {
+                let err = unsupported_footnote_block_error(line);
+                return Err(attach_slide_context(
+                    err,
+                    index,
+                    explicit_key.as_ref(),
+                    &fragments,
+                ));
+            }
+            footnote_capture = Some(FootnoteCapture::new(label.to_string(), line));
+            continue;
+        }
+        if let Some(capture) = footnote_capture.as_mut() {
+            match event {
+                Event::End(TagEnd::FootnoteDefinition) => {
+                    let capture = footnote_capture
+                        .take()
+                        .expect("capture exists while finishing footnote definition");
+                    let definition = capture.finish().map_err(|err| {
+                        attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                    })?;
+                    footnotes.record_definition(definition);
+                    continue;
+                }
+                Event::Start(Tag::Paragraph) => {
+                    capture.start_paragraph(global_start, line).map_err(|err| {
+                        attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                    })?;
+                    continue;
+                }
+                Event::End(TagEnd::Paragraph) => {
+                    capture
+                        .finish_paragraph(source, global_end)
+                        .map_err(|err| {
+                            attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                        })?;
+                    continue;
+                }
+                Event::FootnoteReference(label) => {
+                    footnotes.record_reference(label.to_string(), line);
+                    continue;
+                }
+                Event::Text(_)
+                | Event::Code(_)
+                | Event::SoftBreak
+                | Event::HardBreak
+                | Event::Start(Tag::Emphasis)
+                | Event::End(TagEnd::Emphasis)
+                | Event::Start(Tag::Strong)
+                | Event::End(TagEnd::Strong)
+                | Event::Start(Tag::Link { .. })
+                | Event::End(TagEnd::Link) => continue,
+                Event::Start(Tag::Image { .. })
+                | Event::End(TagEnd::Image)
+                | Event::Start(Tag::Heading { .. })
+                | Event::End(TagEnd::Heading(_))
+                | Event::Start(Tag::CodeBlock(_))
+                | Event::End(TagEnd::CodeBlock)
+                | Event::Start(Tag::List(_))
+                | Event::End(TagEnd::List(_))
+                | Event::Start(Tag::Item)
+                | Event::End(TagEnd::Item)
+                | Event::Start(Tag::BlockQuote(_))
+                | Event::End(TagEnd::BlockQuote(_))
+                | Event::Start(Tag::HtmlBlock)
+                | Event::End(TagEnd::HtmlBlock)
+                | Event::Start(Tag::Table(_))
+                | Event::End(TagEnd::Table)
+                | Event::Start(Tag::TableHead)
+                | Event::End(TagEnd::TableHead)
+                | Event::Start(Tag::TableRow)
+                | Event::End(TagEnd::TableRow)
+                | Event::Start(Tag::TableCell)
+                | Event::End(TagEnd::TableCell)
+                | Event::Start(Tag::MetadataBlock(_))
+                | Event::End(TagEnd::MetadataBlock(_))
+                | Event::Start(Tag::FootnoteDefinition(_))
+                | Event::Html(_)
+                | Event::InlineHtml(_)
+                | Event::InlineMath(_)
+                | Event::DisplayMath(_)
+                | Event::Rule
+                | Event::TaskListMarker(_)
+                | Event::Start(Tag::DefinitionList)
+                | Event::End(TagEnd::DefinitionList)
+                | Event::Start(Tag::DefinitionListTitle)
+                | Event::End(TagEnd::DefinitionListTitle)
+                | Event::Start(Tag::DefinitionListDefinition)
+                | Event::End(TagEnd::DefinitionListDefinition)
+                | Event::Start(Tag::Strikethrough)
+                | Event::End(TagEnd::Strikethrough)
+                | Event::Start(Tag::Superscript)
+                | Event::End(TagEnd::Superscript)
+                | Event::Start(Tag::Subscript)
+                | Event::End(TagEnd::Subscript) => {
+                    let err = unsupported_footnote_block_error(line);
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
+            }
+        }
         match event {
             Event::Rule => {
                 let err = unsupported_construct(line, "thematic break inside slide");
@@ -1436,6 +1727,21 @@ fn parse_slide(
                         explicit_key.as_ref(),
                         &fragments,
                     ));
+                }
+            }
+            Event::FootnoteReference(label) => {
+                footnotes.record_reference(label.to_string(), line);
+                if let Some(OpenBlock::Paragraph { inline, .. }) = block.as_mut() {
+                    let marker = format!("[^{}]", label.as_ref());
+                    if !push_paragraph_text(inline, &marker) {
+                        let err = unsupported_construct(line, "mixed image paragraph");
+                        return Err(attach_slide_context(
+                            err,
+                            index,
+                            explicit_key.as_ref(),
+                            &fragments,
+                        ));
+                    }
                 }
             }
             _ if list_depth > 0 => {}
@@ -1725,6 +2031,21 @@ fn parse_slide(
         }
     }
 
+    if let Some(capture) = footnote_capture {
+        let err = BuildError::new(
+            ErrorKind::Parse,
+            Some(capture.line),
+            "unclosed footnote definition",
+            "finish the footnote definition before the end of the slide",
+        );
+        return Err(attach_slide_context(
+            err,
+            index,
+            explicit_key.as_ref(),
+            &fragments,
+        ));
+    }
+
     if let Some((open_line, _, _)) = slot_group_stack.first() {
         let err = BuildError::new(
             ErrorKind::Parse,
@@ -1738,6 +2059,13 @@ fn parse_slide(
             explicit_key.as_ref(),
             &fragments,
         ));
+    }
+
+    if let Some(fragment) = footnotes
+        .into_fragment()
+        .map_err(|err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments))?
+    {
+        fragments.push(fragment);
     }
 
     let (key, key_source) = explicit_key
@@ -1942,11 +2270,13 @@ fn attach_slide_context(
 }
 
 fn parser_options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_OLD_FOOTNOTES
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
 }
 
 fn slide_split_options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES
+    Options::ENABLE_TABLES | Options::ENABLE_OLD_FOOTNOTES
 }
 
 fn validate_unique_keys<'a>(slides: impl IntoIterator<Item = &'a ParsedSlide>) -> Result<()> {
@@ -2126,6 +2456,15 @@ fn unsupported_construct(line: usize, name: &str) -> BuildError {
     )
 }
 
+fn unsupported_footnote_block_error(line: usize) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        Some(line),
+        "unsupported content in footnote definition",
+        "keep footnote bodies to one paragraph of inline Markdown and leave a blank line after the definition",
+    )
+}
+
 fn metadata_block_position_error(source: &str, offset: usize) -> BuildError {
     BuildError::new(
         ErrorKind::Parse,
@@ -2147,12 +2486,7 @@ fn unexpected_frontmatter_content_error(source: &str, offset: usize) -> BuildErr
 fn unsupported_tag(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
-        Tag::BlockQuote(_)
-            | Tag::Table(_)
-            | Tag::TableHead
-            | Tag::TableRow
-            | Tag::TableCell
-            | Tag::FootnoteDefinition(_)
+        Tag::BlockQuote(_) | Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell
     )
 }
 
@@ -2160,7 +2494,6 @@ fn unsupported_tag_name(tag: &Tag<'_>) -> &'static str {
     match tag {
         Tag::BlockQuote(_) => "blockquote",
         Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => "table",
-        Tag::FootnoteDefinition(_) => "footnote",
         _ => "markdown",
     }
 }
@@ -3087,6 +3420,435 @@ enum Phase { Parsed, Mapped, Checked }
     }
 
     #[test]
+    fn parses_footnotes_as_last_fragment_ordered_by_first_reference() {
+        let markdown = r#"# Title
+
+Body refers to beta[^beta], then alpha[^alpha].
+
+[^alpha]: Alpha **note**.
+
+[^beta]: Beta note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 3);
+        assert_eq!(
+            slide.fragments[0].kind(),
+            &FragmentKind::Heading { level: 1 }
+        );
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Paragraph);
+        match slide.fragments[2].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(slide.fragments[2].line(), 7);
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].number(), 1);
+                assert_eq!(entries[0].label(), "beta");
+                assert_eq!(entries[0].markdown(), "Beta note.");
+                assert_eq!(entries[0].line(), 7);
+                assert_eq!(entries[1].number(), 2);
+                assert_eq!(entries[1].label(), "alpha");
+                assert_eq!(entries[1].markdown(), "Alpha **note**.");
+                assert_eq!(entries[1].line(), 5);
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repeated_footnote_references_share_one_number() {
+        let deck = parse_markdown(
+            "# Title\n\nFirst use[^same], second use[^same].\n\n[^same]: Shared note.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].number(), 1);
+                assert_eq!(entries[0].label(), "same");
+                assert_eq!(entries[0].markdown(), "Shared note.");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_undefined_footnote_reference_with_line_and_help() {
+        let err = parse_markdown(
+            "# Title\n\nMissing note[^missing].",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("undefined footnote reference `[^missing]`"));
+        assert_eq!(err.help, "add `[^missing]: ...` on the same slide");
+    }
+
+    #[test]
+    fn rejects_unused_footnote_definition_with_line_and_help() {
+        let err = parse_markdown(
+            "# Title\n\n[^unused]: Defined but not referenced.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unused footnote definition `[^unused]`"));
+        assert_eq!(err.help, "reference it with `[^unused]` or remove it");
+    }
+
+    #[test]
+    fn rejects_duplicate_footnote_definition_at_second_definition_line() {
+        let err = parse_markdown(
+            "# Title\n\nUse it[^dup].\n\n[^dup]: First definition.\n\n[^dup]: Second definition.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert!(err
+            .to_string()
+            .contains("duplicate footnote definition `[^dup]`"));
+        assert_eq!(
+            err.help,
+            "keep only one `[^dup]: ...` definition on the slide"
+        );
+    }
+
+    #[test]
+    fn cross_slide_reference_without_same_slide_definition_is_undefined() {
+        let err = parse_markdown(
+            "# One\n\nNeeds a local note[^shared].\n\n---\n# Two\n\n[^shared]: Other slide.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("slide 1 ('one'), line 3"));
+        assert!(err
+            .to_string()
+            .contains("undefined footnote reference `[^shared]`"));
+    }
+
+    #[test]
+    fn cross_slide_definition_without_same_slide_reference_is_unused() {
+        let err = parse_markdown(
+            "# One\n\n[^shared]: Other slide.\n\n---\n# Two\n\nNeeds a local note[^shared].",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("slide 1 ('one'), line 3"));
+        assert!(err
+            .to_string()
+            .contains("unused footnote definition `[^shared]`"));
+    }
+
+    #[test]
+    fn footnote_reference_inside_list_item_is_validated() {
+        let deck = parse_markdown(
+            "# Title\n\n- Item with note[^list]\n\n[^list]: List note.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::List);
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "list");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_footnote_definition_inside_list_item_with_line_and_help() {
+        let err = parse_markdown(
+            "# Title\n\n- Item\n  [^a]: note",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'footnote definition inside list'"));
+        assert_eq!(
+            err.help,
+            "rewrite this slide using headings, paragraphs, lists, or fenced code blocks for milestone 1"
+        );
+    }
+
+    #[test]
+    fn escaped_footnote_reference_stays_literal_and_records_nothing() {
+        let deck = parse_markdown(
+            "# Title\n\nEscaped \\[^x] stays literal.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 2);
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Paragraph);
+        assert_eq!(
+            slide.fragments[1].markdown(),
+            "Escaped \\[^x] stays literal."
+        );
+    }
+
+    #[test]
+    fn inline_code_footnote_reference_stays_literal_and_records_nothing() {
+        let deck = parse_markdown(
+            "# Title\n\nInline code `[^x]` stays literal.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 2);
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Paragraph);
+        assert_eq!(
+            slide.fragments[1].markdown(),
+            "Inline code `[^x]` stays literal."
+        );
+    }
+
+    #[test]
+    fn fenced_code_footnote_reference_stays_literal_and_records_nothing() {
+        let deck = parse_markdown(
+            "# Title\n\n```\n[^x]\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 2);
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Code);
+        assert_eq!(slide.fragments[1].line(), 3);
+        assert_eq!(slide.fragments[1].code_text(), "[^x]\n");
+    }
+
+    #[test]
+    fn lazy_continuation_footnote_definition_joins_one_paragraph() {
+        let markdown = r#"# Title
+
+Body has a note[^lazy].
+
+[^lazy]: First line
+lazy continuation with *emphasis*.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(
+                    entries[0].markdown(),
+                    "First line\nlazy continuation with *emphasis*."
+                );
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indented_continuation_after_footnote_definition_becomes_code_fragment() {
+        let markdown = r#"# Title
+
+Body has a note[^single].
+
+[^single]: First paragraph.
+
+    Indented continuation with `code`.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 4);
+        assert_eq!(slide.fragments[2].kind(), &FragmentKind::Code);
+        assert_eq!(slide.fragments[2].line(), 7);
+        assert_eq!(
+            slide.fragments[2].code_text(),
+            "Indented continuation with `code`.\n"
+        );
+        match slide.fragments[3].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].markdown(), "First paragraph.");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_image_inside_footnote_definition() {
+        let markdown = r#"# Title
+
+Body has a note[^image].
+
+[^image]: ![alt](image.png)
+"#;
+
+        let err = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err
+            .to_string()
+            .contains("unsupported content in footnote definition"));
+        assert_eq!(
+            err.help,
+            "keep footnote bodies to one paragraph of inline Markdown and leave a blank line after the definition"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_footnote_definition() {
+        let err = parse_markdown(
+            "# Title\n\nBody has a note[^empty].\n\n[^empty]:",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err
+            .to_string()
+            .contains("footnote definition needs paragraph content"));
+        assert_eq!(
+            err.help,
+            "keep footnote bodies to one paragraph of inline Markdown and leave a blank line after the definition"
+        );
+    }
+
+    #[test]
+    fn accepts_footnote_definitions_before_and_after_references() {
+        let markdown = r#"# Title
+
+[^early]: Early note.
+
+Body uses early[^early] and late[^late].
+
+[^late]: Late note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| (entry.number(), entry.label(), entry.markdown()))
+                        .collect::<Vec<_>>(),
+                    vec![(1, "early", "Early note."), (2, "late", "Late note.")]
+                );
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footnote_references_inside_definitions_are_recorded_and_order_entries() {
+        let markdown = r#"# Title
+
+Body uses only alpha[^a].
+
+[^a]: see[^b].
+
+[^b]: back[^a].
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| (entry.number(), entry.label(), entry.markdown()))
+                        .collect::<Vec<_>>(),
+                    vec![(1, "a", "see[^b]."), (2, "b", "back[^a].")]
+                );
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draft_slide_with_invalid_footnote_still_errors_during_parse() {
+        let err = parse_markdown(
+            "<!-- {\"draft\":true} -->\n# Draft\n\nMissing note[^missing].\n\n---\n# Live",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert!(err
+            .to_string()
+            .contains("undefined footnote reference `[^missing]`"));
+        assert_eq!(err.help, "add `[^missing]: ...` on the same slide");
+    }
+
+    #[test]
+    fn footnotes_inside_explicit_slot_group_collect_slide_wide() {
+        let markdown = r#"# Title
+
+::: {slot=body}
+
+Grouped content[^grouped].
+
+[^grouped]: Grouped note.
+
+:::
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments.len(), 3);
+        match slide.fragments[1].kind() {
+            FragmentKind::SlotGroup { children, .. } => {
+                assert_eq!(children.len(), 1);
+                assert_eq!(children[0].kind(), &FragmentKind::Paragraph);
+            }
+            other => panic!("expected slot group, got {other:?}"),
+        }
+        match slide.fragments[2].kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "grouped");
+                assert_eq!(entries[0].markdown(), "Grouped note.");
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_standalone_image_paragraph_as_image_fragment() {
         let deck = parse_markdown(
             "# Title\n\n![Architecture diagram](images/arch.png)",
@@ -3322,6 +4084,36 @@ enum Phase { Parsed, Mapped, Checked }
 
         let err = parse_markdown(
             "# Title\n\n![Architecture](x.png) suffix",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'mixed image paragraph'"));
+    }
+
+    #[test]
+    fn rejects_image_followed_by_footnote_reference_as_mixed_image_paragraph() {
+        let err = parse_markdown(
+            "# Title\n\n![Architecture](x.png)[^a]\n\n[^a]: note",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'mixed image paragraph'"));
+    }
+
+    #[test]
+    fn rejects_footnote_reference_followed_by_image_as_mixed_image_paragraph() {
+        let err = parse_markdown(
+            "# Title\n\n[^a]![Architecture](x.png)\n\n[^a]: note",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
