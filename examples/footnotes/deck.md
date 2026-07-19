@@ -34,6 +34,7 @@ without forcing every source into the main visual hierarchy.
 
 ---
 
+<!-- {"layout":"literal-flow"} -->
 # Literal markers stay literal
 
 Use code when the marker is part of the subject.
@@ -46,6 +47,10 @@ Even a regex character class such as `/^[^a-z]+$/` stays literal inline.
 /^[^a-z]+$/
 ```
 
+::: {slot=outro}
+
 The actual citation still resolves[^regex].
+
+:::
 
 [^regex]: Escaped markers and code-delimited markers stay literal; real references remain checked.

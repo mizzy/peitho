@@ -1,0 +1,142 @@
+.peitho-slide {
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  padding: 64px 72px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: #f7f7f2;
+  color: #181818;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.peitho-slide:where([data-peitho-page-number]) {
+  position: relative;
+}
+
+.peitho-slide[data-peitho-page-number]::after {
+  content: attr(data-peitho-page-number);
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  font-size: 18px;
+  color: #8a8578;
+  font-variant-numeric: tabular-nums;
+}
+
+.peitho-slide[data-peitho-page-total]::after {
+  content: attr(data-peitho-page-number) " / " attr(data-peitho-page-total);
+}
+
+.peitho-slide h1 {
+  margin: 0;
+  font-size: 56px;
+  line-height: 1.05;
+  font-weight: 760;
+}
+
+.slot-title {
+  display: inline-block;
+}
+
+.body {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.slot-body {
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.slot-body p {
+  margin: 0 0 24px;
+}
+
+.slot-body ul {
+  margin: 0;
+  padding-left: 34px;
+}
+
+.footnotes {
+  min-width: 0;
+  margin-top: auto;
+  overflow: hidden;
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.footnotes:empty {
+  display: none;
+}
+
+.peitho-footnotes {
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid #8a8578;
+  font-size: 0.62em;
+  line-height: 1.35;
+  color: #8a8578;
+}
+
+.peitho-footnotes ol {
+  margin: 0;
+  padding-left: 1.45em;
+}
+
+.peitho-footnotes li {
+  padding-left: 0.25em;
+}
+
+.peitho-footnotes p {
+  margin: 0 0 10px;
+}
+
+.peitho-footnote-ref {
+  font-size: 0.62em;
+  line-height: 0;
+  vertical-align: super;
+}
+
+.code {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.slot-code {
+  display: block;
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.slot-code .hl-comment {
+  color: #8a8578;
+}
+
+.slot-code .hl-string {
+  color: #2f7d4f;
+}
+
+.slot-code .hl-keyword,
+.slot-code .hl-storage {
+  color: #7141d8;
+}
+
+.slot-code .hl-constant {
+  color: #b45309;
+}
+
+.slot-code .hl-function {
+  color: #1d4ed8;
+}
+
+.slot-code .hl-type {
+  color: #0f766e;
+}

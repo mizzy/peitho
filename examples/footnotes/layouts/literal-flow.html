@@ -1,0 +1,7 @@
+<section class="peitho-slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <figure class="code"><slot name="code" accepts="code" arity="1"></slot></figure>
+  <div class="body"><slot name="outro" accepts="blocks" arity="1..*"></slot></div>
+  <footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
+</section>
