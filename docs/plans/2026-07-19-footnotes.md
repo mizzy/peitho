@@ -1,28 +1,52 @@
 # Footnotes in slide bodies
 
-Issue: #323. Author decision (2026-07-19): rendering model is **Option A — the
-footnote block is appended at the end of the `body` slot**, following the
-`FragmentKind::Math` precedent. A dedicated `footnotes` slot (Option B) and the
-hybrid "explicit slot > body tail" dispatch (Option C) were considered; A was
-chosen because it is zero-config (works with every layout that has a `body`
-slot, no layout changes), minimal, and can later be extended to C
-non-destructively if placement control is ever needed.
+Issue: #323. Author decision (2026-07-19, revised 2026-07-20): rendering model
+is **Option C — hybrid slot dispatch**. The footnote block routes to a
+dedicated `footnotes` slot when the slide's layout declares one, and falls
+back to the end of the `body` slot when it does not (the `FragmentKind::Math`
+precedent). Option A (body-tail only) was implemented first and revised after
+the author observed that "end of the body column" is not "bottom of the
+slide": on the default layout a code figure renders below the body, so
+footnotes landed mid-slide whenever code was present. The hybrid follows the
+existing "explicit > convention" precedents (layout dispatch, asset
+resolution): both stages are deterministic, and zero-config custom layouts
+keep working via the body-tail fallback. The built-in default layout declares
+a `footnotes` slot pinned to the slide's bottom edge, making footnotes true
+page furniture in the standard look. Markdown authoring, validation, and
+numbering are unchanged — only the rendered block's location is
+layout-controlled.
+
+Dispatch rule (mapping): if the slide's layout has a slot named `footnotes`,
+the synthesized `Footnotes` fragment routes there; otherwise it routes to
+`body`. No new error paths: a layout with neither slot sends the fragment to
+`unassigned` (existing `ResidualContent` error), and an author who also
+targets the slot with `::: {slot=footnotes}` content collides via the
+ordinary arity check — deterministic, never silent.
 
 ## Scope
 
-- `[^label]` inline references render as superscript links; `[^label]: ...`
-  definitions render as an ordered list inside a `.peitho-footnotes` block
-  appended as the **last fragment of the `body` slot**.
+- `[^label]` inline references render as plain superscript number markers;
+  `[^label]: ...` definitions render as an ordered list inside a
+  `.peitho-footnotes` block, placed by the hybrid dispatch above (dedicated
+  `footnotes` slot when the layout declares one, else the last fragment of
+  the `body` slot).
 - Footnotes are **per-slide**. A reference must resolve to a definition on the
   same slide and every definition must be referenced on the same slide.
   Cross-slide references are out of scope (they surface as the
   undefined-reference / unused-definition errors below).
 - Definition position within the slide is unconstrained (like speaker notes):
-  wherever the author writes `[^x]: ...`, the rendered block lands at the end
-  of the body slot. Definitions written inside a `::: {slot=...}` group are
+  wherever the author writes `[^x]: ...`, the rendered block lands at the
+  dispatched location. Definitions written inside a `::: {slot=...}` group are
   still collected slide-wide (the group captures fragments; definitions are
   not fragments).
-- No backlinks (↩) in v1 — on a slide everything is visible at once.
+- No links at all (author decision 2026-07-19): on a slide everything is
+  visible at once, so neither backlinks (↩) nor marker→note anchors serve a
+  purpose — a marker is a plain `<sup>` number, notes are plain `<li>`s.
+  Clicking during a talk must not navigate, and a link-colored marker would
+  be a false affordance — the marker inherits the surrounding text color.
+  This also removes any need for deck-unique element
+  IDs (PDF export renders all slides into one document, which is why IDs
+  would otherwise have to be slide-key-namespaced).
 
 ## Grammar: `ENABLE_OLD_FOOTNOTES`, one grammar, no text scanning
 
@@ -117,10 +141,17 @@ Changes:
 
 ## Mapping (`mapping.rs`)
 
-`FragmentKind::Footnotes` routes to the `body` slot by convention (next to the
-`Math` arm). A layout without a `body` slot sends it to `unassigned`, which the
-existing `check_no_unassigned` turns into a line-numbered `ResidualContent`
-error — no new error path.
+`FragmentKind::Footnotes` routes to the `footnotes` slot when the layout
+declares one, else to `body` (next to the `Math` arm). A layout with neither
+slot sends it to `unassigned`, which the existing `check_no_unassigned` turns
+into a line-numbered `ResidualContent` error — no new error path.
+
+## Built-in default layout (`layouts/title-body-code.html`)
+
+Gains `<slot name="footnotes" accepts="blocks" arity="0..1"></slot>` inside a
+`<footer class="footnotes">` after the code figure, so the block sits at the
+slide's bottom edge in the standard look. The slot is optional (`0..1`): decks
+without footnotes render nothing there (empty slots emit no markup).
 
 ## Check (`check.rs`)
 
@@ -136,20 +167,17 @@ Two seams:
    Enable `ENABLE_OLD_FOOTNOTES` there (same grammar as the parser — old
    mode emits `FootnoteReference` even though definitions were lifted out of
    the runs at parse time) and intercept `Event::FootnoteReference`,
-   emitting `<sup class="peitho-footnote-ref"><a href="#fn-<slide>-<n>"><n></a></sup>`
-   from a slide-scoped label → number map threaded into the renderers. No
-   string replacement or raw-text scanning on the render side either. IDs
-   are namespaced per slide (PDF export puts all slides in one document)
-   using the slide identity available at render time. A label missing from
-   the map, or a `FootnoteDefinition` appearing in a run, is unreachable
-   after parse validation and must be a hard render error, not a silent
-   literal.
+   emitting `<sup class="peitho-footnote-ref"><n></sup>` from a slide-scoped
+   label → number map threaded into the renderers. No string replacement or
+   raw-text scanning on the render side either. A label missing from the
+   map, or a `FootnoteDefinition` appearing in a run, is unreachable after
+   parse validation and must be a hard render error, not a silent literal.
 2. **The block.** `render_block_slot` renders the `Footnotes` fragment last
    (it is the last body fragment by construction):
 
    ```html
    <div class="peitho-footnotes"><ol>
-     <li id="fn-<slide>-1"><p>…</p></li>
+     <li><p>…</p></li>
    </ol></div>
    ```
 
@@ -160,8 +188,14 @@ Two seams:
 ## Theme (`themes/base.css`)
 
 Add `.peitho-footnotes` (reduced font size, top border, top margin — separator
-look) and `.peitho-footnote-ref` (superscript link styling) following existing
-`.slot-*` conventions. Colors via the theme's existing palette only.
+look) and `.peitho-footnote-ref` (plain superscript marker, inheriting the
+surrounding text color). Colors via the theme's existing palette only. The
+default layout's `.footnotes` footer is pinned to the slide's bottom edge via
+`margin-top: auto` in the existing flex column, and an empty footer is
+`display: none` (the layout writes the footer on one line so the emptied
+element has no whitespace children and `:empty` matches) — a slide without
+footnotes must not lose any vertical space to the wrapper (the flex `gap`
+would otherwise count it as an item).
 
 ## Tests (TDD — write failing tests first)
 
@@ -174,8 +208,11 @@ look) and `.peitho-footnote-ref` (superscript link styling) following existing
   literal (no reference recorded, no error); definitions before/after their
   references; footnotes inside a `::: {slot=...}` deck still collect
   slide-wide.
-- Mapping/check: `Footnotes` → body; layout without `body` slot →
-  `ResidualContent`; accepts pairing.
-- Render: reference HTML, block HTML, IDs unique across slides, escaping of
-  label-derived content, inline markdown inside definition bodies.
+- Mapping/check: `Footnotes` → `footnotes` slot when declared, else body;
+  layout with neither slot → `ResidualContent`; explicit `::: {slot=footnotes}`
+  content colliding with collected footnotes → arity error; accepts pairing.
+- Render: marker HTML (plain sup, no anchors/IDs), block HTML, footer
+  placement after the code figure on the default layout, empty footer emits
+  no visible box, escaping of label-derived content, inline markdown inside
+  definition bodies.
 - Gates: full workspace tests ×3, clippy, fmt, bindings drift, shell drift.

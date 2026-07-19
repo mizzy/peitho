@@ -28,6 +28,9 @@ numbering follows first-reference order. The list slide shows per-slide scoping
 and the build-time contract: an undefined reference is an error with line
 number and help text, not a missing marker in rendered HTML.
 
-The final slide demonstrates the escape hatches. A marker in a code span or a
-fenced code block stays literal, while the real reference on the same slide is
-validated and rendered as a footnote link.
+In the built-in layout, footnotes render at the bottom of the slide; custom
+layouts without a `footnotes` slot keep the body-tail fallback. The final slide
+demonstrates the escape hatches. A marker in a code span or regex character
+class stays literal inline, and the fenced regex block stays literal in the
+code figure above the footnotes footer. The real reference on the same slide is
+validated and rendered as a plain superscript marker.

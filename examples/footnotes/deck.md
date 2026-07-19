@@ -40,6 +40,8 @@ Use code when the marker is part of the subject.
 
 `[^x]` is a code span, not a citation.
 
+Even a regex character class such as `/^[^a-z]+$/` stays literal inline.
+
 ```
 /^[^a-z]+$/
 ```

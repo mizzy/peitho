@@ -60,6 +60,18 @@
   padding-left: 34px;
 }
 
+.footnotes {
+  min-width: 0;
+  margin-top: auto;
+  overflow: hidden;
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.footnotes:empty {
+  display: none;
+}
+
 .peitho-footnotes {
   margin-top: 34px;
   padding-top: 18px;
@@ -86,11 +98,6 @@
   font-size: 0.62em;
   line-height: 0;
   vertical-align: super;
-}
-
-.peitho-footnote-ref a {
-  color: #1d4ed8;
-  text-decoration: none;
 }
 
 .code {
