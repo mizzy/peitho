@@ -1,6 +1,9 @@
 export { calculateCanvasFit, installCanvasScaler } from "./canvas";
 export { installAgenda } from "./agenda";
 export type { AgendaOptions } from "./agenda";
+export { installRehearsalBridge } from "./rehearsalBridge";
+export { installRehearsalReporter } from "./rehearsalReporter";
+export { installSectionActuals } from "./sectionActuals";
 export type { CanvasFit, CanvasScalerOptions, CanvasViewport } from "./canvas";
 export {
   installCanvasClickNavigation,
@@ -38,6 +41,8 @@ export {
   isValidDurationMs
 } from "./timeTracker";
 export type { PresenterOptions, PresenterView } from "./presenter";
+export type { RehearsalReporterOptions, RehearsalReporterShell } from "./rehearsalReporter";
+export type { SectionActuals, SectionActualsOptions, SectionActualsShell } from "./sectionActuals";
 export type {
   NavigateDetail,
   NavigateTarget,

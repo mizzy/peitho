@@ -1,7 +1,10 @@
 import type { Notes } from "../../../bindings/Notes";
 import { installAgenda } from "./agenda";
+import { installRehearsalBridge } from "./rehearsalBridge";
+import { installRehearsalReporter } from "./rehearsalReporter";
+import { installSectionActuals } from "./sectionActuals";
 import { installPresenterKeyboard } from "./keyboard";
-import { sectionIndexForSlide } from "./sections";
+import { sectionIndexForSlide, validateSections } from "./sections";
 import {
   mountPresentShell,
   type PresentShell,
@@ -112,7 +115,8 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const doc = options.document ?? document;
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
-  const log = options.console ?? console;
+  const rawLog = options.console ?? console;
+  const log = { error: rawLog.error };
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -298,16 +302,35 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           document: doc,
           variant: "presenter"
         });
-  const sections = mainShell.manifest?.sections ?? [];
+  const manifestSections = mainShell.manifest?.sections ?? [];
+  const sections = validateSections(manifestSections, log) ? manifestSections : [];
+  // Install accumulator listeners before consumers; slidechange must attribute
+  // elapsed time to the pre-transition section before agenda/reporter reads it.
+  const sectionActuals = installSectionActuals({
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    log
+  });
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
     sections,
+    actuals: sectionActuals,
     bus,
     window: win,
     document: doc,
     log
   });
+  const rehearsalReporterCleanup = installRehearsalReporter({
+    actuals: sectionActuals,
+    shell: mainShell,
+    sections,
+    bus,
+    window: win
+  });
+  const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
   const rippleTimeouts = new Set<number>();
 
   function setTimerStateChrome(state: TimerState): void {
@@ -455,7 +478,10 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      rehearsalBridgeCleanup();
+      rehearsalReporterCleanup();
       agendaCleanup();
+      sectionActuals.destroy();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();

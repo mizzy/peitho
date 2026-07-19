@@ -1,12 +1,8 @@
 import type { ManifestSection } from "../../../bindings/ManifestSection";
-import { sectionIndexForSlide } from "./sections";
-import type {
-  PresentShell,
-  SlideChangeDetail,
-  TimerAdoptDetail,
-  TimerControlDetail,
-} from "./shell";
-import { formatMinuteSeconds, isValidDurationMs } from "./timeTracker";
+import { sectionIndexForSlide, validateSections } from "./sections";
+import type { PresentShell } from "./shell";
+import type { SectionActuals } from "./sectionActuals";
+import { formatMinuteSeconds } from "./timeTracker";
 
 const EM_DASH = "—";
 const MINUS_SIGN = "−";
@@ -25,6 +21,7 @@ export type AgendaOptions = {
   root: HTMLElement;
   shell: Pick<PresentShell, "currentIndex" | "elapsedMs" | "startedAt">;
   sections: ManifestSection[];
+  actuals: Pick<SectionActuals, "actualMs">;
   window?: Window;
   document?: Document;
   bus?: EventTarget;
@@ -37,7 +34,8 @@ export function installAgenda(options: AgendaOptions): () => void {
   const win = options.window ?? window;
   const doc = options.document ?? document;
   const bus = options.bus ?? win;
-  const log = options.log ?? console;
+  const rawLog = options.log ?? console;
+  const log = { error: rawLog.error };
   if (!validateSections(options.sections, log)) return () => undefined;
   const host = doc.createElement("section");
   host.dataset.peithoAgenda = "true";
@@ -52,131 +50,37 @@ export function installAgenda(options: AgendaOptions): () => void {
   const list = host.querySelector<HTMLElement>("[data-peitho-agenda-list]")!;
   const rows = options.sections.map((section) => createRow(doc, section));
   list.append(...rows.map(({ row }) => row));
-  const actualMs = new Array<number>(options.sections.length).fill(0);
-  let lastElapsedMs = options.shell.elapsedMs();
 
   function render(): void {
     const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
-    rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
-  }
-
-  function flushElapsedToSectionOf(slideIndex: number | null): void {
-    if (slideIndex === null || options.shell.startedAt() === null) return;
-    const elapsedMs = options.shell.elapsedMs();
-    const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
-    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
-    lastElapsedMs = elapsedMs;
+    const actuals = options.actuals.actualMs();
+    rows.forEach((row, index) =>
+      updateRow(row, index, currentSection, Math.max(0, actuals[index] ?? 0))
+    );
   }
 
   function onSlideChange(event: Event): void {
-    const previousIndex =
-      (event as CustomEvent<SlideChangeDetail>).detail?.previousIndex ?? null;
-    flushElapsedToSectionOf(previousIndex);
-    render();
-  }
-
-  function onTimerControl(event: Event): void {
-    const action = (event as CustomEvent<TimerControlDetail>).detail?.action;
-    if (action !== "reset") return;
-    actualMs.fill(0);
-    lastElapsedMs = 0;
-    render();
-  }
-
-  function onTimerAdopt(event: Event): void {
-    const detail = (event as CustomEvent<TimerAdoptDetail>).detail;
-    if (
-      typeof detail?.running !== "boolean" ||
-      typeof detail.elapsedMs !== "number" ||
-      !Number.isFinite(detail.elapsedMs) ||
-      detail.elapsedMs < 0 ||
-      typeof detail.previousElapsedMs !== "number" ||
-      !Number.isFinite(detail.previousElapsedMs) ||
-      detail.previousElapsedMs < 0
-    ) {
-      log.error("Invalid peitho:timeradopt event");
-      return;
-    }
-    if (!detail.running && detail.elapsedMs === 0) {
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      render();
-      return;
-    }
-    if (options.shell.startedAt() !== null) {
-      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
-      if (sectionIndex >= 0) {
-        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
-      }
-    }
-    lastElapsedMs = detail.elapsedMs;
+    void event;
     render();
   }
 
   function tick(): void {
-    if (options.shell.startedAt() === null) {
-      // Reset events zero actuals immediately in onTimerControl; this branch keeps
-      // the stopped-state display zeroed when the shell is already stopped.
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      render();
-      return;
-    }
-
-    flushElapsedToSectionOf(options.shell.currentIndex);
     render();
   }
 
   render();
   bus.addEventListener("peitho:slidechange", onSlideChange);
-  bus.addEventListener("peitho:timercontrol", onTimerControl);
-  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  bus.addEventListener("peitho:timercontrol", onSlideChange);
+  bus.addEventListener("peitho:timeradopt", onSlideChange);
   const interval = win.setInterval(tick, 250);
 
   return () => {
     win.clearInterval(interval);
     bus.removeEventListener("peitho:slidechange", onSlideChange);
-    bus.removeEventListener("peitho:timercontrol", onTimerControl);
-    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    bus.removeEventListener("peitho:timercontrol", onSlideChange);
+    bus.removeEventListener("peitho:timeradopt", onSlideChange);
     host.remove();
   };
-}
-
-function validateSections(
-  sections: ManifestSection[],
-  log: Pick<Console, "error">
-): boolean {
-  let expectedStartIndex = 0;
-  for (const [index, section] of sections.entries()) {
-    const label = `manifest section ${index + 1} "${section.name}"`;
-    if (!isValidDurationMs(section.plannedDurationMs)) {
-      log.error(`Invalid plannedDurationMs for ${label} in manifest.json`);
-      return false;
-    }
-    if (!isValidSlideIndex(section.startIndex) || !isValidSlideIndex(section.endIndex)) {
-      log.error(
-        `Invalid ${label}: startIndex and endIndex must be non-negative integers`
-      );
-      return false;
-    }
-    if (section.endIndex < section.startIndex) {
-      log.error(`Invalid ${label}: endIndex must be greater than or equal to startIndex`);
-      return false;
-    }
-    if (section.startIndex !== expectedStartIndex) {
-      log.error(
-        `Invalid ${label}: expected startIndex ${expectedStartIndex}, got ${section.startIndex}`
-      );
-      return false;
-    }
-    expectedStartIndex = section.endIndex + 1;
-  }
-  return true;
-}
-
-function isValidSlideIndex(index: number): boolean {
-  return Number.isSafeInteger(index) && index >= 0;
 }
 
 function createRow(doc: Document, section: ManifestSection): AgendaRow {

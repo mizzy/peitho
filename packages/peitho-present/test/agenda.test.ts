@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  installAgenda,
   type PresentShell,
   type SlideChangeDetail,
   type TimerControlDetail
 } from "../src/index";
+import { installAgenda as installAgendaImpl, type AgendaOptions } from "../src/agenda";
+import { installSectionActuals } from "../src/sectionActuals";
 
 const cleanups: Array<() => void> = [];
 
@@ -17,6 +18,26 @@ function shell(overrides: Partial<PresentShell> = {}): Pick<
     elapsedMs: () => 0,
     startedAt: () => 100,
     ...overrides
+  };
+}
+
+type TestAgendaOptions = Omit<AgendaOptions, "actuals"> & {
+  actuals?: AgendaOptions["actuals"];
+};
+
+function installAgenda(options: TestAgendaOptions): () => void {
+  if (options.actuals) return installAgendaImpl(options as AgendaOptions);
+  const actuals = installSectionActuals({
+    shell: options.shell,
+    sections: options.sections,
+    bus: options.bus,
+    window: options.window,
+    log: options.log
+  });
+  const cleanupAgenda = installAgendaImpl({ ...options, actuals });
+  return () => {
+    cleanupAgenda();
+    actuals.destroy();
   };
 }
 
@@ -129,8 +150,17 @@ it("renders agenda header and rows with mock-compatible structure", () => {
   });
   cleanups.push(cleanup);
 
+  const head = root.querySelector<HTMLElement>("[data-peitho-agenda-head]")!;
+  const headAttributeNames = Array.from(head.children).map((child) =>
+    Array.from((child as HTMLElement).attributes).map((attr) => attr.name)
+  );
+  expect(headAttributeNames).toEqual([
+    ["data-peitho-agenda-title"],
+    ["data-peitho-agenda-hint"]
+  ]);
   expect(root.querySelector("[data-peitho-agenda-title]")?.textContent).toBe("Agenda");
   expect(root.querySelector("[data-peitho-agenda-hint]")?.textContent).toBe("Actual / Planned");
+  expect(root.querySelector("[data-peitho-agenda-head-spacer]")).toBeNull();
   const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-peitho-agenda-row]"));
   expect(rows.map((row) => row.dataset.peithoAgendaState)).toEqual(["done", "current"]);
   expect(rows[0].children.length).toBe(4);
@@ -619,6 +649,7 @@ it("removes agenda interval listener and DOM on cleanup", () => {
     root,
     shell: shell({ elapsedMs: () => elapsed }),
     sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    actuals: { actualMs: () => [0] },
     bus,
     window,
     document

@@ -1838,6 +1838,7 @@ version = "1.11.0"
 dependencies = [
  "assert_cmd",
  "base64",
+ "chrono",
  "clap",
  "clap_complete",
  "if-addrs",

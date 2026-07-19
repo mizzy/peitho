@@ -1,3 +1,18 @@
+// src/timeTracker.ts
+var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
+function isOverrun(elapsedMs, plannedDurationMs) {
+  return elapsedMs > plannedDurationMs;
+}
+function isValidDurationMs(ms) {
+  return Number.isSafeInteger(ms) && ms > 0;
+}
+function formatMinuteSeconds(ms) {
+  const totalSeconds = Math.round(ms / 1e3);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 // src/sections.ts
 function sectionIndexForSlide(sections, slideIndex) {
   return sections.findIndex(
@@ -769,21 +784,6 @@ function serverSyncChannelFactory(options = {}) {
       }
     };
   };
-}
-
-// src/timeTracker.ts
-var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
-function isOverrun(elapsedMs, plannedDurationMs) {
-  return elapsedMs > plannedDurationMs;
-}
-function isValidDurationMs(ms) {
-  return Number.isSafeInteger(ms) && ms > 0;
-}
-function formatMinuteSeconds(ms) {
-  const totalSeconds = Math.round(ms / 1e3);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
-  return `${minutes}:${seconds}`;
 }
 
 // src/remote.ts

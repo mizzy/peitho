@@ -13,6 +13,7 @@ pub mod parser;
 pub mod phase;
 mod plain;
 pub mod present_config;
+pub mod rehearsal;
 pub mod render;
 pub mod theme;
 
@@ -39,6 +40,7 @@ pub use phase::{
     Mapped, Rendered,
 };
 pub use present_config::{present_config_json, PresentConfig};
+pub use rehearsal::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
 pub use render::{
     render_deck, render_distribution_index, render_lint_document, render_pdf_document,
     render_present_index, render_presenter_index, render_preview_error_index, render_preview_index,

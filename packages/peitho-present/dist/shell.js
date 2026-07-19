@@ -31,13 +31,6 @@ function installCanvasScaler(options) {
   return () => win.removeEventListener("resize", apply);
 }
 
-// src/sections.ts
-function sectionIndexForSlide(sections, slideIndex) {
-  return sections.findIndex(
-    (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
-  );
-}
-
 // src/timeTracker.ts
 var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
@@ -156,98 +149,11 @@ function installTimeTracker(options) {
   };
 }
 
-// src/agenda.ts
-var EM_DASH = "\u2014";
-var MINUS_SIGN = "\u2212";
-function installAgenda(options) {
-  if (options.sections.length === 0) return () => void 0;
-  const win = options.window ?? window;
-  const doc = options.document ?? document;
-  const bus = options.bus ?? win;
-  const log = options.log ?? console;
-  if (!validateSections(options.sections, log)) return () => void 0;
-  const host = doc.createElement("section");
-  host.dataset.peithoAgenda = "true";
-  host.innerHTML = [
-    "<div data-peitho-agenda-head>",
-    "<span data-peitho-agenda-title>Agenda</span>",
-    "<span data-peitho-agenda-hint>Actual / Planned</span>",
-    "</div>",
-    "<div data-peitho-agenda-list></div>"
-  ].join("");
-  options.root.appendChild(host);
-  const list = host.querySelector("[data-peitho-agenda-list]");
-  const rows = options.sections.map((section) => createRow(doc, section));
-  list.append(...rows.map(({ row }) => row));
-  const actualMs = new Array(options.sections.length).fill(0);
-  let lastElapsedMs = options.shell.elapsedMs();
-  function render() {
-    const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
-    rows.forEach((row, index) => updateRow(row, index, currentSection, actualMs[index]));
-  }
-  function flushElapsedToSectionOf(slideIndex) {
-    if (slideIndex === null || options.shell.startedAt() === null) return;
-    const elapsedMs = options.shell.elapsedMs();
-    const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
-    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
-    lastElapsedMs = elapsedMs;
-  }
-  function onSlideChange(event) {
-    const previousIndex = event.detail?.previousIndex ?? null;
-    flushElapsedToSectionOf(previousIndex);
-    render();
-  }
-  function onTimerControl(event) {
-    const action = event.detail?.action;
-    if (action !== "reset") return;
-    actualMs.fill(0);
-    lastElapsedMs = 0;
-    render();
-  }
-  function onTimerAdopt(event) {
-    const detail = event.detail;
-    if (typeof detail?.running !== "boolean" || typeof detail.elapsedMs !== "number" || !Number.isFinite(detail.elapsedMs) || detail.elapsedMs < 0 || typeof detail.previousElapsedMs !== "number" || !Number.isFinite(detail.previousElapsedMs) || detail.previousElapsedMs < 0) {
-      log.error("Invalid peitho:timeradopt event");
-      return;
-    }
-    if (!detail.running && detail.elapsedMs === 0) {
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      render();
-      return;
-    }
-    if (options.shell.startedAt() !== null) {
-      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
-      if (sectionIndex >= 0) {
-        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
-      }
-    }
-    lastElapsedMs = detail.elapsedMs;
-    render();
-  }
-  function tick() {
-    if (options.shell.startedAt() === null) {
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      render();
-      return;
-    }
-    flushElapsedToSectionOf(options.shell.currentIndex);
-    render();
-  }
-  render();
-  bus.addEventListener("peitho:slidechange", onSlideChange);
-  bus.addEventListener("peitho:timercontrol", onTimerControl);
-  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
-  const interval = win.setInterval(tick, 250);
-  return () => {
-    win.clearInterval(interval);
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
-    bus.removeEventListener("peitho:timercontrol", onTimerControl);
-    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
-    host.remove();
-  };
+// src/sections.ts
+function sectionIndexForSlide(sections, slideIndex) {
+  return sections.findIndex(
+    (section) => slideIndex >= section.startIndex && slideIndex <= section.endIndex
+  );
 }
 function validateSections(sections, log) {
   let expectedStartIndex = 0;
@@ -279,6 +185,58 @@ function validateSections(sections, log) {
 }
 function isValidSlideIndex(index) {
   return Number.isSafeInteger(index) && index >= 0;
+}
+
+// src/agenda.ts
+var EM_DASH = "\u2014";
+var MINUS_SIGN = "\u2212";
+function installAgenda(options) {
+  if (options.sections.length === 0) return () => void 0;
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const bus = options.bus ?? win;
+  const rawLog = options.log ?? console;
+  const log = { error: rawLog.error };
+  if (!validateSections(options.sections, log)) return () => void 0;
+  const host = doc.createElement("section");
+  host.dataset.peithoAgenda = "true";
+  host.innerHTML = [
+    "<div data-peitho-agenda-head>",
+    "<span data-peitho-agenda-title>Agenda</span>",
+    "<span data-peitho-agenda-hint>Actual / Planned</span>",
+    "</div>",
+    "<div data-peitho-agenda-list></div>"
+  ].join("");
+  options.root.appendChild(host);
+  const list = host.querySelector("[data-peitho-agenda-list]");
+  const rows = options.sections.map((section) => createRow(doc, section));
+  list.append(...rows.map(({ row }) => row));
+  function render() {
+    const currentSection = sectionIndexForSlide(options.sections, options.shell.currentIndex);
+    const actuals = options.actuals.actualMs();
+    rows.forEach(
+      (row, index) => updateRow(row, index, currentSection, Math.max(0, actuals[index] ?? 0))
+    );
+  }
+  function onSlideChange(event) {
+    void event;
+    render();
+  }
+  function tick() {
+    render();
+  }
+  render();
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onSlideChange);
+  bus.addEventListener("peitho:timeradopt", onSlideChange);
+  const interval = win.setInterval(tick, 250);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:timercontrol", onSlideChange);
+    bus.removeEventListener("peitho:timeradopt", onSlideChange);
+    host.remove();
+  };
 }
 function createRow(doc, section) {
   const row = doc.createElement("div");
@@ -336,6 +294,183 @@ function outcomeFor(actual, planned) {
 }
 function diffSeconds(actual, planned) {
   return Math.round((actual - planned) / 1e3);
+}
+
+// src/rehearsalBridge.ts
+function installRehearsalBridge(win, bus = win, fetcher = win.fetch.bind(win)) {
+  function onReport(event) {
+    const detail = event.detail;
+    void fetcher("/rehearsal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify(detail)
+    }).then((response) => {
+      if (!response.ok) {
+        console.error(`failed to POST rehearsal snapshot: ${response.status}`);
+      }
+    }).catch((error) => {
+      console.error("failed to POST rehearsal snapshot", error);
+    });
+  }
+  bus.addEventListener("peitho:rehearsalreport", onReport);
+  return () => {
+    bus.removeEventListener("peitho:rehearsalreport", onReport);
+  };
+}
+
+// src/rehearsalReporter.ts
+function installRehearsalReporter(options) {
+  if (options.sections.length === 0) return () => void 0;
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  let hasStarted = options.shell.startedAt() !== null;
+  function markStarted() {
+    if (options.shell.startedAt() !== null) hasStarted = true;
+  }
+  function snapshot() {
+    const actualMs = options.actuals.actualMs();
+    return {
+      version: 1,
+      elapsedMs: roundNonNegativeMs(options.shell.elapsedMs()),
+      sections: options.sections.map((section, index) => ({
+        name: section.name,
+        plannedDurationMs: section.plannedDurationMs,
+        actualMs: roundNonNegativeMs(actualMs[index] ?? 0)
+      }))
+    };
+  }
+  function report() {
+    markStarted();
+    if (!hasStarted) return;
+    options.actuals.flush();
+    bus.dispatchEvent(
+      new CustomEvent("peitho:rehearsalreport", {
+        detail: snapshot()
+      })
+    );
+  }
+  function onSlideChange() {
+    report();
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action === "start" || action === "resume") {
+      markStarted();
+      return;
+    }
+    if (action === "pause" || action === "reset") report();
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (!isValidTimerAdoptDetail(detail)) return;
+    if (detail.running || detail.elapsedMs > 0) hasStarted = true;
+    if (!detail.running && detail.elapsedMs === 0 && hasStarted) report();
+  }
+  function onCloseRequest() {
+    report();
+  }
+  function tick() {
+    markStarted();
+    if (!hasStarted || options.shell.startedAt() === null || options.shell.isPaused()) return;
+    report();
+  }
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  bus.addEventListener("peitho:closerequest", onCloseRequest);
+  const interval = win.setInterval(tick, 5e3);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    bus.removeEventListener("peitho:closerequest", onCloseRequest);
+  };
+}
+function isValidTimerAdoptDetail(detail) {
+  return typeof detail?.running === "boolean" && typeof detail.elapsedMs === "number" && Number.isFinite(detail.elapsedMs) && detail.elapsedMs >= 0 && typeof detail.previousElapsedMs === "number" && Number.isFinite(detail.previousElapsedMs) && detail.previousElapsedMs >= 0;
+}
+function roundNonNegativeMs(ms) {
+  return Math.max(0, Math.round(ms));
+}
+
+// src/sectionActuals.ts
+function installSectionActuals(options) {
+  if (options.sections.length === 0) {
+    return {
+      actualMs: () => [],
+      flush: () => void 0,
+      destroy: () => void 0
+    };
+  }
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const log = options.log ?? console;
+  const actualMs = new Array(options.sections.length).fill(0);
+  let lastElapsedMs = options.shell.elapsedMs();
+  function flushElapsedToSectionOf(slideIndex) {
+    if (slideIndex === null || options.shell.startedAt() === null) return;
+    const elapsedMs = options.shell.elapsedMs();
+    const delta = Math.max(0, elapsedMs - lastElapsedMs);
+    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
+    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
+    lastElapsedMs = elapsedMs;
+  }
+  function onSlideChange(event) {
+    const previousIndex = event.detail?.previousIndex ?? null;
+    flushElapsedToSectionOf(previousIndex);
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "reset") return;
+    actualMs.fill(0);
+    lastElapsedMs = 0;
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (typeof detail?.running !== "boolean" || typeof detail.elapsedMs !== "number" || !Number.isFinite(detail.elapsedMs) || detail.elapsedMs < 0 || typeof detail.previousElapsedMs !== "number" || !Number.isFinite(detail.previousElapsedMs) || detail.previousElapsedMs < 0) {
+      log.error("Invalid peitho:timeradopt event");
+      return;
+    }
+    if (!detail.running && detail.elapsedMs === 0) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      return;
+    }
+    if (options.shell.startedAt() !== null) {
+      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
+      if (sectionIndex >= 0) {
+        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
+      }
+    }
+    lastElapsedMs = detail.elapsedMs;
+  }
+  function tick() {
+    if (options.shell.startedAt() === null) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      return;
+    }
+    flush();
+  }
+  function flush() {
+    flushElapsedToSectionOf(options.shell.currentIndex);
+  }
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  const interval = win.setInterval(tick, 250);
+  return {
+    actualMs: () => actualMs.slice(),
+    flush,
+    destroy() {
+      win.clearInterval(interval);
+      bus.removeEventListener("peitho:slidechange", onSlideChange);
+      bus.removeEventListener("peitho:timercontrol", onTimerControl);
+      bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    }
+  };
 }
 
 // src/clickNavigationGuard.ts
@@ -1511,7 +1646,8 @@ async function mountPresenterView(options) {
   const doc = options.document ?? document;
   const fetcher = options.fetcher ?? fetch.bind(globalThis);
   const now = options.now ?? Date.now;
-  const log = options.console ?? console;
+  const rawLog = options.console ?? console;
+  const log = { error: rawLog.error };
   const bus = win;
   const previewBus = new EventTarget();
   options.root.innerHTML = `
@@ -1689,16 +1825,33 @@ async function mountPresenterView(options) {
     document: doc,
     variant: "presenter"
   });
-  const sections = mainShell.manifest?.sections ?? [];
+  const manifestSections = mainShell.manifest?.sections ?? [];
+  const sections = validateSections(manifestSections, log) ? manifestSections : [];
+  const sectionActuals = installSectionActuals({
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    log
+  });
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
     sections,
+    actuals: sectionActuals,
     bus,
     window: win,
     document: doc,
     log
   });
+  const rehearsalReporterCleanup = installRehearsalReporter({
+    actuals: sectionActuals,
+    shell: mainShell,
+    sections,
+    bus,
+    window: win
+  });
+  const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
   const rippleTimeouts = /* @__PURE__ */ new Set();
   function setTimerStateChrome(state) {
     clockRoot.dataset.peithoState = state;
@@ -1832,7 +1985,10 @@ async function mountPresenterView(options) {
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      rehearsalBridgeCleanup();
+      rehearsalReporterCleanup();
       agendaCleanup();
+      sectionActuals.destroy();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
       keyboardCleanup();
@@ -1856,6 +2012,9 @@ export {
   installKeyboardNavigation,
   installPresentationControls,
   installPresenterKeyboard,
+  installRehearsalBridge,
+  installRehearsalReporter,
+  installSectionActuals,
   installSwapShortcut,
   installSwipeNavigation,
   installSyncBridge,
