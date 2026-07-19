@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  installAgenda,
   type PresentShell,
   type SlideChangeDetail,
   type TimerControlDetail
 } from "../src/index";
+import { installAgenda as installAgendaImpl, type AgendaOptions } from "../src/agenda";
+import { installSectionActuals } from "../src/sectionActuals";
 
 const cleanups: Array<() => void> = [];
 
@@ -17,6 +18,26 @@ function shell(overrides: Partial<PresentShell> = {}): Pick<
     elapsedMs: () => 0,
     startedAt: () => 100,
     ...overrides
+  };
+}
+
+type TestAgendaOptions = Omit<AgendaOptions, "actuals"> & {
+  actuals?: AgendaOptions["actuals"];
+};
+
+function installAgenda(options: TestAgendaOptions): () => void {
+  if (options.actuals) return installAgendaImpl(options as AgendaOptions);
+  const actuals = installSectionActuals({
+    shell: options.shell,
+    sections: options.sections,
+    bus: options.bus,
+    window: options.window,
+    log: options.log
+  });
+  const cleanupAgenda = installAgendaImpl({ ...options, actuals });
+  return () => {
+    cleanupAgenda();
+    actuals.destroy();
   };
 }
 
@@ -144,6 +165,85 @@ it("renders agenda header and rows with mock-compatible structure", () => {
   expect(rows[1].querySelector("[data-peitho-agenda-time]")?.textContent).toBe("0:00 / 2:00");
   expect(rows[1].querySelector("[data-peitho-agenda-delta]")?.textContent).toBe("·");
   expect(rows[1].hasAttribute("data-peitho-agenda-outcome")).toBe(false);
+});
+
+it("renders matching rehearsal baseline actuals per section", () => {
+  const root = document.createElement("div");
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0 }),
+    sections: [
+      { name: "Setup", startIndex: 0, endIndex: 1, plannedDurationMs: 60_000 },
+      { name: "Demo", startIndex: 2, endIndex: 2, plannedDurationMs: 120_000 }
+    ],
+    rehearsal: {
+      version: 1,
+      lastRun: {
+        version: 1,
+        recordedAtMs: 1_783_000_000_000,
+        elapsedMs: 200_000,
+        sections: [
+          { name: "Setup", plannedDurationMs: 60_000, actualMs: 52_000 },
+          { name: "Demo", plannedDurationMs: 120_000, actualMs: 128_000 }
+        ]
+      }
+    },
+    bus: new EventTarget(),
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  const last = Array.from(
+    root.querySelectorAll("[data-peitho-agenda-last]"),
+    (node) => node.textContent
+  );
+  expect(last).toEqual(["(last 0:52)", "(last 2:08)"]);
+});
+
+it("omits rehearsal comparison and warns when section names or plans differ", () => {
+  const root = document.createElement("div");
+  const log = { error: vi.fn(), warn: vi.fn() };
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0 }),
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    rehearsal: {
+      version: 1,
+      lastRun: {
+        version: 1,
+        recordedAtMs: 1_783_000_000_000,
+        elapsedMs: 2_000,
+        sections: [{ name: "Setup", plannedDurationMs: 61_000, actualMs: 2_000 }]
+      }
+    },
+    bus: new EventTarget(),
+    window,
+    document,
+    log
+  });
+  cleanups.push(cleanup);
+
+  expect(root.querySelector("[data-peitho-agenda-last]")).toBeNull();
+  expect(log.warn).toHaveBeenCalledWith(
+    "Last rehearsal does not match the current agenda; deck may have been edited since the rehearsal"
+  );
+});
+
+it("does not render rehearsal comparison when there is no last run", () => {
+  const root = document.createElement("div");
+  const cleanup = installAgenda({
+    root,
+    shell: shell({ currentIndex: 0 }),
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    rehearsal: { version: 1, lastRun: null },
+    bus: new EventTarget(),
+    window,
+    document
+  });
+  cleanups.push(cleanup);
+
+  expect(root.querySelector("[data-peitho-agenda-last]")).toBeNull();
 });
 
 it("renders never-visited upcoming sections with a dash actual", () => {
@@ -619,6 +719,7 @@ it("removes agenda interval listener and DOM on cleanup", () => {
     root,
     shell: shell({ elapsedMs: () => elapsed }),
     sections: [{ name: "Only", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    actuals: { actualMs: () => [0] },
     bus,
     window,
     document

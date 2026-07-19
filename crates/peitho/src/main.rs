@@ -325,6 +325,7 @@ struct PresentOptions {
     no_presenter: bool,
     presenter_windowed: bool,
     host: Option<Option<IpAddr>>,
+    rehearsal: bool,
 }
 
 struct PreviewOptions {
@@ -406,6 +407,8 @@ enum Command {
         no_presenter: bool,
         #[arg(long)]
         presenter_windowed: bool,
+        #[arg(long)]
+        rehearsal: bool,
         #[arg(
             long,
             value_name = "IP",
@@ -462,11 +465,13 @@ fn present_port_help() -> String {
 }
 const PRESENT_CACHE: &str = ".peitho/present-cache";
 const PREVIEW_CACHE: &str = ".peitho/preview-cache";
+const REHEARSALS_DIR: &str = ".peitho/rehearsals";
 const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
     "present.html",
     "presenter.html",
     "remote.html",
     "notes.json",
+    "rehearsal.json",
     "shell.js",
     "remote.js",
 ];
@@ -536,6 +541,7 @@ fn main() -> miette::Result<()> {
             no_serve,
             no_presenter,
             presenter_windowed,
+            rehearsal,
             host,
         } => present(PresentOptions {
             input,
@@ -545,6 +551,7 @@ fn main() -> miette::Result<()> {
             no_serve,
             no_presenter,
             presenter_windowed,
+            rehearsal,
             host,
         }),
         Command::Publish { dist, command } => {
@@ -2318,6 +2325,77 @@ fn reject_presentation_only_files(dist: &Path) -> miette::Result<()> {
     Ok(())
 }
 
+fn rehearsal_baseline_from_dir(dir: &Path) -> miette::Result<peitho_core::RehearsalBaseline> {
+    let paths = rehearsal_record_paths(dir)?;
+    let Some(latest_path) = latest_rehearsal_path_by_name(&paths) else {
+        return Ok(peitho_core::RehearsalBaseline::empty());
+    };
+
+    Ok(peitho_core::RehearsalBaseline::new(Some(
+        read_rehearsal_record(&latest_path)?,
+    )))
+}
+
+fn rehearsal_record_paths(dir: &Path) -> miette::Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(dir)
+        .map_err(|err| rehearsal_record_paths_entry_error(dir, err))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|err| rehearsal_record_paths_entry_error(dir, err))?
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.file_name().map(|name| name.to_os_string()));
+    Ok(paths)
+}
+
+fn rehearsal_record_paths_entry_error(dir: &Path, err: std::io::Error) -> miette::Report {
+    miette::miette!(
+        "failed to read rehearsal records in {}\nhelp: check permissions or move the rehearsals directory\ncaused by: {err}",
+        dir.display()
+    )
+}
+
+fn latest_rehearsal_path_by_name(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            // Files outside Peitho's rehearsal filename scheme are not records.
+            let key = server::parse_rehearsal_filename(name)?;
+            Some((key, path))
+        })
+        .max_by_key(|(key, _)| key.clone())
+        .map(|(_, path)| path.clone())
+}
+
+fn read_rehearsal_record(path: &Path) -> miette::Result<peitho_core::RehearsalRecord> {
+    let json = fs::read_to_string(path).map_err(|err| {
+        miette::miette!(
+            "failed to read rehearsal record {}\nhelp: delete or move {} and run `peitho present` again\ncaused by: {err}",
+            path.display(),
+            path.display()
+        )
+    })?;
+    let record: peitho_core::RehearsalRecord = serde_json::from_str(&json).map_err(|err| {
+        miette::miette!(
+            "failed to parse rehearsal record {}\nhelp: delete or move {} and run `peitho present` again\ncaused by: {err}",
+            path.display(),
+            path.display()
+        )
+    })?;
+    record.validate().map_err(|err| {
+        miette::miette!(
+            "{err} in rehearsal record {}\nhelp: delete or move {} and run `peitho present` again",
+            path.display(),
+            path.display()
+        )
+    })?;
+    Ok(record)
+}
+
 fn read_publish_manifest(dist: &Path) -> miette::Result<peitho_core::Manifest> {
     let path = dist.join("manifest.json");
     let json = fs::read_to_string(&path).map_err(|err| {
@@ -2490,13 +2568,36 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     fs::create_dir_all(&cache).into_diagnostic()?;
 
     let artifacts = build_artifacts(&options.input)?;
+    if options.rehearsal {
+        validate_rehearsal_sections(&artifacts)?;
+    }
+    let rehearsals_dir = PathBuf::from(REHEARSALS_DIR);
+    let rehearsal_baseline = rehearsal_baseline_from_dir(&rehearsals_dir)?;
     if options.no_serve {
-        emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false)?;
+        emit_present_cache(
+            &cache,
+            &artifacts,
+            options.shell.as_deref(),
+            false,
+            &rehearsal_baseline,
+        )?;
         println!("generated present cache at {}", cache.display());
         return Ok(());
     }
 
-    let server = bind_present_server(cache.clone(), resolved_port, "present.html", &resolved_host)?;
+    let rehearsal_sink = if options.rehearsal {
+        Some(server::RehearsalSink::new(
+            rehearsals_dir,
+            expected_rehearsal_sections(&artifacts),
+        ))
+    } else {
+        None
+    };
+    let mut server =
+        bind_present_server(cache.clone(), resolved_port, "present.html", &resolved_host)?;
+    if let Some(sink) = rehearsal_sink {
+        server = server.with_rehearsal_sink(sink);
+    }
     let url = server.url();
     let presenter_url = browser::presenter_url(&url);
     let browser_plan = if options.no_open {
@@ -2514,8 +2615,17 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     let presenter_open = browser_plan
         .as_ref()
         .is_some_and(|plan| plan.opens_presenter);
-    emit_present_cache(&cache, &artifacts, options.shell.as_deref(), presenter_open)?;
+    emit_present_cache(
+        &cache,
+        &artifacts,
+        options.shell.as_deref(),
+        presenter_open,
+        &rehearsal_baseline,
+    )?;
     println!("serving presentation at {url}");
+    if options.rehearsal {
+        println!("recording rehearsal to {REHEARSALS_DIR}/");
+    }
     if let Some(target) =
         remote_control_target_for_resolved_host(&resolved_host, server.addr().port())
     {
@@ -2553,6 +2663,11 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 }
 
 fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
+    if options.rehearsal && options.no_serve {
+        return Err(miette::miette!(
+            "--rehearsal requires the present server\nhelp: remove --no-serve or omit --rehearsal"
+        ));
+    }
     let Some(host) = options.host else {
         return Ok(());
     };
@@ -2567,6 +2682,25 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_rehearsal_sections(artifacts: &BuildArtifacts) -> miette::Result<()> {
+    if artifacts.rendered.settings().sections().is_empty() {
+        return Err(miette::miette!(
+            "--rehearsal requires agenda sections\nhelp: declare {{\"section\":...}} page comments to define the agenda"
+        ));
+    }
+    Ok(())
+}
+
+fn expected_rehearsal_sections(artifacts: &BuildArtifacts) -> Vec<(String, u64)> {
+    artifacts
+        .rendered
+        .settings()
+        .sections()
+        .iter()
+        .map(|section| (section.name().to_owned(), section.planned().as_millis()))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3049,6 +3183,7 @@ fn emit_present_cache(
     artifacts: &BuildArtifacts,
     shell: Option<&Path>,
     presenter_open: bool,
+    rehearsal_baseline: &peitho_core::RehearsalBaseline,
 ) -> miette::Result<()> {
     if let Some(shell) = shell {
         ensure_shell_bundle(shell)?;
@@ -3064,6 +3199,11 @@ fn emit_present_cache(
         core(peitho_core::notes_json(&peitho_core::Notes::from_slides(
             artifacts.rendered.slides(),
         )))?,
+    )
+    .into_diagnostic()?;
+    fs::write(
+        cache.join("rehearsal.json"),
+        core(peitho_core::rehearsal_baseline_json(rehearsal_baseline))?,
     )
     .into_diagnostic()?;
     fs::write(
@@ -5216,6 +5356,13 @@ contexts:
     }
 
     #[test]
+    fn present_command_accepts_rehearsal_flag() {
+        let cli = Cli::parse_from(["peitho", "present", "deck.md", "--rehearsal"]);
+
+        assert!(present_rehearsal_from_cli(cli));
+    }
+
+    #[test]
     fn present_command_without_port_preserves_unspecified_state() {
         let cli = Cli::parse_from(["peitho", "present", "deck.md", "--host"]);
 
@@ -5307,6 +5454,7 @@ contexts:
             no_presenter: false,
             presenter_windowed: false,
             host: Some(Some("100.64.0.5".parse().unwrap())),
+            rehearsal: false,
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -5328,12 +5476,60 @@ contexts:
             no_presenter: false,
             presenter_windowed: false,
             host: Some(Some("127.0.0.1".parse().unwrap())),
+            rehearsal: false,
         };
 
         let err = validate_present_options(&options).unwrap_err();
 
         assert!(err.to_string().contains("--host must be non-loopback"));
         assert!(err.to_string().contains("use the default loopback server"));
+    }
+
+    #[test]
+    fn present_options_reject_rehearsal_with_no_serve() {
+        let options = PresentOptions {
+            input: PathBuf::from("deck.md"),
+            shell: None,
+            port: None,
+            no_open: true,
+            no_serve: true,
+            no_presenter: false,
+            presenter_windowed: false,
+            host: None,
+            rehearsal: true,
+        };
+
+        let err = validate_present_options(&options).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--rehearsal requires the present server"));
+        assert!(err.to_string().contains("--no-serve"));
+    }
+
+    #[test]
+    fn rehearsal_mode_rejects_sectionless_deck() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        let err = validate_rehearsal_sections(&artifacts).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--rehearsal requires agenda sections"));
+        assert!(err
+            .to_string()
+            .contains(r#"declare {"section":...} page comments"#));
+    }
+
+    #[test]
+    fn rehearsal_mode_accepts_deck_with_sections() {
+        let fixture = WatchFixture::new(
+            "---\ntime: 1m\n---\n<!-- {\"section\":\"Setup\",\"time\":\"1m\"} -->\n# Intro\n",
+        );
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        validate_rehearsal_sections(&artifacts).unwrap();
     }
 
     #[test]
@@ -5570,6 +5766,23 @@ contexts:
     fn present_host_from_cli(cli: Cli) -> Option<Option<IpAddr>> {
         match cli.command {
             Command::Present { host, .. } => host,
+            Command::Build { .. }
+            | Command::Lint { .. }
+            | Command::New { .. }
+            | Command::Layouts { .. }
+            | Command::Doctor { .. }
+            | Command::Preview { .. }
+            | Command::Publish { .. }
+            | Command::Export { .. }
+            | Command::Completions { .. } => {
+                panic!("expected present command");
+            }
+        }
+    }
+
+    fn present_rehearsal_from_cli(cli: Cli) -> bool {
+        match cli.command {
+            Command::Present { rehearsal, .. } => rehearsal,
             Command::Build { .. }
             | Command::Lint { .. }
             | Command::New { .. }
@@ -6359,10 +6572,254 @@ printf '0 bytes written to file %s\n' "$out" >&2
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
 
         fs::create_dir_all(&fixture.options.out).unwrap();
-        emit_present_cache(&fixture.options.out, &artifacts, None, true).unwrap();
+        emit_present_cache(
+            &fixture.options.out,
+            &artifacts,
+            None,
+            true,
+            &peitho_core::RehearsalBaseline::empty(),
+        )
+        .unwrap();
 
         let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
         assert!(json.contains(r#""presenterOpen": true"#));
+    }
+
+    #[test]
+    fn emit_present_cache_always_writes_rehearsal_json() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        fs::create_dir_all(&fixture.options.out).unwrap();
+        emit_present_cache(
+            &fixture.options.out,
+            &artifacts,
+            None,
+            false,
+            &peitho_core::RehearsalBaseline::empty(),
+        )
+        .unwrap();
+
+        let json = fs::read_to_string(fixture.options.out.join("rehearsal.json")).unwrap();
+        assert_eq!(json, "{\n  \"version\": 1,\n  \"lastRun\": null\n}\n");
+    }
+
+    #[test]
+    fn rehearsal_baseline_is_null_for_missing_or_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            rehearsal_baseline_from_dir(&dir.path().join("missing")).unwrap(),
+            peitho_core::RehearsalBaseline::empty()
+        );
+        fs::create_dir_all(dir.path().join("empty")).unwrap();
+        assert_eq!(
+            rehearsal_baseline_from_dir(&dir.path().join("empty")).unwrap(),
+            peitho_core::RehearsalBaseline::empty()
+        );
+    }
+
+    #[test]
+    fn rehearsal_record_entry_error_has_recovery_help() {
+        let dir = Path::new("deck/.peitho/rehearsals");
+        let err =
+            rehearsal_record_paths_entry_error(dir, std::io::Error::other("injected read error"));
+        let message = format!("{err:?}");
+
+        assert!(message.contains("failed to read rehearsal records in deck/.peitho/rehearsals"));
+        assert!(message.contains("help: check permissions or move the rehearsals directory"));
+        assert!(message.contains("caused by: injected read error"));
+    }
+
+    #[test]
+    fn latest_rehearsal_path_selection_uses_filename_order() {
+        let paths = vec![
+            PathBuf::from("rehearsal-20260719-100000.json"),
+            PathBuf::from("rehearsal-20260719-090000.json"),
+        ];
+
+        assert_eq!(
+            latest_rehearsal_path_by_name(&paths),
+            Some(PathBuf::from("rehearsal-20260719-100000.json"))
+        );
+    }
+
+    #[test]
+    fn rehearsal_baseline_uses_latest_record_by_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090000.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                1_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
+            ),
+        );
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-100000.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_003_600_000,
+                2_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
+            ),
+        );
+
+        let baseline = rehearsal_baseline_from_dir(&rehearsals).unwrap();
+
+        assert_eq!(baseline.last_run().unwrap().elapsed_ms(), 2_000);
+    }
+
+    #[test]
+    fn rehearsal_baseline_ignores_stray_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090000.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                1_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
+            ),
+        );
+        fs::write(rehearsals.join("zzz-notes.json"), "not json").unwrap();
+
+        let baseline = rehearsal_baseline_from_dir(&rehearsals).unwrap();
+
+        assert_eq!(baseline.last_run().unwrap().elapsed_ms(), 1_000);
+    }
+
+    #[test]
+    fn rehearsal_baseline_orders_unsuffixed_and_suffixed_same_stamp_numerically() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090507.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                1_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
+            ),
+        );
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090507-2.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                2_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
+            ),
+        );
+
+        let baseline = rehearsal_baseline_from_dir(&rehearsals).unwrap();
+
+        assert_eq!(baseline.last_run().unwrap().elapsed_ms(), 2_000);
+    }
+
+    #[test]
+    fn rehearsal_baseline_orders_collision_suffixes_numerically() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090507-2.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                2_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
+            ),
+        );
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-090507-10.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                10_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 10_000)],
+            ),
+        );
+
+        let baseline = rehearsal_baseline_from_dir(&rehearsals).unwrap();
+
+        assert_eq!(baseline.last_run().unwrap().elapsed_ms(), 10_000);
+    }
+
+    #[test]
+    fn rehearsal_baseline_ignores_corrupt_older_record_when_latest_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        fs::write(
+            rehearsals.join("rehearsal-20260719-090000.json"),
+            "not json",
+        )
+        .unwrap();
+        write_rehearsal_record(
+            &rehearsals.join("rehearsal-20260719-100000.json"),
+            peitho_core::RehearsalRecord::new(
+                1_783_003_600_000,
+                2_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
+            ),
+        );
+
+        let baseline = rehearsal_baseline_from_dir(&rehearsals).unwrap();
+
+        assert_eq!(baseline.last_run().unwrap().elapsed_ms(), 2_000);
+    }
+
+    #[test]
+    fn rehearsal_baseline_errors_on_corrupt_latest_record_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = dir.path().join("rehearsal-20260719-090000.json");
+        write_rehearsal_record(
+            &older,
+            peitho_core::RehearsalRecord::new(
+                1_783_000_000_000,
+                1_000,
+                vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
+            ),
+        );
+        let path = dir.path().join("rehearsal-20260719-100000.json");
+        fs::write(&path, "not json").unwrap();
+
+        let err = rehearsal_baseline_from_dir(dir.path()).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("failed to parse rehearsal record"));
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("delete or move"));
+    }
+
+    #[test]
+    fn rehearsal_baseline_errors_on_future_version_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rehearsal-20260719-090000.json");
+        fs::write(
+            &path,
+            r#"{"version":2,"recordedAtMs":1783000000000,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+        )
+        .unwrap();
+
+        let err = rehearsal_baseline_from_dir(dir.path()).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("unsupported rehearsal version"));
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("delete or move"));
+    }
+
+    #[test]
+    fn publish_contamination_rejects_rehearsal_json() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("rehearsal.json"), "{}").unwrap();
+
+        let err = reject_presentation_only_files(dir.path()).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("distribution contains presentation-only file: rehearsal.json"));
     }
 
     #[test]
@@ -6391,7 +6848,14 @@ printf '0 bytes written to file %s\n' "$out" >&2
 
         let artifacts = build_artifacts(&deck).unwrap();
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(
+            &cache,
+            &artifacts,
+            None,
+            false,
+            &peitho_core::RehearsalBaseline::empty(),
+        )
+        .unwrap();
 
         let mut assets = fs::read_dir(cache.join("assets"))
             .unwrap()
@@ -6418,7 +6882,14 @@ printf '0 bytes written to file %s\n' "$out" >&2
 
         let artifacts = build_artifacts(&deck).unwrap();
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(
+            &cache,
+            &artifacts,
+            None,
+            false,
+            &peitho_core::RehearsalBaseline::empty(),
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read(cache.join("fonts/deck-font.woff2")).unwrap(),
@@ -6433,7 +6904,14 @@ printf '0 bytes written to file %s\n' "$out" >&2
         let cache = fixture._dir.path().join("present-cache");
 
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(
+            &cache,
+            &artifacts,
+            None,
+            false,
+            &peitho_core::RehearsalBaseline::empty(),
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read(cache.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
@@ -7436,6 +7914,10 @@ printf '0 bytes written to file %s\n' "$out" >&2
             .find(|font| font.file_name() == file_name)
             .map(peitho_core::MathFontAsset::bytes)
             .expect("expected embedded KaTeX font")
+    }
+
+    fn write_rehearsal_record(path: &Path, record: peitho_core::RehearsalRecord) {
+        fs::write(path, peitho_core::rehearsal_record_json(&record).unwrap()).unwrap();
     }
 
     fn watch_state_with_fonts() -> (tempfile::TempDir, WatchState, PathBuf) {

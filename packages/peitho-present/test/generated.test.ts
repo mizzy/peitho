@@ -96,9 +96,10 @@ describe("generated manifest contract", () => {
     const start: PresentationStartDetail = { total: 3, startedAt: 1000 };
     const end: PresentationEndDetail = { endedAt: 2000, elapsedMs: 1000 };
     const control: TimerControlDetail = { action: "pause" };
-    const options: Pick<PresenterOptions, "root" | "notes"> = {
+    const options: Pick<PresenterOptions, "root" | "notes" | "rehearsal"> = {
       root: document.createElement("main"),
-      notes: { version: 1, notes: {} }
+      notes: { version: 1, notes: {} },
+      rehearsal: { version: 1, lastRun: null }
     };
 
     expect(start.total).toBe(3);

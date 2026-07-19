@@ -1125,6 +1125,7 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
     [data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }
     [data-peitho-agenda-state="current"] [data-peitho-agenda-name] { color: var(--fg); font-weight: 600; }
     [data-peitho-agenda-range] { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; flex-shrink: 0; white-space: nowrap; }
+    [data-peitho-agenda-last] { color: var(--fg-dim); font-size: 11px; letter-spacing: 0; flex-shrink: 0; white-space: nowrap; }
     [data-peitho-agenda-time],
     [data-peitho-agenda-delta] { font-family: "Geist Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-dim); }
     [data-peitho-agenda-delta] { min-width: 6ch; text-align: right; }
@@ -1189,10 +1190,12 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
       const root = document.getElementById('peitho-presenter-root');
       try {
         const notes = await fetchOk('notes.json').then((response) => response.json());
+        const rehearsal = await fetchOk('rehearsal.json').then((response) => response.json());
         peitho.installCloseOnEscape(window);
         await peitho.mountPresenterView({
           root,
           notes,
+          rehearsal,
           syncChannelFactory: peitho.serverSyncChannelFactory()
         });
         if (typeof peitho.installSwapShortcut === 'function') {
@@ -2184,6 +2187,7 @@ Paragraph after heading.
         assert!(html.contains("flex-shrink: 0"));
         assert!(html.contains(r#"[data-peitho-agenda-time]"#));
         assert!(html.contains(r#"[data-peitho-agenda-delta]"#));
+        assert!(html.contains(r#"[data-peitho-agenda-last]"#));
         assert!(html.contains(r#"[data-peitho-agenda-state="done"] [data-peitho-agenda-name] { color: var(--fg-dim); }"#));
         assert!(html.contains("min-width: 6ch"));
         assert!(html
@@ -2251,6 +2255,16 @@ Paragraph after heading.
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
+    }
+
+    #[test]
+    fn presenter_index_fetches_rehearsal_baseline_with_notes() {
+        let html = render_presenter_index(AspectRatio::Ratio16To9);
+
+        assert!(html.contains("fetchOk('notes.json')"));
+        assert!(html.contains("fetchOk('rehearsal.json')"));
+        assert!(html.contains("const rehearsal = await fetchOk('rehearsal.json')"));
+        assert!(html.contains("rehearsal,"));
     }
 
     #[test]

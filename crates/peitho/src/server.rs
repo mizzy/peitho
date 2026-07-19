@@ -1,6 +1,7 @@
 use std::{
     error::Error,
-    fmt, fs,
+    fmt,
+    fs::{self, OpenOptions},
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
@@ -12,6 +13,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{Local, NaiveDateTime};
+use peitho_core::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -263,9 +266,93 @@ pub struct PresentServer {
     root: Arc<RwLock<PathBuf>>,
     default_document: String,
     serve_remote_assets: bool,
+    rehearsal_sink: Option<Arc<RehearsalSink>>,
     server: Arc<Server>,
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
+}
+
+#[derive(Debug)]
+pub struct RehearsalSink {
+    dir: PathBuf,
+    expected: Vec<(String, u64)>,
+    session: Mutex<Option<RehearsalSession>>,
+}
+
+#[derive(Debug, Clone)]
+struct RehearsalSession {
+    path: PathBuf,
+    recorded_at_ms: u64,
+}
+
+#[derive(Debug)]
+struct ReservedRehearsalFile {
+    path: PathBuf,
+    file: fs::File,
+}
+
+#[derive(Debug)]
+enum RehearsalWriteError {
+    SectionMismatch,
+    Io(io::Error),
+    Serialize(String),
+}
+
+impl fmt::Display for RehearsalWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SectionMismatch => write!(f, "rehearsal sections do not match this deck"),
+            Self::Io(err) => write!(f, "{err}"),
+            Self::Serialize(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl RehearsalSink {
+    pub fn new(dir: PathBuf, expected: Vec<(String, u64)>) -> Self {
+        Self {
+            dir,
+            expected,
+            session: Mutex::new(None),
+        }
+    }
+
+    fn write_snapshot(&self, snapshot: &RehearsalSnapshot) -> Result<(), RehearsalWriteError> {
+        if !snapshot_matches_expected(snapshot.sections(), &self.expected) {
+            return Err(RehearsalWriteError::SectionMismatch);
+        }
+
+        // Hold the session mutex through serialization and disk writes; it
+        // serializes concurrent POSTs that share this session path.
+        let mut session = self.session.lock().expect("rehearsal sink mutex");
+        if let Some(session) = session.as_ref() {
+            let record = RehearsalRecord::from_snapshot(session.recorded_at_ms, snapshot);
+            let json = rehearsal_record_json(&record)
+                .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
+
+            // Keep the session mutex held through the atomic rewrite; it also
+            // serializes concurrent POSTs that share this session path and temp file.
+            return write_atomic(&session.path, json.as_bytes()).map_err(RehearsalWriteError::Io);
+        }
+
+        let recorded_at_ms = epoch_ms_now();
+        let record = RehearsalRecord::from_snapshot(recorded_at_ms, snapshot);
+        let json = rehearsal_record_json(&record)
+            .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
+        let reserved = reserve_rehearsal_path(&self.dir, Local::now().naive_local())
+            .map_err(RehearsalWriteError::Io)?;
+        let path = match write_first_rehearsal_record(reserved, json.as_bytes(), |file, bytes| {
+            file.write_all(bytes)
+        }) {
+            Ok(path) => path,
+            Err(err) => return Err(RehearsalWriteError::Io(err)),
+        };
+        *session = Some(RehearsalSession {
+            path,
+            recorded_at_ms,
+        });
+        Ok(())
+    }
 }
 
 impl PresentServer {
@@ -319,10 +406,16 @@ impl PresentServer {
             root: Arc::new(RwLock::new(root)),
             default_document: default_document.to_owned(),
             serve_remote_assets,
+            rehearsal_sink: None,
             server: server.clone(),
             listeners: Arc::new(Mutex::new(vec![server])),
             sync: SyncHub::default(),
         })
+    }
+
+    pub fn with_rehearsal_sink(mut self, sink: RehearsalSink) -> Self {
+        self.rehearsal_sink = Some(Arc::new(sink));
+        self
     }
 
     fn add_listener(&self, host: IpAddr) -> miette::Result<SocketAddr> {
@@ -417,6 +510,10 @@ impl PresentServer {
                 self.respond_sync_post(request, shutdown);
                 return;
             }
+            (&Method::Post, "/rehearsal") => {
+                self.respond_rehearsal_post(request);
+                return;
+            }
             _ => {}
         }
 
@@ -496,6 +593,26 @@ impl PresentServer {
                 shutdown.start();
             }
         }
+    }
+
+    fn respond_rehearsal_post(&self, mut request: tiny_http::Request) {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() {
+            send_response(
+                request,
+                Response::from_string("invalid rehearsal body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        }
+        let outcome = rehearsal_post_outcome(self.rehearsal_sink.as_deref(), &body);
+        if outcome.json {
+            send_json_response(request, outcome.body);
+            return;
+        }
+        send_response(
+            request,
+            Response::from_string(outcome.body).with_status_code(StatusCode(outcome.status)),
+        );
     }
 
     fn respond_static(&self, request: tiny_http::Request) {
@@ -675,6 +792,167 @@ fn sync_post_response_body(seq: u64) -> String {
     serde_json::to_string(&SyncPostResponseBody { seq }).expect("sync post response serializes")
 }
 
+fn rehearsal_post_response_body(recorded: bool) -> String {
+    #[derive(Serialize)]
+    struct RehearsalPostResponseBody {
+        recorded: bool,
+    }
+
+    serde_json::to_string(&RehearsalPostResponseBody { recorded })
+        .expect("rehearsal post response serializes")
+}
+
+struct RehearsalPostOutcome {
+    status: u16,
+    body: String,
+    json: bool,
+}
+
+fn rehearsal_post_outcome(sink: Option<&RehearsalSink>, body: &str) -> RehearsalPostOutcome {
+    let Ok(snapshot) = serde_json::from_str::<RehearsalSnapshot>(body) else {
+        return text_rehearsal_outcome(400, "invalid rehearsal body\n");
+    };
+    if let Err(message) = snapshot.validate() {
+        return text_rehearsal_outcome(400, format!("invalid rehearsal snapshot: {message}\n"));
+    }
+    let Some(sink) = sink else {
+        return json_rehearsal_outcome(rehearsal_post_response_body(false));
+    };
+    match sink.write_snapshot(&snapshot) {
+        Ok(()) => {}
+        Err(RehearsalWriteError::SectionMismatch) => {
+            return text_rehearsal_outcome(422, "rehearsal sections do not match this deck\n");
+        }
+        Err(err) => {
+            eprintln!("warning: failed to write rehearsal snapshot: {err}");
+            return text_rehearsal_outcome(500, "failed to write rehearsal snapshot\n");
+        }
+    }
+    json_rehearsal_outcome(rehearsal_post_response_body(true))
+}
+
+fn json_rehearsal_outcome(body: String) -> RehearsalPostOutcome {
+    RehearsalPostOutcome {
+        status: 200,
+        body,
+        json: true,
+    }
+}
+
+fn text_rehearsal_outcome(status: u16, body: impl Into<String>) -> RehearsalPostOutcome {
+    RehearsalPostOutcome {
+        status,
+        body: body.into(),
+        json: false,
+    }
+}
+
+fn snapshot_matches_expected(sections: &[RehearsalSection], expected: &[(String, u64)]) -> bool {
+    sections.len() == expected.len()
+        && sections
+            .iter()
+            .zip(expected)
+            .all(|(section, (name, planned_duration_ms))| {
+                section.name() == name && section.planned_duration_ms() == *planned_duration_ms
+            })
+}
+
+fn format_rehearsal_filename(local: NaiveDateTime, suffix: u32) -> String {
+    let stamp = local.format("%Y%m%d-%H%M%S");
+    if suffix <= 1 {
+        format!("rehearsal-{stamp}.json")
+    } else {
+        format!("rehearsal-{stamp}-{suffix}.json")
+    }
+}
+
+/// Parses Peitho rehearsal record filenames for the CLI's baseline selection.
+pub fn parse_rehearsal_filename(name: &str) -> Option<(String, u32)> {
+    let stem = name.strip_prefix("rehearsal-")?.strip_suffix(".json")?;
+    if is_rehearsal_stamp(stem) {
+        return Some((stem.to_owned(), 1));
+    }
+    let (stamp, suffix) = stem.rsplit_once('-')?;
+    if !is_rehearsal_stamp(stamp) || suffix.starts_with('0') {
+        return None;
+    }
+    let suffix = suffix.parse::<u32>().ok()?;
+    if suffix <= 1 {
+        return None;
+    }
+    Some((stamp.to_owned(), suffix))
+}
+
+fn is_rehearsal_stamp(stamp: &str) -> bool {
+    let bytes = stamp.as_bytes();
+    bytes.len() == 15
+        && bytes[0..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'-'
+        && bytes[9..15].iter().all(u8::is_ascii_digit)
+}
+
+fn reserve_rehearsal_path(dir: &Path, local: NaiveDateTime) -> io::Result<ReservedRehearsalFile> {
+    fs::create_dir_all(dir)?;
+    let mut suffix = 1;
+    loop {
+        let path = dir.join(format_rehearsal_filename(local, suffix));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok(ReservedRehearsalFile { path, file }),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                suffix += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn write_first_rehearsal_record<F>(
+    reserved: ReservedRehearsalFile,
+    bytes: &[u8],
+    write_bytes: F,
+) -> io::Result<PathBuf>
+where
+    F: FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+{
+    let ReservedRehearsalFile { path, mut file } = reserved;
+    let result = write_bytes(&mut file, bytes).and_then(|()| file.flush());
+    if let Err(err) = result {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        // A SIGKILL during this first direct write can still leave a partial
+        // file; that residual risk is accepted because startup validation names
+        // the file to delete or move.
+        return Err(first_rehearsal_write_error(&path, err));
+    }
+    Ok(path)
+}
+
+fn first_rehearsal_write_error(path: &Path, err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!(
+            "failed to write first rehearsal record {}; if a partial file exists, delete or move it and run `peitho present` again; caused by: {err}",
+            path.display()
+        ),
+    )
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Crash-orphaned *.json.tmp files do not match the record scheme and are not swept because sweeping could race an in-flight rename.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)
+}
+
+fn epoch_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn server_clock_ms() -> u64 {
     let duration = SERVER_CLOCK_START.get_or_init(Instant::now).elapsed();
     u64::try_from(duration.as_millis()).expect("monotonic milliseconds fit in u64")
@@ -719,8 +997,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, TcpStream},
+        path::Path,
+        time::Duration,
+    };
 
     #[test]
     fn resolves_root_to_configured_default_document() {
@@ -1155,5 +1437,314 @@ mod tests {
             Some(SyncGet::Poll(7))
         ));
         assert!(sync_get("/sync?seq=nope").is_none());
+    }
+
+    #[test]
+    fn formats_rehearsal_filename_from_local_time() {
+        let local = chrono::NaiveDate::from_ymd_opt(2026, 7, 19)
+            .unwrap()
+            .and_hms_opt(9, 5, 7)
+            .unwrap();
+
+        assert_eq!(
+            format_rehearsal_filename(local, 1),
+            "rehearsal-20260719-090507.json"
+        );
+        assert_eq!(
+            format_rehearsal_filename(local, 2),
+            "rehearsal-20260719-090507-2.json"
+        );
+    }
+
+    #[test]
+    fn reserves_collision_suffixes_without_overwriting_existing_sessions() {
+        let local = chrono::NaiveDate::from_ymd_opt(2026, 7, 19)
+            .unwrap()
+            .and_hms_opt(9, 5, 7)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("rehearsal-20260719-090507.json"),
+            "existing",
+        )
+        .unwrap();
+        let second = reserve_rehearsal_path(dir.path(), local).unwrap();
+        drop(second.file);
+        fs::write(&second.path, "second").unwrap();
+        let third = reserve_rehearsal_path(dir.path(), local).unwrap();
+
+        assert_eq!(
+            second.path.file_name().and_then(|name| name.to_str()),
+            Some("rehearsal-20260719-090507-2.json")
+        );
+        assert_eq!(
+            third.path.file_name().and_then(|name| name.to_str()),
+            Some("rehearsal-20260719-090507-3.json")
+        );
+        assert!(
+            parse_rehearsal_filename("rehearsal-20260719-090507.json")
+                < parse_rehearsal_filename("rehearsal-20260719-090507-2.json")
+        );
+        assert!(
+            parse_rehearsal_filename("rehearsal-20260719-090507-2.json")
+                < parse_rehearsal_filename("rehearsal-20260719-090507-3.json")
+        );
+    }
+
+    #[test]
+    fn parses_only_rehearsal_filename_scheme() {
+        assert_eq!(
+            parse_rehearsal_filename("rehearsal-20260719-090507.json"),
+            Some(("20260719-090507".to_owned(), 1))
+        );
+        assert_eq!(
+            parse_rehearsal_filename("rehearsal-20260719-090507-10.json"),
+            Some(("20260719-090507".to_owned(), 10))
+        );
+        assert_eq!(parse_rehearsal_filename("zzz-notes.json"), None);
+        assert_eq!(
+            parse_rehearsal_filename("rehearsal-20260719-090507-0.json"),
+            None
+        );
+        assert_eq!(
+            parse_rehearsal_filename("rehearsal-20260719-090507-01.json"),
+            None
+        );
+    }
+
+    #[test]
+    fn first_write_failure_removes_reserved_rehearsal_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = chrono::NaiveDate::from_ymd_opt(2026, 7, 19)
+            .unwrap()
+            .and_hms_opt(9, 5, 7)
+            .unwrap();
+        let reserved = reserve_rehearsal_path(dir.path(), local).unwrap();
+        let path = reserved.path.clone();
+
+        let error = write_first_rehearsal_record(reserved, b"{}", |file, _bytes| {
+            file.write_all(b"{")?;
+            Err(std::io::Error::other("injected first-write failure"))
+        })
+        .unwrap_err();
+
+        assert!(!path.exists());
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+        assert!(error.to_string().contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn non_rehearsal_server_discards_rehearsal_reports() {
+        let response = rehearsal_post_outcome(
+            None,
+            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, r#"{"recorded":false}"#);
+        assert!(response.json);
+    }
+
+    #[test]
+    fn rehearsal_server_writes_and_rewrites_one_session_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+
+        let first = rehearsal_post_outcome(
+            Some(&sink),
+            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+        );
+        assert_eq!(first.status, 200);
+        assert_eq!(first.body, r#"{"recorded":true}"#);
+        let first_path = single_rehearsal_file(&rehearsals);
+        assert!(fs::metadata(&first_path).unwrap().len() > 0);
+        assert!(fs::read_dir(&rehearsals)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .all(|path| path.extension().and_then(|ext| ext.to_str()) != Some("tmp")));
+        let first_record: peitho_core::RehearsalRecord =
+            serde_json::from_str(&fs::read_to_string(&first_path).unwrap()).unwrap();
+        assert_eq!(first_record.elapsed_ms(), 1_000);
+        assert_eq!(first_record.sections()[0].actual_ms(), 1_000);
+
+        let second = rehearsal_post_outcome(
+            Some(&sink),
+            r#"{"version":1,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}]}"#,
+        );
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body, r#"{"recorded":true}"#);
+        let second_path = single_rehearsal_file(&rehearsals);
+        let second_record: peitho_core::RehearsalRecord =
+            serde_json::from_str(&fs::read_to_string(&second_path).unwrap()).unwrap();
+
+        assert_eq!(second_path, first_path);
+        assert_eq!(second_record.elapsed_ms(), 2_000);
+        assert_eq!(second_record.sections()[0].actual_ms(), 2_000);
+        assert_eq!(
+            second_record.recorded_at_ms(),
+            first_record.recorded_at_ms()
+        );
+        assert!(fs::read_dir(&rehearsals)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .all(|path| path.extension().and_then(|ext| ext.to_str()) != Some("tmp")));
+    }
+
+    #[test]
+    fn rehearsal_server_rejects_garbage_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+
+        let response = rehearsal_post_outcome(Some(&sink), "not json");
+
+        assert_eq!(response.status, 400);
+        assert!(!response.json);
+        assert!(fs::read_dir(rehearsals).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rehearsal_server_rejects_future_version_with_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = RehearsalSink::new(rehearsals, vec![("Setup".to_owned(), 60_000)]);
+
+        let response = rehearsal_post_outcome(
+            Some(&sink),
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+        );
+
+        assert_eq!(response.status, 400);
+        assert!(response
+            .body
+            .contains("invalid rehearsal snapshot: unsupported rehearsal version 2"));
+    }
+
+    #[test]
+    fn rehearsal_server_rejects_section_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+
+        let response = rehearsal_post_outcome(
+            Some(&sink),
+            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}]}"#,
+        );
+
+        assert_eq!(response.status, 422);
+        assert!(!response.json);
+        assert!(fs::read_dir(rehearsals).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rehearsal_route_without_sink_returns_recorded_false_over_http() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let response = http_request(
+            &server,
+            "POST",
+            "/rehearsal",
+            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, r#"{"recorded":false}"#);
+    }
+
+    #[test]
+    fn get_rehearsal_is_not_a_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let response = http_request(&server, "GET", "/rehearsal", "");
+
+        assert_eq!(response.status, 404);
+    }
+
+    #[test]
+    fn post_to_static_paths_still_returns_405() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let response = http_request(&server, "POST", "/not-rehearsal", "{}");
+
+        assert_eq!(response.status, 405);
+    }
+
+    #[test]
+    fn sync_endpoint_is_unchanged_by_rehearsal_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let post = http_request(&server, "POST", "/sync", r#"{"index":2}"#);
+        let get = http_request(&server, "GET", "/sync", "");
+
+        assert_eq!(post.status, 200);
+        assert_eq!(serde_json::from_str::<Value>(&post.body).unwrap()["seq"], 1);
+        assert_eq!(get.status, 200);
+        assert_eq!(
+            serde_json::from_str::<Value>(&get.body).unwrap()["index"],
+            2
+        );
+    }
+
+    #[derive(Debug)]
+    struct TestHttpResponse {
+        status: u16,
+        body: String,
+    }
+
+    fn http_request(
+        server: &PresentServer,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> TestHttpResponse {
+        let addr = server.addr();
+        let server_for_request = server.clone();
+        let handle = thread::spawn(move || server_for_request.handle_one());
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        handle.join().unwrap();
+
+        parse_http_response(&raw)
+    }
+
+    fn parse_http_response(raw: &str) -> TestHttpResponse {
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap();
+        TestHttpResponse {
+            status,
+            body: body.to_owned(),
+        }
+    }
+
+    fn single_rehearsal_file(dir: &Path) -> PathBuf {
+        let files = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        files[0].clone()
     }
 }

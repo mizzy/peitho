@@ -822,6 +822,69 @@ fn present_no_open_server_prints_assigned_url() {
 }
 
 #[test]
+fn present_rehearsal_prints_recording_directory_after_serving_url() {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    fs::write(
+        &fixture.deck,
+        deck_with_assets(
+            "./layout.html",
+            "<!-- {\"key\":\"arch-1\",\"section\":\"Setup\",\"time\":\"1m\"} -->\n# Architecture\n\nBody",
+        ),
+    )
+    .unwrap();
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-open", "--port", "0", "--rehearsal"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let (recording_tx, recording_rx) = mpsc::channel();
+    let (lines_tx, lines_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        let mut recording_tx = Some(recording_tx);
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line == "recording rehearsal to .peitho/rehearsals/" {
+                if let Some(tx) = recording_tx.take() {
+                    tx.send(()).unwrap();
+                }
+            }
+            lines.push(line);
+        }
+        lines_tx.send(lines).unwrap();
+    });
+    recording_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("present server did not print rehearsal recording line within 5 seconds");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    reader.join().unwrap();
+    let lines = lines_rx.recv().unwrap();
+
+    let serving_index = lines
+        .iter()
+        .position(|line| line.contains("serving presentation at"))
+        .expect("captured serving line");
+    assert_eq!(
+        lines.get(serving_index + 1).map(String::as_str),
+        Some("recording rehearsal to .peitho/rehearsals/"),
+        "rehearsal line should immediately follow serving URL: {lines:?}"
+    );
+}
+
+#[test]
 fn present_host_prints_remote_qr_after_remote_control_lines() {
     let Some(lines) = capture_present_remote_output(&["--host", "0.0.0.0"]) else {
         return;
