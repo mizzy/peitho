@@ -31,7 +31,7 @@ export {
   installPresenterKeyboard
 } from "./keyboard";
 export { mountPresenterView } from "./presenter";
-export { mountPresentShell } from "./shell";
+export { installPointerOverlay, mountPresentShell } from "./shell";
 export { installSwapShortcut, swapRoute } from "./swap";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";
 export {
@@ -46,6 +46,7 @@ export type { SectionActuals, SectionActualsOptions, SectionActualsShell } from 
 export type {
   NavigateDetail,
   NavigateTarget,
+  PointerOverlayOptions,
   PresentShell,
   PresentationEndDetail,
   PresentationStartDetail,
