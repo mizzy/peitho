@@ -1086,18 +1086,19 @@ function installPointerOverlay(options) {
     clearCanvas();
     const opacity = fadeOpacity(state, now());
     if (opacity <= 0) return;
+    const x = state.x * canvas.width;
+    const y = state.y * canvas.height;
+    const radius = 0.012 * Math.min(canvas.width, canvas.height);
+    const ringRadius = radius + 2;
     ctx.save();
     ctx.globalAlpha = opacity;
-    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(x, y, ringRadius, 0, Math.PI * 2);
+    ctx.fill();
     ctx.fillStyle = "#ff2a2a";
     ctx.beginPath();
-    ctx.arc(
-      state.x * canvas.width,
-      state.y * canvas.height,
-      0.012 * Math.min(canvas.width, canvas.height),
-      0,
-      Math.PI * 2
-    );
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -1295,7 +1296,6 @@ var PresentShellController = class {
     canvas.style.inset = "0";
     canvas.style.zIndex = "4";
     canvas.style.pointerEvents = "none";
-    canvas.style.mixBlendMode = "multiply";
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     this.root.appendChild(canvas);

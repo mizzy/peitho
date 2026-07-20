@@ -59,9 +59,11 @@ function canvasFixture(): {
   canvas: HTMLCanvasElement;
   context: MockCanvasContext;
   alphas: number[];
+  fillStyles: string[];
 } {
   const canvas = document.createElement("canvas");
   const alphas: number[] = [];
+  const fillStyles: string[] = [];
   const context = {
     globalAlpha: 1,
     globalCompositeOperation: "source-over",
@@ -73,6 +75,7 @@ function canvasFixture(): {
     arc: vi.fn(),
     fill: vi.fn(() => {
       alphas.push(context.globalAlpha);
+      fillStyles.push(String(context.fillStyle));
     })
   } as unknown as MockCanvasContext;
   vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
@@ -88,7 +91,7 @@ function canvasFixture(): {
   });
   vi.spyOn(canvas, "getContext").mockReturnValue(context);
   document.body.append(canvas);
-  return { canvas, context, alphas };
+  return { canvas, context, alphas, fillStyles };
 }
 
 function pointerFetch(): { fetcher: typeof fetch; polls: DeferredPoll[] } {
@@ -110,19 +113,20 @@ async function setupOverlay(now: () => number = () => 0): Promise<{
   polls: DeferredPoll[];
   context: MockCanvasContext;
   alphas: number[];
+  fillStyles: string[];
 }> {
   const frames = installFrameMock();
-  const { canvas, context, alphas } = canvasFixture();
+  const { canvas, context, alphas, fillStyles } = canvasFixture();
   const { fetcher, polls } = pointerFetch();
   const bus = new EventTarget();
   cleanups.push(installPointerOverlay({ canvas, fetcher, bus, window, now }));
   await flushPromises();
   expect(polls[0]?.url).toBe("/pointer?seq=0");
-  return { bus, frames, polls, context, alphas };
+  return { bus, frames, polls, context, alphas, fillStyles };
 }
 
 it("pointer overlay renders a dot on move messages", async () => {
-  const { frames, polls, context } = await setupOverlay();
+  const { frames, polls, context, fillStyles } = await setupOverlay();
 
   polls.shift()?.resolve(
     okJson({ seq: 1, event: { move: { x: 0.25, y: 0.5 } }, session: "session-a" })
@@ -130,9 +134,10 @@ it("pointer overlay renders a dot on move messages", async () => {
   await flushPromises();
   frames.shift()?.(0);
 
-  expect(context.arc).toHaveBeenCalledWith(50, 50, 1.2, 0, Math.PI * 2);
-  expect(context.globalCompositeOperation).toBe("multiply");
-  expect(context.fillStyle).toBe("#ff2a2a");
+  expect(context.arc).toHaveBeenNthCalledWith(1, 50, 50, 3.2, 0, Math.PI * 2);
+  expect(context.arc).toHaveBeenNthCalledWith(2, 50, 50, 1.2, 0, Math.PI * 2);
+  expect(context.globalCompositeOperation).toBe("source-over");
+  expect(fillStyles).toEqual(["#ffffff", "#ff2a2a"]);
 });
 
 it("pointer overlay fades after up messages", async () => {
@@ -153,8 +158,9 @@ it("pointer overlay fades after up messages", async () => {
   now = 1075;
   frames.shift()?.(1075);
 
-  expect(alphas[0]).toBe(1);
-  expect(alphas[1]).toBeCloseTo(0.5);
+  expect(alphas.slice(0, 2)).toEqual([1, 1]);
+  expect(alphas[2]).toBeCloseTo(0.5);
+  expect(alphas[3]).toBeCloseTo(0.5);
 });
 
 it("pointer overlay clears immediately on navigation", async () => {
