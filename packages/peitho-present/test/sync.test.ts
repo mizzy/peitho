@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   installCloseOnEscape,
   installSyncBridge,
@@ -510,6 +510,12 @@ it("server sync channel aborts the active poll on close", async () => {
 
 const shells: PresentShell[] = [];
 const cleanups: Array<() => void> = [];
+
+beforeEach(() => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    (() => null) as HTMLCanvasElement["getContext"]
+  );
+});
 
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();

@@ -214,8 +214,9 @@ it("remote controls compose dimmable rows and actions in fixed order", () => {
   const chase = root.querySelector<HTMLElement>('[data-peitho-remote="chase"]');
   const pace = root.querySelector<HTMLElement>(".peitho-remote-pace");
   const notesPanel = root.querySelector<HTMLElement>(".peitho-remote-notes");
+  const pointerMode = root.querySelector<HTMLElement>('[data-peitho-remote="pointer-mode"]');
   const actions = root.querySelector<HTMLElement>(".peitho-remote-actions");
-  const dimmableRows = [preview, titlebar, chase, pace, notesPanel];
+  const dimmableRows = [preview, titlebar, chase, pace, notesPanel, pointerMode];
 
   expect(Array.from(container.children)).toEqual([
     preview,
@@ -223,9 +224,10 @@ it("remote controls compose dimmable rows and actions in fixed order", () => {
     chase,
     pace,
     notesPanel,
+    pointerMode,
     actions
   ]);
-  expect(dimmableRows).toHaveLength(5);
+  expect(dimmableRows).toHaveLength(6);
   for (const element of dimmableRows) {
     expect(element?.classList).toContain("peitho-remote-dim-on-end");
   }
