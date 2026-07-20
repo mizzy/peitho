@@ -232,44 +232,6 @@ impl Manifest {
         sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
     ) -> Self {
-        Self::with_images(
-            title,
-            planned_duration_ms,
-            aspect_ratio,
-            sections,
-            slides,
-            Vec::new(),
-        )
-    }
-
-    pub fn with_images(
-        title: impl Into<String>,
-        planned_duration_ms: Option<u64>,
-        aspect_ratio: AspectRatio,
-        sections: Vec<ManifestSection>,
-        slides: Vec<ManifestSlide>,
-        images: Vec<ManifestImage>,
-    ) -> Self {
-        Self::with_images_and_pointer_color(
-            title,
-            planned_duration_ms,
-            aspect_ratio,
-            None,
-            sections,
-            slides,
-            images,
-        )
-    }
-
-    pub fn with_images_and_pointer_color(
-        title: impl Into<String>,
-        planned_duration_ms: Option<u64>,
-        aspect_ratio: AspectRatio,
-        pointer_color: Option<String>,
-        sections: Vec<ManifestSection>,
-        slides: Vec<ManifestSlide>,
-        images: Vec<ManifestImage>,
-    ) -> Self {
         let slide_count = slides.len();
         Self {
             version: 1,
@@ -278,11 +240,21 @@ impl Manifest {
             slide_count,
             planned_duration_ms,
             aspect_ratio,
-            pointer_color,
+            pointer_color: None,
             sections,
             slides,
-            images,
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<ManifestImage>) -> Self {
+        self.images = images;
+        self
+    }
+
+    pub fn with_pointer_color(mut self, pointer_color: Option<String>) -> Self {
+        self.pointer_color = pointer_color;
+        self
     }
 
     pub fn slide_count(&self) -> usize {
@@ -426,17 +398,19 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
         .map(|asset| ManifestImage::new(asset.dist_rel.as_str()))
         .collect();
 
-    Manifest::with_images_and_pointer_color(
+    Manifest::new(
         title,
         deck.settings().planned_time().map(PlannedTime::as_millis),
         deck.settings().aspect_ratio(),
+        sections,
+        slides,
+    )
+    .with_pointer_color(
         deck.settings()
             .pointer_color()
             .map(|color| color.as_str().to_owned()),
-        sections,
-        slides,
-        images,
     )
+    .with_images(images)
 }
 
 pub fn fragment_src(index: usize, key: &SlideKey) -> String {
