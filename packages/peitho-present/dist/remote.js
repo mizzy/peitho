@@ -1,3 +1,17 @@
+// src/keyboard.ts
+var navigationKeyMap = /* @__PURE__ */ new Map([
+  ["ArrowRight", "next"],
+  ["PageDown", "next"],
+  ["ArrowLeft", "prev"],
+  ["PageUp", "prev"],
+  ["Home", "first"],
+  ["End", "last"]
+]);
+var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
+function hasChordModifier(event) {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+
 // src/timeTracker.ts
 var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
@@ -243,6 +257,198 @@ async function mountPresentShell(options) {
   await shell.load();
   return shell;
 }
+function installPointerOverlay(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const fetcher = options.fetcher ?? fetch.bind(globalThis);
+  const now = options.now ?? Date.now;
+  const log = options.console ?? console;
+  const canvas = options.canvas;
+  const ctx = canvas2dContext(canvas);
+  const state = { x: 0, y: 0, visible: false, lastUpAt: -Infinity };
+  let closed = false;
+  let seq = 0;
+  let session = null;
+  let frame = null;
+  let retryTimer = null;
+  const requestFrame = (callback) => {
+    if (typeof win.requestAnimationFrame === "function") {
+      return win.requestAnimationFrame(callback);
+    }
+    return win.setTimeout(() => callback(now()), 16);
+  };
+  const cancelFrame = (handle) => {
+    if (typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(handle);
+      return;
+    }
+    win.clearTimeout(handle);
+  };
+  const resizeCanvas = () => {
+    const rect = canvas.getBoundingClientRect();
+    const fallbackWidth = win.innerWidth || 1;
+    const fallbackHeight = win.innerHeight || 1;
+    const cssWidth = rect.width > 0 ? rect.width : fallbackWidth;
+    const cssHeight = rect.height > 0 ? rect.height : fallbackHeight;
+    const scale = win.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(cssWidth * scale));
+    canvas.height = Math.max(1, Math.round(cssHeight * scale));
+    draw();
+  };
+  const clearCanvas = () => {
+    if (ctx == null) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
+  const requestDraw = () => {
+    if (frame !== null) return;
+    frame = requestFrame(() => {
+      frame = null;
+      draw();
+      if (!closed && fadeOpacity(state, now()) > 0) {
+        requestDraw();
+      }
+    });
+  };
+  const resetState = () => {
+    state.visible = false;
+    state.lastUpAt = -Infinity;
+    clearCanvas();
+  };
+  const setSession = (nextSession) => {
+    if (session !== null && session !== nextSession) {
+      resetState();
+      session = nextSession;
+      return true;
+    }
+    session = nextSession;
+    return false;
+  };
+  const applyEvent = (event, options2 = {}) => {
+    if (event.kind === "move") {
+      state.x = event.x;
+      state.y = event.y;
+      state.visible = true;
+      state.lastUpAt = -Infinity;
+      requestDraw();
+      return;
+    }
+    if (options2.fadeUp === false) {
+      resetState();
+      return;
+    }
+    state.visible = false;
+    state.lastUpAt = now();
+    requestDraw();
+  };
+  const delay = () => new Promise((resolve) => {
+    retryTimer = win.setTimeout(() => {
+      retryTimer = null;
+      resolve();
+    }, 1e3);
+  });
+  const handshake = async () => {
+    try {
+      const response = await fetcher("/pointer");
+      if (closed) return false;
+      if (!response.ok) {
+        log.error(`Failed to start pointer polling: ${response.status}`);
+        await delay();
+        return false;
+      }
+      const body = await response.json();
+      if (!isPointerHandshakeResponse(body)) {
+        log.error("Invalid peitho pointer handshake");
+        await delay();
+        return false;
+      }
+      seq = body.seq;
+      setSession(body.session);
+      return true;
+    } catch (error) {
+      if (!closed) {
+        log.error(`Failed to start pointer polling: ${String(error)}`);
+        await delay();
+      }
+      return false;
+    }
+  };
+  const poll = async () => {
+    let needsHandshake = true;
+    while (!closed) {
+      while (!closed && needsHandshake && !await handshake()) {
+        continue;
+      }
+      if (closed) return;
+      needsHandshake = false;
+      try {
+        const response = await fetcher(`/pointer?seq=${seq}`);
+        if (closed) return;
+        if (response.status === 204) continue;
+        if (!response.ok) {
+          log.error(`Failed to poll pointer message: ${response.status}`);
+          await delay();
+          continue;
+        }
+        const body = pointerPollResponse(await response.json());
+        if (body == null) {
+          log.error("Invalid peitho pointer message");
+          await delay();
+          continue;
+        }
+        seq = body.seq;
+        const sessionChanged = setSession(body.session);
+        applyEvent(body.event, { fadeUp: !(sessionChanged && body.event.kind === "up") });
+      } catch (error) {
+        if (!closed) {
+          log.error(`Failed to poll pointer message: ${String(error)}`);
+          needsHandshake = true;
+          await delay();
+        }
+      }
+    }
+  };
+  const onNavigate = () => resetState();
+  if (ctx != null) {
+    resizeCanvas();
+    win.addEventListener("resize", resizeCanvas);
+    bus.addEventListener("peitho:navigate", onNavigate);
+    void poll();
+  }
+  return () => {
+    closed = true;
+    bus.removeEventListener("peitho:navigate", onNavigate);
+    win.removeEventListener("resize", resizeCanvas);
+    if (frame !== null) {
+      cancelFrame(frame);
+      frame = null;
+    }
+    if (retryTimer !== null) {
+      win.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    clearCanvas();
+  };
+  function draw() {
+    if (ctx == null) return;
+    clearCanvas();
+    const opacity = fadeOpacity(state, now());
+    if (opacity <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = "#ff2a2a";
+    ctx.beginPath();
+    ctx.arc(
+      state.x * canvas.width,
+      state.y * canvas.height,
+      0.012 * Math.min(canvas.width, canvas.height),
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+    ctx.restore();
+  }
+}
 var PresentShellController = class {
   manifest = null;
   currentIndex = -1;
@@ -258,6 +464,7 @@ var PresentShellController = class {
   viewport;
   canvasCleanups = [];
   fontScopeCleanup = null;
+  pointerCleanup = null;
   startedAtValue = null;
   pausedAtValue = null;
   pausedTotalMs = 0;
@@ -323,6 +530,7 @@ var PresentShellController = class {
         this.slides.push(view);
       }
       this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
+      this.mountPointerOverlay();
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -366,6 +574,8 @@ var PresentShellController = class {
   }
   destroy() {
     this.endPresentation();
+    this.pointerCleanup?.();
+    this.pointerCleanup = null;
     this.fontScopeCleanup?.();
     this.fontScopeCleanup = null;
     while (this.canvasCleanups.length > 0) this.canvasCleanups.pop()?.();
@@ -423,6 +633,27 @@ var PresentShellController = class {
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
     return host;
+  }
+  mountPointerOverlay() {
+    if (this.viewport != null) return;
+    const canvas = this.doc.createElement("canvas");
+    canvas.dataset.peithoPointerOverlay = "true";
+    canvas.style.position = "absolute";
+    canvas.style.inset = "0";
+    canvas.style.zIndex = "4";
+    canvas.style.pointerEvents = "none";
+    canvas.style.mixBlendMode = "multiply";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    this.root.appendChild(canvas);
+    this.pointerCleanup = installPointerOverlay({
+      canvas,
+      fetcher: this.fetcher,
+      bus: this.bus,
+      window: this.win,
+      now: this.now,
+      console: this.log
+    });
   }
   resolveTarget(to) {
     if (to === "first") return 0;
@@ -533,17 +764,58 @@ var PresentShellController = class {
     );
   }
 };
-
-// src/keyboard.ts
-var navigationKeyMap = /* @__PURE__ */ new Map([
-  ["ArrowRight", "next"],
-  ["PageDown", "next"],
-  ["ArrowLeft", "prev"],
-  ["PageUp", "prev"],
-  ["Home", "first"],
-  ["End", "last"]
-]);
-var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
+function fadeOpacity(state, nowMs) {
+  if (state.visible) return 1;
+  if (!Number.isFinite(state.lastUpAt)) return 0;
+  return Math.max(0, Math.min(1, 1 - (nowMs - state.lastUpAt) / 150));
+}
+function canvas2dContext(canvas) {
+  try {
+    return canvas.getContext("2d");
+  } catch (_error) {
+    return null;
+  }
+}
+function isPointerHandshakeResponse(value) {
+  return hasExactKeys(value, ["seq", "session"]) && typeof value.seq === "number" && Number.isFinite(value.seq) && typeof value.session === "string";
+}
+function pointerPollResponse(value) {
+  if (!hasExactKeys(value, ["seq", "event", "session"]) || typeof value.seq !== "number" || !Number.isFinite(value.seq) || typeof value.session !== "string") {
+    return null;
+  }
+  const event = pointerOverlayEvent(value.event);
+  if (event == null) return null;
+  return { seq: value.seq, event, session: value.session };
+}
+function pointerOverlayEvent(value) {
+  if (!isRecord(value)) return null;
+  if (hasExactKeys(value, ["up"])) {
+    return value.up === true ? { kind: "up" } : null;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || !Object.hasOwn(value, "move")) {
+    return null;
+  }
+  const move = value.move;
+  if (!hasExactKeys(move, ["x", "y"])) {
+    return null;
+  }
+  if (!isUnitCoordinate(move.x) || !isUnitCoordinate(move.y)) {
+    return null;
+  }
+  return { kind: "move", x: move.x, y: move.y };
+}
+function hasExactKeys(value, keys) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function isUnitCoordinate(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
 
 // src/swap.ts
 var SWAP_ROUTES = Object.freeze({
@@ -556,35 +828,35 @@ var SWAP_ROUTES = Object.freeze({
 });
 
 // src/sync.ts
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function isCloseSyncMessage(value) {
-  return isRecord(value) && value.close === true;
+  return isRecord2(value) && value.close === true;
 }
 function isIndexSyncMessage(value) {
-  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
+  return isRecord2(value) && typeof value.index === "number" && Number.isFinite(value.index);
 }
 function isSwappedSyncMessage(value) {
-  return isRecord(value) && typeof value.swapped === "boolean";
+  return isRecord2(value) && typeof value.swapped === "boolean";
 }
 function isSyncedSyncMessage(value) {
-  return isRecord(value) && value.synced === true;
+  return isRecord2(value) && value.synced === true;
 }
 function isSessionChangedSyncMessage(value) {
-  return isRecord(value) && value.sessionChanged === true;
+  return isRecord2(value) && value.sessionChanged === true;
 }
 function isNonNegativeFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 function isTimerSyncMessage(value) {
-  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs);
+  return isRecord2(value) && isRecord2(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs);
 }
 function isTimerReplaySyncMessage(value) {
-  return isRecord(value) && isRecord(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs) && isNonNegativeFiniteNumber(value.timer.atMs) && isNonNegativeFiniteNumber(value.nowMs);
+  return isRecord2(value) && isRecord2(value.timer) && typeof value.timer.running === "boolean" && isNonNegativeFiniteNumber(value.timer.elapsedMs) && isNonNegativeFiniteNumber(value.timer.atMs) && isNonNegativeFiniteNumber(value.nowMs);
 }
 function isGenerationSyncMessage(value) {
-  return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
+  return isRecord2(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
 function serverSyncChannelFactory(options = {}) {
   const url = options.url ?? "/sync";
@@ -886,13 +1158,30 @@ function installRemoteControls(options) {
   notesBody.className = "peitho-remote-notes-body";
   notesBody.dataset.peithoRemote = "notes";
   notesPanel.append(notesCaption, notesBody);
+  const pointerMode = createDimmableRow(doc, "div", "peitho-remote-pointer-mode");
+  pointerMode.dataset.peithoRemote = "pointer-mode";
+  pointerMode.setAttribute("role", "group");
+  pointerMode.setAttribute("aria-label", "Pointer mode");
+  const pointerOff = remotePointerModeButton(doc, "off", "Off");
+  const pointerOn = remotePointerModeButton(doc, "pointer", "Pointer");
+  pointerMode.append(pointerOff, pointerOn);
   const actions = doc.createElement("div");
   actions.className = "peitho-remote-actions";
   const prev = remoteButton(doc, "prev", "Previous");
   const next = remoteButton(doc, "next", "Next");
   actions.append(prev, next);
+  let currentPointerMode = "off";
+  const setPointerMode = (mode) => {
+    if (mode === currentPointerMode) return;
+    currentPointerMode = mode;
+    pointerOff.setAttribute("aria-pressed", mode === "off" ? "true" : "false");
+    pointerOn.setAttribute("aria-pressed", mode === "pointer" ? "true" : "false");
+    dispatchPointerModeChange(bus, mode);
+  };
   const onPrev = () => dispatchNavigate(bus, "prev");
   const onNext = () => dispatchNavigate(bus, "next");
+  const onPointerOff = () => setPointerMode("off");
+  const onPointerOn = () => setPointerMode("pointer");
   const onTimer = () => {
     const action = timerButton.dataset.peithoTimerAction;
     if (action === "start" || action === "pause" || action === "resume") {
@@ -902,6 +1191,8 @@ function installRemoteControls(options) {
   const onReset = () => dispatchTimerControl(bus, "reset");
   prev.addEventListener("click", onPrev);
   next.addEventListener("click", onNext);
+  pointerOff.addEventListener("click", onPointerOff);
+  pointerOn.addEventListener("click", onPointerOn);
   timerButton.addEventListener("click", onTimer);
   resetButton.addEventListener("click", onReset);
   const rows = [
@@ -910,6 +1201,7 @@ function installRemoteControls(options) {
     { kind: "dimmable", element: chase },
     { kind: "dimmable", element: pace },
     { kind: "dimmable", element: notesPanel },
+    { kind: "dimmable", element: pointerMode },
     { kind: "actions", element: actions }
   ];
   container.append(...rows.map((row) => row.element));
@@ -917,6 +1209,8 @@ function installRemoteControls(options) {
   return () => {
     prev.removeEventListener("click", onPrev);
     next.removeEventListener("click", onNext);
+    pointerOff.removeEventListener("click", onPointerOff);
+    pointerOn.removeEventListener("click", onPointerOn);
     timerButton.removeEventListener("click", onTimer);
     resetButton.removeEventListener("click", onReset);
     container.remove();
@@ -926,6 +1220,180 @@ function createDimmableRow(doc, tag, ...classNames) {
   const el = doc.createElement(tag);
   el.classList.add("peitho-remote-dim-on-end", ...classNames);
   return el;
+}
+function remotePointerModeButton(doc, mode, label) {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.dataset.peithoPointerMode = mode;
+  button.setAttribute("aria-pressed", mode === "off" ? "true" : "false");
+  button.textContent = label;
+  return button;
+}
+function installRemotePointerBridge(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const fetcher = options.fetcher ?? fetch.bind(globalThis);
+  const log = options.console ?? console;
+  const now = options.now ?? Date.now;
+  const previewRoot = options.previewRoot;
+  let mode = "off";
+  let activePointerId = null;
+  let listenersInstalled = false;
+  let pendingMove = null;
+  let frame = null;
+  let previousTouchAction = null;
+  const requestFrame = (callback) => {
+    if (typeof win.requestAnimationFrame === "function") {
+      return win.requestAnimationFrame(callback);
+    }
+    return win.setTimeout(() => callback(now()), 16);
+  };
+  const cancelFrame = (handle) => {
+    if (typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(handle);
+      return;
+    }
+    win.clearTimeout(handle);
+  };
+  const postPointer = (message) => {
+    let request;
+    try {
+      request = fetcher("/pointer", {
+        method: "POST",
+        body: JSON.stringify(message),
+        keepalive: true,
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error) {
+      log.error(`Failed to post pointer message: ${String(error)}`);
+      return;
+    }
+    void request.then((response) => {
+      if (!response.ok) {
+        log.error(`Failed to post pointer message: ${response.status}`);
+      }
+    }).catch((error) => {
+      log.error(`Failed to post pointer message: ${String(error)}`);
+    });
+  };
+  const cancelPendingMove = () => {
+    pendingMove = null;
+    if (frame === null) return;
+    cancelFrame(frame);
+    frame = null;
+  };
+  const flushMove = () => {
+    frame = null;
+    const move = pendingMove;
+    pendingMove = null;
+    if (mode !== "pointer" || move == null) return;
+    postPointer({ move });
+  };
+  const queueMove = (move) => {
+    pendingMove = move;
+    if (frame !== null) return;
+    frame = requestFrame(flushMove);
+  };
+  const pointForEvent = (event) => {
+    const rect = previewRoot.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: clamp01((event.clientX - rect.left) / rect.width),
+      y: clamp01((event.clientY - rect.top) / rect.height)
+    };
+  };
+  const onPointerDown = (event) => {
+    if (mode !== "pointer" || hasChordModifier(event) || event.button !== 0) return;
+    const point = pointForEvent(event);
+    if (point == null) return;
+    activePointerId = event.pointerId;
+    event.preventDefault();
+    dispatchPointerMove(bus, point);
+  };
+  const onPointerMove = (event) => {
+    if (mode !== "pointer" || activePointerId !== event.pointerId || hasChordModifier(event)) {
+      return;
+    }
+    const point = pointForEvent(event);
+    if (point == null) return;
+    event.preventDefault();
+    dispatchPointerMove(bus, point);
+  };
+  const onPointerEnd = (event) => {
+    if (mode !== "pointer" || activePointerId !== event.pointerId) return;
+    activePointerId = null;
+    event.preventDefault();
+    dispatchPointerUp(bus);
+  };
+  const installPointerListeners = () => {
+    if (listenersInstalled) return;
+    listenersInstalled = true;
+    previousTouchAction = previewRoot.style.touchAction;
+    previewRoot.style.touchAction = "none";
+    previewRoot.dataset.peithoPointerMode = "pointer";
+    previewRoot.addEventListener("pointerdown", onPointerDown);
+    previewRoot.addEventListener("pointermove", onPointerMove);
+    previewRoot.addEventListener("pointerup", onPointerEnd);
+    previewRoot.addEventListener("pointercancel", onPointerEnd);
+    previewRoot.addEventListener("pointerleave", onPointerEnd);
+  };
+  const removePointerListeners = (sendFinalUp) => {
+    if (listenersInstalled) {
+      previewRoot.removeEventListener("pointerdown", onPointerDown);
+      previewRoot.removeEventListener("pointermove", onPointerMove);
+      previewRoot.removeEventListener("pointerup", onPointerEnd);
+      previewRoot.removeEventListener("pointercancel", onPointerEnd);
+      previewRoot.removeEventListener("pointerleave", onPointerEnd);
+      listenersInstalled = false;
+    }
+    activePointerId = null;
+    cancelPendingMove();
+    if (previousTouchAction !== null) {
+      previewRoot.style.touchAction = previousTouchAction;
+      previousTouchAction = null;
+    }
+    delete previewRoot.dataset.peithoPointerMode;
+    if (sendFinalUp) postPointer({ up: true });
+  };
+  const onModeChange = (event) => {
+    const next = event.detail?.mode;
+    if (next !== "off" && next !== "pointer") {
+      log.error("Invalid peitho:pointermodechange event");
+      return;
+    }
+    if (next === mode) return;
+    mode = next;
+    if (mode === "pointer") {
+      installPointerListeners();
+    } else {
+      removePointerListeners(true);
+    }
+  };
+  const onPointerMoveRequest = (event) => {
+    if (mode !== "pointer") return;
+    const detail = event.detail;
+    if (!isPointerMoveDetail(detail)) {
+      log.error("Invalid peitho:pointermove event");
+      return;
+    }
+    queueMove(detail);
+  };
+  const onPointerUpRequest = () => {
+    if (mode !== "pointer") return;
+    activePointerId = null;
+    cancelPendingMove();
+    postPointer({ up: true });
+  };
+  bus.addEventListener("peitho:pointermodechange", onModeChange);
+  bus.addEventListener("peitho:pointermove", onPointerMoveRequest);
+  bus.addEventListener("peitho:pointerup", onPointerUpRequest);
+  return () => {
+    bus.removeEventListener("peitho:pointermodechange", onModeChange);
+    bus.removeEventListener("peitho:pointermove", onPointerMoveRequest);
+    bus.removeEventListener("peitho:pointerup", onPointerUpRequest);
+    removePointerListeners(mode === "pointer");
+    mode = "off";
+  };
 }
 function installRemoteSyncBridge(options) {
   const bus = options.bus ?? window;
@@ -1021,6 +1489,7 @@ var RemoteController = class {
   timerState = null;
   controlsCleanup = null;
   syncCleanup = null;
+  pointerCleanup = null;
   previewShell = null;
   timerInterval = null;
   constructor(options) {
@@ -1065,6 +1534,14 @@ var RemoteController = class {
           now: this.now,
           viewport: paneViewport(previewRoot)
         });
+        this.pointerCleanup = installRemotePointerBridge({
+          bus: this.bus,
+          previewRoot,
+          fetcher: this.fetcher,
+          window: this.win,
+          now: this.now,
+          console: this.log
+        });
       }
       this.render();
       this.syncCleanup = installRemoteSyncBridge({
@@ -1087,6 +1564,8 @@ var RemoteController = class {
   }
   destroy() {
     this.clearTimerInterval();
+    this.pointerCleanup?.();
+    this.pointerCleanup = null;
     this.syncCleanup?.();
     this.syncCleanup = null;
     this.previewShell?.destroy();
@@ -1344,6 +1823,25 @@ function dispatchNavigate(bus, to) {
 function dispatchTimerControl(bus, action) {
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action } }));
 }
+function dispatchPointerModeChange(bus, mode) {
+  bus.dispatchEvent(
+    new CustomEvent("peitho:pointermodechange", { detail: { mode } })
+  );
+}
+function dispatchPointerMove(bus, detail) {
+  bus.dispatchEvent(new CustomEvent("peitho:pointermove", { detail }));
+}
+function dispatchPointerUp(bus) {
+  bus.dispatchEvent(new CustomEvent("peitho:pointerup"));
+}
+function isPointerMoveDetail(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value;
+  return isUnitCoordinate2(candidate.x) && isUnitCoordinate2(candidate.y);
+}
+function isUnitCoordinate2(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
 function resolveRemoteTarget(slides, currentIndex, to) {
   const base = currentIndex ?? initialSlideIndex(slides);
   if (base === null) return null;
@@ -1473,6 +1971,7 @@ export {
   createDimmableRow,
   expectedElapsedAtSlide,
   installRemoteControls,
+  installRemotePointerBridge,
   installRemoteSyncBridge,
   mountPresentShell,
   mountRemoteView,
