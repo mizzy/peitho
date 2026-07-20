@@ -1834,7 +1834,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "peitho"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "peitho-core"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "html-escape",
  "katex-rs",

@@ -113,7 +113,7 @@ rendered as plaintext.
 ## Page settings comments
 
 JSON HTML comments carry page settings. The supported settings are `key`,
-`layout`, `section`, `time`, `draft`, and `skip`.
+`layout`, `section`, `time`, `draft`, `skip`, and `include`.
 
 ```markdown
 <!-- {"key":"checks","layout":"agenda","section":"Contracts","time":"3m"} -->
@@ -147,3 +147,34 @@ The marked slide starts a section that runs until the next marker. If any
 section marker exists, the first slide must carry one. When deck frontmatter
 sets `time`, the section totals must equal that deck time; when deck `time` is
 absent, the section total becomes the deck's planned time.
+
+## Splitting a deck across files
+
+An `include` page settings comment on an otherwise empty slide splices the
+referenced Markdown file's slides in at that position. Use it to share a
+common intro or outro across a talk series, or to break a long deck into
+smaller files.
+
+```markdown
+# Deck slide
+
+---
+<!-- {"include":"shared/intro.md"} -->
+---
+# Next deck slide
+```
+
+The include comment must be the only content of its slide, may not combine
+with any other page settings key, and takes only `include` — a string with a
+deck-relative Markdown path. The referenced file may contain any number of
+slides, may nest further `include` comments up to 64 levels deep, and may
+declare `section` and `time` markers that participate in the deck's normal
+section-total-vs-`time` validation. Included files may **not** carry
+frontmatter — the top-level deck is the sole source of deck-wide settings.
+
+Paths are resolved relative to the including file and must stay under the
+top-level deck's directory. Absolute paths, `..` escapes, missing targets,
+cycles, chains exceeding 64 nested includes, empty included files, and any
+of the above malformed shapes are all line-numbered build errors. Watch
+mode observes the entire include tree, so edits to any included file
+trigger a rebuild.

@@ -115,6 +115,15 @@ A slide's page settings are one `<!-- { ... } -->` JSON comment (at most one per
 
 - `layout` — pin a layout by name, e.g. `{"layout":"cover"}`. An unknown name is a build error with a candidate list
 - `section` + `time` — the marked slide starts an agenda section that runs until the next marker. Section budgets must add up to the deck's `time` frontmatter (when present) — mismatches are build errors with line numbers. During the talk, the presenter agenda shows planned vs. actual per section in real time
+- `include` — on an otherwise empty slide, splices the referenced Markdown file's slides in at that position:
+
+  ```markdown
+  ---
+  <!-- {"include":"shared/intro.md"} -->
+  ---
+  ```
+
+  Deck-relative paths only, nested up to 64 levels, cycles/absolute/`..`-escape are build errors. Included files may not carry frontmatter but may declare their own `section`/`time` markers. Watch mode rebuilds when any included file changes.
 
 ### Speaker notes
 
