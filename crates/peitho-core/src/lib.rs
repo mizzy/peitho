@@ -1,8 +1,11 @@
+#![allow(clippy::result_large_err)]
+
 pub mod check;
 pub mod code_images;
 pub mod domain;
 pub mod error;
 pub mod highlight;
+pub mod include;
 mod json;
 pub mod layout;
 pub mod manifest;

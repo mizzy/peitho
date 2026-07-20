@@ -130,6 +130,71 @@ fn build_fails_for_undefined_footnote_reference_with_line_and_help() {
 }
 
 #[test]
+fn build_reports_parse_errors_from_included_file_with_file_and_line() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "<!-- {\"include\":\"shared.md\"} -->\n").unwrap();
+    fs::write(
+        dir.path().join("shared.md"),
+        "<!-- {\"key\":\"Bad Key\"} -->\n# Included\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("shared.md:1"))
+        .stderr(predicate::str::contains(
+            "slide key must use lowercase ascii",
+        ))
+        .stderr(predicate::str::contains("help: use lowercase ascii"));
+}
+
+#[test]
+fn build_reports_section_total_mismatch_from_included_file_with_file_and_line() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\ntime: 5m\n---\n<!-- {\"include\":\"shared.md\"} -->\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("shared.md"),
+        "<!-- {\"section\":\"Foo\",\"time\":\"1m\"} -->\n# Included\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("shared.md:1"))
+        .stderr(predicate::str::contains(
+            "frontmatter time 300000ms does not match section total",
+        ))
+        .stderr(predicate::str::contains("60000ms"))
+        .stderr(predicate::str::contains(
+            "help: adjust frontmatter time or section times so the totals match",
+        ));
+}
+
+#[test]
 fn build_fails_for_root_class_width_override_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

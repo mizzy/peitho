@@ -360,6 +360,7 @@ struct RawFrontmatter {
     yaml: String,
 }
 
+#[derive(Clone)]
 pub struct ParsedFrontmatter {
     settings: DeckSettings,
     pub(crate) body_start: usize,
@@ -373,6 +374,10 @@ impl ParsedFrontmatter {
 
     pub fn key_line(&self, key: &str) -> Option<usize> {
         self.key_lines.get(key).copied()
+    }
+
+    pub fn body_start(&self) -> usize {
+        self.body_start
     }
 }
 
@@ -390,6 +395,23 @@ pub fn parse_frontmatter(source: &str) -> Result<ParsedFrontmatter> {
         body_start,
         key_lines,
     })
+}
+
+pub(crate) fn detect_frontmatter_present(source: &str) -> Option<usize> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    match leading_frontmatter(source) {
+        Ok((Some(raw), _)) => Some(raw.line),
+        Ok((None, _)) => leading_frontmatter_start_line(source),
+        Err(err) => leading_frontmatter_start_line(source)
+            .or(err.line)
+            .or(Some(1)),
+    }
+}
+
+fn leading_frontmatter_start_line(source: &str) -> Option<usize> {
+    first_nonblank_source_line(source)
+        .filter(|(_, line)| line.trim() == "---")
+        .map(|(offset, _)| line_for_offset(source, offset))
 }
 
 pub(crate) fn parse_markdown(
@@ -1380,7 +1402,7 @@ fn scan_slot_div_markers(
 /// Extract the leading fence character (`\`` or `~`) and its length, if this
 /// line opens a code fence. Only fences of three or more of the same character
 /// count, matching pulldown-cmark semantics.
-fn opening_code_fence(line: &str) -> Option<(char, usize)> {
+pub(crate) fn opening_code_fence(line: &str) -> Option<(char, usize)> {
     let trimmed = line.trim_start();
     let ch = trimmed.chars().next()?;
     if ch != '`' && ch != '~' {
@@ -1395,7 +1417,7 @@ fn opening_code_fence(line: &str) -> Option<(char, usize)> {
 }
 
 /// A closing fence must be the same character and at least as long.
-fn is_closing_code_fence(line: &str, ch: char, min_len: usize) -> bool {
+pub(crate) fn is_closing_code_fence(line: &str, ch: char, min_len: usize) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
@@ -2344,6 +2366,18 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
     if !json.starts_with('{') {
         return Ok(None);
     }
+    if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| {
+        value
+            .as_object()
+            .is_some_and(|object| object.contains_key("include"))
+    }) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "include comment must be the only content of its slide",
+            "place the include comment in its own slide bounded by `---`",
+        ));
+    }
     let parsed: PageComment = serde_json::from_str(json).map_err(|err| {
         BuildError::new(
             ErrorKind::Parse,
@@ -2463,7 +2497,7 @@ fn is_html_comment(raw: &str) -> bool {
     trimmed.starts_with("<!--") && trimmed.ends_with("-->")
 }
 
-fn line_for_offset(source: &str, offset: usize) -> usize {
+pub(crate) fn line_for_offset(source: &str, offset: usize) -> usize {
     source[..offset]
         .bytes()
         .filter(|byte| *byte == b'\n')
@@ -4421,6 +4455,20 @@ After list
         assert_eq!(section.line, 7);
         assert_eq!(settings.layout.as_deref(), Some("cover"));
         assert_eq!(settings.key.unwrap().as_str(), "cover");
+    }
+
+    #[test]
+    fn parse_page_comment_rejects_include_key_if_it_reaches_the_parser() {
+        let err = parse_page_comment(r#"<!-- {"include":"shared.md"} -->"#, 7).unwrap_err();
+
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "include comment must be the only content of its slide"
+        );
+        assert!(err
+            .help
+            .contains("place the include comment in its own slide"));
     }
 
     #[test]

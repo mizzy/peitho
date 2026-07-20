@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{
     collections::{BTreeMap, HashSet},
     env,
@@ -38,6 +40,33 @@ struct BuildArtifacts {
     manifest_json: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
     fonts_source: Option<PathBuf>,
+}
+
+pub(crate) struct LoadedDeckSource {
+    pub(crate) deck_path: PathBuf,
+    pub(crate) source: String,
+    pub(crate) frontmatter: peitho_core::ParsedFrontmatter,
+    pub(crate) line_map: peitho_core::include::LineMap,
+}
+
+impl LoadedDeckSource {
+    pub(crate) fn translate<T>(&self, result: peitho_core::Result<T>) -> miette::Result<T> {
+        core_for_deck(result, &self.deck_path, Some(&self.line_map))
+    }
+
+    pub(crate) fn included_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = Vec::new();
+        for origin in self.line_map.origins() {
+            if same_watch_path(&origin.file, &self.deck_path) {
+                continue;
+            }
+            if files.iter().any(|path| same_watch_path(path, &origin.file)) {
+                continue;
+            }
+            files.push(origin.file.clone());
+        }
+        files
+    }
 }
 
 struct CliSvgRunner {
@@ -89,6 +118,7 @@ struct WatchRoot {
 struct WatchTargets {
     roots: Vec<WatchRoot>,
     assets: ResolvedAssets,
+    included_files: Vec<PathBuf>,
 }
 
 struct WatchState {
@@ -155,6 +185,15 @@ impl WatchState {
         write_suppressed_watch_note(&key, &note, stderr, &mut self.emitted_watch_error_notes)?;
         Ok(())
     }
+
+    fn is_source_change(&self, changed: &Path) -> bool {
+        same_watch_path(&self.input, changed)
+            || self
+                .targets
+                .included_files
+                .iter()
+                .any(|path| same_watch_path(path, changed))
+    }
 }
 
 struct WatchRuntime {
@@ -166,11 +205,15 @@ struct WatchRuntime {
 impl WatchTargets {
     /// The deck file plus the resolved asset paths. Each asset path may be a
     /// single file or a directory whose matching extension files are watched.
-    fn new(input: PathBuf, assets: ResolvedAssets) -> Self {
+    fn new(input: PathBuf, assets: ResolvedAssets, included_files: Vec<PathBuf>) -> Self {
         let mut roots = vec![WatchRoot {
-            path: input,
+            path: input.clone(),
             ext: Some("md"),
         }];
+        roots.extend(included_files.iter().cloned().map(|path| WatchRoot {
+            path,
+            ext: Some("md"),
+        }));
         if let Some(path) = assets.layouts.path() {
             roots.push(WatchRoot {
                 path: path.to_path_buf(),
@@ -195,7 +238,11 @@ impl WatchTargets {
                 ext: None,
             });
         }
-        Self { roots, assets }
+        Self {
+            roots,
+            assets,
+            included_files,
+        }
     }
 
     fn is_relevant_change(&self, changed: &Path) -> bool {
@@ -621,14 +668,8 @@ fn export_pdf(input: PathBuf, out: Option<PathBuf>) -> miette::Result<()> {
 }
 
 fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::Result<()> {
-    let markdown = fs::read_to_string(&input).map_err(|err| {
-        miette::miette!(
-            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
-            input.display()
-        )
-    })?;
-    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
-    let assets = resolve_assets(&input, &frontmatter)?;
+    let loaded = load_and_expand_deck_source(&input)?;
+    let assets = resolve_assets(&input, &loaded.frontmatter)?;
     let layouts = load_layouts(assets.layouts.path())?;
 
     let Some(key) = explain else {
@@ -641,9 +682,9 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
     };
 
     let highlighter = load_highlighter(assets.syntaxes.path())?;
-    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
-        &markdown,
-        frontmatter,
+    let parsed = loaded.translate(peitho_core::code_images::parse_deck_and_transform(
+        &loaded.source,
+        loaded.frontmatter.clone(),
         &highlighter,
         &CliSvgRunner::for_deck(&input),
         &code_images_cache_dir(&input),
@@ -1071,9 +1112,9 @@ where
     if relevant
         && changed_paths
             .iter()
-            .any(|changed| same_watch_path(&state.input, changed))
+            .any(|changed| state.is_source_change(changed))
     {
-        refresh_watch_targets_after_deck_change(state, stderr)?;
+        refresh_watch_targets_after_source_change(state, stderr)?;
     }
 
     let watch_set_changed = state.reconcile_after_events(watcher, stderr)?;
@@ -1193,8 +1234,13 @@ where
 }
 
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
-    let assets = resolve_deck_assets(input)?;
-    Ok(WatchTargets::new(input.to_path_buf(), assets))
+    let loaded = load_and_expand_deck_source(input)?;
+    let assets = resolve_assets(input, &loaded.frontmatter)?;
+    Ok(WatchTargets::new(
+        input.to_path_buf(),
+        assets,
+        loaded.included_files(),
+    ))
 }
 
 fn resolve_watch_targets_or_deck_only(input: &Path) -> WatchTargets {
@@ -1210,29 +1256,31 @@ fn deck_only_watch_targets(input: &Path) -> WatchTargets {
             syntaxes: Provenance::Builtin,
             fonts: Provenance::Builtin,
         },
+        Vec::new(),
     )
 }
 
-fn resolve_deck_assets(input: &Path) -> miette::Result<ResolvedAssets> {
-    let markdown = fs::read_to_string(input).into_diagnostic()?;
-    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
-    resolve_assets(input, &frontmatter)
-}
-
-fn refresh_watch_targets_after_deck_change(
+fn refresh_watch_targets_after_source_change(
     state: &mut WatchState,
     stderr: &mut dyn Write,
 ) -> miette::Result<()> {
-    let current_assets = match resolve_deck_assets(&state.input) {
-        Ok(assets) => assets,
+    let current_targets = match resolve_watch_targets(&state.input) {
+        Ok(targets) => targets,
         Err(_) => {
             return Ok(());
         }
     };
-    let paths_changed = resolved_asset_paths_changed(&state.targets.assets, &current_assets);
-    let next_targets = WatchTargets::new(state.input.clone(), current_assets);
-    state.targets = next_targets;
-    if !paths_changed {
+    let asset_paths_changed =
+        resolved_asset_paths_changed(&state.targets.assets, &current_targets.assets);
+    let include_paths_changed = path_lists_changed(
+        &state.targets.included_files,
+        &current_targets.included_files,
+    );
+    state.targets = current_targets;
+    if !asset_paths_changed && !include_paths_changed {
+        return Ok(());
+    }
+    if !asset_paths_changed {
         return Ok(());
     }
     writeln!(
@@ -1250,6 +1298,14 @@ fn resolved_asset_paths_changed(old: &ResolvedAssets, new: &ResolvedAssets) -> b
         || old.css.path() != new.css.path()
         || old.syntaxes.path() != new.syntaxes.path()
         || old.fonts.path() != new.fonts.path()
+}
+
+fn path_lists_changed(old: &[PathBuf], new: &[PathBuf]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|(old_path, new_path)| !same_watch_path(old_path, new_path))
 }
 
 fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette::Result<()> {
@@ -1475,26 +1531,20 @@ fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>
 }
 
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
-    let markdown = fs::read_to_string(input).map_err(|err| {
-        miette::miette!(
-            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
-            input.display()
-        )
-    })?;
-    let frontmatter = core(peitho_core::parse_frontmatter(&markdown))?;
-    let assets = resolve_assets(input, &frontmatter)?;
+    let loaded = load_and_expand_deck_source(input)?;
+    let assets = resolve_assets(input, &loaded.frontmatter)?;
     let highlighter = load_highlighter(assets.syntaxes.path())?;
     let layouts = load_layouts(assets.layouts.path())?;
     let css_files = load_css(assets.css.path())?;
-    let parsed = core(peitho_core::code_images::parse_deck_and_transform(
-        &markdown,
-        frontmatter,
+    let parsed = loaded.translate(peitho_core::code_images::parse_deck_and_transform(
+        &loaded.source,
+        loaded.frontmatter.clone(),
         &highlighter,
         &CliSvgRunner::for_deck(input),
         &code_images_cache_dir(input),
     ))?;
-    let mapped = core(peitho_core::dispatch_by_convention(parsed, &layouts))?;
-    let checked = core(peitho_core::check_deck(mapped))?;
+    let mapped = loaded.translate(peitho_core::dispatch_by_convention(parsed, &layouts))?;
+    let checked = loaded.translate(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
     let theme_css = core(peitho_core::build_theme_css(
         &css_files,
@@ -1503,12 +1553,13 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &layouts.root_classes(),
     ))?;
     let mut image_resolver = ImageResolver::new(input);
-    let (resolved, image_assets) = core(peitho_core::resolve_image_paths(checked, |request| {
-        image_resolver.resolve(request)
-    }))?;
+    let (resolved, image_assets) = loaded
+        .translate(peitho_core::resolve_image_paths(checked, |request| {
+            image_resolver.resolve(request)
+        }))?;
     let manifest = peitho_core::build_manifest(&resolved, &image_assets);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
-    let rendered = core(peitho_core::render_deck(resolved, &highlighter, theme_css))?;
+    let rendered = loaded.translate(peitho_core::render_deck(resolved, &highlighter, theme_css))?;
 
     Ok(BuildArtifacts {
         slide_count,
@@ -1516,6 +1567,31 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         manifest_json,
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
+    })
+}
+
+pub(crate) fn load_and_expand_deck_source(input: &Path) -> miette::Result<LoadedDeckSource> {
+    let markdown = read_deck_source(input)?;
+    let frontmatter = core_for_deck(peitho_core::parse_frontmatter(&markdown), input, None)?;
+    let expanded = core_for_deck(
+        peitho_core::include::expand_includes(&markdown, frontmatter.body_start(), input),
+        input,
+        None,
+    )?;
+    Ok(LoadedDeckSource {
+        deck_path: input.to_path_buf(),
+        source: expanded.source,
+        frontmatter,
+        line_map: expanded.line_map,
+    })
+}
+
+fn read_deck_source(input: &Path) -> miette::Result<String> {
+    fs::read_to_string(input).map_err(|err| {
+        miette::miette!(
+            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
+            input.display()
+        )
     })
 }
 
@@ -3641,6 +3717,49 @@ fn core<T>(result: peitho_core::Result<T>) -> miette::Result<T> {
     result.map_err(|err| miette::miette!("{err}"))
 }
 
+fn core_for_deck<T>(
+    result: peitho_core::Result<T>,
+    deck: &Path,
+    line_map: Option<&peitho_core::include::LineMap>,
+) -> miette::Result<T> {
+    result.map_err(|err| miette::miette!("{}", translate_deck_error(err, deck, line_map)))
+}
+
+fn translate_deck_error(
+    mut err: peitho_core::BuildError,
+    deck: &Path,
+    line_map: Option<&peitho_core::include::LineMap>,
+) -> peitho_core::BuildError {
+    if let Some(origin) = err.origin_file.take() {
+        err.origin_file = Some(origin_for_display(&origin, deck));
+        return err;
+    }
+
+    let Some(line) = err.line else {
+        return err;
+    };
+    let Some(line_map) = line_map else {
+        err.origin_file = Some(origin_for_display(deck, deck));
+        return err;
+    };
+    let (origin, original_line) = line_map.translate(line);
+    if origin.as_os_str().is_empty() {
+        return err;
+    }
+    err.line = Some(original_line);
+    if !same_watch_path(&origin, deck) {
+        err.origin_file = Some(origin_for_display(&origin, deck));
+    }
+    err
+}
+
+fn origin_for_display(origin: &Path, deck: &Path) -> PathBuf {
+    origin
+        .strip_prefix(asset_resolution::deck_parent(deck))
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| origin.to_path_buf())
+}
+
 fn layout_name(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -3666,6 +3785,59 @@ contexts:
       scope: keyword.control.carina
 "#;
     const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
+
+    #[test]
+    fn load_and_expand_deck_source_returns_source_frontmatter_and_line_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let source = "---\ntime: 1m\n---\n# Intro\n";
+        fs::write(&deck, source).unwrap();
+
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+
+        assert_eq!(loaded.source, source);
+        assert_eq!(loaded.frontmatter.body_start(), 16);
+        assert_eq!(loaded.line_map.translate(4), (deck.clone(), 4));
+    }
+
+    #[test]
+    fn load_and_expand_deck_source_reports_distinct_included_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let shared = dir.path().join("shared");
+        let intro = shared.join("intro.md");
+        let outro = shared.join("outro.md");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(&intro, "# Intro\n").unwrap();
+        fs::write(&outro, "# Outro\n").unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"include\":\"shared/intro.md\"} -->\n---\n# Middle\n---\n<!-- {\"include\":\"shared/intro.md\"} -->\n---\n<!-- {\"include\":\"shared/outro.md\"} -->\n",
+        )
+        .unwrap();
+
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+
+        assert_eq!(loaded.included_files(), vec![intro, outro]);
+    }
+
+    #[test]
+    fn load_and_expand_deck_source_frontmatter_errors_include_deck_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "---\ntime: [\n---\n# Intro\n").unwrap();
+
+        let err = match load_and_expand_deck_source(&deck) {
+            Ok(_) => panic!("invalid frontmatter should fail"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains("deck.md:3: invalid deck frontmatter"),
+            "actual error: {message}"
+        );
+    }
 
     #[test]
     fn watch_dependency_types_are_available() {
@@ -3694,6 +3866,7 @@ contexts:
                 syntaxes: Provenance::Explicit(syntaxes.clone()),
                 fonts: Provenance::Builtin,
             },
+            Vec::new(),
         );
 
         assert!(targets.is_relevant_change(&dir.path().join("deck.md")));
@@ -3723,6 +3896,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(fonts.clone()),
             },
+            Vec::new(),
         );
 
         assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
@@ -3747,6 +3921,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(fonts.clone()),
             },
+            Vec::new(),
         );
 
         assert!(!targets.is_relevant_change(&fonts.join(".DS_Store")));
@@ -3768,6 +3943,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(fonts.clone()),
             },
+            Vec::new(),
         );
 
         assert!(targets.is_relevant_change(&nested.join("400.woff2")));
@@ -3794,6 +3970,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(missing_fonts.clone()),
             },
+            Vec::new(),
         );
 
         let dirs = targets.watch_dirs();
@@ -3816,7 +3993,7 @@ contexts:
 
     #[test]
     fn build_options_with_builtin_assets_watch_only_the_deck() {
-        let targets = WatchTargets::new(PathBuf::from("deck.md"), empty_assets());
+        let targets = WatchTargets::new(PathBuf::from("deck.md"), empty_assets(), Vec::new());
 
         assert!(targets.is_relevant_change(Path::new("deck.md")));
         assert!(!targets.is_relevant_change(Path::new("layout.html")));
@@ -4153,6 +4330,7 @@ contexts:
                 syntaxes: Provenance::Builtin,
                 fonts: Provenance::Builtin,
             },
+            Vec::new(),
         );
 
         assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
@@ -4242,6 +4420,55 @@ contexts:
         .unwrap();
 
         let manifest = fs::read_to_string(fixture.options.out.join("manifest.json")).unwrap();
+        assert!(manifest.contains(r#""slideCount": 2"#));
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 2 slide(s)"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn watch_path_handler_rebuilds_after_included_markdown_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let shared = dir.path().join("shared");
+        let included = shared.join("intro.md");
+        let out = dir.path().join("dist");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(&included, "# Intro\n").unwrap();
+        fs::write(&deck, "<!-- {\"include\":\"shared/intro.md\"} -->\n").unwrap();
+        let options = BuildOptions {
+            input: deck.clone(),
+            out,
+        };
+        let targets = resolve_watch_targets(&deck).unwrap();
+        assert!(targets.is_relevant_change(&included));
+        let watched_dirs = targets.watch_dirs();
+        assert!(
+            watched_dirs.iter().any(|path| path == &shared),
+            "actual dirs: {watched_dirs:?}"
+        );
+        let mut state = WatchState::new(deck, targets, watched_dirs);
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_once_for_watch(&options, &mut stdout, &mut stderr).unwrap();
+        stdout.clear();
+        stderr.clear();
+        fs::write(&included, "# Intro\n\n---\n# Included Details\n").unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&included),
+            &mut stdout,
+            &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
+        )
+        .unwrap();
+
+        let manifest = fs::read_to_string(options.out.join("manifest.json")).unwrap();
         assert!(manifest.contains(r#""slideCount": 2"#));
         assert!(String::from_utf8(stdout)
             .unwrap()
@@ -4387,6 +4614,44 @@ contexts:
     }
 
     #[test]
+    fn watch_path_handler_rewatches_when_include_paths_change() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut watcher = RecordingWatchController::default();
+        let shared = fixture._dir.path().join("shared");
+        let included = shared.join("intro.md");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(&included, "# Included\n").unwrap();
+        fs::write(
+            &fixture.options.input,
+            "<!-- {\"include\":\"shared/intro.md\"} -->\n",
+        )
+        .unwrap();
+
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+            |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds, 1);
+        assert!(state.targets.is_relevant_change(&included));
+        assert!(watcher.watched.iter().any(|path| path == &shared));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn deck_refresh_updates_targets_without_reconciling_watched_dirs() {
         let fixture = WatchFixture::new("# Intro\n");
         let old_layouts = fixture._dir.path().join("layouts");
@@ -4410,7 +4675,7 @@ contexts:
         .unwrap();
         let mut stderr = Vec::new();
 
-        refresh_watch_targets_after_deck_change(&mut state, &mut stderr).unwrap();
+        refresh_watch_targets_after_source_change(&mut state, &mut stderr).unwrap();
 
         assert!(state.watched_dirs.iter().any(|path| path == &old_layouts));
         assert_eq!(
@@ -4440,7 +4705,7 @@ contexts:
         fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Intro\n").unwrap();
         let mut stderr = Vec::new();
 
-        refresh_watch_targets_after_deck_change(&mut state, &mut stderr).unwrap();
+        refresh_watch_targets_after_source_change(&mut state, &mut stderr).unwrap();
 
         assert!(
             stderr.is_empty(),

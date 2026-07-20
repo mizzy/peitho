@@ -1,4 +1,8 @@
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -22,6 +26,7 @@ pub struct ErrorSlide {
 pub struct BuildError {
     pub kind: ErrorKind,
     pub line: Option<usize>,
+    pub origin_file: Option<PathBuf>,
     pub message: String,
     pub help: String,
     pub slide: Option<ErrorSlide>,
@@ -37,10 +42,16 @@ impl BuildError {
         Self {
             kind,
             line,
+            origin_file: None,
             message: message.into(),
             help: help.into(),
             slide: None,
         }
+    }
+
+    pub fn with_origin_file(mut self, path: impl AsRef<Path>) -> Self {
+        self.origin_file = Some(path.as_ref().to_path_buf());
+        self
     }
 
     pub fn with_slide(mut self, number: usize, key: Option<&str>) -> Self {
@@ -54,8 +65,29 @@ impl BuildError {
 
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.slide, self.line) {
-            (Some(slide), Some(line)) => match &slide.key {
+        match (&self.slide, self.line, &self.origin_file) {
+            (Some(slide), Some(line), Some(file)) => match &slide.key {
+                Some(key) => write!(
+                    f,
+                    "{}:{}, slide {} ('{}'): {}\n  = help: {}",
+                    file.display(),
+                    line,
+                    slide.number,
+                    key,
+                    self.message,
+                    self.help
+                ),
+                None => write!(
+                    f,
+                    "{}:{}, slide {}: {}\n  = help: {}",
+                    file.display(),
+                    line,
+                    slide.number,
+                    self.message,
+                    self.help
+                ),
+            },
+            (Some(slide), Some(line), None) => match &slide.key {
                 Some(key) => write!(
                     f,
                     "slide {} ('{}'), line {}: {}\n  = help: {}",
@@ -67,7 +99,7 @@ impl fmt::Display for BuildError {
                     slide.number, line, self.message, self.help
                 ),
             },
-            (Some(slide), None) => match &slide.key {
+            (Some(slide), None, _) => match &slide.key {
                 Some(key) => write!(
                     f,
                     "slide {} ('{}'): {}\n  = help: {}",
@@ -79,12 +111,20 @@ impl fmt::Display for BuildError {
                     slide.number, self.message, self.help
                 ),
             },
-            (None, Some(line)) => write!(
+            (None, Some(line), Some(file)) => write!(
+                f,
+                "{}:{}: {}\n  = help: {}",
+                file.display(),
+                line,
+                self.message,
+                self.help
+            ),
+            (None, Some(line), None) => write!(
                 f,
                 "line {}: {}\n  = help: {}",
                 line, self.message, self.help
             ),
-            (None, None) => write!(f, "{}\n  = help: {}", self.message, self.help),
+            (None, None, _) => write!(f, "{}\n  = help: {}", self.message, self.help),
         }
     }
 }

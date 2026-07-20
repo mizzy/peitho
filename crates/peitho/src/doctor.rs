@@ -443,34 +443,23 @@ fn shell_check(name: &'static str, source: &str) -> DoctorCheck {
 }
 
 fn push_asset_checks(checks: &mut Vec<DoctorCheck>, deck: &Path) {
-    let markdown = match fs::read_to_string(deck) {
-        Ok(markdown) => markdown,
+    let loaded = match crate::load_and_expand_deck_source(deck) {
+        Ok(loaded) => loaded,
         Err(err) => {
             checks.push(DoctorCheck {
                 category: DoctorCategory::Assets,
                 name: "deck",
                 status: DoctorStatus::Fail,
-                message: format!("failed to read {}: {err}", deck.display()),
-                help: Some("pass the deck path explicitly if it lives elsewhere".to_owned()),
+                message: err.to_string(),
+                help: Some("fix the deck source before checking assets".to_owned()),
                 details: Some(serde_json::json!({ "path": deck.display().to_string() })),
             });
             return;
         }
     };
-    let frontmatter = match peitho_core::parse_frontmatter(&markdown) {
-        Ok(frontmatter) => frontmatter,
-        Err(err) => {
-            checks.push(asset_error_check(
-                "frontmatter",
-                err,
-                Some(serde_json::json!({ "path": deck.display().to_string() })),
-            ));
-            return;
-        }
-    };
 
     for key in AssetKey::ALL {
-        match asset_resolution::resolve_asset(deck, &frontmatter, key) {
+        match asset_resolution::resolve_asset(deck, &loaded.frontmatter, key) {
             Ok(provenance) => checks.push(asset_pass_check(key, provenance)),
             Err(err) => {
                 checks.push(asset_error_check(key.as_str(), err, None));
@@ -1065,6 +1054,7 @@ mod tests {
             peitho_core::error::BuildError {
                 kind: peitho_core::error::ErrorKind::Parse,
                 line: None,
+                origin_file: None,
                 message: "css path is invalid".to_owned(),
                 help: String::new(),
                 slide: None,
