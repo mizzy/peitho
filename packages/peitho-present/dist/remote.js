@@ -1290,9 +1290,71 @@ function serverSyncChannelFactory(options = {}) {
   };
 }
 
+// src/timerUrgency.ts
+var URGENCY_ORDER = ["normal", "warning", "urgent", "overrun"];
+var URGENCY_RANK = {
+  normal: 0,
+  warning: 1,
+  urgent: 2,
+  overrun: 3
+};
+function urgencyFor(elapsedMs, plannedDurationMs) {
+  if (plannedDurationMs == null) return "normal";
+  if (isOverrun(elapsedMs, plannedDurationMs)) return "overrun";
+  const remainingMs = plannedDurationMs - elapsedMs;
+  if (remainingMs <= 6e4) return "urgent";
+  if (remainingMs <= 18e4) return "warning";
+  return "normal";
+}
+function installUrgencyTracker(options) {
+  const win = options.window ?? window;
+  const bus = options.bus;
+  let lastKnown = null;
+  const emit = (from, to) => {
+    bus.dispatchEvent(
+      new CustomEvent("peitho:urgencychange", {
+        detail: { from, to }
+      })
+    );
+  };
+  const tick = () => {
+    if (options.shell.startedAt() === null) {
+      lastKnown = null;
+      return;
+    }
+    const target = urgencyFor(options.shell.elapsedMs(), options.plannedDurationMs);
+    if (lastKnown === null) {
+      lastKnown = target;
+      return;
+    }
+    const fromIndex = URGENCY_RANK[lastKnown];
+    const toIndex = URGENCY_RANK[target];
+    if (toIndex <= fromIndex) {
+      lastKnown = target;
+      return;
+    }
+    for (let index = fromIndex; index < toIndex; index += 1) {
+      emit(URGENCY_ORDER[index], URGENCY_ORDER[index + 1]);
+    }
+    lastKnown = target;
+  };
+  const interval = win.setInterval(tick, 250);
+  return {
+    destroy() {
+      win.clearInterval(interval);
+    }
+  };
+}
+
 // src/remote.ts
 var isReadOnly = (state) => state.kind === "ended";
 var canInteract = (state) => state.kind === "active";
+var HAPTIC_PATTERNS = {
+  normal: null,
+  warning: [80],
+  urgent: [120],
+  overrun: [180, 80, 180]
+};
 async function mountRemoteView(options) {
   const view = new RemoteController(options);
   await view.load();
@@ -1627,6 +1689,42 @@ function installRemotePointerBridge(options) {
     mode = "off";
   };
 }
+function installRemoteHapticBridge(options) {
+  const win = options.window ?? window;
+  const bus = options.bus;
+  const vibrate = typeof win.navigator.vibrate === "function" ? win.navigator.vibrate.bind(win.navigator) : null;
+  if (vibrate == null) return () => void 0;
+  let pendingPatterns = [];
+  let flushScheduled = false;
+  let destroyed = false;
+  const flush = () => {
+    flushScheduled = false;
+    if (destroyed || pendingPatterns.length === 0) return;
+    const merged = [];
+    pendingPatterns.forEach((pattern, index) => {
+      if (index > 0) merged.push(200);
+      merged.push(...pattern);
+    });
+    pendingPatterns = [];
+    vibrate(merged);
+  };
+  const onUrgencyChange = (event) => {
+    if (destroyed) return;
+    const to = event.detail?.to;
+    const pattern = to == null ? null : HAPTIC_PATTERNS[to];
+    if (pattern === null) return;
+    pendingPatterns.push(pattern);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      queueMicrotask(flush);
+    }
+  };
+  bus.addEventListener("peitho:urgencychange", onUrgencyChange);
+  return () => {
+    destroyed = true;
+    bus.removeEventListener("peitho:urgencychange", onUrgencyChange);
+  };
+}
 function installRemoteSyncBridge(options) {
   const bus = options.bus ?? window;
   const log = options.console ?? console;
@@ -1722,6 +1820,8 @@ var RemoteController = class {
   controlsCleanup = null;
   syncCleanup = null;
   pointerCleanup = null;
+  hapticCleanup = null;
+  urgencyTracker = null;
   previewShell = null;
   timerInterval = null;
   constructor(options) {
@@ -1752,6 +1852,23 @@ var RemoteController = class {
       this.controlsCleanup = installRemoteControls({
         root: this.root,
         document: this.doc,
+        bus: this.bus
+      });
+      this.hapticCleanup = installRemoteHapticBridge({
+        bus: this.bus,
+        window: this.win
+      });
+      this.urgencyTracker = installUrgencyTracker({
+        shell: {
+          elapsedMs: () => this.currentElapsedMs(),
+          startedAt: () => {
+            const elapsedMs = this.currentElapsedMs();
+            if (timerVisualState(this.timerState, elapsedMs) === "stopped") return null;
+            return this.timerState.receivedAtMs;
+          }
+        },
+        plannedDurationMs: validPlannedDurationMs(manifest),
+        window: this.win,
         bus: this.bus
       });
       const previewRoot = this.root.querySelector('[data-peitho-remote="preview"]');
@@ -1796,6 +1913,10 @@ var RemoteController = class {
   }
   destroy() {
     this.clearTimerInterval();
+    this.urgencyTracker?.destroy();
+    this.urgencyTracker = null;
+    this.hapticCleanup?.();
+    this.hapticCleanup = null;
     this.pointerCleanup?.();
     this.pointerCleanup = null;
     this.syncCleanup?.();
@@ -2203,6 +2324,7 @@ export {
   createDimmableRow,
   expectedElapsedAtSlide,
   installRemoteControls,
+  installRemoteHapticBridge,
   installRemotePointerBridge,
   installRemoteSyncBridge,
   mountPresentShell,

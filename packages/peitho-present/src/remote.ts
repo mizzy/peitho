@@ -21,6 +21,12 @@ import {
   serverSyncChannelFactory,
   type SyncChannelFactory
 } from "./sync";
+import {
+  installUrgencyTracker,
+  type TimerUrgency,
+  type UrgencyChangeDetail,
+  type UrgencyTracker
+} from "./timerUrgency";
 import { clamp01, formatMinuteSeconds, isOverrun, isValidDurationMs } from "./timeTracker";
 
 export { mountPresentShell } from "./shell";
@@ -114,6 +120,18 @@ export type RemotePointerBridgeOptions = {
   now?: () => number;
   console?: Pick<Console, "error">;
 };
+
+export type RemoteHapticBridgeOptions = {
+  bus: EventTarget;
+  window?: Window;
+};
+
+const HAPTIC_PATTERNS = {
+  normal: null,
+  warning: [80],
+  urgent: [120],
+  overrun: [180, 80, 180]
+} as const satisfies Record<TimerUrgency, readonly number[] | null>;
 
 export async function mountRemoteView(options: RemoteViewOptions): Promise<RemoteView> {
   const view = new RemoteController(options);
@@ -496,6 +514,50 @@ export function installRemotePointerBridge(options: RemotePointerBridgeOptions):
   };
 }
 
+export function installRemoteHapticBridge(options: RemoteHapticBridgeOptions): () => void {
+  const win = options.window ?? window;
+  const bus = options.bus;
+  const vibrate =
+    typeof win.navigator.vibrate === "function"
+      ? win.navigator.vibrate.bind(win.navigator)
+      : null;
+  if (vibrate == null) return () => undefined;
+
+  let pendingPatterns: (readonly number[])[] = [];
+  let flushScheduled = false;
+  let destroyed = false;
+
+  const flush = (): void => {
+    flushScheduled = false;
+    if (destroyed || pendingPatterns.length === 0) return;
+    const merged: number[] = [];
+    pendingPatterns.forEach((pattern, index) => {
+      if (index > 0) merged.push(200);
+      merged.push(...pattern);
+    });
+    pendingPatterns = [];
+    vibrate(merged);
+  };
+
+  const onUrgencyChange = (event: Event): void => {
+    if (destroyed) return;
+    const to = (event as CustomEvent<UrgencyChangeDetail>).detail?.to;
+    const pattern = to == null ? null : HAPTIC_PATTERNS[to];
+    if (pattern === null) return;
+    pendingPatterns.push(pattern);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      queueMicrotask(flush);
+    }
+  };
+
+  bus.addEventListener("peitho:urgencychange", onUrgencyChange);
+  return () => {
+    destroyed = true;
+    bus.removeEventListener("peitho:urgencychange", onUrgencyChange);
+  };
+}
+
 export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () => void {
   const bus = options.bus ?? window;
   const log = options.console ?? console;
@@ -600,6 +662,8 @@ class RemoteController implements RemoteView {
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
   private pointerCleanup: (() => void) | null = null;
+  private hapticCleanup: (() => void) | null = null;
+  private urgencyTracker: UrgencyTracker | null = null;
   private previewShell: PresentShell | null = null;
   private timerInterval: number | null = null;
 
@@ -632,6 +696,23 @@ class RemoteController implements RemoteView {
       this.controlsCleanup = installRemoteControls({
         root: this.root,
         document: this.doc,
+        bus: this.bus
+      });
+      this.hapticCleanup = installRemoteHapticBridge({
+        bus: this.bus,
+        window: this.win
+      });
+      this.urgencyTracker = installUrgencyTracker({
+        shell: {
+          elapsedMs: () => this.currentElapsedMs(),
+          startedAt: () => {
+            const elapsedMs = this.currentElapsedMs();
+            if (timerVisualState(this.timerState, elapsedMs) === "stopped") return null;
+            return this.timerState!.receivedAtMs;
+          }
+        },
+        plannedDurationMs: validPlannedDurationMs(manifest),
+        window: this.win,
         bus: this.bus
       });
       const previewRoot = this.root.querySelector<HTMLElement>('[data-peitho-remote="preview"]');
@@ -677,6 +758,10 @@ class RemoteController implements RemoteView {
 
   destroy(): void {
     this.clearTimerInterval();
+    this.urgencyTracker?.destroy();
+    this.urgencyTracker = null;
+    this.hapticCleanup?.();
+    this.hapticCleanup = null;
     this.pointerCleanup?.();
     this.pointerCleanup = null;
     this.syncCleanup?.();

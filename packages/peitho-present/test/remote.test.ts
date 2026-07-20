@@ -4,6 +4,7 @@ import type { Notes } from "../../../bindings/Notes";
 import {
   createDimmableRow,
   expectedElapsedAtSlide,
+  installRemoteHapticBridge,
   installRemoteControls,
   mountRemoteView,
   remotePaceState,
@@ -148,6 +149,125 @@ function mockMountPresentShell(navigations: unknown[] = []): (options: ShellOpti
     };
   });
 }
+
+function mockWindowVibrate(vibrate: ReturnType<typeof vi.fn>): void {
+  const descriptor = Object.getOwnPropertyDescriptor(window.navigator, "vibrate");
+  Object.defineProperty(window.navigator, "vibrate", {
+    configurable: true,
+    value: vibrate
+  });
+  cleanups.push(() => {
+    if (descriptor == null) {
+      Reflect.deleteProperty(window.navigator, "vibrate");
+      return;
+    }
+    Object.defineProperty(window.navigator, "vibrate", descriptor);
+  });
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+}
+
+it("remote haptic bridge merges synchronous urgency transitions into one vibration", async () => {
+  const bus = new EventTarget();
+  const vibrate = vi.fn();
+  cleanups.push(
+    installRemoteHapticBridge({
+      bus,
+      window: { navigator: { vibrate } } as unknown as Window
+    })
+  );
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:urgencychange", { detail: { from: "normal", to: "warning" } })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:urgencychange", { detail: { from: "warning", to: "urgent" } })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:urgencychange", { detail: { from: "urgent", to: "overrun" } })
+  );
+  await flushMicrotasks();
+
+  expect(vibrate.mock.calls).toEqual([[[80, 200, 120, 200, 180, 80, 180]]]);
+});
+
+it("remote haptic bridge is safe when navigator.vibrate is absent", () => {
+  const bus = new EventTarget();
+  const cleanup = installRemoteHapticBridge({
+    bus,
+    window: { navigator: {} } as unknown as Window
+  });
+  cleanups.push(cleanup);
+
+  expect(() => {
+    bus.dispatchEvent(
+      new CustomEvent("peitho:urgencychange", { detail: { from: "normal", to: "warning" } })
+    );
+  }).not.toThrow();
+});
+
+it("remote haptic bridge cleanup removes the urgency listener", async () => {
+  const bus = new EventTarget();
+  const vibrate = vi.fn();
+  const cleanup = installRemoteHapticBridge({
+    bus,
+    window: { navigator: { vibrate } } as unknown as Window
+  });
+
+  cleanup();
+  bus.dispatchEvent(
+    new CustomEvent("peitho:urgencychange", { detail: { from: "normal", to: "warning" } })
+  );
+  await flushMicrotasks();
+
+  expect(vibrate).not.toHaveBeenCalled();
+});
+
+it("remote haptic bridge cleanup cancels a pending microtask flush", async () => {
+  const bus = new EventTarget();
+  const vibrate = vi.fn();
+  const cleanup = installRemoteHapticBridge({
+    bus,
+    window: { navigator: { vibrate } } as unknown as Window
+  });
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:urgencychange", { detail: { from: "normal", to: "warning" } })
+  );
+  cleanup();
+  await flushMicrotasks();
+
+  expect(vibrate).not.toHaveBeenCalled();
+});
+
+it("remote controller wires timer urgency transitions to haptics", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  const vibrate = vi.fn(() => true);
+  mockWindowVibrate(vibrate);
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro" }, { key: "end" }], {
+      plannedDurationMs: 300_000
+    })
+  );
+
+  channel.deliver({ timer: { running: true, elapsedMs: 0, atMs: 0 }, nowMs: 0 });
+  vi.advanceTimersByTime(250);
+  await flushMicrotasks();
+  channel.deliver({ timer: { running: true, elapsedMs: 119_750, atMs: 250 }, nowMs: 250 });
+  vi.advanceTimersByTime(250);
+  await flushMicrotasks();
+  channel.deliver({ timer: { running: true, elapsedMs: 239_750, atMs: 500 }, nowMs: 500 });
+  vi.advanceTimersByTime(250);
+  await flushMicrotasks();
+  channel.deliver({ timer: { running: true, elapsedMs: 300_001, atMs: 750 }, nowMs: 750 });
+  vi.advanceTimersByTime(250);
+  await flushMicrotasks();
+
+  expect(vibrate.mock.calls).toEqual([[[80]], [[120]], [[180, 80, 180]]]);
+});
 
 it("remote buttons dispatch navigate request events only", () => {
   const root = document.createElement("main");
