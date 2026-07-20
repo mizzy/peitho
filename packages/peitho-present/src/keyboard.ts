@@ -11,7 +11,9 @@ const navigationKeyMap = new Map<string, NavigateTarget>([
 
 const keyMap = new Map<string, NavigateTarget>([...navigationKeyMap, [" ", "next"]]);
 
-export function hasChordModifier(event: KeyboardEvent): boolean {
+export type ChordModifierEvent = Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey">;
+
+export function hasChordModifier(event: ChordModifierEvent): boolean {
   return event.metaKey || event.ctrlKey || event.altKey;
 }
 

@@ -4,4 +4,4 @@ import type { ManifestImage } from "./ManifestImage";
 import type { ManifestSection } from "./ManifestSection";
 import type { ManifestSlide } from "./ManifestSlide";
 
-export type Manifest = { version: number, peithoVersion: string, title: string, slideCount: number, plannedDurationMs: number | null, aspectRatio: AspectRatio, canvasWidth: number, canvasHeight: number, sections: Array<ManifestSection>, slides: Array<ManifestSlide>, images: Array<ManifestImage>, };
+export type Manifest = { version: number, peithoVersion: string, title: string, slideCount: number, plannedDurationMs: number | null, aspectRatio: AspectRatio, pointerColor?: string, canvasWidth: number, canvasHeight: number, sections: Array<ManifestSection>, slides: Array<ManifestSlide>, images: Array<ManifestImage>, };

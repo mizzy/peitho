@@ -15,6 +15,7 @@ pub struct Manifest {
     slide_count: usize,
     planned_duration_ms: Option<u64>,
     aspect_ratio: AspectRatio,
+    pointer_color: Option<String>,
     sections: Vec<ManifestSection>,
     slides: Vec<ManifestSlide>,
     images: Vec<ManifestImage>,
@@ -32,6 +33,12 @@ struct ManifestWire {
     planned_duration_ms: Option<u64>,
     #[serde(rename = "aspectRatio", default)]
     aspect_ratio: AspectRatio,
+    #[serde(
+        rename = "pointerColor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pointer_color: Option<String>,
     #[serde(rename = "canvasWidth", skip_deserializing)]
     canvas_width: u32,
     #[serde(rename = "canvasHeight", skip_deserializing)]
@@ -58,6 +65,8 @@ struct ManifestBinding {
     planned_duration_ms: Option<u64>,
     #[ts(rename = "aspectRatio")]
     aspect_ratio: AspectRatio,
+    #[ts(rename = "pointerColor", optional)]
+    pointer_color: Option<String>,
     #[ts(rename = "canvasWidth")]
     canvas_width: u32,
     #[ts(rename = "canvasHeight")]
@@ -223,24 +232,6 @@ impl Manifest {
         sections: Vec<ManifestSection>,
         slides: Vec<ManifestSlide>,
     ) -> Self {
-        Self::with_images(
-            title,
-            planned_duration_ms,
-            aspect_ratio,
-            sections,
-            slides,
-            Vec::new(),
-        )
-    }
-
-    pub fn with_images(
-        title: impl Into<String>,
-        planned_duration_ms: Option<u64>,
-        aspect_ratio: AspectRatio,
-        sections: Vec<ManifestSection>,
-        slides: Vec<ManifestSlide>,
-        images: Vec<ManifestImage>,
-    ) -> Self {
         let slide_count = slides.len();
         Self {
             version: 1,
@@ -249,10 +240,21 @@ impl Manifest {
             slide_count,
             planned_duration_ms,
             aspect_ratio,
+            pointer_color: None,
             sections,
             slides,
-            images,
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<ManifestImage>) -> Self {
+        self.images = images;
+        self
+    }
+
+    pub fn with_pointer_color(mut self, pointer_color: Option<String>) -> Self {
+        self.pointer_color = pointer_color;
+        self
     }
 
     pub fn slide_count(&self) -> usize {
@@ -266,6 +268,10 @@ impl Manifest {
     /// The deck's canvas aspect ratio, from frontmatter `aspect_ratio:` or default 16:9.
     pub fn aspect_ratio(&self) -> AspectRatio {
         self.aspect_ratio
+    }
+
+    pub fn pointer_color(&self) -> Option<&str> {
+        self.pointer_color.as_deref()
     }
 
     /// Derived logical canvas width in pixels; equals `aspect_ratio().width()`.
@@ -300,6 +306,7 @@ impl From<&Manifest> for ManifestWire {
             slide_count: manifest.slide_count,
             planned_duration_ms: manifest.planned_duration_ms,
             aspect_ratio: manifest.aspect_ratio,
+            pointer_color: manifest.pointer_color.clone(),
             canvas_width: manifest.canvas_width(),
             canvas_height: manifest.canvas_height(),
             sections: manifest.sections.clone(),
@@ -318,6 +325,7 @@ impl From<ManifestWire> for Manifest {
             slide_count: wire.slide_count,
             planned_duration_ms: wire.planned_duration_ms,
             aspect_ratio: wire.aspect_ratio,
+            pointer_color: wire.pointer_color,
             sections: wire.sections,
             slides: wire.slides,
             images: wire.images,
@@ -390,14 +398,19 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
         .map(|asset| ManifestImage::new(asset.dist_rel.as_str()))
         .collect();
 
-    Manifest::with_images(
+    Manifest::new(
         title,
         deck.settings().planned_time().map(PlannedTime::as_millis),
         deck.settings().aspect_ratio(),
         sections,
         slides,
-        images,
     )
+    .with_pointer_color(
+        deck.settings()
+            .pointer_color()
+            .map(|color| color.as_str().to_owned()),
+    )
+    .with_images(images)
 }
 
 pub fn fragment_src(index: usize, key: &SlideKey) -> String {
@@ -616,6 +629,20 @@ mod tests {
         assert!(json.contains(r#""aspectRatio": "4:3""#));
         assert!(json.contains(r#""canvasWidth": 960"#));
         assert!(json.contains(r#""canvasHeight": 720"#));
+    }
+
+    #[test]
+    fn build_manifest_serializes_pointer_color_from_checked_deck() {
+        let checked = checked_deck(
+            "---\npointer_color: '#ff2a2a'\n---\n# Intro",
+            title_body_layout(),
+        );
+
+        let manifest = build_manifest(&checked, &[]);
+        let json = manifest_json(&manifest).unwrap();
+
+        assert_eq!(manifest.pointer_color(), Some("#ff2a2a"));
+        assert!(json.contains("\"pointerColor\": \"#ff2a2a\""));
     }
 
     #[test]

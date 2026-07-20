@@ -1,5 +1,6 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
+import { hasChordModifier } from "./keyboard";
 import { sectionIndexForSlide } from "./sections";
 import {
   mountPresentShell as defaultMountPresentShell,
@@ -38,6 +39,9 @@ type RemoteTimerAnchor = {
 };
 
 type TimerVisualState = "stopped" | "running" | "paused";
+export type PointerMode = "off" | "pointer";
+export type PointerModeChangeDetail = { mode: PointerMode };
+export type PointerMoveDetail = { x: number; y: number };
 
 type RemoteViewState =
   | { kind: "loading" }
@@ -99,6 +103,15 @@ export type RemoteSyncBridgeOptions = {
   setSynced(): void;
   setEnded(): void;
   onSessionChange(): void;
+  console?: Pick<Console, "error">;
+};
+
+export type RemotePointerBridgeOptions = {
+  previewRoot: HTMLElement;
+  bus?: EventTarget;
+  fetcher?: typeof fetch;
+  window?: Window;
+  now?: () => number;
   console?: Pick<Console, "error">;
 };
 
@@ -207,14 +220,32 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   notesBody.dataset.peithoRemote = "notes";
   notesPanel.append(notesCaption, notesBody);
 
+  const pointerMode = createDimmableRow(doc, "div", "peitho-remote-pointer-mode");
+  pointerMode.dataset.peithoRemote = "pointer-mode";
+  pointerMode.setAttribute("role", "group");
+  pointerMode.setAttribute("aria-label", "Pointer mode");
+  const pointerOff = remotePointerModeButton(doc, "off", "Off");
+  const pointerOn = remotePointerModeButton(doc, "pointer", "Pointer");
+  pointerMode.append(pointerOff, pointerOn);
+
   const actions = doc.createElement("div");
   actions.className = "peitho-remote-actions";
   const prev = remoteButton(doc, "prev", "Previous");
   const next = remoteButton(doc, "next", "Next");
   actions.append(prev, next);
 
+  let currentPointerMode: PointerMode = "off";
+  const setPointerMode = (mode: PointerMode): void => {
+    if (mode === currentPointerMode) return;
+    currentPointerMode = mode;
+    pointerOff.setAttribute("aria-pressed", mode === "off" ? "true" : "false");
+    pointerOn.setAttribute("aria-pressed", mode === "pointer" ? "true" : "false");
+    dispatchPointerModeChange(bus, mode);
+  };
   const onPrev = (): void => dispatchNavigate(bus, "prev");
   const onNext = (): void => dispatchNavigate(bus, "next");
+  const onPointerOff = (): void => setPointerMode("off");
+  const onPointerOn = (): void => setPointerMode("pointer");
   const onTimer = (): void => {
     const action = timerButton.dataset.peithoTimerAction;
     if (action === "start" || action === "pause" || action === "resume") {
@@ -224,6 +255,8 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   const onReset = (): void => dispatchTimerControl(bus, "reset");
   prev.addEventListener("click", onPrev);
   next.addEventListener("click", onNext);
+  pointerOff.addEventListener("click", onPointerOff);
+  pointerOn.addEventListener("click", onPointerOn);
   timerButton.addEventListener("click", onTimer);
   resetButton.addEventListener("click", onReset);
 
@@ -238,6 +271,7 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
     { kind: "dimmable", element: chase },
     { kind: "dimmable", element: pace },
     { kind: "dimmable", element: notesPanel },
+    { kind: "dimmable", element: pointerMode },
     { kind: "actions", element: actions }
   ];
   container.append(...rows.map((row) => row.element));
@@ -246,6 +280,8 @@ export function installRemoteControls(options: RemoteControlsOptions): () => voi
   return () => {
     prev.removeEventListener("click", onPrev);
     next.removeEventListener("click", onNext);
+    pointerOff.removeEventListener("click", onPointerOff);
+    pointerOn.removeEventListener("click", onPointerOn);
     timerButton.removeEventListener("click", onTimer);
     resetButton.removeEventListener("click", onReset);
     container.remove();
@@ -260,6 +296,204 @@ export function createDimmableRow(
   const el = doc.createElement(tag);
   el.classList.add("peitho-remote-dim-on-end", ...classNames);
   return el as RemoteRowElement;
+}
+
+function remotePointerModeButton(
+  doc: Document,
+  mode: PointerMode,
+  label: string
+): HTMLButtonElement {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.dataset.peithoPointerMode = mode;
+  button.setAttribute("aria-pressed", mode === "off" ? "true" : "false");
+  button.textContent = label;
+  return button;
+}
+
+export function installRemotePointerBridge(options: RemotePointerBridgeOptions): () => void {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const fetcher = options.fetcher ?? fetch.bind(globalThis);
+  const log = options.console ?? console;
+  const now = options.now ?? Date.now;
+  const previewRoot = options.previewRoot;
+  let mode: PointerMode = "off";
+  let activePointerId: number | null = null;
+  let listenersInstalled = false;
+  let pendingMove: PointerMoveDetail | null = null;
+  let frame: number | null = null;
+  let previousTouchAction: string | null = null;
+
+  const requestFrame = (callback: FrameRequestCallback): number => {
+    if (typeof win.requestAnimationFrame === "function") {
+      return win.requestAnimationFrame(callback);
+    }
+    return win.setTimeout(() => callback(now()), 16);
+  };
+  const cancelFrame = (handle: number): void => {
+    if (typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(handle);
+      return;
+    }
+    win.clearTimeout(handle);
+  };
+
+  const postPointer = (message: { move: PointerMoveDetail } | { up: true }): void => {
+    let request: Promise<Response>;
+    try {
+      request = fetcher("/pointer", {
+        method: "POST",
+        body: JSON.stringify(message),
+        keepalive: true,
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error: unknown) {
+      log.error(`Failed to post pointer message: ${String(error)}`);
+      return;
+    }
+    void request
+      .then((response) => {
+        if (!response.ok) {
+          log.error(`Failed to post pointer message: ${response.status}`);
+        }
+      })
+      .catch((error: unknown) => {
+        log.error(`Failed to post pointer message: ${String(error)}`);
+      });
+  };
+
+  const cancelPendingMove = (): void => {
+    pendingMove = null;
+    if (frame === null) return;
+    cancelFrame(frame);
+    frame = null;
+  };
+
+  const flushMove = (): void => {
+    frame = null;
+    const move = pendingMove;
+    pendingMove = null;
+    if (mode !== "pointer" || move == null) return;
+    postPointer({ move });
+  };
+
+  const queueMove = (move: PointerMoveDetail): void => {
+    pendingMove = move;
+    if (frame !== null) return;
+    frame = requestFrame(flushMove);
+  };
+
+  const pointForEvent = (event: PointerEvent): PointerMoveDetail | null => {
+    const rect = previewRoot.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: clamp01((event.clientX - rect.left) / rect.width),
+      y: clamp01((event.clientY - rect.top) / rect.height)
+    };
+  };
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (mode !== "pointer" || hasChordModifier(event) || event.button !== 0) return;
+    const point = pointForEvent(event);
+    if (point == null) return;
+    activePointerId = event.pointerId;
+    event.preventDefault();
+    dispatchPointerMove(bus, point);
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (mode !== "pointer" || activePointerId !== event.pointerId || hasChordModifier(event)) {
+      return;
+    }
+    const point = pointForEvent(event);
+    if (point == null) return;
+    event.preventDefault();
+    dispatchPointerMove(bus, point);
+  };
+
+  const onPointerEnd = (event: PointerEvent): void => {
+    if (mode !== "pointer" || activePointerId !== event.pointerId) return;
+    activePointerId = null;
+    event.preventDefault();
+    dispatchPointerUp(bus);
+  };
+
+  const installPointerListeners = (): void => {
+    if (listenersInstalled) return;
+    listenersInstalled = true;
+    previousTouchAction = previewRoot.style.touchAction;
+    previewRoot.style.touchAction = "none";
+    previewRoot.dataset.peithoPointerMode = "pointer";
+    previewRoot.addEventListener("pointerdown", onPointerDown);
+    previewRoot.addEventListener("pointermove", onPointerMove);
+    previewRoot.addEventListener("pointerup", onPointerEnd);
+    previewRoot.addEventListener("pointercancel", onPointerEnd);
+    previewRoot.addEventListener("pointerleave", onPointerEnd);
+  };
+
+  const removePointerListeners = (sendFinalUp: boolean): void => {
+    if (listenersInstalled) {
+      previewRoot.removeEventListener("pointerdown", onPointerDown);
+      previewRoot.removeEventListener("pointermove", onPointerMove);
+      previewRoot.removeEventListener("pointerup", onPointerEnd);
+      previewRoot.removeEventListener("pointercancel", onPointerEnd);
+      previewRoot.removeEventListener("pointerleave", onPointerEnd);
+      listenersInstalled = false;
+    }
+    activePointerId = null;
+    cancelPendingMove();
+    if (previousTouchAction !== null) {
+      previewRoot.style.touchAction = previousTouchAction;
+      previousTouchAction = null;
+    }
+    delete previewRoot.dataset.peithoPointerMode;
+    if (sendFinalUp) postPointer({ up: true });
+  };
+
+  const onModeChange = (event: Event): void => {
+    const next = (event as CustomEvent<PointerModeChangeDetail>).detail?.mode;
+    if (next !== "off" && next !== "pointer") {
+      log.error("Invalid peitho:pointermodechange event");
+      return;
+    }
+    if (next === mode) return;
+    mode = next;
+    if (mode === "pointer") {
+      installPointerListeners();
+    } else {
+      removePointerListeners(true);
+    }
+  };
+
+  const onPointerMoveRequest = (event: Event): void => {
+    if (mode !== "pointer") return;
+    const detail = (event as CustomEvent<PointerMoveDetail>).detail;
+    if (!isPointerMoveDetail(detail)) {
+      log.error("Invalid peitho:pointermove event");
+      return;
+    }
+    queueMove(detail);
+  };
+
+  const onPointerUpRequest = (): void => {
+    if (mode !== "pointer") return;
+    activePointerId = null;
+    cancelPendingMove();
+    postPointer({ up: true });
+  };
+
+  bus.addEventListener("peitho:pointermodechange", onModeChange);
+  bus.addEventListener("peitho:pointermove", onPointerMoveRequest);
+  bus.addEventListener("peitho:pointerup", onPointerUpRequest);
+
+  return () => {
+    bus.removeEventListener("peitho:pointermodechange", onModeChange);
+    bus.removeEventListener("peitho:pointermove", onPointerMoveRequest);
+    bus.removeEventListener("peitho:pointerup", onPointerUpRequest);
+    removePointerListeners(mode === "pointer");
+    mode = "off";
+  };
 }
 
 export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () => void {
@@ -365,6 +599,7 @@ class RemoteController implements RemoteView {
   private timerState: RemoteTimerAnchor | null = null;
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
+  private pointerCleanup: (() => void) | null = null;
   private previewShell: PresentShell | null = null;
   private timerInterval: number | null = null;
 
@@ -411,6 +646,14 @@ class RemoteController implements RemoteView {
           now: this.now,
           viewport: paneViewport(previewRoot)
         });
+        this.pointerCleanup = installRemotePointerBridge({
+          bus: this.bus,
+          previewRoot,
+          fetcher: this.fetcher,
+          window: this.win,
+          now: this.now,
+          console: this.log
+        });
       }
       this.render();
       this.syncCleanup = installRemoteSyncBridge({
@@ -434,6 +677,8 @@ class RemoteController implements RemoteView {
 
   destroy(): void {
     this.clearTimerInterval();
+    this.pointerCleanup?.();
+    this.pointerCleanup = null;
     this.syncCleanup?.();
     this.syncCleanup = null;
     this.previewShell?.destroy();
@@ -728,6 +973,30 @@ function dispatchNavigate(bus: EventTarget, to: "prev" | "next"): void {
 
 function dispatchTimerControl(bus: EventTarget, action: TimerControlDetail["action"]): void {
   bus.dispatchEvent(new CustomEvent<TimerControlDetail>("peitho:timercontrol", { detail: { action } }));
+}
+
+function dispatchPointerModeChange(bus: EventTarget, mode: PointerMode): void {
+  bus.dispatchEvent(
+    new CustomEvent<PointerModeChangeDetail>("peitho:pointermodechange", { detail: { mode } })
+  );
+}
+
+function dispatchPointerMove(bus: EventTarget, detail: PointerMoveDetail): void {
+  bus.dispatchEvent(new CustomEvent<PointerMoveDetail>("peitho:pointermove", { detail }));
+}
+
+function dispatchPointerUp(bus: EventTarget): void {
+  bus.dispatchEvent(new CustomEvent("peitho:pointerup"));
+}
+
+function isPointerMoveDetail(value: unknown): value is PointerMoveDetail {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<PointerMoveDetail>;
+  return isUnitCoordinate(candidate.x) && isUnitCoordinate(candidate.y);
+}
+
+function isUnitCoordinate(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function resolveRemoteTarget(

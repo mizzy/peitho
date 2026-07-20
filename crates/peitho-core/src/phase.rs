@@ -28,6 +28,9 @@ pub enum PageNumberFormat {
     CurrentOfTotal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerColor(String);
+
 impl PlannedTime {
     pub(crate) const GREATER_THAN_ZERO_MESSAGE: &'static str = "time must be greater than zero";
     pub(crate) const MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS: u64 = 9_007_199_254_740_991;
@@ -47,6 +50,190 @@ impl PlannedTime {
         self.0
     }
 }
+
+impl PointerColor {
+    pub(crate) const HELP: &'static str = "set pointer_color to a CSS color like #38bdf8 or cyan";
+
+    pub fn parse(raw: &str) -> std::result::Result<Self, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err("pointer_color has no value".to_owned());
+        }
+        if is_pointer_hex_color(value) || is_css_named_color(value) {
+            return Ok(Self(value.to_owned()));
+        }
+        Err(format!(
+            "invalid pointer_color '{value}'; use #RGB, #RRGGBB, #RGBA, #RRGGBBAA, or a CSS named color"
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn is_pointer_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_css_named_color(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    CSS_NAMED_COLORS.contains(&normalized.as_str())
+}
+
+const CSS_NAMED_COLORS: &[&str] = &[
+    "aliceblue",
+    "antiquewhite",
+    "aqua",
+    "aquamarine",
+    "azure",
+    "beige",
+    "bisque",
+    "black",
+    "blanchedalmond",
+    "blue",
+    "blueviolet",
+    "brown",
+    "burlywood",
+    "cadetblue",
+    "chartreuse",
+    "chocolate",
+    "coral",
+    "cornflowerblue",
+    "cornsilk",
+    "crimson",
+    "cyan",
+    "darkblue",
+    "darkcyan",
+    "darkgoldenrod",
+    "darkgray",
+    "darkgreen",
+    "darkgrey",
+    "darkkhaki",
+    "darkmagenta",
+    "darkolivegreen",
+    "darkorange",
+    "darkorchid",
+    "darkred",
+    "darksalmon",
+    "darkseagreen",
+    "darkslateblue",
+    "darkslategray",
+    "darkslategrey",
+    "darkturquoise",
+    "darkviolet",
+    "deeppink",
+    "deepskyblue",
+    "dimgray",
+    "dimgrey",
+    "dodgerblue",
+    "firebrick",
+    "floralwhite",
+    "forestgreen",
+    "fuchsia",
+    "gainsboro",
+    "ghostwhite",
+    "gold",
+    "goldenrod",
+    "gray",
+    "green",
+    "greenyellow",
+    "grey",
+    "honeydew",
+    "hotpink",
+    "indianred",
+    "indigo",
+    "ivory",
+    "khaki",
+    "lavender",
+    "lavenderblush",
+    "lawngreen",
+    "lemonchiffon",
+    "lightblue",
+    "lightcoral",
+    "lightcyan",
+    "lightgoldenrodyellow",
+    "lightgray",
+    "lightgreen",
+    "lightgrey",
+    "lightpink",
+    "lightsalmon",
+    "lightseagreen",
+    "lightskyblue",
+    "lightslategray",
+    "lightslategrey",
+    "lightsteelblue",
+    "lightyellow",
+    "lime",
+    "limegreen",
+    "linen",
+    "magenta",
+    "maroon",
+    "mediumaquamarine",
+    "mediumblue",
+    "mediumorchid",
+    "mediumpurple",
+    "mediumseagreen",
+    "mediumslateblue",
+    "mediumspringgreen",
+    "mediumturquoise",
+    "mediumvioletred",
+    "midnightblue",
+    "mintcream",
+    "mistyrose",
+    "moccasin",
+    "navajowhite",
+    "navy",
+    "oldlace",
+    "olive",
+    "olivedrab",
+    "orange",
+    "orangered",
+    "orchid",
+    "palegoldenrod",
+    "palegreen",
+    "paleturquoise",
+    "palevioletred",
+    "papayawhip",
+    "peachpuff",
+    "peru",
+    "pink",
+    "plum",
+    "powderblue",
+    "purple",
+    "rebeccapurple",
+    "red",
+    "rosybrown",
+    "royalblue",
+    "saddlebrown",
+    "salmon",
+    "sandybrown",
+    "seagreen",
+    "seashell",
+    "sienna",
+    "silver",
+    "skyblue",
+    "slateblue",
+    "slategray",
+    "slategrey",
+    "snow",
+    "springgreen",
+    "steelblue",
+    "tan",
+    "teal",
+    "thistle",
+    "tomato",
+    "turquoise",
+    "violet",
+    "wheat",
+    "white",
+    "whitesmoke",
+    "yellow",
+    "yellowgreen",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetPath(PathBuf);
@@ -103,6 +290,7 @@ pub struct DeckSettings {
     resolution: Resolution,
     breaks: bool,
     page_numbers: Option<PageNumberFormat>,
+    pointer_color: Option<PointerColor>,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -125,6 +313,7 @@ impl DeckSettings {
         resolution: Option<Resolution>,
         breaks: bool,
         page_numbers: Option<PageNumberFormat>,
+        pointer_color: Option<PointerColor>,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
@@ -142,6 +331,7 @@ impl DeckSettings {
             resolution,
             breaks,
             page_numbers,
+            pointer_color,
             sections,
             layouts,
             css,
@@ -169,6 +359,10 @@ impl DeckSettings {
 
     pub fn page_numbers(&self) -> Option<PageNumberFormat> {
         self.page_numbers
+    }
+
+    pub fn pointer_color(&self) -> Option<&PointerColor> {
+        self.pointer_color.as_ref()
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -712,6 +906,24 @@ mod tests {
     }
 
     #[test]
+    fn pointer_color_accepts_supported_css_color_strings() {
+        for value in ["#ff2a2a", "#f00", "#ff2a2aff", "red", "cyan"] {
+            let color = PointerColor::parse(value).unwrap();
+
+            assert_eq!(color.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn pointer_color_rejects_unsupported_css_color_strings() {
+        for value in ["not-a-color", "rgb(255,0,0)", ""] {
+            let err = PointerColor::parse(value).unwrap_err();
+
+            assert!(err.contains("pointer_color"), "case: {value}");
+        }
+    }
+
+    #[test]
     fn deck_settings_carry_owned_sections() {
         let setup = DeckSection::new(
             "Setup".to_owned(),
@@ -724,6 +936,7 @@ mod tests {
             AspectRatio::default(),
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
+            None,
             None,
             vec![setup.clone()],
             None,
@@ -755,6 +968,7 @@ mod tests {
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
             None,
+            None,
             vec![setup.clone()],
             None,
             None,
@@ -777,6 +991,7 @@ mod tests {
             None,
             false,
             None,
+            None,
             Vec::new(),
             None,
             None,
@@ -798,6 +1013,7 @@ mod tests {
             Some(Resolution::from_frontmatter("1024x768").unwrap()),
             false,
             None,
+            None,
             Vec::new(),
             None,
             None,
@@ -817,6 +1033,7 @@ mod tests {
             AspectRatio::Ratio16To9,
             Some(Resolution::from_frontmatter("16x9").unwrap()),
             false,
+            None,
             None,
             Vec::new(),
             None,

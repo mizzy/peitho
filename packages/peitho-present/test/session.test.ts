@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
 import { mountPresentShell } from "../src/index";
 import type { PresentShell } from "../src/index";
@@ -55,8 +55,15 @@ function standardFetch(): typeof fetch {
 
 const shells: PresentShell[] = [];
 
+beforeEach(() => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    (() => null) as HTMLCanvasElement["getContext"]
+  );
+});
+
 afterEach(() => {
   while (shells.length > 0) shells.pop()?.destroy();
+  vi.restoreAllMocks();
 });
 
 it("does not start the presentation on mount", async () => {

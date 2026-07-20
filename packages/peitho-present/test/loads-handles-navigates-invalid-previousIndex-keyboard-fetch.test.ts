@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { installKeyboardNavigation, installPresenterKeyboard, mountPresentShell } from "../src/index";
 import type { PresentShell } from "../src/index";
 
@@ -50,6 +50,12 @@ const fontCssText = `
 const mountedShells: PresentShell[] = [];
 const windowListenerCleanups: Array<() => void> = [];
 
+beforeEach(() => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    (() => null) as HTMLCanvasElement["getContext"]
+  );
+});
+
 afterEach(() => {
   while (mountedShells.length > 0) {
     mountedShells.pop()?.destroy();
@@ -60,6 +66,7 @@ afterEach(() => {
   document.documentElement.style.removeProperty("--peitho-canvas-width");
   document.documentElement.style.removeProperty("--peitho-canvas-height");
   document.documentElement.style.removeProperty("--peitho-canvas-aspect");
+  vi.restoreAllMocks();
 });
 
 async function mountForTest(options: Parameters<typeof mountPresentShell>[0]): Promise<PresentShell> {

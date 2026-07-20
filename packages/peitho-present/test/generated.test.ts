@@ -8,6 +8,7 @@ import {
   installCanvasScaler,
   installCloseOnEscape,
   installFullscreenShortcut,
+  installPointerOverlay,
   installPresentationControls,
   mountPresenterView,
   mountPresentShell,
@@ -114,6 +115,7 @@ describe("generated manifest contract", () => {
     expect(typeof installCanvasClickNavigation).toBe("function");
     expect(typeof installCloseOnEscape).toBe("function");
     expect(typeof installFullscreenShortcut).toBe("function");
+    expect(typeof installPointerOverlay).toBe("function");
     expect(typeof mountPresentShell).toBe("function");
     expect(typeof mountPresenterView).toBe("function");
   });
