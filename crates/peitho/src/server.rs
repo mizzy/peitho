@@ -194,6 +194,96 @@ impl SyncHub {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct PointerHub {
+    state: Arc<(Mutex<PointerState>, Condvar)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PointerState {
+    seq: u64,
+    event: PointerEvent,
+    session: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PointerEvent {
+    Move { x: f64, y: f64 },
+    Up,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PointerSnapshot {
+    seq: u64,
+    event: PointerEvent,
+    session: String,
+}
+
+impl PointerHub {
+    fn new(session: String) -> Self {
+        Self {
+            state: Arc::new((
+                Mutex::new(PointerState {
+                    seq: 0,
+                    event: PointerEvent::Up,
+                    session,
+                }),
+                Condvar::new(),
+            )),
+        }
+    }
+
+    fn reset_session(&self, session: String) -> u64 {
+        let (lock, cvar) = &*self.state;
+        let mut state = lock.lock().expect("pointer hub mutex");
+        if state.session == session {
+            return state.seq;
+        }
+        state.seq += 1;
+        state.event = PointerEvent::Up;
+        state.session = session;
+        let seq = state.seq;
+        cvar.notify_all();
+        seq
+    }
+
+    fn broadcast(&self, event: PointerEvent) -> u64 {
+        let (lock, cvar) = &*self.state;
+        let mut state = lock.lock().expect("pointer hub mutex");
+        state.seq += 1;
+        state.event = event;
+        let seq = state.seq;
+        cvar.notify_all();
+        seq
+    }
+
+    fn wait_after(&self, seq: u64, timeout: Duration) -> Option<PointerSnapshot> {
+        let (lock, cvar) = &*self.state;
+        let state = lock.lock().expect("pointer hub mutex");
+        let (state, _) = cvar
+            .wait_timeout_while(state, timeout, |state| state.seq <= seq)
+            .expect("pointer hub mutex");
+        if state.seq <= seq {
+            return None;
+        }
+        Some(PointerSnapshot {
+            seq: state.seq,
+            event: state.event,
+            session: state.session.clone(),
+        })
+    }
+
+    fn snapshot(&self) -> PointerSnapshot {
+        let (lock, _) = &*self.state;
+        let state = lock.lock().expect("pointer hub mutex");
+        PointerSnapshot {
+            seq: state.seq,
+            event: state.event,
+            session: state.session.clone(),
+        }
+    }
+}
+
 pub(crate) fn resolve_request_path(
     root: &Path,
     url: &str,
@@ -270,6 +360,7 @@ pub struct PresentServer {
     server: Arc<Server>,
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
+    pointer: PointerHub,
 }
 
 #[derive(Debug)]
@@ -402,6 +493,8 @@ impl PresentServer {
         let server = Server::http(addr)
             .map_err(|err| miette::Report::new(PresentServerBindError::from_boxed(addr, err)))?;
         let server = Arc::new(server);
+        let sync = SyncHub::default();
+        let pointer = PointerHub::new(sync.snapshot().session);
         Ok(Self {
             root: Arc::new(RwLock::new(root)),
             default_document: default_document.to_owned(),
@@ -409,7 +502,8 @@ impl PresentServer {
             rehearsal_sink: None,
             server: server.clone(),
             listeners: Arc::new(Mutex::new(vec![server])),
-            sync: SyncHub::default(),
+            sync,
+            pointer,
         })
     }
 
@@ -510,6 +604,14 @@ impl PresentServer {
                 self.respond_sync_post(request, shutdown);
                 return;
             }
+            (&Method::Get, "/pointer") => {
+                self.respond_pointer_get(request);
+                return;
+            }
+            (&Method::Post, "/pointer") => {
+                self.respond_pointer_post(request);
+                return;
+            }
             (&Method::Post, "/rehearsal") => {
                 self.respond_rehearsal_post(request);
                 return;
@@ -593,6 +695,52 @@ impl PresentServer {
                 shutdown.start();
             }
         }
+    }
+
+    fn respond_pointer_get(&self, request: tiny_http::Request) {
+        let Some(pointer_get) = pointer_get(request.url()) else {
+            send_response(
+                request,
+                Response::from_string("invalid pointer seq\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+        self.pointer.reset_session(self.sync.snapshot().session);
+        let PointerGet::Poll(seq) = pointer_get else {
+            send_json_response(
+                request,
+                pointer_handshake_response_body(self.pointer.snapshot()),
+            );
+            return;
+        };
+        let pointer = self.pointer.clone();
+        thread::spawn(
+            move || match pointer.wait_after(seq, Duration::from_secs(5)) {
+                Some(snapshot) => send_json_response(request, pointer_poll_response_body(snapshot)),
+                None => send_response(request, Response::empty(StatusCode(204))),
+            },
+        );
+    }
+
+    fn respond_pointer_post(&self, mut request: tiny_http::Request) {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() {
+            send_response(
+                request,
+                Response::from_string("invalid pointer body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        }
+        let Some(event) = pointer_event_from_body(&body) else {
+            send_response(
+                request,
+                Response::from_string("invalid pointer body\n").with_status_code(StatusCode(400)),
+            );
+            return;
+        };
+        self.pointer.reset_session(self.sync.snapshot().session);
+        let seq = self.pointer.broadcast(event);
+        send_json_response(request, pointer_post_response_body(seq));
     }
 
     fn respond_rehearsal_post(&self, mut request: tiny_http::Request) {
@@ -719,6 +867,33 @@ struct SyncCloseMessage {
     close: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PointerMessage {
+    Move(PointerMoveMessage),
+    Up(PointerUpMessage),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PointerMoveMessage {
+    #[serde(rename = "move")]
+    move_: PointerMovePayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PointerMovePayload {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PointerUpMessage {
+    up: bool,
+}
+
 impl SyncMessage {
     fn is_valid(&self) -> bool {
         match self {
@@ -728,7 +903,41 @@ impl SyncMessage {
     }
 }
 
+impl PointerMessage {
+    fn into_event(self) -> Option<PointerEvent> {
+        match self {
+            Self::Move(message) => {
+                if !is_valid_pointer_coordinate(message.move_.x)
+                    || !is_valid_pointer_coordinate(message.move_.y)
+                {
+                    return None;
+                }
+                Some(PointerEvent::Move {
+                    x: message.move_.x,
+                    y: message.move_.y,
+                })
+            }
+            Self::Up(message) => message.up.then_some(PointerEvent::Up),
+        }
+    }
+}
+
+fn is_valid_pointer_coordinate(value: f64) -> bool {
+    (0.0..=1.0).contains(&value)
+}
+
+fn pointer_event_from_body(body: &str) -> Option<PointerEvent> {
+    serde_json::from_str::<PointerMessage>(body)
+        .ok()?
+        .into_event()
+}
+
 enum SyncGet {
+    Handshake,
+    Poll(u64),
+}
+
+enum PointerGet {
     Handshake,
     Poll(u64),
 }
@@ -752,6 +961,27 @@ fn sync_get(url: &str) -> Option<SyncGet> {
         }
     }
     Some(SyncGet::Handshake)
+}
+
+fn pointer_get(url: &str) -> Option<PointerGet> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Some(PointerGet::Handshake);
+    };
+    if query.is_empty() {
+        return Some(PointerGet::Handshake);
+    }
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == "seq" {
+            if value.is_empty() {
+                return Some(PointerGet::Handshake);
+            }
+            return value.parse().ok().map(PointerGet::Poll);
+        }
+    }
+    Some(PointerGet::Handshake)
 }
 
 fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
@@ -790,6 +1020,50 @@ fn sync_post_response_body(seq: u64) -> String {
     }
 
     serde_json::to_string(&SyncPostResponseBody { seq }).expect("sync post response serializes")
+}
+
+fn pointer_handshake_response_body(snapshot: PointerSnapshot) -> String {
+    #[derive(Serialize)]
+    struct PointerHandshakeResponseBody {
+        seq: u64,
+        session: String,
+    }
+
+    serde_json::to_string(&PointerHandshakeResponseBody {
+        seq: snapshot.seq,
+        session: snapshot.session,
+    })
+    .expect("pointer handshake response serializes")
+}
+
+fn pointer_poll_response_body(snapshot: PointerSnapshot) -> String {
+    #[derive(Serialize)]
+    struct PointerPollResponseBody {
+        seq: u64,
+        event: Value,
+        session: String,
+    }
+
+    let event = match snapshot.event {
+        PointerEvent::Move { x, y } => serde_json::json!({ "move": { "x": x, "y": y } }),
+        PointerEvent::Up => serde_json::json!({ "up": true }),
+    };
+    serde_json::to_string(&PointerPollResponseBody {
+        seq: snapshot.seq,
+        event,
+        session: snapshot.session,
+    })
+    .expect("pointer poll response serializes")
+}
+
+fn pointer_post_response_body(seq: u64) -> String {
+    #[derive(Serialize)]
+    struct PointerPostResponseBody {
+        seq: u64,
+    }
+
+    serde_json::to_string(&PointerPostResponseBody { seq })
+        .expect("pointer post response serializes")
 }
 
 fn rehearsal_post_response_body(recorded: bool) -> String {
@@ -1331,6 +1605,100 @@ mod tests {
     }
 
     #[test]
+    fn pointer_hub_sequence_is_monotonic() {
+        let hub = PointerHub::new("session-a".to_owned());
+
+        assert_eq!(hub.broadcast(PointerEvent::Move { x: 0.25, y: 0.5 }), 1);
+        assert_eq!(hub.broadcast(PointerEvent::Up), 2);
+        assert_eq!(hub.broadcast(PointerEvent::Move { x: 1.0, y: 0.0 }), 3);
+        assert_eq!(hub.snapshot().seq, 3);
+    }
+
+    #[test]
+    fn pointer_hub_up_is_sticky_until_next_move() {
+        let hub = PointerHub::new("session-a".to_owned());
+
+        assert_eq!(hub.snapshot().event, PointerEvent::Up);
+        hub.broadcast(PointerEvent::Move { x: 0.2, y: 0.8 });
+        hub.broadcast(PointerEvent::Up);
+
+        assert_eq!(hub.snapshot().event, PointerEvent::Up);
+        assert_eq!(
+            hub.wait_after(1, Duration::from_secs(1)).unwrap(),
+            PointerSnapshot {
+                seq: 2,
+                event: PointerEvent::Up,
+                session: "session-a".to_owned()
+            }
+        );
+
+        hub.broadcast(PointerEvent::Move { x: 0.4, y: 0.6 });
+        assert_eq!(hub.snapshot().event, PointerEvent::Move { x: 0.4, y: 0.6 });
+    }
+
+    #[test]
+    fn pointer_hub_new_session_resets_state_to_up() {
+        let hub = PointerHub::new("session-a".to_owned());
+        hub.broadcast(PointerEvent::Move { x: 0.2, y: 0.8 });
+
+        assert_eq!(hub.reset_session("session-b".to_owned()), 2);
+
+        assert_eq!(
+            hub.snapshot(),
+            PointerSnapshot {
+                seq: 2,
+                event: PointerEvent::Up,
+                session: "session-b".to_owned()
+            }
+        );
+        assert_eq!(
+            hub.wait_after(1, Duration::from_secs(1)).unwrap().event,
+            PointerEvent::Up
+        );
+    }
+
+    #[test]
+    fn pointer_coordinate_validation_accepts_only_unit_range() {
+        assert_eq!(
+            pointer_event_from_body(r#"{"move":{"x":0,"y":1}}"#).unwrap(),
+            PointerEvent::Move { x: 0.0, y: 1.0 }
+        );
+        assert_eq!(
+            pointer_event_from_body(r#"{"move":{"x":1,"y":0}}"#).unwrap(),
+            PointerEvent::Move { x: 1.0, y: 0.0 }
+        );
+        assert!(pointer_event_from_body(r#"{"move":{"x":-0.01,"y":0.5}}"#).is_none());
+        assert!(pointer_event_from_body(r#"{"move":{"x":0.5,"y":1.01}}"#).is_none());
+    }
+
+    #[test]
+    fn pointer_unknown_json_is_rejected() {
+        assert!(pointer_event_from_body("{}").is_none());
+        assert!(pointer_event_from_body(r#"{"draw":true}"#).is_none());
+        assert!(pointer_event_from_body(r#"{"up":false}"#).is_none());
+        assert!(pointer_event_from_body(r#"{"move":{"x":0.5,"y":0.5},"up":true}"#).is_none());
+        assert!(pointer_event_from_body(r#"{"move":{"x":0.5,"y":0.5,"z":0}}"#).is_none());
+    }
+
+    #[test]
+    fn pointer_wait_after_returns_immediately_when_sequence_advanced() {
+        let hub = PointerHub::new("session-a".to_owned());
+        hub.broadcast(PointerEvent::Move { x: 0.2, y: 0.8 });
+
+        let poll = hub.wait_after(0, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(poll.seq, 1);
+        assert_eq!(poll.event, PointerEvent::Move { x: 0.2, y: 0.8 });
+    }
+
+    #[test]
+    fn pointer_wait_after_times_out_when_nothing_changes() {
+        let hub = PointerHub::new("session-a".to_owned());
+
+        assert!(hub.wait_after(0, Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
     fn sync_response_body_always_includes_generation() {
         let body = sync_response_body(
             SyncSnapshot {
@@ -1405,6 +1773,38 @@ mod tests {
     }
 
     #[test]
+    fn pointer_response_bodies_match_transport_contract() {
+        let handshake = pointer_handshake_response_body(PointerSnapshot {
+            seq: 4,
+            event: PointerEvent::Up,
+            session: "session-a".to_owned(),
+        });
+        let moved = pointer_poll_response_body(PointerSnapshot {
+            seq: 5,
+            event: PointerEvent::Move { x: 0.42, y: 0.71 },
+            session: "session-a".to_owned(),
+        });
+        let up = pointer_poll_response_body(PointerSnapshot {
+            seq: 6,
+            event: PointerEvent::Up,
+            session: "session-a".to_owned(),
+        });
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&handshake).unwrap(),
+            serde_json::json!({"seq":4,"session":"session-a"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved).unwrap(),
+            serde_json::json!({"seq":5,"event":{"move":{"x":0.42,"y":0.71}},"session":"session-a"})
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&up).unwrap(),
+            serde_json::json!({"seq":6,"event":{"up":true},"session":"session-a"})
+        );
+    }
+
+    #[test]
     fn reload_is_not_accepted_as_a_posted_sync_message() {
         assert!(serde_json::from_str::<SyncMessage>(r#"{"reload":true}"#).is_err());
     }
@@ -1437,6 +1837,28 @@ mod tests {
             Some(SyncGet::Poll(7))
         ));
         assert!(sync_get("/sync?seq=nope").is_none());
+    }
+
+    #[test]
+    fn parses_pointer_get_query() {
+        assert!(matches!(
+            pointer_get("/pointer"),
+            Some(PointerGet::Handshake)
+        ));
+        assert!(matches!(
+            pointer_get("/pointer?seq="),
+            Some(PointerGet::Handshake)
+        ));
+        assert!(pointer_get("/pointer?seq=now").is_none());
+        assert!(matches!(
+            pointer_get("/pointer?seq=42"),
+            Some(PointerGet::Poll(42))
+        ));
+        assert!(matches!(
+            pointer_get("/pointer?other=x&seq=7"),
+            Some(PointerGet::Poll(7))
+        ));
+        assert!(pointer_get("/pointer?seq=nope").is_none());
     }
 
     #[test]
