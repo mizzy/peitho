@@ -5,11 +5,11 @@ Status: Draft — awaiting author approval before implementation
 
 ## Goal
 
-Let the presenter, holding the phone remote (`/remote`), point at things on the slides window in real time. A tap-and-hold on the remote's slide-preview area shows a red dot on the slides display; releasing removes it. Nothing is persisted; nothing enters `dist/`.
+Let the presenter, holding the phone remote (`/remote`), point at things on the slides window in real time. A tap-and-hold on the remote's slide-preview area shows a laser-style pointer on the slides display; releasing fades it out. Nothing is persisted.
 
 Non-goals for v1:
 - Drawing / stroke retention (deferred — clean up first, add later if desired)
-- Color / size pickers (fixed red, fixed radius)
+- Color / size UI pickers (frontmatter can set `pointer_color`; radius stays fixed)
 - Overlay on presenter window (slides only)
 - Pointer-as-navigation gesture (Next/Prev buttons stay authoritative)
 
@@ -27,15 +27,17 @@ Add a single toggle at the bottom of `/remote`, next to existing controls:
 
 - Default Off. Selection is session-only (no localStorage; a reload resets to Off).
 - With Pointer on, the remote's slide-preview area (the black 16:9 region already present in the landscape layout) becomes a touch surface:
-  - `touchstart` / `pointerdown` inside the region → normalized `{x,y}` in `[0,1]²` is broadcast; slides window paints a red dot at the corresponding position.
+  - `touchstart` / `pointerdown` inside the region → normalized `{x,y}` in `[0,1]²` is broadcast; slides window paints the pointer at the corresponding position.
   - Movement while held → normalized coordinates continue to broadcast.
-  - `touchend` / `pointerup` / `pointercancel` / touch leaves the region → broadcast `pointerup`; slides fades the dot in ~150ms.
+  - `touchend` / `pointerup` / `pointercancel` / touch leaves the region → broadcast `pointerup`; slides lets the recent trail fade over 500ms.
 - Next/Prev buttons remain active. Timer control area is unaffected.
 - Chord-modified taps (unlikely on iOS but possible on trackpad-connected iPads) are ignored, consistent with `hasChordModifier` guard elsewhere.
 
 Slides window:
 - One overlay `<canvas>` layered above the slide DOM at `z-index` above content, below the presenter chrome (there is no presenter chrome on the slides window, but keep the layering explicit).
-- Dot is a filled circle, radius ~1.2% of the shorter viewport dimension, color `#ff2a2a`, `mix-blend-mode: multiply` for legibility on both light and dark backgrounds. No trail.
+- Pointer is a single radial gradient, radius ~1.2% of the shorter viewport dimension: `#e0f2fe` core, `#38bdf8` at 25%, transparent edge. No blend mode.
+- `pointer_color` frontmatter can override the base color; the overlay derives the hot core by mixing that color toward white.
+- Recent move points are kept in a bounded trail buffer and fade out over 500ms; navigation and session changes clear the buffer immediately.
 - `requestAnimationFrame` interpolates between received coordinates so the visual motion is smooth even if the transport batches.
 - On `peitho:navigate` (existing shell event) the overlay is cleared regardless of pointer state — pointer never survives a slide change.
 - On sync `session` change (server restart) the overlay is cleared.
@@ -78,33 +80,34 @@ Remote shell (bridge to transport):
 
 Slides shell (bridge from transport to overlay):
 - Polls `/pointer` in parallel with `/sync` (independent long poll loop).
-- On `move`, updates a single `PointerState { x, y, visible: true }`.
-- On `up`, sets `visible: false` and fades out.
+- On `move`, updates `PointerState { x, y, visible: true }` and appends a timestamped trail point.
+- On `up`, sets `visible: false` and lets the existing trail fade out.
 - On `peitho:navigate` or `session` change, clears state.
 
 Presenter shell: no pointer subscription in v1.
 
 ## Types (ts-rs)
 
-Domain in `peitho-core` remains untouched (pointer is runtime-only, no deck contract change). The pointer message type lives in the server crate and is not exported to `bindings/` — it's a transport concern, not a domain contract.
+Pointer transport messages remain runtime-only and live in the server crate. Deck frontmatter now adds `pointer_color`, which surfaces as optional manifest `pointerColor` in `bindings/Manifest.ts`; no pointer transport type is exported to `bindings/`.
 
 ## Files touched
 
 - `crates/peitho/src/server.rs` — add `/pointer` GET/POST routes, `PointerHub` (mirrors `SyncHub` but simpler: single latest event + seq).
 - `packages/peitho-present/src/remote.ts` — mode toggle, touch listeners, POST loop, region hit-testing.
-- `packages/peitho-present/src/shell.ts` — pointer overlay canvas, long-poll loop, fade animation, clear-on-navigate.
+- `crates/peitho-core/src/parser.rs` / `phase.rs` / `manifest.rs` — `pointer_color` frontmatter validation and optional manifest `pointerColor`.
+- `packages/peitho-present/src/shell.ts` — pointer overlay canvas, long-poll loop, gradient/trail rendering, clear-on-navigate.
 - `packages/peitho-present/src/sync.ts` — no change (pointer is a separate transport).
 - Tests in Rust: `PointerHub` seq monotonicity, "up sticky until next move", session-scoped clear on new session.
 - Tests in vitest: mode toggle emits `peitho:pointermodechange`; slides overlay clears on `peitho:navigate`; fade timer.
 
 ## Gates additions
 
-Existing gates cover this (Rust tests × 3, clippy, fmt, bindings drift not applicable since no ts-rs change, vitest, embedded shell/remote drift after `npm run build`).
+Existing gates cover this (Rust tests × 3, clippy, fmt, bindings drift, vitest, embedded shell/remote drift after `npm run build`).
 
 E2E verification before merging (real display required):
 1. `peitho present --host deck.md` on macOS, phone joins `/remote`.
-2. Toggle Pointer on, tap-drag inside the preview area, confirm red dot tracks on the slides display.
-3. Release, confirm dot fades.
+2. Toggle Pointer on, tap-drag inside the preview area, confirm the cyan gradient pointer and trail track on the slides display.
+3. Release, confirm the trail fades.
 4. Advance slide via Next button, confirm any residual dot clears immediately.
 5. Toggle back to Off, confirm dot goes away and further taps do nothing.
 6. Kill server, restart, rejoin from phone, confirm no stale dot.
@@ -121,4 +124,4 @@ E2E verification before merging (real display required):
 
 - Whether to ship v1 without draw at all (this plan assumes yes; if draw is wanted from day one, the transport doesn't change but the overlay/state model grows).
 - Whether Off should be the persisted default per-device (plan: no persistence in v1).
-- Dot color/size (plan: fixed `#ff2a2a`, 1.2% of min viewport dimension).
+- ~~Dot color/size (plan: fixed `#ff2a2a`, 1.2% of min viewport dimension).~~ Resolved 2026-07-20: default is design E (`#38bdf8` radial gradient with `#e0f2fe` core), `pointer_color` frontmatter overrides the base color, radius remains 1.2%, and the overlay keeps a 500ms fading trail.

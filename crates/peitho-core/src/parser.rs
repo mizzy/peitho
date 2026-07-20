@@ -18,7 +18,7 @@ use crate::{
     highlight::Highlighter,
     phase::{
         AssetPath, Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, PageNumberFormat,
-        Parsed, ParsedSlide, PlannedTime,
+        Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
 };
 
@@ -57,6 +57,8 @@ struct DeckFrontmatter {
     breaks: bool,
     #[serde(default, deserialize_with = "deserialize_optional_page_number_format")]
     page_numbers: Option<PageNumberFormat>,
+    #[serde(default)]
+    pointer_color: Option<String>,
     #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
@@ -805,6 +807,10 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
     )?;
     let resolution =
         parse_frontmatter_resolution(parsed.resolution, key_lines.get("resolution").copied())?;
+    let pointer_color = parse_frontmatter_pointer_color(
+        parsed.pointer_color,
+        key_lines.get("pointer_color").copied(),
+    )?;
     let code_images =
         parse_code_images_config(parsed.code_images, key_lines.get("code_images").copied())?;
 
@@ -814,6 +820,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         resolution,
         parsed.breaks,
         parsed.page_numbers,
+        pointer_color,
         Vec::new(),
         parsed.layouts,
         parsed.css,
@@ -948,6 +955,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "resolution",
             "breaks",
             "page_numbers",
+            "pointer_color",
             "layouts",
             "css",
             "syntaxes",
@@ -1019,6 +1027,24 @@ fn parse_frontmatter_resolution(
             Some(line),
             "resolution has no value",
             "set resolution to WxH pixels, like 1920x1080",
+        )),
+    }
+}
+
+fn parse_frontmatter_pointer_color(
+    value: Option<String>,
+    line: Option<usize>,
+) -> Result<Option<PointerColor>> {
+    match (value.as_deref(), line) {
+        (None, None) => Ok(None),
+        (Some(value), line) => PointerColor::parse(value).map(Some).map_err(|message| {
+            BuildError::new(ErrorKind::Parse, line, message, PointerColor::HELP)
+        }),
+        (None, Some(line)) => Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "pointer_color has no value",
+            PointerColor::HELP,
         )),
     }
 }
@@ -1161,7 +1187,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -1172,6 +1198,8 @@ fn frontmatter_help(message: &str) -> &'static str {
         || message.contains(r#"use "current" or "current_of_total""#)
     {
         r#"use "current" or "current_of_total""#
+    } else if frontmatter_message_mentions_key(message, "pointer_color") {
+        PointerColor::HELP
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -2664,6 +2692,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_pointer_color_frontmatter_values() {
+        let cases = [
+            ("'#ff2a2a'", "#ff2a2a"),
+            ("'#f00'", "#f00"),
+            ("'#ff2a2aff'", "#ff2a2aff"),
+            ("red", "red"),
+            ("cyan", "cyan"),
+        ];
+
+        for (yaml_value, expected) in cases {
+            let markdown = format!("---\npointer_color: {yaml_value}\n---\n# Intro");
+            let deck =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+
+            assert_eq!(deck.settings().pointer_color().unwrap().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn omitted_pointer_color_frontmatter_defaults_to_none() {
+        let deck = parse_markdown("# Intro", &crate::highlight::Highlighter::defaults()).unwrap();
+
+        assert_eq!(deck.settings().pointer_color(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_pointer_color_frontmatter_with_line_and_help() {
+        for frontmatter_line in [
+            "pointer_color: not-a-color",
+            "pointer_color: rgb(255,0,0)",
+            "pointer_color: \"\"",
+        ] {
+            let markdown = format!("---\ntime: 15m\n{frontmatter_line}\n---\n# Intro");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "case: {frontmatter_line}");
+            assert_eq!(err.line, Some(3), "case: {frontmatter_line}");
+            assert!(
+                err.message.contains("pointer_color"),
+                "case: {frontmatter_line}: {}",
+                err.message
+            );
+            assert_eq!(err.help, PointerColor::HELP, "case: {frontmatter_line}");
+        }
+    }
+
+    #[test]
     fn parsed_deck_settings_keep_planned_time_until_consumed() {
         let raw = RawFrontmatter {
             line: 1,
@@ -3286,6 +3362,14 @@ mod tests {
         let frontmatter = parse_frontmatter("---\ntime: 15m\nbreaks: true\n---\n# Intro").unwrap();
 
         assert_eq!(frontmatter.key_line("breaks"), Some(3));
+    }
+
+    #[test]
+    fn parse_frontmatter_records_key_line_for_pointer_color() {
+        let frontmatter =
+            parse_frontmatter("---\ntime: 15m\npointer_color: cyan\n---\n# Intro").unwrap();
+
+        assert_eq!(frontmatter.key_line("pointer_color"), Some(3));
     }
 
     #[test]
@@ -5198,7 +5282,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -5313,6 +5397,10 @@ After list
                 "set breaks to true or false",
             ),
             (
+                "---\npointer_color: not-a-color\n---\n# Intro",
+                PointerColor::HELP,
+            ),
+            (
                 "---\ntime: bad-value\n---\n# Intro",
                 "set time to 15m, 90s, 1h, 1h30m, or an integer minute count",
             ),
@@ -5399,7 +5487,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -5456,7 +5544,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
