@@ -89,6 +89,54 @@ fn present_no_serve_writes_clean_present_cache() {
 }
 
 #[test]
+fn present_no_serve_expands_two_file_deck_into_manifest_and_notes() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layout = dir.path().join("layout.html");
+    let css_dir = dir.path().join("css");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(
+        &deck,
+        deck_with_assets(
+            "./layout.html",
+            "# Cover\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# End\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("shared.md"),
+        "<!-- {\"key\":\"shared\"} -->\n# Shared\n\n<!-- Speaker note from include. -->\n",
+    )
+    .unwrap();
+    fs::write(
+        &layout,
+        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+    )
+    .unwrap();
+    fs::write(css_dir.join("base.css"), "").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["present", deck.to_str().unwrap(), "--no-serve", "--no-open"])
+        .assert()
+        .success();
+
+    let cache = dir.path().join(".peitho/present-cache");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cache.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["slideCount"].as_u64(), Some(3));
+    let slides = manifest["slides"].as_array().unwrap();
+    assert_eq!(slides[0]["key"].as_str(), Some("cover"));
+    assert_eq!(slides[1]["key"].as_str(), Some("shared"));
+    assert_eq!(slides[2]["key"].as_str(), Some("end"));
+    assert_eq!(slides[1]["hasNotes"].as_bool(), Some(true));
+
+    let notes = fs::read_to_string(cache.join("notes.json")).unwrap();
+    assert!(notes.contains("Speaker note from include."));
+}
+
+#[test]
 fn present_no_serve_writes_presenter_html() {
     let dir = tempdir().unwrap();
     let fixture = Fixture::write(dir.path());
