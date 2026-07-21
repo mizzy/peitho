@@ -2,6 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
+import { waitForFontsReady } from "./fontsReady";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 
 export type NavigateTarget =
@@ -44,7 +45,7 @@ export type ShellOptions = {
   fetcher?: typeof fetch;
   window?: Window;
   document?: Document;
-  console?: Pick<Console, "error">;
+  console?: Pick<Console, "error"> & Partial<Pick<Console, "warn">>;
   bus?: EventTarget;
   now?: () => number;
   viewport?: () => CanvasViewport;
@@ -510,7 +511,7 @@ class PresentShellController implements PresentShell {
   private readonly injectedManifest?: Manifest;
   private readonly win: Window;
   private readonly doc: Document;
-  private readonly log: Pick<Console, "error">;
+  private readonly log: Pick<Console, "error" | "warn">;
   private readonly bus: EventTarget;
   private readonly now: () => number;
   private readonly viewport?: () => CanvasViewport;
@@ -545,7 +546,8 @@ class PresentShellController implements PresentShell {
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
-    this.log = options.console ?? console;
+    const log = options.console ?? console;
+    this.log = { error: log.error, warn: log.warn ?? console.warn.bind(console) };
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
     this.viewport = options.viewport;
@@ -572,6 +574,7 @@ class PresentShellController implements PresentShell {
       this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
+      await waitForFontsReady(this.doc, this.win, { log: this.log });
       const pending: SlideView[] = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);

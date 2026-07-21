@@ -890,6 +890,52 @@ function isCssWhitespace(char) {
   return char === " " || char === "\n" || char === "\r" || char === "	" || char === "\f";
 }
 
+// src/fontsReady.ts
+var MAX_FONT_READY_PASSES = 5;
+async function waitForFontsReady(doc, win, options) {
+  const fonts = doc.fonts;
+  if (fonts == null) return;
+  const timeoutMs = options?.timeoutMs ?? 3e3;
+  const deadline = Date.now() + timeoutMs;
+  const kicked = /* @__PURE__ */ new WeakSet();
+  for (let pass = 0; pass < MAX_FONT_READY_PASSES; pass += 1) {
+    const hasNewFace = kickVisibleFontFaces(fonts, kicked);
+    if (!hasNewFace && pass > 0) return;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0 || await raceReadyWithTimeout(fonts, win, remainingMs)) {
+      const log = options?.log ?? console;
+      log.warn(`document.fonts.ready timed out after ${timeoutMs}ms`);
+      return;
+    }
+  }
+}
+function kickVisibleFontFaces(fonts, kicked) {
+  let hasNewFace = false;
+  fonts.forEach((face) => {
+    if (kicked.has(face)) return;
+    kicked.add(face);
+    hasNewFace = true;
+    try {
+      face.load().catch(() => void 0);
+    } catch {
+    }
+  });
+  return hasNewFace;
+}
+async function raceReadyWithTimeout(fonts, win, ms) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = win.setTimeout(() => resolve("timeout"), ms);
+  });
+  const ready = fonts.ready.then(
+    () => "ready",
+    () => "ready"
+  );
+  const result = await Promise.race([ready, timeout]);
+  if (timeoutId !== void 0) win.clearTimeout(timeoutId);
+  return result === "timeout";
+}
+
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
   let index = from + direction;
@@ -1326,7 +1372,8 @@ var PresentShellController = class {
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
-    this.log = options.console ?? console;
+    const log = options.console ?? console;
+    this.log = { error: log.error, warn: log.warn ?? console.warn.bind(console) };
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
     this.viewport = options.viewport;
@@ -1352,6 +1399,7 @@ var PresentShellController = class {
       this.setCanvasRootProperties(dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
+      await waitForFontsReady(this.doc, this.win, { log: this.log });
       const pending = [];
       for (const slide of manifest.slides) {
         const html = await this.fetchText(slide.src);
