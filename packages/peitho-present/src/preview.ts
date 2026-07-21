@@ -3,6 +3,7 @@ import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
+import { waitForFontsReady } from "./fontsReady";
 import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
@@ -35,7 +36,7 @@ export type PreviewShellOptions = {
   fetcher?: typeof fetch;
   window?: Window;
   document?: Document;
-  console?: Pick<Console, "error">;
+  console?: Pick<Console, "error"> & Partial<Pick<Console, "warn">>;
   bus?: EventTarget;
   storage?: Storage;
   syncUrl?: string;
@@ -161,7 +162,7 @@ class PreviewShellController implements PreviewShell {
   private readonly fetcher: typeof fetch;
   private readonly win: Window;
   private readonly doc: Document;
-  private readonly log: Pick<Console, "error">;
+  private readonly log: Pick<Console, "error" | "warn">;
   private readonly bus: EventTarget;
   private readonly storage?: Storage;
   private readonly syncUrl: string;
@@ -198,7 +199,8 @@ class PreviewShellController implements PreviewShell {
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
     this.win = options.window ?? window;
     this.doc = options.document ?? document;
-    this.log = options.console ?? console;
+    const log = options.console ?? console;
+    this.log = { error: log.error, warn: log.warn ?? console.warn.bind(console) };
     this.bus = options.bus ?? this.win;
     this.storage = options.storage ?? this.win.sessionStorage;
     this.syncUrl = options.syncUrl ?? "/sync";
@@ -227,6 +229,7 @@ class PreviewShellController implements PreviewShell {
       this.setCanvasRootProperties(this.dimensions, cssAspect);
       const css = await this.fetchText("peitho.css");
       this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
+      await waitForFontsReady(this.doc, this.win, { log: this.log });
       const pending = await Promise.all(
         manifest.slides.map(async (slide) => {
           const html = await this.fetchText(slide.src);
