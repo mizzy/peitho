@@ -3,6 +3,7 @@
   var SCALE = 2;
   var MAX_CANVAS_DIMENSION = 16384;
   var MAX_CANVAS_AREA = 268000000;
+  var FONT_READY_TIMEOUT_MS = 2000; // Below Chrome --virtual-time-budget=10000.
   var nextClassId = 0;
   var pseudoStyleElement = null;
   var rasterCache = new Map();
@@ -929,7 +930,12 @@
 
   async function waitForStableLayout() {
     if (document.fonts && document.fonts.ready) {
-      await document.fonts.ready;
+      await Promise.race([
+        document.fonts.ready.then(function () {}, function () {}),
+        new Promise(function (resolve) {
+          setTimeout(resolve, FONT_READY_TIMEOUT_MS);
+        })
+      ]);
     }
     await waitForWindowLoad();
   }

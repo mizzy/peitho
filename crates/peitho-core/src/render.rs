@@ -2740,6 +2740,15 @@ Paragraph after heading.
     }
 
     #[test]
+    fn pdf_flatten_script_bounds_font_wait_with_a_timeout() {
+        // Same class-of-bug as lint_measure.js: see Issue #337.
+        assert!(PDF_FLATTEN_JS.contains("document.fonts.ready"));
+        assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS"));
+        assert!(PDF_FLATTEN_JS.contains("Promise.race"));
+        assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS = 2000"));
+    }
+
+    #[test]
     fn pdf_document_uses_four_by_three_resolution_and_scale() {
         let rendered = render_checked_deck("---\naspect_ratio: 4:3\n---\n# Intro");
 
@@ -2815,6 +2824,35 @@ Paragraph after heading.
         assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "CHUNK""#));
         assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "DONE""#));
         assert!(!LINT_MEASURE_JS.contains("document.title"));
+    }
+
+    #[test]
+    fn lint_measure_script_bounds_font_wait_with_a_timeout() {
+        // Regression: document.fonts.ready has been observed to hang under
+        // Chrome's --virtual-time-budget, so the script must bound the wait
+        // instead of awaiting it unconditionally.
+        assert!(
+            LINT_MEASURE_JS.contains("document.fonts.ready"),
+            "expected the script to still reference document.fonts.ready"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("FONT_READY_TIMEOUT_MS"),
+            "expected a named timeout constant so the bound is discoverable"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("setTimeout"),
+            "expected a setTimeout so the wait is bounded"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("Promise.race"),
+            "expected Promise.race around the fonts.ready wait, or the timeout is dead code"
+        );
+        // The named constant must be reasonable - below the virtual-time
+        // budget so publish() still has time to run.
+        assert!(
+            LINT_MEASURE_JS.contains("FONT_READY_TIMEOUT_MS = 2000"),
+            "expected FONT_READY_TIMEOUT_MS to be 2000ms; adjust intentionally if this changes"
+        );
     }
 
     #[test]
