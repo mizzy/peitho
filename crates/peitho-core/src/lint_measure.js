@@ -3,6 +3,7 @@
   var DONE = "PEITHO_LINT_" + "DONE";
   // Keep each console payload comfortably below macOS PIPE_BUF after Chrome's log wrapper.
   var CHUNK_SIZE = 300;
+  var FONT_READY_TIMEOUT_MS = 2000; // Below Chrome --virtual-time-budget=10000.
 
   function waitForWindowLoad() {
     if (document.readyState === "complete") {
@@ -31,7 +32,17 @@
     if (!document.fonts || !document.fonts.ready) {
       return Promise.resolve();
     }
-    return document.fonts.ready;
+    // Bound the wait: document.fonts.ready has been observed to hang
+    // indefinitely under Chrome's --virtual-time-budget on Linux headless
+    // (same pitfall class as image decode promises). If fonts don't settle
+    // in time, publish measurements against whatever font resolves at the
+    // next requestAnimationFrame; better than emitting no payload.
+    return Promise.race([
+      document.fonts.ready.then(function () {}, function () {}),
+      new Promise(function (resolve) {
+        setTimeout(resolve, FONT_READY_TIMEOUT_MS);
+      })
+    ]);
   }
 
   function waitForFrame() {
