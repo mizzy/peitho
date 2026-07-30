@@ -1079,9 +1079,8 @@ fn parse_frontmatter_pointer_color(
 fn parse_frontmatter_lang(value: Option<String>, line: Option<usize>) -> Result<DeckLang> {
     match (value.as_deref(), line) {
         (None, None) => Ok(DeckLang::default()),
-        (Some(value), line) => DeckLang::parse(value).map_err(|message| {
-            BuildError::new(ErrorKind::Parse, line, message, DeckLang::HELP)
-        }),
+        (Some(value), line) => DeckLang::parse(value)
+            .map_err(|message| BuildError::new(ErrorKind::Parse, line, message, DeckLang::HELP)),
         (None, Some(line)) => Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
