@@ -39,8 +39,8 @@ pub use math::{MathAssets, MathFontAsset};
 pub use notes::{notes_json, Notes};
 pub use parser::{parse_frontmatter, ParsedFrontmatter};
 pub use phase::{
-    require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, ImageRequest,
-    Mapped, Rendered,
+    require_checked_for_render, resolve_image_paths, AssetPath, Checked, Deck, DeckLang,
+    ImageRequest, Mapped, Rendered,
 };
 pub use present_config::{present_config_json, PresentConfig};
 pub use rehearsal::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};

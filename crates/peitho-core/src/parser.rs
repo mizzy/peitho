@@ -17,8 +17,8 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     phase::{
-        AssetPath, Deck, DeckSection, DeckSettings, KeySource, LayoutRequest, PageNumberFormat,
-        Parsed, ParsedSlide, PlannedTime, PointerColor,
+        AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
+        PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
 };
 
@@ -59,6 +59,8 @@ struct DeckFrontmatter {
     page_numbers: Option<PageNumberFormat>,
     #[serde(default)]
     pointer_color: Option<String>,
+    #[serde(default)]
+    lang: Option<String>,
     #[serde(default)]
     layouts: Option<AssetPath>,
     #[serde(default)]
@@ -835,6 +837,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
     )?;
     let code_images =
         parse_code_images_config(parsed.code_images, key_lines.get("code_images").copied())?;
+    let lang = parse_frontmatter_lang(parsed.lang, key_lines.get("lang").copied())?;
 
     DeckSettings::new(
         parsed.time,
@@ -843,6 +846,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         parsed.breaks,
         parsed.page_numbers,
         pointer_color,
+        lang,
         Vec::new(),
         parsed.layouts,
         parsed.css,
@@ -978,6 +982,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "breaks",
             "page_numbers",
             "pointer_color",
+            "lang",
             "layouts",
             "css",
             "syntaxes",
@@ -1067,6 +1072,21 @@ fn parse_frontmatter_pointer_color(
             Some(line),
             "pointer_color has no value",
             PointerColor::HELP,
+        )),
+    }
+}
+
+fn parse_frontmatter_lang(value: Option<String>, line: Option<usize>) -> Result<DeckLang> {
+    match (value.as_deref(), line) {
+        (None, None) => Ok(DeckLang::default()),
+        (Some(value), line) => DeckLang::parse(value).map_err(|message| {
+            BuildError::new(ErrorKind::Parse, line, message, DeckLang::HELP)
+        }),
+        (None, Some(line)) => Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "lang has no value",
+            DeckLang::HELP,
         )),
     }
 }
@@ -1209,7 +1229,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -1222,6 +1242,8 @@ fn frontmatter_help(message: &str) -> &'static str {
         r#"use "current" or "current_of_total""#
     } else if frontmatter_message_mentions_key(message, "pointer_color") {
         PointerColor::HELP
+    } else if frontmatter_message_mentions_key(message, "lang") {
+        DeckLang::HELP
     } else if frontmatter_message_mentions_key(message, "layouts") {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
@@ -2770,6 +2792,49 @@ mod tests {
                 err.message
             );
             assert_eq!(err.help, PointerColor::HELP, "case: {frontmatter_line}");
+        }
+    }
+
+    #[test]
+    fn parses_lang_frontmatter_values() {
+        let cases = [("en", "en"), ("ja", "ja"), ("zh-Hans", "zh-Hans")];
+
+        for (yaml_value, expected) in cases {
+            let markdown = format!("---\nlang: {yaml_value}\n---\n# Intro");
+            let deck =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+
+            assert_eq!(deck.settings().lang().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn omitted_lang_frontmatter_defaults_to_en() {
+        let deck = parse_markdown("# Intro", &crate::highlight::Highlighter::defaults()).unwrap();
+
+        assert_eq!(deck.settings().lang().as_str(), "en");
+    }
+
+    #[test]
+    fn rejects_invalid_lang_frontmatter_with_line_and_help() {
+        for frontmatter_line in [
+            "lang: 'not a tag'",
+            "lang: '1ja'",
+            "lang: 'ja_JP'",
+            "lang: \"\"",
+        ] {
+            let markdown = format!("---\ntime: 15m\n{frontmatter_line}\n---\n# Intro");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "case: {frontmatter_line}");
+            assert_eq!(err.line, Some(3), "case: {frontmatter_line}");
+            assert!(
+                err.message.contains("lang"),
+                "case: {frontmatter_line}: {}",
+                err.message
+            );
+            assert_eq!(err.help, DeckLang::HELP, "case: {frontmatter_line}");
         }
     }
 
@@ -5330,7 +5395,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -5535,7 +5600,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -5592,7 +5657,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 

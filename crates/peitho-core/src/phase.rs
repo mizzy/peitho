@@ -31,6 +31,9 @@ pub enum PageNumberFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointerColor(String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeckLang(String);
+
 impl PlannedTime {
     pub(crate) const GREATER_THAN_ZERO_MESSAGE: &'static str = "time must be greater than zero";
     pub(crate) const MAX_SAFE_JAVASCRIPT_INTEGER_MILLIS: u64 = 9_007_199_254_740_991;
@@ -69,6 +72,43 @@ impl PointerColor {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl DeckLang {
+    pub(crate) const HELP: &'static str =
+        "set lang to a BCP 47 language tag like en, ja, or zh-Hans";
+    const MAX_LEN: usize = 35;
+
+    pub fn parse(raw: &str) -> std::result::Result<Self, String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err("lang has no value".to_owned());
+        }
+        let subtags_valid = value.split('-').all(|subtag| {
+            !subtag.is_empty()
+                && subtag.len() <= 8
+                && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+        if subtags_valid
+            && value.len() <= Self::MAX_LEN
+            && value.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Ok(Self(value.to_owned()));
+        }
+        Err(format!(
+            "invalid lang '{value}'; use a BCP 47 language tag like en or ja"
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for DeckLang {
+    fn default() -> Self {
+        Self("en".to_owned())
     }
 }
 
@@ -291,6 +331,7 @@ pub struct DeckSettings {
     breaks: bool,
     page_numbers: Option<PageNumberFormat>,
     pointer_color: Option<PointerColor>,
+    lang: DeckLang,
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
@@ -314,6 +355,7 @@ impl DeckSettings {
         breaks: bool,
         page_numbers: Option<PageNumberFormat>,
         pointer_color: Option<PointerColor>,
+        lang: DeckLang,
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
@@ -332,6 +374,7 @@ impl DeckSettings {
             breaks,
             page_numbers,
             pointer_color,
+            lang,
             sections,
             layouts,
             css,
@@ -363,6 +406,10 @@ impl DeckSettings {
 
     pub fn pointer_color(&self) -> Option<&PointerColor> {
         self.pointer_color.as_ref()
+    }
+
+    pub fn lang(&self) -> &DeckLang {
+        &self.lang
     }
 
     pub fn sections(&self) -> &[DeckSection] {
@@ -924,6 +971,41 @@ mod tests {
     }
 
     #[test]
+    fn deck_lang_accepts_bcp47_style_tags() {
+        for value in ["en", "ja", "zh-Hans", "en-US", "x-custom", " ja "] {
+            let lang = DeckLang::parse(value).unwrap();
+
+            assert_eq!(lang.as_str(), value.trim());
+        }
+    }
+
+    #[test]
+    fn deck_lang_rejects_invalid_tags() {
+        for value in [
+            "",
+            "  ",
+            "not a tag",
+            "1ja",
+            "ja_JP",
+            "ja-",
+            "-ja",
+            "ja--JP",
+            "verylongsubtag1",
+            "日本語",
+            "en\"><script>",
+        ] {
+            let err = DeckLang::parse(value).unwrap_err();
+
+            assert!(err.contains("lang"), "case: {value}: {err}");
+        }
+    }
+
+    #[test]
+    fn deck_lang_defaults_to_english() {
+        assert_eq!(DeckLang::default().as_str(), "en");
+    }
+
+    #[test]
     fn deck_settings_carry_owned_sections() {
         let setup = DeckSection::new(
             "Setup".to_owned(),
@@ -938,6 +1020,7 @@ mod tests {
             false,
             None,
             None,
+            DeckLang::default(),
             vec![setup.clone()],
             None,
             None,
@@ -969,6 +1052,7 @@ mod tests {
             false,
             None,
             None,
+            DeckLang::default(),
             vec![setup.clone()],
             None,
             None,
@@ -992,6 +1076,7 @@ mod tests {
             false,
             None,
             None,
+            DeckLang::default(),
             Vec::new(),
             None,
             None,
@@ -1014,6 +1099,7 @@ mod tests {
             false,
             None,
             None,
+            DeckLang::default(),
             Vec::new(),
             None,
             None,
@@ -1035,6 +1121,7 @@ mod tests {
             false,
             None,
             None,
+            DeckLang::default(),
             Vec::new(),
             None,
             None,

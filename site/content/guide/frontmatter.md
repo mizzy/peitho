@@ -18,8 +18,8 @@ by a missing closing `---` all stop the build.
 
 ## Keys
 
-Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `layouts`,
-`css`, `syntaxes`, `fonts`, and `code_images`.
+Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `lang`,
+`layouts`, `css`, `syntaxes`, `fonts`, and `code_images`.
 
 | Key | Purpose |
 | --- | --- |
@@ -27,6 +27,7 @@ Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `layouts`,
 | `aspect_ratio` | Slide canvas aspect ratio: `16:9` (default) or `4:3`. |
 | `resolution` | PDF-only physical page size in `WxH` CSS pixels. |
 | `breaks` | Render single newlines in slide body Markdown as hard line breaks: `true` or `false` (default). |
+| `lang` | Deck language as a BCP 47 tag, emitted as `<html lang>` on every page that renders slides: `en` (default), `ja`, `zh-Hans`, … Language-sensitive CSS such as `word-break: auto-phrase` keys off this. |
 | `layouts` | Layout HTML file or directory. |
 | `css` | Theme CSS file or directory. |
 | `syntaxes` | Custom syntect syntax file or directory. |

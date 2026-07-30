@@ -15,7 +15,7 @@ use crate::{
     highlight::Highlighter,
     layout::Layout,
     math::MathAssets,
-    phase::{Checked, CheckedSlot, Deck, PageNumberFormat, Rendered},
+    phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, Rendered},
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
@@ -493,9 +493,9 @@ fn render_error(err: RewritingError) -> BuildError {
     }
 }
 
-pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
+pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="__PEITHO_LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -689,7 +689,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio) -> String {
 </body>
 </html>"#;
 
-    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+    fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
 }
 
 pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
@@ -706,7 +706,7 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
 
     format!(
         r#"<!doctype html>
-<html lang="en">
+<html lang="{lang}">
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="peitho.css">
@@ -733,6 +733,7 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
         canvas_height = aspect_ratio.height(),
         canvas_aspect = aspect_ratio.css_aspect_value(),
         pdf_flatten_js = PDF_FLATTEN_JS,
+        lang = settings.lang().as_str(),
     )
 }
 
@@ -747,7 +748,7 @@ pub fn render_lint_document(deck: &Deck<Rendered>) -> String {
 
     format!(
         r#"<!doctype html>
-<html lang="en">
+<html lang="{lang}">
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="peitho.css">
@@ -768,6 +769,7 @@ pub fn render_lint_document(deck: &Deck<Rendered>) -> String {
         canvas_height = aspect_ratio.height(),
         canvas_aspect = aspect_ratio.css_aspect_value(),
         lint_measure_js = LINT_MEASURE_JS,
+        lang = settings.lang().as_str(),
     )
 }
 
@@ -776,7 +778,7 @@ fn format_pdf_scale(page_width: u32, canvas_width: u32) -> String {
     scale.to_string()
 }
 
-fn fill_canvas_tokens(template: &str, aspect_ratio: AspectRatio) -> String {
+fn fill_canvas_tokens(template: &str, aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
     template
         .replace("__PEITHO_CANVAS_WIDTH__", &aspect_ratio.width().to_string())
         .replace(
@@ -784,11 +786,12 @@ fn fill_canvas_tokens(template: &str, aspect_ratio: AspectRatio) -> String {
             &aspect_ratio.height().to_string(),
         )
         .replace("__PEITHO_CANVAS_ASPECT__", aspect_ratio.css_aspect_value())
+        .replace("__PEITHO_LANG__", lang.as_str())
 }
 
-pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
+pub fn render_present_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="__PEITHO_LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -891,12 +894,12 @@ pub fn render_present_index(aspect_ratio: AspectRatio) -> String {
 </body>
 </html>"#;
 
-    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+    fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
 }
 
-pub fn render_preview_index(aspect_ratio: AspectRatio) -> String {
+pub fn render_preview_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="__PEITHO_LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -933,7 +936,7 @@ pub fn render_preview_index(aspect_ratio: AspectRatio) -> String {
 </body>
 </html>"#;
 
-    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+    fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
 }
 
 pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
@@ -1076,7 +1079,8 @@ pub fn render_remote_index(aspect_ratio: AspectRatio) -> String {
 </body>
 </html>"#;
 
-    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+    // The remote controller is peitho UI in English, not deck content.
+    fill_canvas_tokens(TEMPLATE, aspect_ratio, &DeckLang::default())
 }
 
 pub fn render_preview_error_index(generation: u64, error: &str) -> String {
@@ -1124,9 +1128,9 @@ pub fn render_preview_error_index(generation: u64, error: &str) -> String {
     )
 }
 
-pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
+pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="__PEITHO_LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1344,7 +1348,7 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio) -> String {
 </body>
 </html>"#;
 
-    fill_canvas_tokens(TEMPLATE, aspect_ratio)
+    fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
 }
 
 #[cfg(test)]
@@ -2087,7 +2091,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_uses_one_slide_canvas_without_shell_bundle() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
         assert!(html.contains(r#"id="peitho-canvas""#));
@@ -2118,7 +2122,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_click_navigation_ignores_selection_gestures() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("window.getSelection()"));
         assert!(html.contains("__clickStart"));
@@ -2128,7 +2132,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_reads_slide_query_on_load() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("URLSearchParams(location.search)"));
         assert!(html.contains(".get('slide')"));
@@ -2137,7 +2141,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_supports_hash_fallback() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("location.hash"));
         assert!(html.contains("hash.startsWith('#slide=')"));
@@ -2147,7 +2151,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_updates_url_on_slide_change() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("history.replaceState"));
         let show_slide_index = html.find("function showSlide(index)").unwrap();
@@ -2167,21 +2171,21 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_never_uses_pushstate() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(!html.contains("history.pushState"));
     }
 
     #[test]
     fn distribution_index_handles_popstate() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("window.addEventListener('popstate'"));
     }
 
     #[test]
     fn distribution_index_preserves_query_and_hash_when_writing_slide() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("location.pathname"));
         assert!(html.contains("params.set('slide'"));
@@ -2191,8 +2195,8 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_url_deep_link_leaves_present_and_presenter_alone() {
-        let present_html = render_present_index(AspectRatio::Ratio16To9);
-        let presenter_html = render_presenter_index(AspectRatio::Ratio16To9);
+        let present_html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let presenter_html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(!present_html.contains("?slide="));
         assert!(!present_html.contains("URLSearchParams"));
@@ -2202,7 +2206,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_uses_deck_aspect_ratio_canvas_dimensions() {
-        let html = render_distribution_index(AspectRatio::Ratio4To3);
+        let html = render_distribution_index(AspectRatio::Ratio4To3, &DeckLang::default());
 
         assert!(html.contains("--peitho-canvas-width: 960px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
@@ -2213,7 +2217,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_mounts_shell_controls_keyboard_sync_and_notes() {
-        let html = render_present_index(AspectRatio::Ratio16To9);
+        let html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
         assert!(html.contains(
@@ -2261,7 +2265,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_fetches_present_config_and_mounts_time_tracker_conditionally() {
-        let html = render_present_index(AspectRatio::Ratio16To9);
+        let html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("import * as peitho from './shell.js';"));
         assert!(html.contains("fetchOk('present.json')"));
@@ -2443,7 +2447,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_mounts_presenter_view_with_canvas_panes_and_notes() {
-        let html = render_presenter_index(AspectRatio::Ratio16To9);
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(r#"<main id="peitho-presenter-root"></main>"#));
         assert!(html.contains("import * as peitho from './shell.js';"));
@@ -2500,7 +2504,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_uses_deck_aspect_ratio_css_variable() {
-        let html = render_presenter_index(AspectRatio::Ratio4To3);
+        let html = render_presenter_index(AspectRatio::Ratio4To3, &DeckLang::default());
 
         assert!(html.contains("--peitho-canvas-aspect: 4 / 3;"));
         assert!(html.contains("aspect-ratio: var(--peitho-canvas-aspect);"));
@@ -2512,7 +2516,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_emits_deck_aspect_ratio_css_variable() {
-        let html = render_present_index(AspectRatio::Ratio4To3);
+        let html = render_present_index(AspectRatio::Ratio4To3, &DeckLang::default());
 
         assert!(html.contains("--peitho-canvas-width: 960px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
@@ -2521,7 +2525,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_includes_time_tracker_css() {
-        let html = render_presenter_index(AspectRatio::Ratio16To9);
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(".peitho-time-tracker"));
         assert!(html.contains(r#"[data-peitho-time-tracker="presenter"]"#));
@@ -2552,7 +2556,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_includes_agenda_css_with_data_selectors() {
-        let html = render_presenter_index(AspectRatio::Ratio16To9);
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(r#"[data-peitho-agenda] { overflow: hidden; padding: 0 16px 14px; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; column-gap: 8px; align-content: start; }"#));
         assert!(html.contains(r#"[data-peitho-agenda-head], [data-peitho-agenda-list], [data-peitho-agenda-row] { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }"#));
@@ -2614,7 +2618,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_does_not_include_time_tracker() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(!html.contains("installTimeTracker"));
         assert!(!html.contains("peitho-time-tracker"));
@@ -2623,7 +2627,7 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_maps_escape_to_index_navigation() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9);
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("event.key === 'Escape'"));
         assert!(html.contains("function exitToIndex()"));
@@ -2634,7 +2638,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_uses_server_sync_factory() {
-        let html = render_present_index(AspectRatio::Ratio16To9);
+        let html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("peitho.installSyncBridge("));
@@ -2656,7 +2660,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_passes_server_sync_factory_to_presenter_view() {
-        let html = render_presenter_index(AspectRatio::Ratio16To9);
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
@@ -2664,7 +2668,7 @@ Paragraph after heading.
 
     #[test]
     fn presenter_index_fetches_notes_without_rehearsal_baseline() {
-        let html = render_presenter_index(AspectRatio::Ratio16To9);
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("fetchOk('notes.json')"));
         assert!(!html.contains("fetchOk('rehearsal.json')"));
@@ -2673,7 +2677,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_has_no_static_presenter_link() {
-        let html = render_present_index(AspectRatio::Ratio16To9);
+        let html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(r#"<main id="peitho-present-root"></main>"#));
         assert!(!html.contains("peitho-presenter-link"));
@@ -2683,7 +2687,7 @@ Paragraph after heading.
 
     #[test]
     fn present_index_keeps_controls_default_display_management_before_mount() {
-        let html = render_present_index(AspectRatio::Ratio16To9);
+        let html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         let controls_index = html
             .find("peitho.installPresentationControls({ root, window, document })")
@@ -2694,6 +2698,46 @@ Paragraph after heading.
         assert!(controls_index < mount_index);
         assert!(html.contains("peitho.installPresentationControls({ root, window, document })"));
         assert!(!html.contains("openPresenter"));
+    }
+
+    #[test]
+    fn slide_pages_carry_deck_lang() {
+        let ja = DeckLang::parse("ja").unwrap();
+
+        for html in [
+            render_distribution_index(AspectRatio::Ratio16To9, &ja),
+            render_present_index(AspectRatio::Ratio16To9, &ja),
+            render_preview_index(AspectRatio::Ratio16To9, &ja),
+            render_presenter_index(AspectRatio::Ratio16To9, &ja),
+        ] {
+            assert!(html.contains(r#"<html lang="ja">"#));
+        }
+    }
+
+    #[test]
+    fn slide_pages_default_to_english_lang() {
+        for html in [
+            render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default()),
+            render_present_index(AspectRatio::Ratio16To9, &DeckLang::default()),
+            render_preview_index(AspectRatio::Ratio16To9, &DeckLang::default()),
+            render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default()),
+        ] {
+            assert!(html.contains(r#"<html lang="en">"#));
+        }
+    }
+
+    #[test]
+    fn remote_and_preview_error_pages_stay_english() {
+        assert!(render_remote_index(AspectRatio::Ratio16To9).contains(r#"<html lang="en">"#));
+        assert!(render_preview_error_index(1, "boom").contains(r#"<html lang="en">"#));
+    }
+
+    #[test]
+    fn pdf_and_lint_documents_carry_deck_lang() {
+        let rendered = render_checked_deck("---\nlang: ja\n---\n# Intro");
+
+        assert!(render_pdf_document(&rendered).contains(r#"<html lang="ja">"#));
+        assert!(render_lint_document(&rendered).contains(r#"<html lang="ja">"#));
     }
 
     #[test]
