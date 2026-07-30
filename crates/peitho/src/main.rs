@@ -1605,7 +1605,10 @@ fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<(
     fs::write(out.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         out.join("index.html"),
-        peitho_core::render_distribution_index(artifacts.rendered.settings().aspect_ratio()),
+        peitho_core::render_distribution_index(
+            artifacts.rendered.settings().aspect_ratio(),
+            artifacts.rendered.settings().lang(),
+        ),
     )
     .into_diagnostic()?;
     Ok(())
@@ -3448,12 +3451,18 @@ fn emit_present_cache(
     .into_diagnostic()?;
     fs::write(
         cache.join("present.html"),
-        peitho_core::render_present_index(artifacts.rendered.settings().aspect_ratio()),
+        peitho_core::render_present_index(
+            artifacts.rendered.settings().aspect_ratio(),
+            artifacts.rendered.settings().lang(),
+        ),
     )
     .into_diagnostic()?;
     fs::write(
         cache.join("presenter.html"),
-        peitho_core::render_presenter_index(artifacts.rendered.settings().aspect_ratio()),
+        peitho_core::render_presenter_index(
+            artifacts.rendered.settings().aspect_ratio(),
+            artifacts.rendered.settings().lang(),
+        ),
     )
     .into_diagnostic()?;
     fs::write(
@@ -3493,7 +3502,10 @@ fn emit_preview_cache_generation(
     .into_diagnostic()?;
     fs::write(
         generation_dir.join("index.html"),
-        peitho_core::render_preview_index(artifacts.rendered.settings().aspect_ratio()),
+        peitho_core::render_preview_index(
+            artifacts.rendered.settings().aspect_ratio(),
+            artifacts.rendered.settings().lang(),
+        ),
     )
     .into_diagnostic()?;
     fs::write(generation_dir.join("preview.js"), BUILTIN_PREVIEW_JS).into_diagnostic()?;
