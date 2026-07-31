@@ -29,6 +29,7 @@ const manifest: Manifest = {
       src: "slides/000-intro.html",
       hasNotes: false,
       skip: false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     }
   ],
@@ -230,6 +231,7 @@ it("attributes slidechange rehearsal reports to the previous section", async () 
           src: "slides/000-intro.html",
           hasNotes: false,
           skip: false,
+          revealSteps: 0,
           text: { title: "", body: "", code: "" }
         },
         {
@@ -238,6 +240,7 @@ it("attributes slidechange rehearsal reports to the previous section", async () 
           src: "slides/001-demo.html",
           hasNotes: false,
           skip: false,
+          revealSteps: 0,
           text: { title: "", body: "", code: "" }
         }
       ]

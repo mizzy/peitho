@@ -44,6 +44,7 @@ describe("generated manifest contract", () => {
           src: "slides/000-intro.html",
           hasNotes: false,
           skip: false,
+          revealSteps: 0,
           text: { title: "", body: "", code: "" }
         }
       ],
@@ -77,6 +78,7 @@ describe("generated manifest contract", () => {
           src: "slides/000-intro.html",
           hasNotes: false,
           skip: false,
+          revealSteps: 0,
           text: { title: "", body: "", code: "" }
         }
       ],

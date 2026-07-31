@@ -28,6 +28,7 @@ const manifest: Manifest = {
       src: "slides/000-intro.html",
       hasNotes: false,
       skip: false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -36,6 +37,7 @@ const manifest: Manifest = {
       src: "slides/001-details.html",
       hasNotes: false,
       skip: false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     }
   ],

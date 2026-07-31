@@ -27,6 +27,7 @@ const manifest = {
       src: "slides/000-intro.html",
       hasNotes: false,
       skip: false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     },
     {
@@ -35,6 +36,7 @@ const manifest = {
       src: "slides/001-arch-1.html",
       hasNotes: false,
       skip: false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     }
   ]
@@ -105,6 +107,7 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typ
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
+      revealSteps: 0,
       text: { title: "", body: "", code: "" }
     }))
   };

@@ -504,6 +504,7 @@ pub struct MappedSlide {
     pub(crate) slots: BTreeMap<SlotName, MappedSlot>,
     pub(crate) unassigned: Vec<UnassignedFragment>,
     pub(crate) skip: bool,
+    pub(crate) step_count: usize,
     pub(crate) page_number_hidden: bool,
     pub(crate) notes: Option<String>,
 }
@@ -571,6 +572,7 @@ pub struct CheckedSlide<S = RawImagePath> {
     layout: Layout,
     slots: BTreeMap<SlotName, CheckedSlot<S>>,
     skip: bool,
+    step_count: usize,
     page_number_hidden: bool,
     notes: Option<String>,
 }
@@ -653,6 +655,7 @@ impl<S> CheckedSlide<S> {
         layout: Layout,
         slots: BTreeMap<SlotName, CheckedSlot<S>>,
         skip: bool,
+        step_count: usize,
         page_number_hidden: bool,
         notes: Option<String>,
     ) -> Self {
@@ -663,6 +666,7 @@ impl<S> CheckedSlide<S> {
             layout,
             slots,
             skip,
+            step_count,
             page_number_hidden,
             notes,
         }
@@ -690,6 +694,10 @@ impl<S> CheckedSlide<S> {
 
     pub(crate) fn skip(&self) -> bool {
         self.skip
+    }
+
+    pub(crate) fn step_count(&self) -> usize {
+        self.step_count
     }
 
     pub(crate) fn page_number_hidden(&self) -> bool {
@@ -794,6 +802,7 @@ where
             layout,
             slots,
             skip,
+            step_count,
             page_number_hidden,
             notes,
         } = slide;
@@ -842,6 +851,7 @@ where
             layout,
             resolved_slots,
             skip,
+            step_count,
             page_number_hidden,
             notes,
         ));
@@ -1188,6 +1198,7 @@ mod tests {
                 layout,
                 slots,
                 false,
+                0,
                 false,
                 None,
             )],
@@ -1239,6 +1250,7 @@ mod tests {
                 layout,
                 slots,
                 true,
+                0,
                 false,
                 None,
             )],
@@ -1253,5 +1265,52 @@ mod tests {
         .unwrap();
 
         assert!(resolved.checked_slides()[0].skip());
+    }
+
+    #[test]
+    fn resolve_image_paths_preserves_step_count() {
+        let layout = parse_layout(
+            "images",
+            r#"<section><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let contract = layout.slot("hero").unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::image(
+                    3,
+                    "A",
+                    RawImagePath::new_unchecked("a.png".into()),
+                )],
+            ),
+        );
+        let deck = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("gallery").unwrap(),
+                layout,
+                slots,
+                false,
+                2,
+                false,
+                None,
+            )],
+        );
+
+        let (resolved, _assets) = resolve_image_paths(deck, |_request| {
+            Ok(ResolvedImageAsset {
+                source_abs: PathBuf::from("/tmp/a.png"),
+                dist_rel: ResolvedImagePath::from_string("assets/a.png".to_owned()),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(resolved.checked_slides()[0].step_count(), 2);
     }
 }

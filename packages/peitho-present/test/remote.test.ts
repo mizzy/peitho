@@ -46,6 +46,7 @@ function manifestWithSlides(
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
+      revealSteps: 0,
       text: { title: slide.title ?? "", body: "", code: "" }
     })),
     images: [],
