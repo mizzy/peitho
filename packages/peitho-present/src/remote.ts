@@ -8,7 +8,8 @@ import {
   type ShellOptions,
   type TimerControlDetail
 } from "./shell";
-import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
+import { initialSlideIndex } from "./skipnav";
+import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 import {
   isCloseSyncMessage,
   isGenerationSyncMessage,
@@ -30,7 +31,10 @@ type RemoteSlide = {
   key: string;
   skip: boolean;
   title: string;
+  revealSteps: number;
 };
+
+type RemotePosition = { index: number; step: number };
 
 type RemoteTimerAnchor = {
   running: boolean;
@@ -96,8 +100,8 @@ export type RemoteSyncBridgeOptions = {
   channelFactory?: SyncChannelFactory;
   bus?: EventTarget;
   now?: () => number;
-  getCurrentIndex(): number | null;
-  setCurrentIndex(index: number): void;
+  getCurrentPosition(): RemotePosition | null;
+  setCurrentPosition(position: RemotePosition): void;
   getTimerState(): RemoteTimerAnchor | null;
   setTimerState(state: RemoteTimerAnchor): void;
   setSynced(): void;
@@ -507,10 +511,10 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
     if (!synced) return;
     const to = (event as CustomEvent<{ to?: unknown }>).detail?.to;
     if (to !== "next" && to !== "prev") return;
-    const target = resolveRemoteTarget(options.slides, options.getCurrentIndex(), to);
+    const target = resolveRemoteTarget(options.slides, options.getCurrentPosition(), to);
     if (target === null) return;
-    channel.postMessage({ index: target });
-    options.setCurrentIndex(target);
+    channel.postMessage(target);
+    options.setCurrentPosition(target);
   };
 
   const onTimerControl = (event: Event): void => {
@@ -540,7 +544,7 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
       return;
     }
     if (isIndexSyncMessage(data)) {
-      options.setCurrentIndex(data.index);
+      options.setCurrentPosition({ index: data.index, step: data.step });
       return;
     }
     if (isTimerReplaySyncMessage(data)) {
@@ -578,7 +582,6 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
 
 class RemoteController implements RemoteView {
   manifest: Manifest | null = null;
-  currentIndex: number | null = null;
   private readonly root: HTMLElement;
   private readonly manifestUrl: string;
   private readonly notesUrl: string;
@@ -596,6 +599,7 @@ class RemoteController implements RemoteView {
   private notes: Notes = { version: 1, notes: {} };
   private renderedNotesValue: string | null = null;
   private slides: RemoteSlide[] = [];
+  private currentPosition: RemotePosition | null = null;
   private timerState: RemoteTimerAnchor | null = null;
   private controlsCleanup: (() => void) | null = null;
   private syncCleanup: (() => void) | null = null;
@@ -618,6 +622,10 @@ class RemoteController implements RemoteView {
     this.reload = options.reload ?? (() => this.win.location.reload());
   }
 
+  get currentIndex(): number | null {
+    return this.currentPosition?.index ?? null;
+  }
+
   async load(): Promise<void> {
     try {
       const manifest = await this.fetchJson<Manifest>(this.manifestUrl);
@@ -626,9 +634,10 @@ class RemoteController implements RemoteView {
       this.slides = manifest.slides.map((slide) => ({
         key: slide.key,
         skip: slide.skip === true,
-        title: slide.text.title
+        title: slide.text.title,
+        revealSteps: revealStepCount(slide)
       }));
-      this.currentIndex = initialSlideIndex(this.slides);
+      this.currentPosition = initialRemotePosition(this.slides);
       this.controlsCleanup = installRemoteControls({
         root: this.root,
         document: this.doc,
@@ -661,8 +670,8 @@ class RemoteController implements RemoteView {
         channelFactory: this.channelFactory,
         bus: this.bus,
         now: this.now,
-        getCurrentIndex: () => this.currentIndex,
-        setCurrentIndex: (index) => this.setCurrentIndex(index),
+        getCurrentPosition: () => this.currentPosition,
+        setCurrentPosition: (position) => this.setCurrentPosition(position),
         getTimerState: () => this.timerState,
         setTimerState: (state) => this.setTimerState(state),
         setSynced: () => this.setSynced(),
@@ -704,8 +713,8 @@ class RemoteController implements RemoteView {
     }
   }
 
-  private setCurrentIndex(index: number): void {
-    this.currentIndex = clampIndex(index, this.slides.length);
+  private setCurrentPosition(position: RemotePosition): void {
+    this.currentPosition = clampRemotePosition(position, this.slides);
     this.render();
   }
 
@@ -736,7 +745,8 @@ class RemoteController implements RemoteView {
     const container = this.root.querySelector<HTMLElement>(".peitho-remote");
     if (container == null) return;
     container.dataset.peithoEnded = isReadOnly(this.state) ? "true" : "false";
-    const currentIndex = this.currentIndex;
+    const currentPosition = this.currentPosition;
+    const currentIndex = currentPosition?.index ?? null;
     const slide = currentIndex == null ? null : manifest.slides[currentIndex];
     const total = this.slides.length;
 
@@ -748,8 +758,8 @@ class RemoteController implements RemoteView {
     this.renderTimeDependentChrome(manifest, currentIndex);
     this.renderSection(manifest, currentIndex);
     this.renderNotes(slide?.key);
-    this.renderButtons(currentIndex);
-    this.syncPreview(currentIndex);
+    this.renderButtons(currentPosition);
+    this.syncPreview(currentPosition);
     this.updateTimerInterval();
   }
 
@@ -898,20 +908,24 @@ class RemoteController implements RemoteView {
     this.renderedNotesValue = value;
   }
 
-  private renderButtons(currentIndex: number | null): void {
+  private renderButtons(currentPosition: RemotePosition | null): void {
     const prev = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="prev"]');
     const next = this.root.querySelector<HTMLButtonElement>('[data-peitho-action="next"]');
     if (prev == null || next == null) return;
     prev.disabled =
-      !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
+      !canInteract(this.state) ||
+      resolveRemoteTarget(this.slides, currentPosition, "prev") === null;
     next.disabled =
-      !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
+      !canInteract(this.state) ||
+      resolveRemoteTarget(this.slides, currentPosition, "next") === null;
   }
 
-  private syncPreview(currentIndex: number | null): void {
-    if (currentIndex == null) return;
+  private syncPreview(position: RemotePosition | null): void {
+    if (position == null) return;
     this.previewBus.dispatchEvent(
-      new CustomEvent("peitho:navigate", { detail: { to: { index: currentIndex } } })
+      new CustomEvent("peitho:navigate", {
+        detail: { to: { index: position.index, step: position.step } }
+      })
     );
   }
 
@@ -1001,12 +1015,27 @@ function isUnitCoordinate(value: unknown): value is number {
 
 function resolveRemoteTarget(
   slides: ReadonlyArray<RemoteSlide>,
-  currentIndex: number | null,
+  currentPosition: RemotePosition | null,
   to: "prev" | "next"
-): number | null {
-  const base = currentIndex ?? initialSlideIndex(slides);
-  if (base === null) return null;
-  return nextNonSkippedIndex(slides, base, to === "next" ? 1 : -1);
+): RemotePosition | null {
+  const current = clampRemotePosition(currentPosition ?? initialRemotePosition(slides), slides);
+  if (current === null) return null;
+  return resolveStepTarget(slides, current, to === "next" ? 1 : -1);
+}
+
+function initialRemotePosition(slides: ReadonlyArray<RemoteSlide>): RemotePosition | null {
+  const index = initialSlideIndex(slides);
+  return index === null ? null : { index, step: 0 };
+}
+
+function clampRemotePosition(
+  position: RemotePosition | null,
+  slides: ReadonlyArray<RemoteSlide>
+): RemotePosition | null {
+  if (position === null) return null;
+  const index = clampIndex(position.index, slides.length);
+  if (index === null) return null;
+  return { index, step: clampStep(position.step, revealStepCount(slides[index])) };
 }
 
 function clampIndex(index: number, total: number): number | null {

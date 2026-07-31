@@ -1,5 +1,5 @@
 export function nextNonSkippedIndex(
-  slides: ReadonlyArray<{ skip: boolean }>,
+  slides: ReadonlyArray<{ skip?: boolean }>,
   from: number,
   direction: 1 | -1
 ): number | null {
@@ -11,7 +11,7 @@ export function nextNonSkippedIndex(
   return null;
 }
 
-export function initialSlideIndex(slides: ReadonlyArray<{ skip: boolean }>): number | null {
+export function initialSlideIndex(slides: ReadonlyArray<{ skip?: boolean }>): number | null {
   if (slides.length === 0) return null;
   return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }

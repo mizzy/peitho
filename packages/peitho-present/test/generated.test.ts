@@ -22,6 +22,7 @@ import type {
   PresenterOptions,
   ServerSyncOptions,
   ShellOptions,
+  StepChangeDetail,
   TimerControlDetail
 } from "../src/index";
 
@@ -57,6 +58,7 @@ describe("generated manifest contract", () => {
     expect(manifest.aspectRatio).toBe("16:9");
     expect(manifest.canvasWidth).toBe(1280);
     expect(manifest.canvasHeight).toBe(720);
+    expect(manifest.slides[0].revealSteps).toBe(0);
     expect(options.root.tagName).toBe("MAIN");
   });
 
@@ -97,6 +99,7 @@ describe("generated manifest contract", () => {
 
   it("exports presenter and presentation event types", () => {
     const start: PresentationStartDetail = { total: 3, startedAt: 1000 };
+    const step: StepChangeDetail = { index: 0, step: 1, stepCount: 3 };
     const end: PresentationEndDetail = { endedAt: 2000, elapsedMs: 1000 };
     const control: TimerControlDetail = { action: "pause" };
     const options: Pick<PresenterOptions, "root" | "notes"> = {
@@ -105,6 +108,7 @@ describe("generated manifest contract", () => {
     };
 
     expect(start.total).toBe(3);
+    expect(step.step).toBe(1);
     expect(end.elapsedMs).toBe(1000);
     expect(control.action).toBe("pause");
     expect(options.notes.version).toBe(1);

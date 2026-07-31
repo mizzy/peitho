@@ -52,6 +52,7 @@ export type {
   PresentationStartDetail,
   ShellOptions,
   SlideChangeDetail,
+  StepChangeDetail,
   TimerAdoptDetail,
   TimerControlDetail,
   TimerStateDetail

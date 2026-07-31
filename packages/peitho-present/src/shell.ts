@@ -3,7 +3,8 @@ import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
 import { waitForFontsReady } from "./fontsReady";
-import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
+import { initialSlideIndex } from "./skipnav";
+import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 
 export type NavigateTarget =
   | "next"
@@ -11,7 +12,7 @@ export type NavigateTarget =
   | "first"
   | "last"
   | { key: string }
-  | { index: number };
+  | { index: number; step?: number };
 
 export type NavigateDetail = { to: NavigateTarget };
 
@@ -20,8 +21,11 @@ export type SlideChangeDetail = {
   index: number;
   total: number;
   previousIndex: number | null;
+  step?: number;
+  stepCount?: number;
 };
 
+export type StepChangeDetail = { index: number; step: number; stepCount: number };
 export type PresentationStartDetail = { total: number; startedAt: number };
 export type PresentationEndDetail = { endedAt: number; elapsedMs: number };
 export type TimerStateDetail = { running: boolean; elapsedMs: number };
@@ -31,6 +35,7 @@ export type TimerControlDetail = { action: "start" | "pause" | "resume" | "reset
 export type PresentShell = {
   manifest: Manifest | null;
   currentIndex: number;
+  currentStep: number;
   navigate(to: NavigateTarget): void;
   elapsedMs(): number;
   isPaused(): boolean;
@@ -97,6 +102,7 @@ const DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
 const POINTER_TRAIL_DURATION_MS = 500;
 const POINTER_TRAIL_CAP = 64;
 const POINTER_CORE_MIX_TO_WHITE = 0.65;
+const REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 
 const CSS_NAMED_COLORS: Record<string, string> = {
   aliceblue: "#f0f8ff",
@@ -253,6 +259,8 @@ export type SlideView = {
   meta: ManifestSlide;
   host: HTMLElement;
 };
+
+type ResolvedNavigateTarget = { index: number; step: number };
 
 export async function mountPresentShell(options: ShellOptions): Promise<PresentShell> {
   const shell = new PresentShellController(options);
@@ -505,6 +513,7 @@ export function installPointerOverlay(options: PointerOverlayOptions): () => voi
 class PresentShellController implements PresentShell {
   manifest: Manifest | null = null;
   currentIndex = -1;
+  currentStep = 0;
   private readonly slides: SlideView[] = [];
   private readonly root: HTMLElement;
   private readonly fetcher: typeof fetch;
@@ -586,7 +595,7 @@ class PresentShellController implements PresentShell {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
+      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
     } catch (error) {
       this.clearCanvasRootProperties();
@@ -596,9 +605,9 @@ class PresentShellController implements PresentShell {
   }
 
   navigate(to: NavigateTarget): void {
-    const index = this.resolveTarget(to);
-    if (index === null) return;
-    this.show(index);
+    const target = this.resolveTarget(to);
+    if (target === null) return;
+    this.show(target.index, target.step);
   }
 
   elapsedMs(): number {
@@ -703,6 +712,9 @@ class PresentShellController implements PresentShell {
     const style = this.doc.createElement("style");
     style.textContent = css;
     shadow.appendChild(style);
+    const revealStyle = this.doc.createElement("style");
+    revealStyle.textContent = REVEAL_HIDDEN_CSS;
+    shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
@@ -731,9 +743,9 @@ class PresentShellController implements PresentShell {
     });
   }
 
-  private resolveTarget(to: NavigateTarget): number | null {
-    if (to === "first") return 0;
-    if (to === "last") return this.slides.length - 1;
+  private resolveTarget(to: NavigateTarget): ResolvedNavigateTarget | null {
+    if (to === "first") return this.resolveDirectIndex(0);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
     if (to === "next") return this.resolveSequentialTarget(1);
     if (to === "prev") return this.resolveSequentialTarget(-1);
     if ("index" in to) {
@@ -741,47 +753,92 @@ class PresentShellController implements PresentShell {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return to.index;
+      return this.resolveDirectIndex(to.index, to.step);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return index;
+    return this.resolveDirectIndex(index);
   }
 
-  private resolveSequentialTarget(direction: 1 | -1): number | null {
-    return nextNonSkippedIndex(
+  private resolveDirectIndex(index: number, step?: number): ResolvedNavigateTarget | null {
+    if (index < 0 || index >= this.slides.length) return null;
+    const stepCount = this.stepCountFor(index);
+    return {
+      index,
+      step: step === undefined ? stepCount : clampStep(step, stepCount)
+    };
+  }
+
+  private resolveSequentialTarget(direction: 1 | -1): ResolvedNavigateTarget | null {
+    return resolveStepTarget(
       this.slides.map((slide) => slide.meta),
-      this.currentIndex,
+      { index: this.currentIndex, step: this.currentStep },
       direction
     );
   }
 
-  private show(index: number): void {
+  private stepCountFor(index: number): number {
+    return revealStepCount(this.slides[index]?.meta);
+  }
+
+  private show(index: number, step: number): void {
     if (index < 0 || index >= this.slides.length) {
       this.log.error(`Unknown slide target: ${index}`);
       return;
     }
-    if (index === this.currentIndex) return;
+    const stepCount = this.stepCountFor(index);
+    const nextStep = clampStep(step, stepCount);
+    const indexChanged = index !== this.currentIndex;
+    const stepChanged = nextStep !== this.currentStep;
+    if (!indexChanged && !stepChanged) return;
 
     this.slides.forEach((slide, slideIndex) => {
       slide.host.hidden = slideIndex !== index;
     });
     const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
     this.currentIndex = index;
+    this.currentStep = nextStep;
     const slide = this.slides[index];
+    this.applyRevealState(slide.host, nextStep);
+    if (indexChanged) {
+      this.bus.dispatchEvent(
+        new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
+          detail: {
+            key: slide.meta.key,
+            index: slide.meta.index,
+            total: this.slides.length,
+            previousIndex,
+            step: nextStep,
+            stepCount
+          }
+        })
+      );
+      return;
+    }
     this.bus.dispatchEvent(
-      new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
+      new CustomEvent<StepChangeDetail>("peitho:stepchange", {
         detail: {
-          key: slide.meta.key,
           index: slide.meta.index,
-          total: this.slides.length,
-          previousIndex
+          step: nextStep,
+          stepCount
         }
       })
     );
+  }
+
+  private applyRevealState(host: HTMLElement, step: number): void {
+    const markers = host.shadowRoot?.querySelectorAll<HTMLElement>("[data-reveal-step]");
+    if (markers == null) return;
+    for (const marker of markers) {
+      const revealStep = Number(marker.dataset.revealStep);
+      marker.toggleAttribute(
+        "data-reveal-hidden",
+        Number.isFinite(revealStep) && revealStep > step
+      );
+    }
   }
 
   private startPresentation(): void {

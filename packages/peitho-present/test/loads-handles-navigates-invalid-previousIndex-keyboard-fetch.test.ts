@@ -97,7 +97,9 @@ function standardFetch(responseManifest = manifest, css = cssText): typeof fetch
   }) as unknown as typeof fetch;
 }
 
-function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typeof manifest {
+function manifestWithSlides(
+  slides: Array<{ key: string; skip?: boolean; revealSteps?: number }>
+): typeof manifest {
   return {
     ...manifest,
     slideCount: slides.length,
@@ -107,7 +109,7 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typ
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
-      revealSteps: 0,
+      revealSteps: slide.revealSteps ?? 0,
       text: { title: "", body: "", code: "" }
     }))
   };
@@ -360,8 +362,8 @@ it("emits slidechange with previousIndex after navigation", async () => {
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
 
   expect(changes).toEqual([
-    { key: "intro", index: 0, total: 2, previousIndex: null },
-    { key: "arch-1", index: 1, total: 2, previousIndex: 0 }
+    { key: "intro", index: 0, total: 2, previousIndex: null, step: 0, stepCount: 0 },
+    { key: "arch-1", index: 1, total: 2, previousIndex: 0, step: 0, stepCount: 0 }
   ]);
 });
 
@@ -378,6 +380,133 @@ it("does not emit slidechange when next at the last slide is a no-op", async () 
 
   expect(shell.currentIndex).toBe(1);
   expect(changes.map((change) => change.index)).toEqual([0, 1]);
+});
+
+it("walks reveal steps before changing slides and hides future step elements", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "end" }
+  ]);
+  const root = document.createElement("main");
+  const changes: unknown[] = [];
+  const steps: unknown[] = [];
+  listenWindow("peitho:slidechange", (event) => changes.push((event as CustomEvent).detail));
+  listenWindow("peitho:stepchange", (event) => steps.push((event as CustomEvent).detail));
+
+  const shell = await mountForTest({
+    root,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url.includes("intro")) {
+        return okText(
+          '<section><p data-reveal-step="1">A</p><p data-reveal-step="2">B</p></section>'
+        );
+      }
+      if (url.includes("end")) return okText("<section>End</section>");
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as unknown as typeof fetch,
+    window
+  });
+  const intro = root.querySelector<HTMLElement>('[data-slide-index="0"]')!;
+  const markers = intro.shadowRoot!.querySelectorAll<HTMLElement>("[data-reveal-step]");
+
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(0);
+  expect([...markers].map((el) => el.hasAttribute("data-reveal-hidden"))).toEqual([true, true]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(1);
+  expect([...markers].map((el) => el.hasAttribute("data-reveal-hidden"))).toEqual([false, true]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.currentStep).toBe(0);
+  expect(changes).toEqual([
+    { key: "intro", index: 0, total: 2, previousIndex: null, step: 0, stepCount: 2 },
+    { key: "end", index: 1, total: 2, previousIndex: 0, step: 0, stepCount: 0 }
+  ]);
+  expect(steps).toEqual([
+    { index: 0, step: 1, stepCount: 2 },
+    { index: 0, step: 2, stepCount: 2 }
+  ]);
+});
+
+it("direct navigation lands fully revealed and prev enters previous slide fully revealed", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "skip", skip: true, revealSteps: 3 },
+    { key: "end", revealSteps: 1 }
+  ]);
+  const root = document.createElement("main");
+  const shell = await mountForTest({ root, fetcher: fetchForManifest(responseManifest), window });
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { key: "intro" } } }));
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(2);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2, step: 0 } } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(2);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2, step: 0 } } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "first" } }));
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(2);
+});
+
+it("next is a no-op at the last slide's last reveal step", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro" },
+    { key: "end", revealSteps: 1 }
+  ]);
+  const root = document.createElement("main");
+  const changes: unknown[] = [];
+  const steps: unknown[] = [];
+  listenWindow("peitho:slidechange", (event) => changes.push((event as CustomEvent).detail));
+  listenWindow("peitho:stepchange", (event) => steps.push((event as CustomEvent).detail));
+
+  const shell = await mountForTest({ root, fetcher: fetchForManifest(responseManifest), window });
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "last" } }));
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.currentStep).toBe(1);
+  expect(changes).toEqual([
+    { key: "intro", index: 0, total: 2, previousIndex: null, step: 0, stepCount: 0 },
+    { key: "end", index: 1, total: 2, previousIndex: 0, step: 1, stepCount: 1 }
+  ]);
+  expect(steps).toEqual([]);
+});
+
+it("treats invalid revealSteps values as zero", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "negative", revealSteps: -3 },
+    { key: "stringy", revealSteps: "x" as unknown as number }
+  ]);
+  const root = document.createElement("main");
+  const changes: unknown[] = [];
+  listenWindow("peitho:slidechange", (event) => changes.push((event as CustomEvent).detail));
+  const shell = await mountForTest({ root, fetcher: fetchForManifest(responseManifest), window });
+
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(0);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 1, step: 5 } } }));
+  expect(shell.currentIndex).toBe(1);
+  expect(shell.currentStep).toBe(0);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+  expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(0);
+  expect(changes).toEqual([
+    { key: "negative", index: 0, total: 2, previousIndex: null, step: 0, stepCount: 0 },
+    { key: "stringy", index: 1, total: 2, previousIndex: 0, step: 0, stepCount: 0 },
+    { key: "negative", index: 0, total: 2, previousIndex: 1, step: 0, stepCount: 0 }
+  ]);
 });
 
 it("next skips one or more skipped slides in the present shell", async () => {
@@ -472,7 +601,9 @@ it("opens on the first non-skipped slide in the present shell", async () => {
   const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-slide")];
 
   expect(shell.currentIndex).toBe(1);
-  expect(changes).toEqual([{ key: "main", index: 1, total: 3, previousIndex: null }]);
+  expect(changes).toEqual([
+    { key: "main", index: 1, total: 3, previousIndex: null, step: 0, stepCount: 0 }
+  ]);
   expect(hosts.map((host) => host.hidden)).toEqual([true, false, true]);
 });
 

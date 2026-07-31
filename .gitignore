@@ -13,3 +13,4 @@ packages/peitho-present/dist/*
 site/static/giallo.css
 site/static/deck-sources/
 .zola-examples/
+.worktrees/
