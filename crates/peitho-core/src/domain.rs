@@ -646,6 +646,17 @@ pub enum FragmentKind<S = RawImagePath> {
     },
 }
 
+/// Reveal step coverage for one source fragment.
+///
+/// `start` is the 1-based reveal step where this fragment begins. `len` is
+/// the number of steps it occupies: non-list fragments use `1`, and lists use
+/// one step per top-level list item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevealSpan {
+    pub start: usize,
+    pub len: usize,
+}
+
 impl<S> FragmentKind<S> {
     pub fn default_accepts(&self) -> Accepts {
         match self {
@@ -699,6 +710,7 @@ impl<S> fmt::Display for FragmentKind<S> {
 pub struct SourceFragment<S = RawImagePath> {
     line: usize,
     kind: FragmentKind<S>,
+    reveal_span: Option<RevealSpan>,
     markdown: String,
     text: String,
     code: String,
@@ -715,6 +727,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Heading { level },
+            reveal_span: None,
             markdown: markdown.into(),
             text: text.into(),
             code: String::new(),
@@ -726,6 +739,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Paragraph,
+            reveal_span: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -737,6 +751,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::List,
+            reveal_span: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -749,6 +764,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Code,
+            reveal_span: None,
             markdown: code.clone(),
             text: String::new(),
             code,
@@ -765,6 +781,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Math { html: html.into() },
+            reveal_span: None,
             markdown: latex_source.clone(),
             text: String::new(),
             code: latex_source,
@@ -776,6 +793,7 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Footnotes { entries },
+            reveal_span: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -791,11 +809,17 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::SlotGroup { name, children },
+            reveal_span: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
             language: None,
         }
+    }
+
+    pub(crate) fn with_reveal_span(mut self, span: RevealSpan) -> Self {
+        self.reveal_span = Some(span);
+        self
     }
 }
 
@@ -807,6 +831,7 @@ impl<S> SourceFragment<S> {
                 alt: alt.into(),
                 src,
             },
+            reveal_span: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -828,7 +853,16 @@ impl<S> SourceFragment<S> {
         self,
         f: &mut dyn FnMut(S) -> std::result::Result<T, E>,
     ) -> std::result::Result<SourceFragment<T>, E> {
-        let kind = match self.kind {
+        let SourceFragment {
+            line,
+            kind,
+            reveal_span,
+            markdown,
+            text,
+            code,
+            language,
+        } = self;
+        let kind = match kind {
             FragmentKind::Heading { level } => FragmentKind::Heading { level },
             FragmentKind::Paragraph => FragmentKind::Paragraph,
             FragmentKind::Text => FragmentKind::Text,
@@ -849,12 +883,13 @@ impl<S> SourceFragment<S> {
             }
         };
         Ok(SourceFragment {
-            line: self.line,
+            line,
             kind,
-            markdown: self.markdown,
-            text: self.text,
-            code: self.code,
-            language: self.language,
+            reveal_span,
+            markdown,
+            text,
+            code,
+            language,
         })
     }
 
@@ -864,6 +899,10 @@ impl<S> SourceFragment<S> {
 
     pub fn kind(&self) -> &FragmentKind<S> {
         &self.kind
+    }
+
+    pub fn reveal_span(&self) -> Option<RevealSpan> {
+        self.reveal_span
     }
 
     pub fn markdown(&self) -> &str {
@@ -1024,6 +1063,22 @@ mod tests {
         assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
         assert_eq!(fragment.kind().removal_noun(), "footnote block");
         assert_eq!(fragment.kind().to_string(), "footnotes");
+    }
+
+    #[test]
+    fn image_src_mapping_preserves_reveal_span() {
+        let span = RevealSpan { start: 3, len: 1 };
+        let fragment = SourceFragment::image(7, "A", RawImagePath::new_unchecked("a.png".into()))
+            .with_reveal_span(span);
+        let mapped = fragment
+            .try_map_image_src(|_| {
+                Ok::<_, String>(
+                    ResolvedImagePath::from_hashed_asset("0123456789abcdef", "a.png").unwrap(),
+                )
+            })
+            .unwrap();
+
+        assert_eq!(mapped.reveal_span(), Some(span));
     }
 
     #[test]

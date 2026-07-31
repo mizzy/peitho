@@ -79,105 +79,124 @@ fn transform_fragment<R: SvgRunner>(
     runner: &R,
     cache_dir: &Path,
 ) -> Result<SourceFragment> {
-    if let Some(tag) = fragment.language() {
-        if matches!(fragment.kind(), FragmentKind::Code) {
-            if let Some(renderer) = config.renderer_for(tag) {
-                let renderer = match renderer {
-                    CodeImageRenderer::External(command) => SvgCodeImageRenderer::External(command),
-                    CodeImageRenderer::BuiltinMermaid => SvgCodeImageRenderer::BuiltinMermaid,
-                    CodeImageRenderer::BuiltinMath => {
-                        return transform_builtin_math_fragment(
-                            fragment.line(),
-                            tag,
-                            fragment.code_text(),
-                        );
-                    }
-                };
-                let key = match &renderer {
-                    SvgCodeImageRenderer::External(command) => {
-                        code_image_cache_key(command, fragment.code_text())
-                    }
-                    SvgCodeImageRenderer::BuiltinMermaid => {
-                        builtin_mermaid_cache_key(fragment.code_text())
-                    }
-                };
-                let cache_path = cache_dir.join(format!("{key}.svg"));
-                fs::create_dir_all(cache_dir).map_err(|err| {
-                    code_image_error(
-                        fragment.line(),
-                        tag,
-                        format!("failed to create code image cache directory: {err}"),
-                        "make the .peitho directory writable and rebuild",
-                    )
-                })?;
-                let cache_hit = valid_cached_svg(&cache_path);
-                if !cache_hit {
-                    let (bytes, output_context) = match &renderer {
-                        SvgCodeImageRenderer::External(command) => {
-                            let bytes =
-                                runner.run(command, fragment.code_text()).map_err(|err| {
-                                    code_image_error(fragment.line(), tag, err.message, err.help)
-                                })?;
-                            (bytes, CodeImageOutputContext::ExternalCommand)
+    let reveal_span = fragment.reveal_span();
+    let transformed = (|| -> Result<SourceFragment> {
+        if let Some(tag) = fragment.language() {
+            if matches!(fragment.kind(), FragmentKind::Code) {
+                if let Some(renderer) = config.renderer_for(tag) {
+                    let renderer = match renderer {
+                        CodeImageRenderer::External(command) => {
+                            SvgCodeImageRenderer::External(command)
                         }
-                        SvgCodeImageRenderer::BuiltinMermaid => {
-                            let bytes = render_builtin_mermaid(fragment.code_text()).map_err(
-                                |message| {
-                                    code_image_error(
-                                        fragment.line(),
-                                        tag,
-                                        message,
-                                        builtin_mermaid_override_help(),
-                                    )
-                                },
-                            )?;
-                            (bytes, CodeImageOutputContext::BuiltinMermaid)
+                        CodeImageRenderer::BuiltinMermaid => SvgCodeImageRenderer::BuiltinMermaid,
+                        CodeImageRenderer::BuiltinMath => {
+                            return transform_builtin_math_fragment(
+                                fragment.line(),
+                                tag,
+                                fragment.code_text(),
+                            );
                         }
                     };
-                    validate_svg_output(fragment.line(), tag, &bytes, output_context)?;
-                    let bytes =
-                        normalize_svg_intrinsic_size(fragment.line(), tag, &bytes, output_context)?;
-                    write_cache_file_atomic(&cache_path, bytes.as_ref()).map_err(|err| {
+                    let key = match &renderer {
+                        SvgCodeImageRenderer::External(command) => {
+                            code_image_cache_key(command, fragment.code_text())
+                        }
+                        SvgCodeImageRenderer::BuiltinMermaid => {
+                            builtin_mermaid_cache_key(fragment.code_text())
+                        }
+                    };
+                    let cache_path = cache_dir.join(format!("{key}.svg"));
+                    fs::create_dir_all(cache_dir).map_err(|err| {
                         code_image_error(
                             fragment.line(),
                             tag,
-                            format!("failed to write code image cache file: {err}"),
+                            format!("failed to create code image cache directory: {err}"),
                             "make the .peitho directory writable and rebuild",
                         )
                     })?;
+                    let cache_hit = valid_cached_svg(&cache_path);
+                    if !cache_hit {
+                        let (bytes, output_context) = match &renderer {
+                            SvgCodeImageRenderer::External(command) => {
+                                let bytes =
+                                    runner.run(command, fragment.code_text()).map_err(|err| {
+                                        code_image_error(
+                                            fragment.line(),
+                                            tag,
+                                            err.message,
+                                            err.help,
+                                        )
+                                    })?;
+                                (bytes, CodeImageOutputContext::ExternalCommand)
+                            }
+                            SvgCodeImageRenderer::BuiltinMermaid => {
+                                let bytes = render_builtin_mermaid(fragment.code_text()).map_err(
+                                    |message| {
+                                        code_image_error(
+                                            fragment.line(),
+                                            tag,
+                                            message,
+                                            builtin_mermaid_override_help(),
+                                        )
+                                    },
+                                )?;
+                                (bytes, CodeImageOutputContext::BuiltinMermaid)
+                            }
+                        };
+                        validate_svg_output(fragment.line(), tag, &bytes, output_context)?;
+                        let bytes = normalize_svg_intrinsic_size(
+                            fragment.line(),
+                            tag,
+                            &bytes,
+                            output_context,
+                        )?;
+                        write_cache_file_atomic(&cache_path, bytes.as_ref()).map_err(|err| {
+                            code_image_error(
+                                fragment.line(),
+                                tag,
+                                format!("failed to write code image cache file: {err}"),
+                                "make the .peitho directory writable and rebuild",
+                            )
+                        })?;
+                    }
+                    let raw = RawImagePath::from_code_images_cache(&key);
+                    return Ok(SourceFragment::image(
+                        fragment.line(),
+                        format!("diagram ({tag})"),
+                        raw,
+                    ));
                 }
-                let raw = RawImagePath::from_code_images_cache(&key);
-                return Ok(SourceFragment::image(
-                    fragment.line(),
-                    format!("diagram ({tag})"),
-                    raw,
-                ));
             }
         }
-    }
 
-    match fragment.kind() {
-        FragmentKind::SlotGroup { name, children } => {
-            let children = children
-                .clone()
-                .into_iter()
-                .map(|child| transform_fragment(child, config, runner, cache_dir))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(SourceFragment::slot_group(
-                fragment.line(),
-                name.clone(),
-                children,
-            ))
+        match fragment.kind() {
+            FragmentKind::SlotGroup { name, children } => {
+                let children = children
+                    .clone()
+                    .into_iter()
+                    .map(|child| transform_fragment(child, config, runner, cache_dir))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(SourceFragment::slot_group(
+                    fragment.line(),
+                    name.clone(),
+                    children,
+                ))
+            }
+            FragmentKind::Heading { .. }
+            | FragmentKind::Paragraph
+            | FragmentKind::Text
+            | FragmentKind::Code
+            | FragmentKind::Math { .. }
+            | FragmentKind::Footnotes { .. }
+            | FragmentKind::Image { .. }
+            | FragmentKind::List => Ok(fragment),
         }
-        FragmentKind::Heading { .. }
-        | FragmentKind::Paragraph
-        | FragmentKind::Text
-        | FragmentKind::Code
-        | FragmentKind::Math { .. }
-        | FragmentKind::Footnotes { .. }
-        | FragmentKind::Image { .. }
-        | FragmentKind::List => Ok(fragment),
-    }
+    })()?;
+
+    Ok(match reveal_span {
+        Some(span) => transformed.with_reveal_span(span),
+        None => transformed,
+    })
 }
 
 fn render_builtin_mermaid(code_text: &str) -> std::result::Result<Vec<u8>, String> {
@@ -978,7 +997,7 @@ mod tests {
         check::check_deck,
         domain::{
             CodeImageCommand, CodeImagesConfig, FragmentKind, ResolvedImageAsset,
-            ResolvedImagePath, SlotName, SourceFragment,
+            ResolvedImagePath, RevealSpan, SlotName, SourceFragment,
         },
         layout::{parse_layout, Layouts},
         mapping::{dispatch_by_convention, map_by_convention},
@@ -1063,6 +1082,7 @@ mod tests {
                     code.to_owned(),
                 )],
                 skip: false,
+                step_count: 0,
                 page_number_hidden: false,
                 notes: None,
             }],
@@ -1084,6 +1104,30 @@ mod tests {
                     latex.to_owned(),
                 )],
                 skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        )
+    }
+
+    fn deck_with_spanned_code(language: &str, body: &str, span: RevealSpan) -> Deck<Parsed> {
+        Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: crate::domain::SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![SourceFragment::code(
+                    7,
+                    Some(language.to_owned()),
+                    body.to_owned(),
+                )
+                .with_reveal_span(span)],
+                skip: false,
+                step_count: span.len,
                 page_number_hidden: false,
                 notes: None,
             }],
@@ -1156,6 +1200,46 @@ mod tests {
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
             br#"<svg viewBox="0 0 10 10" width="10" height="10">diagram</svg>"#
         );
+    }
+
+    #[test]
+    fn transformed_mermaid_code_preserves_reveal_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">diagram</svg>"#);
+        let span = RevealSpan { start: 1, len: 1 };
+
+        let deck = transform_code_images(
+            deck_with_spanned_code("mermaid", "graph TD", span),
+            &config(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[0];
+
+        assert!(matches!(fragment.kind(), FragmentKind::Image { .. }));
+        assert_eq!(fragment.reveal_span(), Some(span));
+    }
+
+    #[test]
+    fn transformed_builtin_math_code_preserves_reveal_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">unused</svg>"#);
+        let span = RevealSpan { start: 1, len: 1 };
+
+        let deck = transform_code_images(
+            deck_with_spanned_code("math", r#"\frac{1}{2}"#, span),
+            &CodeImagesConfig::default(),
+            &runner,
+            &cache_dir,
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[0];
+
+        assert!(matches!(fragment.kind(), FragmentKind::Math { .. }));
+        assert_eq!(fragment.reveal_span(), Some(span));
     }
 
     #[test]
