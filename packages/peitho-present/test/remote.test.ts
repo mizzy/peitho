@@ -27,7 +27,7 @@ function fail(status: number): Response {
 }
 
 function manifestWithSlides(
-  slides: Array<{ key: string; skip?: boolean; title?: string }>,
+  slides: Array<{ key: string; skip?: boolean; title?: string; revealSteps?: number }>,
   overrides: Partial<Manifest> = {}
 ): Manifest {
   return {
@@ -46,7 +46,7 @@ function manifestWithSlides(
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
-      revealSteps: 0,
+      revealSteps: slide.revealSteps ?? 0,
       text: { title: slide.title ?? "", body: "", code: "" }
     })),
     images: [],
@@ -140,6 +140,7 @@ function mockMountPresentShell(navigations: unknown[] = []): (options: ShellOpti
     return {
       manifest: null,
       currentIndex: 0,
+      currentStep: 0,
       navigate: vi.fn(),
       elapsedMs: () => 0,
       isPaused: () => false,
@@ -241,10 +242,66 @@ it("remote controller resolves next and prev across skipped slides and posts abs
   );
 
   button(root, "next").click();
-  channel.deliver({ index: 2 });
+  channel.deliver({ index: 2, step: 0 });
   button(root, "prev").click();
 
-  expect(channel.sent).toEqual([{ index: 2 }, { index: 0 }]);
+  expect(channel.sent).toEqual([
+    { index: 2, step: 0 },
+    { index: 0, step: 0 }
+  ]);
+});
+
+it("remote resolves reveal steps locally and posts absolute index step targets", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([
+      { key: "intro", revealSteps: 2 },
+      { key: "skip", skip: true, revealSteps: 4 },
+      { key: "end", revealSteps: 1 }
+    ])
+  );
+
+  button(root, "next").click();
+  button(root, "next").click();
+  button(root, "next").click();
+  channel.deliver({ index: 2, step: 0 });
+  button(root, "prev").click();
+
+  expect(channel.sent).toEqual([
+    { index: 0, step: 1 },
+    { index: 0, step: 2 },
+    { index: 2, step: 0 },
+    { index: 0, step: 2 }
+  ]);
+});
+
+it("remote preview mirrors the current reveal step", async () => {
+  const previewNavigations: unknown[] = [];
+  const { channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro", revealSteps: 2 }]),
+    mockChannel(),
+    { mountPresentShell: mockMountPresentShell(previewNavigations) }
+  );
+
+  channel.deliver({ index: 0, step: 1 });
+
+  expect(previewNavigations.at(-1)).toEqual({ to: { index: 0, step: 1 } });
+});
+
+it("remote disables previous and next at reveal-step boundaries", async () => {
+  const { root, channel } = await mountRemoteForTest(
+    manifestWithSlides([{ key: "intro", revealSteps: 2 }, { key: "end", revealSteps: 1 }])
+  );
+
+  expect(button(root, "prev").disabled).toBe(true);
+  expect(button(root, "next").disabled).toBe(false);
+
+  channel.deliver({ index: 1, step: 0 });
+  expect(button(root, "prev").disabled).toBe(false);
+  expect(button(root, "next").disabled).toBe(false);
+
+  channel.deliver({ index: 1, step: 1 });
+  expect(button(root, "prev").disabled).toBe(false);
+  expect(button(root, "next").disabled).toBe(true);
 });
 
 it("remote controls are disabled and silent before the initial sync snapshot is applied", async () => {
@@ -295,7 +352,7 @@ it("remote controls enable after synced replay is reported", async () => {
     root.querySelector<HTMLButtonElement>('[data-peitho-action="timer-reset"]')?.disabled
   ).toBe(true);
   button(root, "next").click();
-  expect(channel.sent).toEqual([{ index: 1 }]);
+  expect(channel.sent).toEqual([{ index: 1, step: 0 }]);
 });
 
 it("remote controller transitions from loading to active to read-only ended", async () => {
@@ -348,7 +405,10 @@ it("remote controller advances optimistically across rapid taps", async () => {
   button(root, "next").click();
   button(root, "next").click();
 
-  expect(channel.sent).toEqual([{ index: 1 }, { index: 2 }]);
+  expect(channel.sent).toEqual([
+    { index: 1, step: 0 },
+    { index: 2, step: 0 }
+  ]);
 });
 
 it("remote controller treats a null replay index as the first non-skipped slide", async () => {
@@ -359,7 +419,7 @@ it("remote controller treats a null replay index as the first non-skipped slide"
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("2 / 3");
   button(root, "next").click();
 
-  expect(channel.sent).toEqual([{ index: 2 }]);
+  expect(channel.sent).toEqual([{ index: 2, step: 0 }]);
 });
 
 it("remote renders preview title section notes and section-aware chase chrome", async () => {
@@ -385,14 +445,14 @@ it("remote renders preview title section notes and section-aware chase chrome", 
     mountPresentShell: mockMountPresentShell(previewNavigations)
   });
 
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
   channel.deliver({
     timer: { running: true, elapsedMs: 20_000, atMs: 1_000_000 },
     nowMs: 1_005_000
   });
 
   expect(root.querySelector('[data-preview-shell="mounted"]')).not.toBeNull();
-  expect(previewNavigations.at(-1)).toEqual({ to: { index: 1 } });
+  expect(previewNavigations.at(-1)).toEqual({ to: { index: 1, step: 0 } });
   expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Architecture");
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("2 / 3");
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="chase-fill"]')?.style.width).toBe(
@@ -438,7 +498,7 @@ it("remote removes the section line when the current slide is outside every sect
     "Intro · slide 1 / 1 in section"
   );
 
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
 
   expect(root.querySelector('[data-peitho-remote="section"]')).toBeNull();
 });
@@ -482,7 +542,7 @@ it("remote mounts with empty notes placeholders when notes fetch fails", async (
     "true"
   );
 
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
 
   expect(root.querySelector('[data-peitho-remote="title"]')?.textContent).toBe("Details");
   expect(root.querySelector('[data-peitho-remote="notes"]')?.textContent).toBe(
@@ -496,7 +556,7 @@ it("remote omits planned rows when the deck has no time", async () => {
   const { root, channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro", title: "Intro" }, { key: "end", title: "End" }])
   );
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
 
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="planned"]')?.hidden).toBe(true);
   expect(root.querySelector<HTMLElement>('[data-peitho-remote="pace-delta"]')?.hidden).toBe(true);
@@ -526,7 +586,7 @@ it("remote disables previous and next based on first and last non-skipped slides
   expect(button(root, "prev").disabled).toBe(true);
   expect(button(root, "next").disabled).toBe(false);
 
-  channel.deliver({ index: 2 });
+  channel.deliver({ index: 2, step: 0 });
   expect(button(root, "prev").disabled).toBe(false);
   expect(button(root, "next").disabled).toBe(true);
 });
@@ -657,7 +717,7 @@ it("remote chase renders on-pace behind and overrun states", async () => {
     )
   );
 
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
   channel.deliver({
     timer: { running: true, elapsedMs: 25_000, atMs: 10_000 },
     nowMs: 10_000
@@ -811,7 +871,7 @@ it("remote chase keeps presenter-exact marker semantics on uneven sections", asy
   );
   const { root, channel } = await mountRemoteForTest(manifest);
 
-  channel.deliver({ index: 5 });
+  channel.deliver({ index: 5, step: 0 });
   channel.deliver({
     timer: { running: true, elapsedMs: 8 * 60_000, atMs: 10_000 },
     nowMs: 10_000
@@ -842,7 +902,7 @@ it("remote chase puts the last-slide rabbit at the slide goal", async () => {
     )
   );
 
-  channel.deliver({ index: 2 });
+  channel.deliver({ index: 2, step: 0 });
   channel.deliver({
     timer: { running: true, elapsedMs: 60_000, atMs: 10_000 },
     nowMs: 10_000
@@ -884,9 +944,9 @@ it("remote controller no-ops at the ends", async () => {
     manifestWithSlides([{ key: "intro" }, { key: "middle" }, { key: "end" }])
   );
 
-  channel.deliver({ index: 2 });
+  channel.deliver({ index: 2, step: 0 });
   button(root, "next").click();
-  channel.deliver({ index: 0 });
+  channel.deliver({ index: 0, step: 0 });
   button(root, "prev").click();
 
   expect(channel.sent).toEqual([]);
@@ -897,10 +957,10 @@ it("remote controller replays and clamps out-of-range indexes into the counter",
     manifestWithSlides([{ key: "intro" }, { key: "middle" }, { key: "end" }])
   );
 
-  channel.deliver({ index: 99 });
+  channel.deliver({ index: 99, step: 0 });
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("3 / 3");
 
-  channel.deliver({ index: -10 });
+  channel.deliver({ index: -10, step: 0 });
   expect(root.querySelector('[data-peitho-remote="counter"]')?.textContent).toBe("1 / 3");
 });
 
@@ -990,7 +1050,7 @@ it("remote controller does not reload on ordinary sync messages", async () => {
     { reload }
   );
 
-  channel.deliver({ index: 1 });
+  channel.deliver({ index: 1, step: 0 });
   channel.deliver({ swapped: true });
   channel.deliver({ generation: 2 });
   channel.deliver({

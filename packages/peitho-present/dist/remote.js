@@ -297,12 +297,39 @@ function initialSlideIndex(slides) {
   return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
 
+// src/stepnav.ts
+function revealStepCount(slide) {
+  const value = slide?.revealSteps;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+function clampStep(step, stepCount) {
+  if (!Number.isFinite(step)) return 0;
+  return Math.max(0, Math.min(Math.floor(step), stepCount));
+}
+function resolveStepTarget(slides, position, direction) {
+  if (direction === 1) {
+    const stepCount = revealStepCount(slides[position.index]);
+    if (position.step < stepCount) {
+      return { index: position.index, step: position.step + 1 };
+    }
+    const index2 = nextNonSkippedIndex(slides, position.index, 1);
+    return index2 === null ? null : { index: index2, step: 0 };
+  }
+  if (position.step > 0) {
+    return { index: position.index, step: position.step - 1 };
+  }
+  const index = nextNonSkippedIndex(slides, position.index, -1);
+  return index === null ? null : { index, step: revealStepCount(slides[index]) };
+}
+
 // src/shell.ts
 var DEFAULT_POINTER_BASE_COLOR = "#38bdf8";
 var DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
 var POINTER_TRAIL_DURATION_MS = 500;
 var POINTER_TRAIL_CAP = 64;
 var POINTER_CORE_MIX_TO_WHITE = 0.65;
+var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 var CSS_NAMED_COLORS = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -679,6 +706,7 @@ function installPointerOverlay(options) {
 var PresentShellController = class {
   manifest = null;
   currentIndex = -1;
+  currentStep = 0;
   slides = [];
   root;
   fetcher;
@@ -758,7 +786,7 @@ var PresentShellController = class {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
+      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
     } catch (error) {
       this.clearCanvasRootProperties();
@@ -767,9 +795,9 @@ var PresentShellController = class {
     }
   }
   navigate(to) {
-    const index = this.resolveTarget(to);
-    if (index === null) return;
-    this.show(index);
+    const target = this.resolveTarget(to);
+    if (target === null) return;
+    this.show(target.index, target.step);
   }
   elapsedMs() {
     if (this.startedAtValue === null) return 0;
@@ -858,6 +886,9 @@ var PresentShellController = class {
     const style = this.doc.createElement("style");
     style.textContent = css;
     shadow.appendChild(style);
+    const revealStyle = this.doc.createElement("style");
+    revealStyle.textContent = REVEAL_HIDDEN_CSS;
+    shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
@@ -885,8 +916,8 @@ var PresentShellController = class {
     });
   }
   resolveTarget(to) {
-    if (to === "first") return 0;
-    if (to === "last") return this.slides.length - 1;
+    if (to === "first") return this.resolveDirectIndex(0);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
     if (to === "next") return this.resolveSequentialTarget(1);
     if (to === "prev") return this.resolveSequentialTarget(-1);
     if ("index" in to) {
@@ -894,44 +925,86 @@ var PresentShellController = class {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return to.index;
+      return this.resolveDirectIndex(to.index, to.step);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return index;
+    return this.resolveDirectIndex(index);
+  }
+  resolveDirectIndex(index, step) {
+    if (index < 0 || index >= this.slides.length) return null;
+    const stepCount = this.stepCountFor(index);
+    return {
+      index,
+      step: step === void 0 ? stepCount : clampStep(step, stepCount)
+    };
   }
   resolveSequentialTarget(direction) {
-    return nextNonSkippedIndex(
+    return resolveStepTarget(
       this.slides.map((slide) => slide.meta),
-      this.currentIndex,
+      { index: this.currentIndex, step: this.currentStep },
       direction
     );
   }
-  show(index) {
+  stepCountFor(index) {
+    return revealStepCount(this.slides[index]?.meta);
+  }
+  show(index, step) {
     if (index < 0 || index >= this.slides.length) {
       this.log.error(`Unknown slide target: ${index}`);
       return;
     }
-    if (index === this.currentIndex) return;
+    const stepCount = this.stepCountFor(index);
+    const nextStep = clampStep(step, stepCount);
+    const indexChanged = index !== this.currentIndex;
+    const stepChanged = nextStep !== this.currentStep;
+    if (!indexChanged && !stepChanged) return;
     this.slides.forEach((slide2, slideIndex) => {
       slide2.host.hidden = slideIndex !== index;
     });
     const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
     this.currentIndex = index;
+    this.currentStep = nextStep;
     const slide = this.slides[index];
+    this.applyRevealState(slide.host, nextStep);
+    if (indexChanged) {
+      this.bus.dispatchEvent(
+        new CustomEvent("peitho:slidechange", {
+          detail: {
+            key: slide.meta.key,
+            index: slide.meta.index,
+            total: this.slides.length,
+            previousIndex,
+            step: nextStep,
+            stepCount
+          }
+        })
+      );
+      return;
+    }
     this.bus.dispatchEvent(
-      new CustomEvent("peitho:slidechange", {
+      new CustomEvent("peitho:stepchange", {
         detail: {
-          key: slide.meta.key,
           index: slide.meta.index,
-          total: this.slides.length,
-          previousIndex
+          step: nextStep,
+          stepCount
         }
       })
     );
+  }
+  applyRevealState(host, step) {
+    const markers = host.shadowRoot?.querySelectorAll("[data-reveal-step]");
+    if (markers == null) return;
+    for (const marker of markers) {
+      const revealStep = Number(marker.dataset.revealStep);
+      marker.toggleAttribute(
+        "data-reveal-hidden",
+        Number.isFinite(revealStep) && revealStep > step
+      );
+    }
   }
   startPresentation() {
     if (this.startedAtValue !== null) return;
@@ -1114,8 +1187,11 @@ function isRecord2(value) {
 function isCloseSyncMessage(value) {
   return isRecord2(value) && value.close === true;
 }
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
 function isIndexSyncMessage(value) {
-  return isRecord2(value) && typeof value.index === "number" && Number.isFinite(value.index);
+  return isRecord2(value) && isFiniteNumber(value.index) && isFiniteNumber(value.step);
 }
 function isSwappedSyncMessage(value) {
   return isRecord2(value) && typeof value.swapped === "boolean";
@@ -1137,6 +1213,13 @@ function isTimerReplaySyncMessage(value) {
 }
 function isGenerationSyncMessage(value) {
   return isRecord2(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
+}
+function serverIndexReplayMessage(value) {
+  if (!isFiniteNumber(value.index)) return null;
+  return {
+    index: value.index,
+    step: isFiniteNumber(value.step) ? value.step : 0
+  };
 }
 function serverSyncChannelFactory(options = {}) {
   const url = options.url ?? "/sync";
@@ -1179,8 +1262,9 @@ function serverSyncChannelFactory(options = {}) {
           onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
         }
       }
-      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
-        onmessage?.({ data: { index: body.index } });
+      const indexReplay = serverIndexReplayMessage(body);
+      if (!skipAbsoluteState && indexReplay !== null) {
+        onmessage?.({ data: indexReplay });
       }
       if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
@@ -1263,11 +1347,12 @@ function serverSyncChannelFactory(options = {}) {
             continue;
           }
           seq = body.seq;
-          if (body.message != null) {
+          const skipAbsoluteState = body.seq < highestAckedPostSeq;
+          if (body.message != null && !(skipAbsoluteState && isIndexSyncMessage(body.message))) {
             onmessage?.({ data: body.message });
           }
           deliverReplayState(body, {
-            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            skipAbsoluteState,
             deferTimerReplay: pendingTimerPosts > 0
           });
         } catch (error) {
@@ -1685,10 +1770,10 @@ function installRemoteSyncBridge(options) {
     if (!synced) return;
     const to = event.detail?.to;
     if (to !== "next" && to !== "prev") return;
-    const target = resolveRemoteTarget(options.slides, options.getCurrentIndex(), to);
+    const target = resolveRemoteTarget(options.slides, options.getCurrentPosition(), to);
     if (target === null) return;
-    channel.postMessage({ index: target });
-    options.setCurrentIndex(target);
+    channel.postMessage(target);
+    options.setCurrentPosition(target);
   };
   const onTimerControl = (event) => {
     if (!synced) return;
@@ -1716,7 +1801,7 @@ function installRemoteSyncBridge(options) {
       return;
     }
     if (isIndexSyncMessage(data)) {
-      options.setCurrentIndex(data.index);
+      options.setCurrentPosition({ index: data.index, step: data.step });
       return;
     }
     if (isTimerReplaySyncMessage(data)) {
@@ -1748,7 +1833,6 @@ function installRemoteSyncBridge(options) {
 }
 var RemoteController = class {
   manifest = null;
-  currentIndex = null;
   root;
   manifestUrl;
   notesUrl;
@@ -1766,6 +1850,7 @@ var RemoteController = class {
   notes = { version: 1, notes: {} };
   renderedNotesValue = null;
   slides = [];
+  currentPosition = null;
   timerState = null;
   controlsCleanup = null;
   syncCleanup = null;
@@ -1786,6 +1871,9 @@ var RemoteController = class {
     this.now = options.now ?? Date.now;
     this.reload = options.reload ?? (() => this.win.location.reload());
   }
+  get currentIndex() {
+    return this.currentPosition?.index ?? null;
+  }
   async load() {
     try {
       const manifest = await this.fetchJson(this.manifestUrl);
@@ -1794,9 +1882,10 @@ var RemoteController = class {
       this.slides = manifest.slides.map((slide) => ({
         key: slide.key,
         skip: slide.skip === true,
-        title: slide.text.title
+        title: slide.text.title,
+        revealSteps: revealStepCount(slide)
       }));
-      this.currentIndex = initialSlideIndex(this.slides);
+      this.currentPosition = initialRemotePosition(this.slides);
       this.controlsCleanup = installRemoteControls({
         root: this.root,
         document: this.doc,
@@ -1829,8 +1918,8 @@ var RemoteController = class {
         channelFactory: this.channelFactory,
         bus: this.bus,
         now: this.now,
-        getCurrentIndex: () => this.currentIndex,
-        setCurrentIndex: (index) => this.setCurrentIndex(index),
+        getCurrentPosition: () => this.currentPosition,
+        setCurrentPosition: (position) => this.setCurrentPosition(position),
         getTimerState: () => this.timerState,
         setTimerState: (state) => this.setTimerState(state),
         setSynced: () => this.setSynced(),
@@ -1868,8 +1957,8 @@ var RemoteController = class {
       return { version: 1, notes: {} };
     }
   }
-  setCurrentIndex(index) {
-    this.currentIndex = clampIndex(index, this.slides.length);
+  setCurrentPosition(position) {
+    this.currentPosition = clampRemotePosition(position, this.slides);
     this.render();
   }
   setTimerState(state) {
@@ -1896,7 +1985,8 @@ var RemoteController = class {
     const container = this.root.querySelector(".peitho-remote");
     if (container == null) return;
     container.dataset.peithoEnded = isReadOnly(this.state) ? "true" : "false";
-    const currentIndex = this.currentIndex;
+    const currentPosition = this.currentPosition;
+    const currentIndex = currentPosition?.index ?? null;
     const slide = currentIndex == null ? null : manifest.slides[currentIndex];
     const total = this.slides.length;
     setText(this.root, "title", slideTitle(slide?.text.title));
@@ -1906,8 +1996,8 @@ var RemoteController = class {
     this.renderTimeDependentChrome(manifest, currentIndex);
     this.renderSection(manifest, currentIndex);
     this.renderNotes(slide?.key);
-    this.renderButtons(currentIndex);
-    this.syncPreview(currentIndex);
+    this.renderButtons(currentPosition);
+    this.syncPreview(currentPosition);
     this.updateTimerInterval();
   }
   renderChase(manifest, currentIndex) {
@@ -2037,17 +2127,19 @@ var RemoteController = class {
     notes.textContent = value;
     this.renderedNotesValue = value;
   }
-  renderButtons(currentIndex) {
+  renderButtons(currentPosition) {
     const prev = this.root.querySelector('[data-peitho-action="prev"]');
     const next = this.root.querySelector('[data-peitho-action="next"]');
     if (prev == null || next == null) return;
-    prev.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "prev") === null;
-    next.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentIndex, "next") === null;
+    prev.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentPosition, "prev") === null;
+    next.disabled = !canInteract(this.state) || resolveRemoteTarget(this.slides, currentPosition, "next") === null;
   }
-  syncPreview(currentIndex) {
-    if (currentIndex == null) return;
+  syncPreview(position) {
+    if (position == null) return;
     this.previewBus.dispatchEvent(
-      new CustomEvent("peitho:navigate", { detail: { to: { index: currentIndex } } })
+      new CustomEvent("peitho:navigate", {
+        detail: { to: { index: position.index, step: position.step } }
+      })
     );
   }
   currentElapsedMs() {
@@ -2122,10 +2214,20 @@ function isPointerMoveDetail(value) {
 function isUnitCoordinate2(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
-function resolveRemoteTarget(slides, currentIndex, to) {
-  const base = currentIndex ?? initialSlideIndex(slides);
-  if (base === null) return null;
-  return nextNonSkippedIndex(slides, base, to === "next" ? 1 : -1);
+function resolveRemoteTarget(slides, currentPosition, to) {
+  const current = clampRemotePosition(currentPosition ?? initialRemotePosition(slides), slides);
+  if (current === null) return null;
+  return resolveStepTarget(slides, current, to === "next" ? 1 : -1);
+}
+function initialRemotePosition(slides) {
+  const index = initialSlideIndex(slides);
+  return index === null ? null : { index, step: 0 };
+}
+function clampRemotePosition(position, slides) {
+  if (position === null) return null;
+  const index = clampIndex(position.index, slides.length);
+  if (index === null) return null;
+  return { index, step: clampStep(position.step, revealStepCount(slides[index])) };
 }
 function clampIndex(index, total) {
   if (total === 0) return null;

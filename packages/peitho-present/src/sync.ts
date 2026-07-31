@@ -6,9 +6,10 @@ export type TimerSyncMessage = { timer: TimerSyncState };
 export type TimerReplaySyncMessage = { timer: TimerSyncSnapshot; nowMs: number };
 export type SyncedSyncMessage = { synced: true };
 export type SessionChangedSyncMessage = { sessionChanged: true };
+type IndexSyncMessage = { index: number; step: number };
 
 export type SyncMessage =
-  | { index: number }
+  | IndexSyncMessage
   | { swapped: boolean }
   | TimerSyncMessage
   | { close: true };
@@ -41,6 +42,7 @@ type ServerSyncPollResponse = {
   seq: number;
   message: unknown;
   index?: unknown;
+  step?: unknown;
   swapped?: unknown;
   generation?: unknown;
   session?: unknown;
@@ -61,8 +63,12 @@ export function isCloseSyncMessage(value: unknown): value is { close: true } {
   return isRecord(value) && value.close === true;
 }
 
-export function isIndexSyncMessage(value: unknown): value is { index: number } {
-  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function isIndexSyncMessage(value: unknown): value is IndexSyncMessage {
+  return isRecord(value) && isFiniteNumber(value.index) && isFiniteNumber(value.step);
 }
 
 export function isSwappedSyncMessage(value: unknown): value is { swapped: boolean } {
@@ -107,6 +113,16 @@ export function isGenerationSyncMessage(value: unknown): value is { generation: 
     typeof value.generation === "number" &&
     Number.isFinite(value.generation)
   );
+}
+
+function serverIndexReplayMessage(
+  value: Partial<ServerSyncPollResponse>
+): IndexSyncMessage | null {
+  if (!isFiniteNumber(value.index)) return null;
+  return {
+    index: value.index,
+    step: isFiniteNumber(value.step) ? value.step : 0
+  };
 }
 
 function defaultChannelFactory(name: string): SyncChannel {
@@ -186,8 +202,9 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
         }
       }
-      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
-        onmessage?.({ data: { index: body.index } });
+      const indexReplay = serverIndexReplayMessage(body);
+      if (!skipAbsoluteState && indexReplay !== null) {
+        onmessage?.({ data: indexReplay });
       }
       if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
@@ -274,11 +291,12 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
             continue;
           }
           seq = body.seq;
-          if (body.message != null) {
+          const skipAbsoluteState = body.seq < highestAckedPostSeq;
+          if (body.message != null && !(skipAbsoluteState && isIndexSyncMessage(body.message))) {
             onmessage?.({ data: body.message });
           }
           deliverReplayState(body, {
-            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            skipAbsoluteState,
             deferTimerReplay: pendingTimerPosts > 0
           });
         } catch (error: unknown) {
@@ -365,10 +383,19 @@ export function installSyncBridge(
   const pathname = hooks.pathname ?? (() => win.location.pathname);
   const navigate = hooks.navigate ?? ((url) => win.location.replace(url));
   let synced = false;
-  const onSlideChange = (event: Event): void => {
-    const detail = (event as CustomEvent<{ index: number }>).detail;
-    if (typeof detail?.index !== "number") return;
-    channel.postMessage({ index: detail.index });
+  const navigationStateMessage = (detail: unknown): IndexSyncMessage | null => {
+    if (!isRecord(detail) || !isFiniteNumber(detail.index) || !isFiniteNumber(detail.step)) {
+      return null;
+    }
+    return { index: detail.index, step: detail.step };
+  };
+  const onNavigationStateChange = (event: Event): void => {
+    const message = navigationStateMessage((event as CustomEvent).detail);
+    if (message === null) {
+      console.error("Invalid peitho navigation state event");
+      return;
+    }
+    channel.postMessage(message);
   };
   const onCloseRequest = (): void => {
     channel.postMessage({ close: true });
@@ -407,7 +434,9 @@ export function installSyncBridge(
     }
     if (isIndexSyncMessage(data)) {
       bus.dispatchEvent(
-        new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } })
+        new CustomEvent("peitho:navigate", {
+          detail: { to: { index: data.index, step: data.step } }
+        })
       );
       return;
     }
@@ -441,12 +470,14 @@ export function installSyncBridge(
     }
     console.error("Invalid peitho sync message");
   };
-  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:slidechange", onNavigationStateChange);
+  bus.addEventListener("peitho:stepchange", onNavigationStateChange);
   bus.addEventListener("peitho:closerequest", onCloseRequest);
   bus.addEventListener("peitho:swaprequest", onSwapRequest);
   bus.addEventListener("peitho:timerchange", onTimerChange);
   return () => {
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:slidechange", onNavigationStateChange);
+    bus.removeEventListener("peitho:stepchange", onNavigationStateChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
     bus.removeEventListener("peitho:swaprequest", onSwapRequest);
     bus.removeEventListener("peitho:timerchange", onTimerChange);

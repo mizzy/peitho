@@ -88,9 +88,11 @@ it("exports strict sync message guards", () => {
   expect(isCloseSyncMessage({ close: true })).toBe(true);
   expect(isCloseSyncMessage({ close: false })).toBe(false);
 
-  expect(isIndexSyncMessage({ index: 1 })).toBe(true);
-  expect(isIndexSyncMessage({ index: Number.NaN })).toBe(false);
-  expect(isIndexSyncMessage({ index: Number.POSITIVE_INFINITY })).toBe(false);
+  expect(isIndexSyncMessage({ index: 1, step: 0 })).toBe(true);
+  expect(isIndexSyncMessage({ index: 1 })).toBe(false);
+  expect(isIndexSyncMessage({ index: Number.NaN, step: 0 })).toBe(false);
+  expect(isIndexSyncMessage({ index: Number.POSITIVE_INFINITY, step: 0 })).toBe(false);
+  expect(isIndexSyncMessage({ index: 1, step: Number.NaN })).toBe(false);
 
   expect(isSwappedSyncMessage({ swapped: true })).toBe(true);
   expect(isSwappedSyncMessage({ swapped: "true" })).toBe(false);
@@ -140,13 +142,13 @@ it("server sync channel posts local messages to /sync", async () => {
   });
   const channel = factory("peitho-sync");
 
-  channel.postMessage({ index: 2 });
+  channel.postMessage({ index: 2, step: 0 });
   await Promise.resolve();
 
   expect(fetcher).toHaveBeenCalledWith("/sync", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index: 2 }),
+    body: JSON.stringify({ index: 2, step: 0 }),
     keepalive: true
   });
   channel.close();
@@ -157,7 +159,7 @@ it("server sync channel polls and forwards long-poll messages", async () => {
     if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
     if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
     if (url === "/sync?seq=5") {
-      return Promise.resolve(okJson({ seq: 6, message: { index: 1 } }));
+      return Promise.resolve(okJson({ seq: 6, message: { index: 1, step: 0 } }));
     }
     return new Promise<Response>(() => undefined);
   }) as typeof fetch;
@@ -168,7 +170,7 @@ it("server sync channel polls and forwards long-poll messages", async () => {
   const received: unknown[] = [];
   channel.onmessage = (event) => received.push(event.data);
 
-  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]));
 
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith("/sync?seq=5", expect.objectContaining({ signal: expect.any(AbortSignal) }));
@@ -181,7 +183,9 @@ it("server sync channel replays poll response state after the poll message", asy
     if (init?.method === "POST") return Promise.resolve({ ok: true, status: 204 } as Response);
     if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
     if (url === "/sync?seq=5") {
-      return Promise.resolve(okJson({ seq: 6, message: { index: 1 }, index: 2, swapped: true }));
+      return Promise.resolve(
+        okJson({ seq: 6, message: { index: 1, step: 0 }, index: 2, step: 3, swapped: true })
+      );
     }
     return new Promise<Response>(() => undefined);
   }) as typeof fetch;
@@ -192,8 +196,8 @@ it("server sync channel replays poll response state after the poll message", asy
   await vi.waitFor(() =>
     expect(received).toEqual([
       { synced: true },
-      { index: 1 },
-      { index: 2 },
+      { index: 1, step: 0 },
+      { index: 2, step: 3 },
       { swapped: true }
     ])
   );
@@ -257,6 +261,7 @@ it("server sync channel delivers handshake replay timer before index and synced 
           seq: 4,
           message: null,
           index: 2,
+          step: 1,
           swapped: true,
           timer: { running: true, elapsedMs: 600_000, atMs: 10_000 },
           nowMs: 11_000
@@ -276,7 +281,7 @@ it("server sync channel delivers handshake replay timer before index and synced 
         timer: { running: true, elapsedMs: 600_000, atMs: 10_000 },
         nowMs: 11_000
       },
-      { index: 2 },
+      { index: 2, step: 1 },
       { swapped: true },
       { synced: true }
     ])
@@ -307,7 +312,7 @@ it("server sync channel does not replay backlog close messages after handshake",
 it("server sync channel replays handshake index then swapped through onmessage", async () => {
   const fetcher = vi.fn((url: string) => {
     if (url === "/sync") {
-      return Promise.resolve(okJson({ seq: 4, message: null, index: 2, swapped: true }));
+      return Promise.resolve(okJson({ seq: 4, message: null, index: 2, step: 1, swapped: true }));
     }
     if (url === "/sync?seq=4") return new Promise<Response>(() => undefined);
     throw new Error(`unexpected sync url: ${url}`);
@@ -317,13 +322,50 @@ it("server sync channel replays handshake index then swapped through onmessage",
   channel.onmessage = (event) => received.push(event.data);
 
   await vi.waitFor(() =>
-    expect(received).toEqual([{ index: 2 }, { swapped: true }, { synced: true }])
+    expect(received).toEqual([{ index: 2, step: 1 }, { swapped: true }, { synced: true }])
   );
 
   expect(fetcher).toHaveBeenCalledWith("/sync");
   expect(fetcher).toHaveBeenCalledWith(
     "/sync?seq=4",
     expect.objectContaining({ signal: expect.any(AbortSignal) })
+  );
+  channel.close();
+});
+
+it("server sync channel replays handshake index and step together", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 4, message: null, index: 2, step: 1 }));
+    if (url === "/sync?seq=4") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ index: 2, step: 1 }, { synced: true }]));
+  channel.close();
+});
+
+it("server sync channel treats missing replay step as zero", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 4, message: null, index: 2 }));
+    if (url === "/sync?seq=4") {
+      return Promise.resolve(okJson({ seq: 5, message: null, index: 3, step: null }));
+    }
+    if (url === "/sync?seq=5") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() =>
+    expect(received).toEqual([
+      { index: 2, step: 0 },
+      { synced: true },
+      { index: 3, step: 0 }
+    ])
   );
   channel.close();
 });
@@ -523,7 +565,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("posts local slidechange index to peitho-sync", async () => {
+it("posts local slidechange index step to peitho-sync", async () => {
   const channel = mockChannel();
   const root = document.createElement("main");
   const shell = await mountPresentShell({ root, fetcher: standardFetch(), window });
@@ -532,7 +574,39 @@ it("posts local slidechange index to peitho-sync", async () => {
 
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
 
-  expect(channel.sent).toEqual([{ index: 1 }]);
+  expect(channel.sent).toEqual([{ index: 1, step: 0 }]);
+});
+
+it("posts local slidechange and stepchange index step to peitho-sync", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(new CustomEvent("peitho:slidechange", { detail: { index: 1, step: 0 } }));
+  bus.dispatchEvent(new CustomEvent("peitho:stepchange", { detail: { index: 1, step: 2 } }));
+
+  expect(channel.sent).toEqual([
+    { index: 1, step: 0 },
+    { index: 1, step: 2 }
+  ]);
+});
+
+it("rejects invalid navigation state sync events", () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(window, () => channel, bus);
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(new CustomEvent("peitho:slidechange", { detail: { index: 1 } }));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:stepchange", { detail: { index: 1, step: Number.NaN } })
+  );
+
+  expect(channel.sent).toEqual([]);
+  expect(error).toHaveBeenCalledTimes(2);
+  expect(error).toHaveBeenCalledWith("Invalid peitho navigation state event");
 });
 
 it("dispatches closerequest from Escape", () => {
@@ -613,7 +687,7 @@ it("does not repost an auto-start timerchange caused by pre-synced index replay"
   shells.push(shell);
   cleanups.push(installSyncBridge(window, () => channel));
 
-  channel.onmessage?.({ data: { index: 1 } });
+  channel.onmessage?.({ data: { index: 1, step: 0 } });
   window.dispatchEvent(
     new CustomEvent("peitho:timerchange", {
       detail: { running: true, elapsedMs: 0 }
@@ -651,12 +725,54 @@ it("skips stale poll replay state older than the highest acknowledged post seq",
       timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
       nowMs: 1000,
       index: 1,
+      step: 0,
       swapped: true
     })
   );
   await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync?seq=7", expect.anything()));
 
   expect(received).toEqual([{ synced: true }]);
+  channel.close();
+});
+
+it("skips stale raw index poll messages older than the highest acknowledged post seq", async () => {
+  let resolvePost!: (response: Response) => void;
+  let resolvePoll!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+    }
+    if (url === "/sync") return Promise.resolve(okJson({ seq: 5, message: null }));
+    if (url === "/sync?seq=5") {
+      return new Promise<Response>((resolve) => {
+        resolvePoll = resolve;
+      });
+    }
+    if (url === "/sync?seq=7") {
+      return Promise.resolve(okJson({ seq: 8, message: { index: 0, step: 2 } }));
+    }
+    if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }]));
+  await vi.waitFor(() => expect(resolvePoll).toBeTypeOf("function"));
+  channel.postMessage({ index: 0, step: 2 });
+  await vi.waitFor(() => expect(resolvePost).toBeTypeOf("function"));
+  resolvePost(okJson({ seq: 8 }));
+  await flushPromises();
+
+  resolvePoll(okJson({ seq: 7, message: { index: 0, step: 1 }, index: 0, step: 2 }));
+
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith("/sync?seq=7", expect.anything()));
+  await vi.waitFor(() =>
+    expect(received).toEqual([{ synced: true }, { index: 0, step: 2 }])
+  );
   channel.close();
 });
 
@@ -733,17 +849,18 @@ it("buffers newer timer replay while a timer post is awaiting ack and delivers i
       message: null,
       timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
       nowMs: 2000,
-      index: 1
+      index: 1,
+      step: 0
     })
   );
 
-  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]));
   resolvePost(okJson({ seq: 7 }));
 
   await vi.waitFor(() =>
     expect(received).toEqual([
       { synced: true },
-      { index: 1 },
+      { index: 1, step: 0 },
       {
         timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
         nowMs: 2000
@@ -753,7 +870,7 @@ it("buffers newer timer replay while a timer post is awaiting ack and delivers i
   await flushPromises();
   expect(received).toEqual([
     { synced: true },
-    { index: 1 },
+    { index: 1, step: 0 },
     {
       timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
       nowMs: 2000
@@ -782,7 +899,8 @@ it("buffers re-handshake timer replay while a timer post is awaiting ack", async
           message: null,
           timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
           nowMs: 2000,
-          index: 1
+          index: 1,
+          step: 0
         })
       );
     }
@@ -804,14 +922,14 @@ it("buffers re-handshake timer replay while a timer post is awaiting ack", async
   await vi.waitFor(() => expect(resolvePost).toBeTypeOf("function"));
   rejectPoll(new Error("poll lost"));
 
-  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]));
   expect(error).toHaveBeenCalledWith("Failed to poll sync message: Error: poll lost");
   resolvePost(okJson({ seq: 7 }));
 
   await vi.waitFor(() =>
     expect(received).toEqual([
       { synced: true },
-      { index: 1 },
+      { index: 1, step: 0 },
       {
         timer: { running: true, elapsedMs: 30_000, atMs: 2000 },
         nowMs: 2000
@@ -853,15 +971,16 @@ it("discards buffered timer replay older than the acknowledged timer post", asyn
       message: null,
       timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
       nowMs: 1000,
-      index: 1
+      index: 1,
+      step: 0
     })
   );
 
-  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]));
   resolvePost(okJson({ seq: 7 }));
   await flushPromises();
 
-  expect(received).toEqual([{ synced: true }, { index: 1 }]);
+  expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]);
   channel.close();
 });
 
@@ -898,18 +1017,19 @@ it("delivers buffered timer replay after a pending timer post fails", async () =
       message: null,
       timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
       nowMs: 1000,
-      index: 1
+      index: 1,
+      step: 0
     })
   );
 
-  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1 }]));
+  await vi.waitFor(() => expect(received).toEqual([{ synced: true }, { index: 1, step: 0 }]));
   rejectPost(new Error("offline"));
   await vi.waitFor(() => expect(error).toHaveBeenCalledWith("Failed to post sync message: Error: offline"));
 
   await vi.waitFor(() =>
     expect(received).toEqual([
       { synced: true },
-      { index: 1 },
+      { index: 1, step: 0 },
       {
         timer: { running: true, elapsedMs: 10_000, atMs: 1000 },
         nowMs: 1000
@@ -977,7 +1097,7 @@ it("closes the window when a remote close sync message arrives", () => {
   expect(closeWindow).toHaveBeenCalledTimes(1);
 });
 
-it("turns remote index messages into navigate requests", () => {
+it("dispatches sync replay as one navigate target with index and step", () => {
   const channel = mockChannel();
   const requests: unknown[] = [];
   const onNavigate = (event: Event) => requests.push((event as CustomEvent).detail);
@@ -985,9 +1105,9 @@ it("turns remote index messages into navigate requests", () => {
   cleanups.push(() => window.removeEventListener("peitho:navigate", onNavigate));
   cleanups.push(installSyncBridge(window, () => channel));
 
-  channel.onmessage?.({ data: { index: 1 } });
+  channel.onmessage?.({ data: { index: 1, step: 0 } });
 
-  expect(requests).toEqual([{ to: { index: 1 } }]);
+  expect(requests).toEqual([{ to: { index: 1, step: 0 } }]);
 });
 
 it("adopts replayed timer sync state through the injected callback", () => {
@@ -1126,7 +1246,7 @@ it("does not navigate on swapped messages received on unknown routes", () => {
 it("does not navigate when replayed swapped state equals the current route", async () => {
   const fetcher = vi.fn((url: string) => {
     if (url === "/sync") {
-      return Promise.resolve(okJson({ seq: 7, message: null, index: 1, swapped: false }));
+      return Promise.resolve(okJson({ seq: 7, message: null, index: 1, step: 0, swapped: false }));
     }
     if (url === "/sync?seq=7") return new Promise<Response>(() => undefined);
     throw new Error(`unexpected sync url: ${url}`);
@@ -1149,7 +1269,7 @@ it("does not navigate when replayed swapped state equals the current route", asy
   );
   cleanups.push(cleanup);
 
-  await vi.waitFor(() => expect(requests).toEqual([{ to: { index: 1 } }]));
+  await vi.waitFor(() => expect(requests).toEqual([{ to: { index: 1, step: 0 } }]));
 
   expect(navigate).not.toHaveBeenCalled();
 });
@@ -1157,10 +1277,12 @@ it("does not navigate when replayed swapped state equals the current route", asy
 it("converges from poll response swapped state when the poll message is unrelated", async () => {
   const fetcher = vi.fn((url: string) => {
     if (url === "/sync") {
-      return Promise.resolve(okJson({ seq: 7, message: null, index: 0, swapped: false }));
+      return Promise.resolve(okJson({ seq: 7, message: null, index: 0, step: 0, swapped: false }));
     }
     if (url === "/sync?seq=7") {
-      return Promise.resolve(okJson({ seq: 8, message: { index: 1 }, index: 1, swapped: true }));
+      return Promise.resolve(
+        okJson({ seq: 8, message: { index: 1, step: 0 }, index: 1, step: 0, swapped: true })
+      );
     }
     if (url === "/sync?seq=8") return new Promise<Response>(() => undefined);
     throw new Error(`unexpected sync url: ${url}`);
@@ -1192,9 +1314,9 @@ it("dispatches remote sync navigation to the injected bus", () => {
 
   const cleanup = installSyncBridge(window, () => channel, bus);
   cleanups.push(cleanup);
-  channel.onmessage?.({ data: { index: 1 } });
+  channel.onmessage?.({ data: { index: 1, step: 0 } });
 
-  expect(requests).toEqual([{ to: { index: 1 } }]);
+  expect(requests).toEqual([{ to: { index: 1, step: 0 } }]);
 });
 
 it("does not echo forever when remote index equals current slide", async () => {
@@ -1205,9 +1327,9 @@ it("does not echo forever when remote index equals current slide", async () => {
   cleanups.push(installSyncBridge(window, () => channel));
 
   window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
-  expect(channel.sent).toEqual([{ index: 1 }]);
-  channel.onmessage?.({ data: { index: 1 } });
+  expect(channel.sent).toEqual([{ index: 1, step: 0 }]);
+  channel.onmessage?.({ data: { index: 1, step: 0 } });
 
   expect(shell.currentIndex).toBe(1);
-  expect(channel.sent).toEqual([{ index: 1 }]);
+  expect(channel.sent).toEqual([{ index: 1, step: 0 }]);
 });

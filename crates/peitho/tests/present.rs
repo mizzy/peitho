@@ -419,15 +419,16 @@ fn present_server_relays_sync_post_to_long_poll_subscriber() {
     poll.write_all(b"GET /sync?seq=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
 
-    let post_response = post_sync(addr, r#"{"index":1}"#);
+    let post_response = post_sync(addr, r#"{"index":1,"step":4}"#);
     assert_sync_post_ack(&post_response, 1);
 
     let event = read_until_contains(&mut poll, r#""swapped":false"#);
     assert!(event.contains("200 OK"));
     assert!(event.contains("application/json"));
     assert!(event.contains(r#""seq":1"#));
-    assert!(event.contains(r#""message":{"index":1}"#));
+    assert!(event.contains(r#""message":{"index":1,"step":4}"#));
     assert!(event.contains(r#""index":1"#));
+    assert!(event.contains(r#""step":4"#));
     assert!(event.contains(r#""swapped":false"#));
     assert!(event.contains(r#""generation":0"#));
 
@@ -454,15 +455,16 @@ fn present_server_poll_response_includes_current_replay_state() {
     poll.write_all(b"GET /sync?seq=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .unwrap();
 
-    let index_response = post_sync(addr, r#"{"index":3}"#);
+    let index_response = post_sync(addr, r#"{"index":3,"step":2}"#);
     assert_sync_post_ack(&index_response, 2);
 
     let event = read_until_contains(&mut poll, r#""swapped":true"#);
     assert!(event.contains("200 OK"));
     assert!(event.contains("application/json"));
     assert!(event.contains(r#""seq":2"#));
-    assert!(event.contains(r#""message":{"index":3}"#));
+    assert!(event.contains(r#""message":{"index":3,"step":2}"#));
     assert!(event.contains(r#""index":3"#));
+    assert!(event.contains(r#""step":2"#));
     assert!(event.contains(r#""swapped":true"#));
     assert!(event.contains(r#""generation":0"#));
 
@@ -495,6 +497,7 @@ fn present_server_relays_swap_sync_post_to_long_poll_subscriber() {
     assert!(event.contains(r#""seq":1"#));
     assert!(event.contains(r#""message":{"swapped":true}"#));
     assert!(event.contains(r#""index":null"#));
+    assert!(event.contains(r#""step":null"#));
     assert!(event.contains(r#""swapped":true"#));
     assert!(event.contains(r#""generation":0"#));
 
@@ -525,6 +528,7 @@ fn present_server_relays_close_sync_post_to_long_poll_subscriber() {
     assert!(event.contains("200 OK"));
     assert!(event.contains(r#""seq":1"#));
     assert!(event.contains(r#""message":{"close":true}"#));
+    assert!(event.contains(r#""step":null"#));
     assert!(event.contains(r#""generation":0"#));
 
     drop(poll);
@@ -551,6 +555,7 @@ fn present_server_broadcast_reload_reaches_long_poll_subscriber() {
     assert_eq!(body["seq"], 1);
     assert!(body["message"].is_null());
     assert!(body["index"].is_null());
+    assert!(body["step"].is_null());
     assert_eq!(body["swapped"], false);
     assert_eq!(body["generation"], 1);
     handle.join().unwrap();
@@ -575,6 +580,7 @@ fn present_server_reload_does_not_change_handshake_replay_state() {
     assert_eq!(body["seq"], 1);
     assert!(body["message"].is_null());
     assert!(body["index"].is_null());
+    assert!(body["step"].is_null());
     assert_eq!(body["swapped"], false);
     assert_eq!(body["generation"], 1);
     handle.join().unwrap();
@@ -635,6 +641,7 @@ fn present_server_sync_handshake_returns_current_seq_without_replaying_latest_me
     assert!(response.contains(r#""seq":1"#));
     assert!(response.contains(r#""message":null"#));
     assert!(response.contains(r#""index":null"#));
+    assert!(response.contains(r#""step":null"#));
     assert!(response.contains(r#""swapped":false"#));
     assert!(response.contains(r#""generation":0"#));
     assert!(!response.contains(r#""close":true"#));
@@ -658,6 +665,7 @@ fn present_server_sync_initial_handshake_returns_replay_state_defaults() {
     assert_eq!(body["seq"], 0);
     assert!(body["message"].is_null());
     assert!(body["index"].is_null());
+    assert!(body["step"].is_null());
     assert_eq!(body["swapped"], false);
     assert_eq!(body["generation"], 0);
     handle.join().unwrap();
@@ -678,7 +686,7 @@ fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
         server.handle_one();
     });
 
-    let index_response = post_sync(addr, r#"{"index":2}"#);
+    let index_response = post_sync(addr, r#"{"index":2,"step":5}"#);
     assert_sync_post_ack(&index_response, 1);
     let swap_response = post_sync(addr, r#"{"swapped":true}"#);
     assert_sync_post_ack(&swap_response, 2);
@@ -688,6 +696,7 @@ fn present_server_sync_handshake_replays_index_and_swapped_after_broadcasts() {
     assert_eq!(body["seq"], 2);
     assert!(body["message"].is_null());
     assert_eq!(body["index"], 2);
+    assert_eq!(body["step"], 5);
     assert_eq!(body["swapped"], true);
     assert_eq!(body["generation"], 0);
     handle.join().unwrap();
@@ -709,7 +718,7 @@ fn present_server_sync_close_does_not_clobber_replay_state() {
         server.handle_one();
     });
 
-    let index_response = post_sync(addr, r#"{"index":2}"#);
+    let index_response = post_sync(addr, r#"{"index":2,"step":6}"#);
     assert_sync_post_ack(&index_response, 1);
     let swap_response = post_sync(addr, r#"{"swapped":true}"#);
     assert_sync_post_ack(&swap_response, 2);
@@ -721,6 +730,7 @@ fn present_server_sync_close_does_not_clobber_replay_state() {
     assert_eq!(body["seq"], 3);
     assert!(body["message"].is_null());
     assert_eq!(body["index"], 2);
+    assert_eq!(body["step"], 6);
     assert_eq!(body["swapped"], true);
     assert_eq!(body["generation"], 0);
     handle.join().unwrap();
@@ -805,7 +815,7 @@ fn present_server_rejects_mixed_sync_post_body() {
     let addr = server.addr();
     let handle = thread::spawn(move || server.handle_one());
 
-    let response = post_sync(addr, r#"{"index":1,"close":true}"#);
+    let response = post_sync(addr, r#"{"index":1,"step":0,"close":true}"#);
 
     assert!(response.contains("400 Bad Request"));
     handle.join().unwrap();

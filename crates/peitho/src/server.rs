@@ -79,6 +79,7 @@ struct SyncState {
     seq: u64,
     latest: Option<String>,
     index: Option<usize>,
+    step: Option<usize>,
     swapped: bool,
     timer: Option<TimerSyncState>,
     generation: u64,
@@ -91,6 +92,7 @@ impl Default for SyncState {
             seq: 0,
             latest: None,
             index: None,
+            step: None,
             swapped: false,
             timer: None,
             generation: 0,
@@ -117,6 +119,7 @@ struct SyncPoll {
 struct SyncSnapshot {
     seq: u64,
     index: Option<usize>,
+    step: Option<usize>,
     swapped: bool,
     timer: Option<TimerSyncState>,
     generation: u64,
@@ -128,7 +131,10 @@ impl SyncHub {
         let (lock, cvar) = &*self.state;
         let mut state = lock.lock().expect("sync hub mutex");
         match message {
-            SyncMessage::Index(message) => state.index = Some(message.index),
+            SyncMessage::Index(message) => {
+                state.index = Some(message.index);
+                state.step = Some(message.step);
+            }
             SyncMessage::Swap(message) => state.swapped = message.swapped,
             SyncMessage::Timer(message) => {
                 state.timer = Some(TimerSyncState {
@@ -171,6 +177,7 @@ impl SyncHub {
             snapshot: SyncSnapshot {
                 seq: state.seq,
                 index: state.index,
+                step: state.step,
                 swapped: state.swapped,
                 timer: state.timer,
                 generation: state.generation,
@@ -186,6 +193,7 @@ impl SyncHub {
         SyncSnapshot {
             seq: state.seq,
             index: state.index,
+            step: state.step,
             swapped: state.swapped,
             timer: state.timer,
             generation: state.generation,
@@ -840,6 +848,7 @@ enum SyncMessage {
 #[serde(deny_unknown_fields)]
 struct SyncIndexMessage {
     index: usize,
+    step: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -991,6 +1000,7 @@ fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
         seq: u64,
         message: Option<Value>,
         index: Option<usize>,
+        step: Option<usize>,
         swapped: bool,
         generation: u64,
         session: String,
@@ -1004,6 +1014,7 @@ fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
         seq: snapshot.seq,
         message,
         index: snapshot.index,
+        step: snapshot.step,
         swapped: snapshot.swapped,
         generation: snapshot.generation,
         session: snapshot.session,
@@ -1464,7 +1475,7 @@ mod tests {
         let hub = SyncHub::default();
         let session = hub.snapshot().session;
 
-        let message = SyncMessage::Index(SyncIndexMessage { index: 2 });
+        let message = SyncMessage::Index(SyncIndexMessage { index: 2, step: 0 });
         let seq = hub.broadcast_sync_message(&message);
 
         assert_eq!(seq, 1);
@@ -1474,15 +1485,42 @@ mod tests {
                 snapshot: SyncSnapshot {
                     seq: 1,
                     index: Some(2),
+                    step: Some(0),
                     swapped: false,
                     timer: None,
                     generation: 0,
                     session
                 },
-                message: Some(r#"{"index":2}"#.to_owned())
+                message: Some(r#"{"index":2,"step":0}"#.to_owned())
             }
         );
         assert!(hub.wait_after(1, Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn sync_hub_stores_index_and_step_atomically() {
+        let hub = SyncHub::default();
+        let session = hub.snapshot().session;
+
+        let message = SyncMessage::Index(SyncIndexMessage { index: 2, step: 3 });
+        let seq = hub.broadcast_sync_message(&message);
+
+        assert_eq!(seq, 1);
+        assert_eq!(
+            hub.wait_after(0, Duration::from_secs(1)).unwrap(),
+            SyncPoll {
+                snapshot: SyncSnapshot {
+                    seq: 1,
+                    index: Some(2),
+                    step: Some(3),
+                    swapped: false,
+                    timer: None,
+                    generation: 0,
+                    session
+                },
+                message: Some(r#"{"index":2,"step":3}"#.to_owned())
+            }
+        );
     }
 
     #[test]
@@ -1563,6 +1601,7 @@ mod tests {
                 snapshot: SyncSnapshot {
                     seq: 1,
                     index: None,
+                    step: None,
                     swapped: false,
                     timer: None,
                     generation: 1,
@@ -1576,6 +1615,7 @@ mod tests {
             SyncSnapshot {
                 seq: 1,
                 index: None,
+                step: None,
                 swapped: false,
                 timer: None,
                 generation: 1,
@@ -1589,7 +1629,7 @@ mod tests {
         let hub = SyncHub::default();
         let session = hub.snapshot().session;
 
-        hub.broadcast_sync_message(&SyncMessage::Index(SyncIndexMessage { index: 1 }));
+        hub.broadcast_sync_message(&SyncMessage::Index(SyncIndexMessage { index: 1, step: 0 }));
         let poll = hub.wait_after(0, Duration::from_secs(1)).unwrap();
 
         assert_eq!(poll.snapshot.session, session);
@@ -1704,6 +1744,7 @@ mod tests {
             SyncSnapshot {
                 seq: 4,
                 index: Some(2),
+                step: Some(1),
                 swapped: true,
                 timer: Some(TimerSyncState {
                     running: true,
@@ -1721,6 +1762,7 @@ mod tests {
         assert!(body.contains(r#""session":"session-a""#));
         assert!(body.contains(r#""message":null"#));
         assert!(body.contains(r#""index":2"#));
+        assert!(body.contains(r#""step":1"#));
         assert!(body.contains(r#""swapped":true"#));
         assert_eq!(json["timer"]["running"], true);
         assert_eq!(json["timer"]["elapsedMs"], 12_000);
@@ -1729,11 +1771,32 @@ mod tests {
     }
 
     #[test]
+    fn sync_response_body_includes_step() {
+        let body = sync_response_body(
+            SyncSnapshot {
+                seq: 4,
+                index: Some(2),
+                step: Some(1),
+                swapped: false,
+                timer: None,
+                generation: 0,
+                session: "session-a".to_owned(),
+            },
+            None,
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["index"], 2);
+        assert_eq!(json["step"], 1);
+    }
+
+    #[test]
     fn sync_response_body_includes_session() {
         let body = sync_response_body(
             SyncSnapshot {
                 seq: 4,
                 index: None,
+                step: None,
                 swapped: false,
                 timer: None,
                 generation: 0,
@@ -1752,6 +1815,7 @@ mod tests {
             SyncSnapshot {
                 seq: 7,
                 index: Some(2),
+                step: Some(0),
                 swapped: false,
                 timer: None,
                 generation: 0,
@@ -1807,6 +1871,11 @@ mod tests {
     #[test]
     fn reload_is_not_accepted_as_a_posted_sync_message() {
         assert!(serde_json::from_str::<SyncMessage>(r#"{"reload":true}"#).is_err());
+    }
+
+    #[test]
+    fn bare_index_sync_messages_are_rejected() {
+        assert!(serde_json::from_str::<SyncMessage>(r#"{"index":2}"#).is_err());
     }
 
     #[test]
@@ -2104,7 +2173,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
 
-        let post = http_request(&server, "POST", "/sync", r#"{"index":2}"#);
+        let post = http_request(&server, "POST", "/sync", r#"{"index":2,"step":0}"#);
         let get = http_request(&server, "GET", "/sync", "");
 
         assert_eq!(post.status, 200);
@@ -2114,6 +2183,34 @@ mod tests {
             serde_json::from_str::<Value>(&get.body).unwrap()["index"],
             2
         );
+        assert_eq!(serde_json::from_str::<Value>(&get.body).unwrap()["step"], 0);
+    }
+
+    #[test]
+    fn sync_endpoint_accepts_index_step_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let post = http_request(&server, "POST", "/sync", r#"{"index":2,"step":1}"#);
+        let get = http_request(&server, "GET", "/sync", "");
+
+        assert_eq!(post.status, 200);
+        assert_eq!(
+            serde_json::from_str::<Value>(&get.body).unwrap()["index"],
+            2
+        );
+        assert_eq!(serde_json::from_str::<Value>(&get.body).unwrap()["step"], 1);
+    }
+
+    #[test]
+    fn sync_endpoint_rejects_bare_index_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let response = http_request(&server, "POST", "/sync", r#"{"index":2}"#);
+
+        assert_eq!(response.status, 400);
+        assert_eq!(response.body, "invalid sync body\n");
     }
 
     #[derive(Debug)]

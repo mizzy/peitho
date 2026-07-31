@@ -950,12 +950,39 @@ function initialSlideIndex(slides) {
   return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
 
+// src/stepnav.ts
+function revealStepCount(slide) {
+  const value = slide?.revealSteps;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+function clampStep(step, stepCount) {
+  if (!Number.isFinite(step)) return 0;
+  return Math.max(0, Math.min(Math.floor(step), stepCount));
+}
+function resolveStepTarget(slides, position, direction) {
+  if (direction === 1) {
+    const stepCount = revealStepCount(slides[position.index]);
+    if (position.step < stepCount) {
+      return { index: position.index, step: position.step + 1 };
+    }
+    const index2 = nextNonSkippedIndex(slides, position.index, 1);
+    return index2 === null ? null : { index: index2, step: 0 };
+  }
+  if (position.step > 0) {
+    return { index: position.index, step: position.step - 1 };
+  }
+  const index = nextNonSkippedIndex(slides, position.index, -1);
+  return index === null ? null : { index, step: revealStepCount(slides[index]) };
+}
+
 // src/shell.ts
 var DEFAULT_POINTER_BASE_COLOR = "#38bdf8";
 var DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
 var POINTER_TRAIL_DURATION_MS = 500;
 var POINTER_TRAIL_CAP = 64;
 var POINTER_CORE_MIX_TO_WHITE = 0.65;
+var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 var CSS_NAMED_COLORS = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -1332,6 +1359,7 @@ function installPointerOverlay(options) {
 var PresentShellController = class {
   manifest = null;
   currentIndex = -1;
+  currentStep = 0;
   slides = [];
   root;
   fetcher;
@@ -1411,7 +1439,7 @@ var PresentShellController = class {
         this.root.appendChild(view.host);
         this.slides.push(view);
       }
-      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0);
+      this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
     } catch (error) {
       this.clearCanvasRootProperties();
@@ -1420,9 +1448,9 @@ var PresentShellController = class {
     }
   }
   navigate(to) {
-    const index = this.resolveTarget(to);
-    if (index === null) return;
-    this.show(index);
+    const target = this.resolveTarget(to);
+    if (target === null) return;
+    this.show(target.index, target.step);
   }
   elapsedMs() {
     if (this.startedAtValue === null) return 0;
@@ -1511,6 +1539,9 @@ var PresentShellController = class {
     const style = this.doc.createElement("style");
     style.textContent = css;
     shadow.appendChild(style);
+    const revealStyle = this.doc.createElement("style");
+    revealStyle.textContent = REVEAL_HIDDEN_CSS;
+    shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     shadow.appendChild(template.content.cloneNode(true));
@@ -1538,8 +1569,8 @@ var PresentShellController = class {
     });
   }
   resolveTarget(to) {
-    if (to === "first") return 0;
-    if (to === "last") return this.slides.length - 1;
+    if (to === "first") return this.resolveDirectIndex(0);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
     if (to === "next") return this.resolveSequentialTarget(1);
     if (to === "prev") return this.resolveSequentialTarget(-1);
     if ("index" in to) {
@@ -1547,44 +1578,86 @@ var PresentShellController = class {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return to.index;
+      return this.resolveDirectIndex(to.index, to.step);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return index;
+    return this.resolveDirectIndex(index);
+  }
+  resolveDirectIndex(index, step) {
+    if (index < 0 || index >= this.slides.length) return null;
+    const stepCount = this.stepCountFor(index);
+    return {
+      index,
+      step: step === void 0 ? stepCount : clampStep(step, stepCount)
+    };
   }
   resolveSequentialTarget(direction) {
-    return nextNonSkippedIndex(
+    return resolveStepTarget(
       this.slides.map((slide) => slide.meta),
-      this.currentIndex,
+      { index: this.currentIndex, step: this.currentStep },
       direction
     );
   }
-  show(index) {
+  stepCountFor(index) {
+    return revealStepCount(this.slides[index]?.meta);
+  }
+  show(index, step) {
     if (index < 0 || index >= this.slides.length) {
       this.log.error(`Unknown slide target: ${index}`);
       return;
     }
-    if (index === this.currentIndex) return;
+    const stepCount = this.stepCountFor(index);
+    const nextStep = clampStep(step, stepCount);
+    const indexChanged = index !== this.currentIndex;
+    const stepChanged = nextStep !== this.currentStep;
+    if (!indexChanged && !stepChanged) return;
     this.slides.forEach((slide2, slideIndex) => {
       slide2.host.hidden = slideIndex !== index;
     });
     const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
     this.currentIndex = index;
+    this.currentStep = nextStep;
     const slide = this.slides[index];
+    this.applyRevealState(slide.host, nextStep);
+    if (indexChanged) {
+      this.bus.dispatchEvent(
+        new CustomEvent("peitho:slidechange", {
+          detail: {
+            key: slide.meta.key,
+            index: slide.meta.index,
+            total: this.slides.length,
+            previousIndex,
+            step: nextStep,
+            stepCount
+          }
+        })
+      );
+      return;
+    }
     this.bus.dispatchEvent(
-      new CustomEvent("peitho:slidechange", {
+      new CustomEvent("peitho:stepchange", {
         detail: {
-          key: slide.meta.key,
           index: slide.meta.index,
-          total: this.slides.length,
-          previousIndex
+          step: nextStep,
+          stepCount
         }
       })
     );
+  }
+  applyRevealState(host, step) {
+    const markers = host.shadowRoot?.querySelectorAll("[data-reveal-step]");
+    if (markers == null) return;
+    for (const marker of markers) {
+      const revealStep = Number(marker.dataset.revealStep);
+      marker.toggleAttribute(
+        "data-reveal-hidden",
+        Number.isFinite(revealStep) && revealStep > step
+      );
+    }
   }
   startPresentation() {
     if (this.startedAtValue !== null) return;
@@ -1781,8 +1854,11 @@ function isRecord2(value) {
 function isCloseSyncMessage(value) {
   return isRecord2(value) && value.close === true;
 }
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
 function isIndexSyncMessage(value) {
-  return isRecord2(value) && typeof value.index === "number" && Number.isFinite(value.index);
+  return isRecord2(value) && isFiniteNumber(value.index) && isFiniteNumber(value.step);
 }
 function isSwappedSyncMessage(value) {
   return isRecord2(value) && typeof value.swapped === "boolean";
@@ -1804,6 +1880,13 @@ function isTimerReplaySyncMessage(value) {
 }
 function isGenerationSyncMessage(value) {
   return isRecord2(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
+}
+function serverIndexReplayMessage(value) {
+  if (!isFiniteNumber(value.index)) return null;
+  return {
+    index: value.index,
+    step: isFiniteNumber(value.step) ? value.step : 0
+  };
 }
 function defaultChannelFactory(name) {
   const channel = new BroadcastChannel(name);
@@ -1875,8 +1958,9 @@ function serverSyncChannelFactory(options = {}) {
           onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
         }
       }
-      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
-        onmessage?.({ data: { index: body.index } });
+      const indexReplay = serverIndexReplayMessage(body);
+      if (!skipAbsoluteState && indexReplay !== null) {
+        onmessage?.({ data: indexReplay });
       }
       if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
@@ -1959,11 +2043,12 @@ function serverSyncChannelFactory(options = {}) {
             continue;
           }
           seq = body.seq;
-          if (body.message != null) {
+          const skipAbsoluteState = body.seq < highestAckedPostSeq;
+          if (body.message != null && !(skipAbsoluteState && isIndexSyncMessage(body.message))) {
             onmessage?.({ data: body.message });
           }
           deliverReplayState(body, {
-            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            skipAbsoluteState,
             deferTimerReplay: pendingTimerPosts > 0
           });
         } catch (error) {
@@ -2039,10 +2124,19 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   const pathname = hooks.pathname ?? (() => win.location.pathname);
   const navigate = hooks.navigate ?? ((url) => win.location.replace(url));
   let synced = false;
-  const onSlideChange = (event) => {
-    const detail = event.detail;
-    if (typeof detail?.index !== "number") return;
-    channel.postMessage({ index: detail.index });
+  const navigationStateMessage = (detail) => {
+    if (!isRecord2(detail) || !isFiniteNumber(detail.index) || !isFiniteNumber(detail.step)) {
+      return null;
+    }
+    return { index: detail.index, step: detail.step };
+  };
+  const onNavigationStateChange = (event) => {
+    const message = navigationStateMessage(event.detail);
+    if (message === null) {
+      console.error("Invalid peitho navigation state event");
+      return;
+    }
+    channel.postMessage(message);
   };
   const onCloseRequest = () => {
     channel.postMessage({ close: true });
@@ -2078,7 +2172,9 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
     }
     if (isIndexSyncMessage(data)) {
       bus.dispatchEvent(
-        new CustomEvent("peitho:navigate", { detail: { to: { index: data.index } } })
+        new CustomEvent("peitho:navigate", {
+          detail: { to: { index: data.index, step: data.step } }
+        })
       );
       return;
     }
@@ -2110,12 +2206,14 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
     }
     console.error("Invalid peitho sync message");
   };
-  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:slidechange", onNavigationStateChange);
+  bus.addEventListener("peitho:stepchange", onNavigationStateChange);
   bus.addEventListener("peitho:closerequest", onCloseRequest);
   bus.addEventListener("peitho:swaprequest", onSwapRequest);
   bus.addEventListener("peitho:timerchange", onTimerChange);
   return () => {
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:slidechange", onNavigationStateChange);
+    bus.removeEventListener("peitho:stepchange", onNavigationStateChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
     bus.removeEventListener("peitho:swaprequest", onSwapRequest);
     bus.removeEventListener("peitho:timerchange", onTimerChange);

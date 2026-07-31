@@ -298,8 +298,11 @@ var SWAP_ROUTES = Object.freeze({
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
 function isIndexSyncMessage(value) {
-  return isRecord(value) && typeof value.index === "number" && Number.isFinite(value.index);
+  return isRecord(value) && isFiniteNumber(value.index) && isFiniteNumber(value.step);
 }
 function isSwappedSyncMessage(value) {
   return isRecord(value) && typeof value.swapped === "boolean";
@@ -318,6 +321,13 @@ function isTimerReplaySyncMessage(value) {
 }
 function isGenerationSyncMessage(value) {
   return isRecord(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
+}
+function serverIndexReplayMessage(value) {
+  if (!isFiniteNumber(value.index)) return null;
+  return {
+    index: value.index,
+    step: isFiniteNumber(value.step) ? value.step : 0
+  };
 }
 function serverSyncChannelFactory(options = {}) {
   const url = options.url ?? "/sync";
@@ -360,8 +370,9 @@ function serverSyncChannelFactory(options = {}) {
           onmessage?.({ data: { timer: body.timer, nowMs: body.nowMs } });
         }
       }
-      if (!skipAbsoluteState && isIndexSyncMessage(body)) {
-        onmessage?.({ data: { index: body.index } });
+      const indexReplay = serverIndexReplayMessage(body);
+      if (!skipAbsoluteState && indexReplay !== null) {
+        onmessage?.({ data: indexReplay });
       }
       if (!skipAbsoluteState && isSwappedSyncMessage(body)) {
         onmessage?.({ data: { swapped: body.swapped } });
@@ -444,11 +455,12 @@ function serverSyncChannelFactory(options = {}) {
             continue;
           }
           seq = body.seq;
-          if (body.message != null) {
+          const skipAbsoluteState = body.seq < highestAckedPostSeq;
+          if (body.message != null && !(skipAbsoluteState && isIndexSyncMessage(body.message))) {
             onmessage?.({ data: body.message });
           }
           deliverReplayState(body, {
-            skipAbsoluteState: body.seq < highestAckedPostSeq,
+            skipAbsoluteState,
             deferTimerReplay: pendingTimerPosts > 0
           });
         } catch (error) {

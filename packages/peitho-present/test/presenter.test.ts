@@ -648,7 +648,7 @@ it("buttons emit navigate timercontrol and close requests", async () => {
   expect(closeRequests).toEqual([null]);
   expect(swapRequests).toEqual([null]);
   expect(channel.sent).toEqual([
-    { index: 1 },
+    { index: 1, step: 0 },
     { timer: { running: true, elapsedMs: 0 } },
     { timer: { running: false, elapsedMs: 0 } },
     { timer: { running: true, elapsedMs: 0 } },
