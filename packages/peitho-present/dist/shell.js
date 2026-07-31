@@ -2562,7 +2562,9 @@ async function mountPresenterView(options) {
       key: firstSlide.key,
       index: firstSlide.index,
       total: mainShell.manifest?.slideCount ?? 0,
-      previousIndex: null
+      previousIndex: null,
+      step: mainShell.currentStep,
+      stepCount: firstSlide.revealSteps ?? 0
     });
   }
   const buttonCleanups = [];

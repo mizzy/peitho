@@ -478,6 +478,53 @@ it("updates preview and shows end of deck on the last slide", async () => {
   );
 });
 
+it("presenter current pane follows sync step while next pane stays final state", async () => {
+  const responseManifest: Manifest = {
+    ...manifest,
+    slides: [
+      { ...manifest.slides[0], revealSteps: 2 },
+      { ...manifest.slides[1], revealSteps: 1 }
+    ]
+  };
+  const root = document.createElement("main");
+  const { channel, factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url === "slides/000-intro.html") {
+        return okText(
+          '<section><p data-reveal-step="1">A</p><p data-reveal-step="2">B</p></section>'
+        );
+      }
+      if (url === "slides/001-details.html") {
+        return okText('<section><p data-reveal-step="1">Next</p></section>');
+      }
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as typeof fetch,
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  channel.onmessage?.({ data: { index: 0, step: 1 } });
+
+  const currentSlide = root
+    .querySelector<HTMLElement>('[data-peitho-presenter="current"] [data-slide-index="0"]')!
+    .shadowRoot!;
+  const currentFirst = currentSlide.querySelector<HTMLElement>('[data-reveal-step="1"]')!;
+  const currentSecond = currentSlide.querySelector<HTMLElement>('[data-reveal-step="2"]')!;
+  const nextFirst = root
+    .querySelector<HTMLElement>('[data-peitho-presenter="preview"] [data-slide-index="1"]')!
+    .shadowRoot!.querySelector<HTMLElement>('[data-reveal-step="1"]')!;
+  expect(currentFirst.hasAttribute("data-reveal-hidden")).toBe(false);
+  expect(currentSecond.hasAttribute("data-reveal-hidden")).toBe(true);
+  expect(nextFirst.hasAttribute("data-reveal-hidden")).toBe(false);
+});
+
 it("next preview skips skipped slides while counters keep total slide count", async () => {
   const root = document.createElement("main");
   const { factory } = mockSyncChannelFactory();
