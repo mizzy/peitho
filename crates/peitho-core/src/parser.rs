@@ -1370,6 +1370,7 @@ fn scan_div_markers(
 ) -> Result<std::collections::HashMap<usize, DivMarker>> {
     let mut markers = std::collections::HashMap::new();
     let mut in_code_fence: Option<(char, usize)> = None;
+    let mut in_html_comment = false;
     let mut line_start = 0usize;
 
     for raw_line in slice.split_inclusive('\n') {
@@ -1392,6 +1393,15 @@ fn scan_div_markers(
             continue;
         }
 
+        // Track HTML comments so ::: inside them is literal comment text.
+        if in_html_comment {
+            if closes_html_comment(trimmed) {
+                in_html_comment = false;
+            }
+            line_start += raw_line.len();
+            continue;
+        }
+
         // Reject long colon fences (four or more colons) explicitly.
         if trimmed.starts_with("::::") {
             return Err(BuildError::new(
@@ -1404,6 +1414,9 @@ fn scan_div_markers(
 
         // Not a `:::` line? move on.
         if !trimmed.starts_with(":::") {
+            if opens_unclosed_html_comment(trimmed) {
+                in_html_comment = true;
+            }
             line_start += raw_line.len();
             continue;
         }
@@ -1424,6 +1437,17 @@ fn scan_div_markers(
         line_start += raw_line.len();
     }
     Ok(markers)
+}
+
+fn opens_unclosed_html_comment(line: &str) -> bool {
+    let Some(start) = line.find("<!--") else {
+        return false;
+    };
+    !line[start + 4..].contains("-->")
+}
+
+fn closes_html_comment(line: &str) -> bool {
+    line.contains("-->")
 }
 
 /// Extract the leading fence character (`\`` or `~`) and its length, if this
@@ -1524,6 +1548,64 @@ fn parse_div_attributes(rest: &str, line: usize) -> Result<DivOpen> {
     Ok(DivOpen::Slot(ExplicitSlot::new(slot)))
 }
 
+fn fused_div_marker_error(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+) -> Option<BuildError> {
+    let (start_line, end_line) = nonblank_line_range(source, start, end)?;
+    if start_line == end_line {
+        return None;
+    }
+
+    let marker_line = (start_line..=end_line).find(|line| markers.contains_key(line))?;
+    let (message, help) = if marker_line == start_line {
+        (
+            "content on the line after `:::` is attached to the fence",
+            "insert a blank line between the `:::` marker and the content",
+        )
+    } else if marker_line == end_line {
+        (
+            "content on the line before `:::` is attached to the fence",
+            "insert a blank line between the content and the `:::` marker",
+        )
+    } else {
+        (
+            "content around `:::` is attached to the fence",
+            "insert blank lines around the `:::` marker",
+        )
+    };
+
+    Some(BuildError::new(
+        ErrorKind::Parse,
+        Some(marker_line),
+        message,
+        help,
+    ))
+}
+
+fn nonblank_line_range(source: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let mut first = None;
+    let mut last = None;
+    let mut line_start = start;
+
+    for raw_line in source[start..end].split_inclusive('\n') {
+        let line_text = raw_line
+            .strip_suffix('\n')
+            .unwrap_or(raw_line)
+            .trim_end_matches('\r');
+        if !line_text.trim().is_empty() {
+            let line = line_for_offset(source, line_start);
+            first.get_or_insert(line);
+            last = Some(line);
+        }
+        line_start += raw_line.len();
+    }
+
+    first.zip(last)
+}
+
 /// Push a fragment into either the outer fragment list or the currently-open
 /// fenced div's children, keeping call sites free of stack bookkeeping.
 fn push_fragment(
@@ -1536,6 +1618,32 @@ fn push_fragment(
     } else {
         fragments.push(fragment);
     }
+}
+
+fn check_finalized_block_span(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+) -> Result<()> {
+    if let Some(err) = fused_div_marker_error(source, start, end, markers) {
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn push_checked_fragment(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+    fragments: &mut Vec<SourceFragment>,
+    div_stack: &mut [(usize, DivOpen, Vec<SourceFragment>)],
+    fragment: SourceFragment,
+) -> Result<()> {
+    check_finalized_block_span(source, start, end, markers)?;
+    push_fragment(fragments, div_stack, fragment);
+    Ok(())
 }
 
 fn parse_slide(
@@ -1617,6 +1725,18 @@ fn parse_slide(
                     continue;
                 }
                 Event::End(TagEnd::Paragraph) => {
+                    if let Some(start) = capture.current_paragraph_start {
+                        if let Err(err) =
+                            check_finalized_block_span(source, start, global_end, &markers)
+                        {
+                            return Err(attach_slide_context(
+                                err,
+                                index,
+                                explicit_key.as_ref(),
+                                &fragments,
+                            ));
+                        }
+                    }
                     capture
                         .finish_paragraph(source, global_end)
                         .map_err(|err| {
@@ -1720,14 +1840,26 @@ fn parse_slide(
                 list_depth -= 1;
                 if list_depth == 0 {
                     if let Some(start) = list_start.take() {
-                        push_fragment(
+                        let fragment = SourceFragment::list(
+                            line_for_offset(source, start),
+                            source_slice(source, start, global_end),
+                        );
+                        if let Err(err) = push_checked_fragment(
+                            source,
+                            start,
+                            global_end,
+                            &markers,
                             &mut fragments,
                             &mut div_stack,
-                            SourceFragment::list(
-                                line_for_offset(source, start),
-                                source_slice(source, start, global_end),
-                            ),
-                        );
+                            fragment,
+                        ) {
+                            return Err(attach_slide_context(
+                                err,
+                                index,
+                                explicit_key.as_ref(),
+                                &fragments,
+                            ));
+                        }
                         seen_content = true;
                     }
                 }
@@ -1847,16 +1979,28 @@ fn parse_slide(
                     let Some(OpenBlock::Heading { level, start, text }) = block.take() else {
                         unreachable!();
                     };
-                    push_fragment(
+                    let fragment = SourceFragment::heading(
+                        line_for_offset(source, start),
+                        level,
+                        source_slice(source, start, global_end),
+                        text.trim(),
+                    );
+                    if let Err(err) = push_checked_fragment(
+                        source,
+                        start,
+                        global_end,
+                        &markers,
                         &mut fragments,
                         &mut div_stack,
-                        SourceFragment::heading(
-                            line_for_offset(source, start),
-                            level,
-                            source_slice(source, start, global_end),
-                            text.trim(),
-                        ),
-                    );
+                        fragment,
+                    ) {
+                        return Err(attach_slide_context(
+                            err,
+                            index,
+                            explicit_key.as_ref(),
+                            &fragments,
+                        ));
+                    }
                     seen_content = true;
                 }
             }
@@ -1872,6 +2016,16 @@ fn parse_slide(
                         unreachable!();
                     };
                     let paragraph_line = line_for_offset(source, start);
+                    if let Err(err) =
+                        check_finalized_block_span(source, start, global_end, &markers)
+                    {
+                        return Err(attach_slide_context(
+                            err,
+                            index,
+                            explicit_key.as_ref(),
+                            &fragments,
+                        ));
+                    }
                     // If this paragraph was actually a `:::` marker line, drop
                     // the paragraph and manipulate the fenced div stack instead.
                     if let Some(marker) = markers.get(&paragraph_line).cloned() {
@@ -2015,11 +2169,23 @@ fn parse_slide(
                                 })?;
                         }
                     }
-                    push_fragment(
+                    let fragment = SourceFragment::code(code_line, language, text);
+                    if let Err(err) = push_checked_fragment(
+                        source,
+                        start,
+                        global_end,
+                        &markers,
                         &mut fragments,
                         &mut div_stack,
-                        SourceFragment::code(code_line, language, text),
-                    );
+                        fragment,
+                    ) {
+                        return Err(attach_slide_context(
+                            err,
+                            index,
+                            explicit_key.as_ref(),
+                            &fragments,
+                        ));
+                    }
                     seen_content = true;
                 }
             }
@@ -6008,6 +6174,142 @@ After list
     fn parse_first_slide(source: &str) -> ParsedSlide {
         let deck = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap();
         deck.parsed_slides()[0].clone()
+    }
+
+    fn assert_fused_after_marker_error(source: &str, line: usize) {
+        let err = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(line));
+        assert_eq!(
+            err.message,
+            "content on the line after `:::` is attached to the fence"
+        );
+        assert_eq!(
+            err.help,
+            "insert a blank line between the `:::` marker and the content"
+        );
+    }
+
+    fn assert_fused_before_marker_error(source: &str, line: usize) {
+        let err = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(line));
+        assert_eq!(
+            err.message,
+            "content on the line before `:::` is attached to the fence"
+        );
+        assert_eq!(
+            err.help,
+            "insert a blank line between the content and the `:::` marker"
+        );
+    }
+
+    fn assert_fused_around_marker_error(source: &str, line: usize) {
+        let err = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(line));
+        assert_eq!(err.message, "content around `:::` is attached to the fence");
+        assert_eq!(err.help, "insert blank lines around the `:::` marker");
+    }
+
+    #[test]
+    fn reveal_opening_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
+        assert_fused_after_marker_error(
+            "# T\n\n::: {reveal}\nFirst, show the architecture.\n\n- a\n- b\n\n:::\n",
+            3,
+        );
+    }
+
+    #[test]
+    fn opening_fence_fused_to_only_paragraph_reports_fusion_not_empty_group() {
+        assert_fused_after_marker_error("# T\n\n::: {reveal}\nOnly paragraph.\n\n:::\n", 3);
+        assert_fused_after_marker_error("# T\n\n::: {slot=body}\nOnly paragraph.\n\n:::\n", 3);
+    }
+
+    #[test]
+    fn opening_fence_fused_to_preceding_paragraph_reports_fusion_for_reveal_and_slot() {
+        assert_fused_before_marker_error("# T\n\nBefore.\n::: {reveal}\n\nx\n\n:::\n", 4);
+        assert_fused_before_marker_error("# T\n\nBefore.\n::: {slot=body}\n\nx\n\n:::\n", 4);
+    }
+
+    #[test]
+    fn closing_reveal_fence_fused_to_preceding_paragraph_reports_fusion_not_unclosed() {
+        assert_fused_before_marker_error("# T\n\n::: {reveal}\n\nx\n:::\n", 6);
+    }
+
+    #[test]
+    fn fence_fused_to_content_on_both_sides_reports_around_marker() {
+        assert_fused_around_marker_error("# T\n\n::: {reveal}\n\nBefore.\n:::\nAfter.\n", 6);
+    }
+
+    #[test]
+    fn list_fused_to_close_marker_without_group_reports_fusion() {
+        assert_fused_before_marker_error("# T\n\n- a\n- b\n:::\n", 5);
+    }
+
+    #[test]
+    fn list_fused_to_close_marker_inside_reveal_reports_fusion_not_unclosed() {
+        assert_fused_before_marker_error("# T\n\n::: {reveal}\n\n- a\n- b\n:::\n", 7);
+    }
+
+    #[test]
+    fn list_fused_to_open_marker_reports_fusion_not_later_stray_close() {
+        assert_fused_before_marker_error("# T\n\n- a\n- b\n::: {reveal}\n\nx\n\n:::\n", 5);
+    }
+
+    #[test]
+    fn footnote_definition_fused_to_close_marker_without_group_reports_fusion() {
+        assert_fused_before_marker_error("# T\n\nBody[^1]\n\n[^1]: note\n:::\n", 6);
+    }
+
+    #[test]
+    fn footnote_definition_fused_to_close_marker_inside_reveal_reports_fusion_not_unclosed() {
+        assert_fused_before_marker_error("# T\n\nBody[^1]\n\n::: {reveal}\n\n[^1]: note\n:::\n", 8);
+    }
+
+    #[test]
+    fn inline_html_comment_with_colon_fence_text_inside_paragraph_is_not_a_div_marker() {
+        let slide = parse_first_slide("# T\n\ntext <!--\n:::\n--> more\n");
+        let paragraph = slide
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Paragraph))
+            .expect("paragraph with inline comment");
+
+        assert!(paragraph.markdown().contains(":::"));
+    }
+
+    #[test]
+    fn block_html_comment_with_colon_fence_text_is_not_a_div_marker() {
+        let slide = parse_first_slide("# T\n\n<!--\n:::\n-->\n\nBody.\n");
+
+        assert!(slide
+            .fragments
+            .iter()
+            .any(|fragment| fragment.markdown().contains("Body.")));
+    }
+
+    #[test]
+    fn closing_reveal_fence_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
+        assert_fused_after_marker_error("# T\n\n::: {reveal}\n\n- a\n\n:::\nAfter.\n", 7);
+    }
+
+    #[test]
+    fn slot_opening_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
+        assert_fused_after_marker_error(
+            "# T\n\n::: {slot=body}\nSlot intro.\n\n- remaining\n\n:::\n",
+            3,
+        );
+    }
+
+    #[test]
+    fn closing_slot_fence_fused_to_preceding_paragraph_reports_fusion_not_unclosed() {
+        assert_fused_before_marker_error("# T\n\n::: {slot=body}\n\nx\n:::\n", 6);
+    }
+
+    #[test]
+    fn closing_slot_fence_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
+        assert_fused_after_marker_error("# T\n\n::: {slot=body}\n\n- a\n\n:::\nAfter.\n", 7);
     }
 
     #[test]
