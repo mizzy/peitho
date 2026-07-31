@@ -71,7 +71,7 @@ Consequences:
 The renderer stamps deterministic attributes into the emitted HTML (visible in diffs, part of the rendered contract):
 
 - `data-reveal-step="N"` on each step's top-level element(s) — for a list, on each top-level `<li>`; for other blocks, on the block's root element. Stamping happens where the fragment's markdown is rendered (event-stream interception around pulldown-cmark's output for lists; the existing lol_html rewriter idiom is the fallback seam).
-- `data-reveal-steps="{total}"` on the slide `<section>`, via the same `HtmlRewriter` pass that already stamps `data-slide-key`.
+- `data-reveal-steps="{total}"` on the slide `<section>`, via the same `HtmlRewriter` pass that already stamps `data-slide-key` — only when the slide has steps, so decks without reveal groups build byte-identical to today.
 
 No CSS in the rendered output hides anything. The present shell owns a small style (`[data-reveal-hidden] { visibility: hidden }` — `visibility`, not `display`, so layout stays stable) and toggles `data-reveal-hidden` on `[data-reveal-step]` elements whose step exceeds the current shown count.
 

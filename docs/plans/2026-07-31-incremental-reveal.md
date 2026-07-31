@@ -337,6 +337,13 @@ fn render_reveal_stamps_blocks_lists_code_and_section_total() {
     assert!(html.contains(r#"<li data-reveal-step="4">two</li>"#), "{html}");
     assert!(html.contains(r#"<pre class="slot-code" data-reveal-step="5"><code"#), "{html}");
     assert!(!html.contains("data-reveal-hidden"), "{html}");
+
+    let plain = render_checked_deck("# Plain\n\nBody");
+    let plain_html = plain.slides()[0].html();
+    assert!(
+        !plain_html.contains("data-reveal-steps") && !plain_html.contains("data-reveal-step"),
+        "{plain_html}"
+    );
 }
 
 #[test]
@@ -351,7 +358,7 @@ fn pdf_document_keeps_reveal_steps_in_final_state() {
 
 **Implementation**:
 
-- Pass `slide.step_count()` into `render_slide` and set `data-reveal-steps` on every `<section>` in the existing `HtmlRewriter` handler that already sets `data-slide-key`.
+- Pass `slide.step_count()` into `render_slide` and set `data-reveal-steps` on the `<section>` in the existing `HtmlRewriter` handler that already sets `data-slide-key` only when `slide.step_count() > 0`.
 - Keep the current `render_block_slot` batching for fragments with `reveal_span() == None`.
 - When `render_block_slot` sees a revealed fragment, flush the current markdown run, render that single fragment, and append reveal attributes before resuming the next non-revealed run.
 - Add `render_revealed_fragment(body, fragment, span, breaks, footnote_numbers)` whose first operation is an exhaustive `match fragment.kind()` with explicit arms for `FragmentKind::Heading { .. }`, `FragmentKind::Paragraph`, `FragmentKind::Text`, `FragmentKind::Code`, `FragmentKind::Math { .. }`, `FragmentKind::Footnotes { .. }`, `FragmentKind::Image { .. }`, `FragmentKind::List`, and `FragmentKind::SlotGroup { .. }`; do not use `_ =>`.
