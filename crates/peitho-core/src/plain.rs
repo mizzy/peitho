@@ -214,6 +214,7 @@ mod tests {
             layout,
             slots,
             false,
+            0,
             false,
             None,
         );

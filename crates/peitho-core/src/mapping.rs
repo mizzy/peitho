@@ -336,6 +336,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
         slots,
         unassigned,
         skip: slide.skip,
+        step_count: slide.step_count,
         page_number_hidden: slide.page_number_hidden,
         notes: slide.notes.clone(),
     })
@@ -416,7 +417,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{FootnoteEntry, SlideKey, SlotName, SourceFragment},
+        domain::{FootnoteEntry, RevealSpan, SlideKey, SlotName, SourceFragment},
         layout::parse_layout,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{DeckSettings, KeySource, ParsedSlide},
@@ -479,6 +480,37 @@ mod tests {
         .unwrap();
 
         assert!(mapped.mapped_slides()[0].skip);
+    }
+
+    #[test]
+    fn mapping_carries_reveal_step_count_and_cross_slot_spans() {
+        let layout = parse_layout(
+            "title-body-code",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="1..*"></slot><slot name="code" accepts="code" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "# T\n\n::: {reveal}\n\nBody paragraph.\n\n```rust\nfn main() {}\n```\n\n:::\n",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let body = SlotName::new("body").unwrap();
+        let code = SlotName::new("code").unwrap();
+
+        assert_eq!(slide.step_count, 2);
+        assert_eq!(
+            slide.slots[&body].fragments()[0].reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
+        );
+        assert_eq!(
+            slide.slots[&code].fragments()[0].reveal_span(),
+            Some(RevealSpan { start: 2, len: 1 })
+        );
     }
 
     #[test]

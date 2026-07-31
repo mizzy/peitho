@@ -44,6 +44,7 @@ pub fn check_deck(deck: Deck<Mapped>) -> Result<Deck<Checked>> {
             slide.layout,
             checked_slots,
             slide.skip,
+            slide.step_count,
             slide.page_number_hidden,
             slide.notes,
         ));
@@ -232,6 +233,7 @@ mod tests {
                 slots,
                 unassigned: Vec::new(),
                 skip: false,
+                step_count: 0,
                 page_number_hidden: false,
                 notes: None,
             }],
@@ -268,6 +270,7 @@ mod tests {
                 slots,
                 unassigned: Vec::new(),
                 skip: false,
+                step_count: 0,
                 page_number_hidden: false,
                 notes: None,
             }],
@@ -324,6 +327,29 @@ mod tests {
         let checked = check_deck(mapped).unwrap();
 
         assert!(checked.checked_slides()[0].skip());
+    }
+
+    #[test]
+    fn check_deck_carries_reveal_step_count_to_checked_slide() {
+        let layout = parse_layout(
+            "title-body",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(
+                    "# T\n\n::: {reveal}\n\n- one\n- two\n\n:::\n",
+                    &crate::highlight::Highlighter::defaults(),
+                )
+                .unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(checked.checked_slides()[0].step_count(), 2);
     }
 
     #[test]
@@ -563,6 +589,7 @@ mod tests {
             slots,
             unassigned: Vec::new(),
             skip: false,
+            step_count: 0,
             page_number_hidden: false,
             notes: None,
         };
@@ -600,6 +627,7 @@ mod tests {
                 slots,
                 unassigned: Vec::new(),
                 skip: false,
+                step_count: 0,
                 page_number_hidden: false,
                 notes: None,
             }],

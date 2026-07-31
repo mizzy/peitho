@@ -108,6 +108,8 @@ pub struct ManifestSlide {
     pub(crate) has_notes: bool,
     #[serde(default)]
     pub(crate) skip: bool,
+    #[serde(rename = "revealSteps", default)]
+    pub(crate) reveal_steps: usize,
     #[serde(default)]
     pub(crate) text: ManifestSlideText,
 }
@@ -185,6 +187,10 @@ impl ManifestSlide {
 
     pub fn skip(&self) -> bool {
         self.skip
+    }
+
+    pub fn reveal_steps(&self) -> usize {
+        self.reveal_steps
     }
 
     pub fn text(&self) -> &ManifestSlideText {
@@ -388,6 +394,7 @@ pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageA
                 src: fragment_src(slide.index(), slide.key()),
                 has_notes: slide.notes().is_some(),
                 skip: slide.skip(),
+                reveal_steps: slide.step_count(),
                 text,
             }
         })
@@ -439,6 +446,7 @@ mod tests {
             src: "slides/000-intro.html".to_owned(),
             has_notes: true,
             skip: true,
+            reveal_steps: 2,
             text: text.clone(),
         };
 
@@ -447,6 +455,7 @@ mod tests {
         assert_eq!(text.code(), "Code");
         assert!(slide.has_notes());
         assert!(slide.skip());
+        assert_eq!(slide.reveal_steps(), 2);
         assert_eq!(slide.text(), &text);
     }
 
@@ -464,6 +473,7 @@ mod tests {
                     src: "slides/000-arch-1.html".to_owned(),
                     has_notes: false,
                     skip: false,
+                    reveal_steps: 0,
                     text: ManifestSlideText::default(),
                 },
                 ManifestSlide {
@@ -472,6 +482,7 @@ mod tests {
                     src: "slides/001-details.html".to_owned(),
                     has_notes: false,
                     skip: false,
+                    reveal_steps: 0,
                     text: ManifestSlideText::default(),
                 },
             ],
@@ -501,6 +512,7 @@ mod tests {
                 "      \"src\": \"slides/000-arch-1.html\",\n",
                 "      \"hasNotes\": false,\n",
                 "      \"skip\": false,\n",
+                "      \"revealSteps\": 0,\n",
                 "      \"text\": {\n",
                 "        \"title\": \"\",\n",
                 "        \"body\": \"\",\n",
@@ -513,6 +525,7 @@ mod tests {
                 "      \"src\": \"slides/001-details.html\",\n",
                 "      \"hasNotes\": false,\n",
                 "      \"skip\": false,\n",
+                "      \"revealSteps\": 0,\n",
                 "      \"text\": {\n",
                 "        \"title\": \"\",\n",
                 "        \"body\": \"\",\n",
@@ -585,6 +598,7 @@ mod tests {
                 src: "slides/000-intro.html".to_owned(),
                 has_notes: false,
                 skip: false,
+                reveal_steps: 0,
                 text: ManifestSlideText::new("Intro", "Body text", "fn main() {}\n"),
             }],
         );
@@ -658,6 +672,7 @@ mod tests {
                 src: "slides/000-intro.html".to_owned(),
                 has_notes: false,
                 skip: false,
+                reveal_steps: 0,
                 text: ManifestSlideText::default(),
             }],
         );
@@ -682,6 +697,7 @@ mod tests {
                 src: "slides/000-intro.html".to_owned(),
                 has_notes: false,
                 skip: false,
+                reveal_steps: 0,
                 text: ManifestSlideText::default(),
             }],
         );
@@ -715,6 +731,21 @@ mod tests {
         assert!(!manifest.slides()[1].skip());
         assert!(json.contains(r#""skip": true"#));
         assert!(json.contains(r#""skip": false"#));
+    }
+
+    #[test]
+    fn build_manifest_serializes_reveal_steps_from_checked_deck() {
+        let manifest = build_manifest(
+            &checked_deck(
+                "# T\n\n::: {reveal}\n\n- one\n- two\n\n:::\n",
+                title_body_layout(),
+            ),
+            &[],
+        );
+        let json = manifest_json(&manifest).unwrap();
+
+        assert_eq!(manifest.slides()[0].reveal_steps(), 2);
+        assert!(json.contains(r#""revealSteps": 2"#));
     }
 
     #[test]
@@ -795,6 +826,29 @@ mod tests {
         let manifest: Manifest = serde_json::from_str(json).unwrap();
 
         assert!(!manifest.slides()[0].skip());
+    }
+
+    #[test]
+    fn deserializes_manifest_missing_reveal_steps_as_zero() {
+        let json = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"peithoVersion\": \"0.1.0\",\n",
+            "  \"title\": \"Deck\",\n",
+            "  \"slideCount\": 1,\n",
+            "  \"plannedDurationMs\": null,\n",
+            "  \"aspectRatio\": \"16:9\",\n",
+            "  \"canvasWidth\": 1280,\n",
+            "  \"canvasHeight\": 720,\n",
+            "  \"sections\": [],\n",
+            "  \"slides\": [{\"index\":0,\"key\":\"intro\",\"src\":\"slides/000-intro.html\",\"hasNotes\":false}],\n",
+            "  \"images\": []\n",
+            "}\n"
+        );
+
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(manifest.slides()[0].reveal_steps(), 0);
     }
 
     #[test]
@@ -1120,6 +1174,7 @@ mod ts_tests {
         assert!(slide.contains("key: string"));
         assert!(slide.contains("hasNotes: boolean"));
         assert!(slide.contains("skip: boolean"));
+        assert!(slide.contains("revealSteps: number"));
         assert!(!slide.contains("page_number"));
         assert!(!slide.contains("pageNumber"));
         assert!(slide.contains(r#"import type { ManifestSlideText } from "./ManifestSlideText";"#));
