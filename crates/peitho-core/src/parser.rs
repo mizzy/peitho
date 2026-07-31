@@ -20,7 +20,7 @@ use crate::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
         PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
-    render::BODY_MARKDOWN_OPTIONS,
+    render::walk_body_markdown_list_items,
 };
 
 /// Page settings comment, deck-style:
@@ -2228,16 +2228,12 @@ fn reveal_span_len(fragment: &SourceFragment) -> usize {
         return 1;
     }
 
-    let mut list_depth = 0usize;
     let mut item_count = 0usize;
-    for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
-        match event {
-            Event::Start(Tag::List(_)) => list_depth += 1,
-            Event::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
-            Event::Start(Tag::Item) if list_depth == 1 => item_count += 1,
-            _ => {}
+    walk_body_markdown_list_items(fragment.markdown(), |_event, top_level_item| {
+        if top_level_item {
+            item_count += 1;
         }
-    }
+    });
     item_count
 }
 

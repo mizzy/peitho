@@ -9,7 +9,7 @@ use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 use crate::{
     domain::{
         Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
-        SlideKey, SlotName, SourceFragment,
+        RevealSpan, SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -22,6 +22,29 @@ const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 
 pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES;
+
+pub(crate) fn walk_body_markdown_list_items<'a>(
+    markdown: &'a str,
+    mut visit: impl FnMut(Event<'a>, bool),
+) {
+    let mut list_depth = 0usize;
+    for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
+        match event {
+            Event::Start(Tag::List(kind)) => {
+                list_depth += 1;
+                visit(Event::Start(Tag::List(kind)), false);
+            }
+            Event::End(TagEnd::List(kind)) => {
+                visit(Event::End(TagEnd::List(kind)), false);
+                list_depth = list_depth.saturating_sub(1);
+            }
+            Event::Start(Tag::Item) if list_depth == 1 => {
+                visit(Event::Start(Tag::Item), true);
+            }
+            event => visit(event, false),
+        }
+    }
+}
 
 /// Render a checked deck whose image paths have already been resolved.
 ///
@@ -53,8 +76,11 @@ pub fn render_deck(
             slide.slots(),
             slide.layout(),
             breaks,
-            page_number,
-            page_total,
+            SlideRenderAttributes {
+                page_number,
+                page_total,
+                reveal_steps: slide.step_count(),
+            },
             highlighter,
         )?;
         let notes = slide.notes().map(|s| s.to_owned());
@@ -86,20 +112,27 @@ fn slide_uses_math(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -
     })
 }
 
+#[derive(Clone, Copy)]
+struct SlideRenderAttributes {
+    page_number: Option<usize>,
+    page_total: Option<usize>,
+    reveal_steps: usize,
+}
+
 fn render_slide(
     key: &SlideKey,
     slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
     layout: &Layout,
     breaks: bool,
-    page_number: Option<usize>,
-    page_total: Option<usize>,
+    attrs: SlideRenderAttributes,
     highlighter: &Highlighter,
 ) -> Result<String> {
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
     let footnote_numbers = collect_footnote_numbers(slots);
-    let page_number_value = page_number.map(|number| number.to_string());
-    let page_total_value = page_total.map(|total| total.to_string());
+    let page_number_value = attrs.page_number.map(|number| number.to_string());
+    let page_total_value = attrs.page_total.map(|total| total.to_string());
+    let reveal_steps_value = (attrs.reveal_steps > 0).then(|| attrs.reveal_steps.to_string());
     let slot_values = slots.clone();
     let mut rewriter = HtmlRewriter::new(
         Settings {
@@ -111,6 +144,9 @@ fn render_slide(
                     }
                     if let Some(total) = &page_total_value {
                         el.set_attribute("data-peitho-page-total", total)?;
+                    }
+                    if let Some(total) = &reveal_steps_value {
+                        el.set_attribute("data-reveal-steps", total)?;
                     }
                     let existing = el.get_attribute("class").unwrap_or_default();
                     let class = if existing
@@ -202,27 +238,55 @@ fn render_slot(
                 .map(|fragment| render_heading_inline_fragment(fragment, footnote_numbers))
                 .collect::<Result<Vec<_>>>()?
                 .join(" ");
-            format!(r#"<span class="{class_name}">{body}</span>"#)
+            if let Some(span) = fragments.iter().find_map(SourceFragment::reveal_span) {
+                // check.rs rejects revealed fragments that share an inline
+                // slot with other content, so render can rely on this shape.
+                if fragments.len() > 1 {
+                    unreachable!("revealed inline slots carry exactly one fragment");
+                }
+                format!(
+                    r#"<span class="{class_name}" data-reveal-step="{}">{body}</span>"#,
+                    span.start
+                )
+            } else {
+                format!(r#"<span class="{class_name}">{body}</span>"#)
+            }
         }
-        Accepts::Code => {
-            let body = fragments
-                .iter()
-                .map(|fragment| render_code_fragment(fragment, highlighter))
-                .collect::<Result<Vec<_>>>()?
-                .join("\n");
-            format!(r#"<pre class="{class_name}"><code>{body}</code></pre>"#)
-        }
+        Accepts::Code => render_code_slot(&class_name, fragments, highlighter)?,
         Accepts::Image => {
             let body = fragments
                 .iter()
-                .map(render_image_fragment)
+                .map(|fragment| {
+                    if let Some(span) = fragment.reveal_span() {
+                        ensure_fragment_matches_contract(Accepts::Image, fragment)?;
+                        let mut html = String::new();
+                        let footnote_numbers = BTreeMap::new();
+                        render_revealed_fragment(
+                            &mut html,
+                            &class_name,
+                            fragment,
+                            span,
+                            breaks,
+                            &footnote_numbers,
+                            highlighter,
+                        )?;
+                        Ok(html)
+                    } else {
+                        render_image_fragment(fragment)
+                    }
+                })
                 .collect::<Result<Vec<_>>>()?
                 .join("\n");
             format!(r#"<div class="{class_name}">{body}</div>"#)
         }
-        Accepts::Blocks | Accepts::Text | Accepts::List => {
-            render_block_slot(&class_name, accepts, fragments, breaks, footnote_numbers)?
-        }
+        Accepts::Blocks | Accepts::Text | Accepts::List => render_block_slot(
+            &class_name,
+            accepts,
+            fragments,
+            breaks,
+            footnote_numbers,
+            highlighter,
+        )?,
     })
 }
 
@@ -242,12 +306,85 @@ fn collect_footnote_numbers(
     numbers
 }
 
+fn render_code_slot(
+    class_name: &str,
+    fragments: &[SourceFragment<ResolvedImagePath>],
+    highlighter: &Highlighter,
+) -> Result<String> {
+    if fragments
+        .iter()
+        .all(|fragment| fragment.reveal_span().is_none())
+    {
+        let body = fragments
+            .iter()
+            .map(|fragment| render_code_fragment(fragment, highlighter))
+            .collect::<Result<Vec<_>>>()?
+            .join("\n");
+        return Ok(format!(
+            r#"<pre class="{class_name}"><code>{body}</code></pre>"#
+        ));
+    }
+
+    let mut body = String::new();
+    let mut code_run = Vec::new();
+    let footnote_numbers = BTreeMap::new();
+    for fragment in fragments {
+        ensure_fragment_matches_contract(Accepts::Code, fragment)?;
+        if let Some(span) = fragment.reveal_span() {
+            flush_code_run(&mut body, class_name, &code_run, highlighter)?;
+            code_run.clear();
+            append_code_separator(&mut body);
+            render_revealed_fragment(
+                &mut body,
+                class_name,
+                fragment,
+                span,
+                false,
+                &footnote_numbers,
+                highlighter,
+            )?;
+        } else {
+            code_run.push(fragment);
+        }
+    }
+    flush_code_run(&mut body, class_name, &code_run, highlighter)?;
+    Ok(body)
+}
+
+fn flush_code_run(
+    body: &mut String,
+    class_name: &str,
+    code_run: &[&SourceFragment<ResolvedImagePath>],
+    highlighter: &Highlighter,
+) -> Result<()> {
+    if code_run.is_empty() {
+        return Ok(());
+    }
+    append_code_separator(body);
+    let code = code_run
+        .iter()
+        .map(|fragment| render_code_fragment(fragment, highlighter))
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
+    body.push_str(&format!(
+        r#"<pre class="{class_name}"><code>{code}</code></pre>"#
+    ));
+    Ok(())
+}
+
+fn append_code_separator(body: &mut String) {
+    if !body.is_empty() {
+        body.push('\n');
+    }
+}
+
 fn render_block_slot(
     class_name: &str,
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
 ) -> Result<String> {
     for fragment in fragments {
         ensure_fragment_matches_contract(accepts, fragment)?;
@@ -255,6 +392,20 @@ fn render_block_slot(
     let mut body = String::new();
     let mut markdown_run = Vec::new();
     for fragment in fragments {
+        if let Some(span) = fragment.reveal_span() {
+            render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+            markdown_run.clear();
+            render_revealed_fragment(
+                &mut body,
+                class_name,
+                fragment,
+                span,
+                breaks,
+                footnote_numbers,
+                highlighter,
+            )?;
+            continue;
+        }
         match fragment.kind() {
             FragmentKind::Math { html } => {
                 render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
@@ -279,6 +430,158 @@ fn render_block_slot(
     }
     render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
+}
+
+fn render_revealed_fragment(
+    body: &mut String,
+    class_name: &str,
+    fragment: &SourceFragment<ResolvedImagePath>,
+    span: RevealSpan,
+    breaks: bool,
+    footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
+) -> Result<()> {
+    match fragment.kind() {
+        FragmentKind::Heading { .. } => render_revealed_markdown_root(
+            body,
+            fragment,
+            RevealedMarkdownRoot::Heading,
+            span.start,
+            breaks,
+            footnote_numbers,
+        ),
+        FragmentKind::Paragraph => render_revealed_markdown_root(
+            body,
+            fragment,
+            RevealedMarkdownRoot::Paragraph,
+            span.start,
+            breaks,
+            footnote_numbers,
+        ),
+        FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
+        FragmentKind::Code => {
+            let code = render_code_fragment(fragment, highlighter)?;
+            body.push_str(&format!(
+                r#"<pre class="{class_name}" data-reveal-step="{}"><code>{code}</code></pre>"#,
+                span.start
+            ));
+            Ok(())
+        }
+        FragmentKind::Math { html } => {
+            body.push_str(&format!(
+                r#"<div class="peitho-math" data-reveal-step="{}">"#,
+                span.start
+            ));
+            body.push_str(html);
+            body.push_str("</div>");
+            Ok(())
+        }
+        FragmentKind::Footnotes { .. } => {
+            // The parser collects footnote definitions slide-wide and appends
+            // the Footnotes fragment after reveal groups dissolve, so this
+            // variant cannot carry a real reveal span from Markdown.
+            unreachable!("revealed Footnotes fragments are not renderable")
+        }
+        FragmentKind::Image { .. } => {
+            body.push_str(&render_image_fragment_with_reveal_step(
+                fragment, span.start,
+            )?);
+            Ok(())
+        }
+        FragmentKind::List => {
+            render_revealed_list_fragment(body, fragment, span, breaks, footnote_numbers)
+        }
+        FragmentKind::SlotGroup { .. } => {
+            unreachable!("revealed SlotGroup fragments are not renderable")
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RevealedMarkdownRoot {
+    Heading,
+    Paragraph,
+}
+
+fn render_revealed_markdown_root(
+    body: &mut String,
+    fragment: &SourceFragment<ResolvedImagePath>,
+    root: RevealedMarkdownRoot,
+    step: usize,
+    breaks: bool,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<()> {
+    let mut events = Vec::new();
+    let mut stamped = false;
+    for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
+        let event = match (root, stamped, event) {
+            (
+                RevealedMarkdownRoot::Heading,
+                false,
+                Event::Start(Tag::Heading {
+                    level,
+                    id,
+                    classes,
+                    attrs,
+                }),
+            ) => {
+                if id.is_some() || !classes.is_empty() || !attrs.is_empty() {
+                    unreachable!("heading attributes are not enabled in BODY_MARKDOWN_OPTIONS");
+                }
+                stamped = true;
+                Event::Html(format!(r#"<{level} data-reveal-step="{step}">"#).into())
+            }
+            (RevealedMarkdownRoot::Paragraph, false, Event::Start(Tag::Paragraph)) => {
+                stamped = true;
+                Event::Html(format!(r#"<p data-reveal-step="{step}">"#).into())
+            }
+            (_, _, event) => event,
+        };
+        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
+    }
+    if !stamped {
+        let label = match root {
+            RevealedMarkdownRoot::Heading => "heading",
+            RevealedMarkdownRoot::Paragraph => "paragraph",
+        };
+        unreachable!("revealed {label} fragment produced no {label} root");
+    }
+    html::push_html(body, events.into_iter());
+    Ok(())
+}
+
+fn render_revealed_list_fragment(
+    body: &mut String,
+    fragment: &SourceFragment<ResolvedImagePath>,
+    span: RevealSpan,
+    breaks: bool,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<()> {
+    let mut raw_events = Vec::new();
+    let mut events = Vec::new();
+    let mut top_level_item_index = 0usize;
+    walk_body_markdown_list_items(fragment.markdown(), |event, top_level_item| {
+        if top_level_item {
+            let step = span.start + top_level_item_index;
+            top_level_item_index += 1;
+            raw_events.push(Event::Html(
+                format!(r#"<li data-reveal-step="{step}">"#).into(),
+            ));
+        } else {
+            raw_events.push(event);
+        }
+    });
+    if top_level_item_index != span.len {
+        unreachable!(
+            "revealed list span length mismatch: stamped {top_level_item_index} top-level items but span.len is {}",
+            span.len
+        );
+    }
+    for event in raw_events {
+        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
+    }
+    html::push_html(body, events.into_iter());
+    Ok(())
 }
 
 fn render_footnotes_block(
@@ -309,28 +612,36 @@ fn render_markdown_run(
     let markdown = markdown_run.join("\n\n");
     let mut events = Vec::new();
     for event in Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS) {
-        let event = match (breaks, event) {
-            (true, Event::SoftBreak) => Event::HardBreak,
-            (_, event) => event,
-        };
-        match event {
-            Event::FootnoteReference(label) => {
-                let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
-                    return Err(missing_footnote_render_error(label.as_ref()));
-                };
-                events.push(Event::Html(render_footnote_reference(number).into()));
-            }
-            Event::Start(Tag::FootnoteDefinition(label)) => {
-                return Err(unexpected_footnote_definition_render_error(label.as_ref()));
-            }
-            Event::End(TagEnd::FootnoteDefinition) => {
-                return Err(unexpected_footnote_definition_render_error(""));
-            }
-            event => events.push(event),
-        }
+        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
     }
     html::push_html(body, events.into_iter());
     Ok(())
+}
+
+fn normalize_markdown_event<'a>(
+    event: Event<'a>,
+    breaks: bool,
+    footnote_numbers: &BTreeMap<String, usize>,
+) -> Result<Event<'a>> {
+    let event = match (breaks, event) {
+        (true, Event::SoftBreak) => Event::HardBreak,
+        (_, event) => event,
+    };
+    match event {
+        Event::FootnoteReference(label) => {
+            let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
+                return Err(missing_footnote_render_error(label.as_ref()));
+            };
+            Ok(Event::Html(render_footnote_reference(number).into()))
+        }
+        Event::Start(Tag::FootnoteDefinition(label)) => {
+            Err(unexpected_footnote_definition_render_error(label.as_ref()))
+        }
+        Event::End(TagEnd::FootnoteDefinition) => {
+            Err(unexpected_footnote_definition_render_error(""))
+        }
+        event => Ok(event),
+    }
 }
 
 fn render_heading_inline_fragment(
@@ -358,13 +669,33 @@ fn render_code_fragment(
 }
 
 fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
+    render_image_fragment_inner(fragment, None)
+}
+
+fn render_image_fragment_with_reveal_step(
+    fragment: &SourceFragment<ResolvedImagePath>,
+    step: usize,
+) -> Result<String> {
+    render_image_fragment_inner(fragment, Some(step))
+}
+
+fn render_image_fragment_inner(
+    fragment: &SourceFragment<ResolvedImagePath>,
+    reveal_step: Option<usize>,
+) -> Result<String> {
     ensure_fragment_matches_contract(Accepts::Image, fragment)?;
     match fragment.kind() {
-        FragmentKind::Image { alt, src } => Ok(format!(
-            r#"<img src="{}" alt="{}">"#,
-            encode_double_quoted_attribute(src.as_str()),
-            encode_double_quoted_attribute(alt),
-        )),
+        FragmentKind::Image { alt, src } => {
+            let reveal_attr = reveal_step
+                .map(|step| format!(r#" data-reveal-step="{step}""#))
+                .unwrap_or_default();
+            Ok(format!(
+                r#"<img src="{}" alt="{}"{}>"#,
+                encode_double_quoted_attribute(src.as_str()),
+                encode_double_quoted_attribute(alt),
+                reveal_attr,
+            ))
+        }
         FragmentKind::Heading { .. }
         | FragmentKind::Paragraph
         | FragmentKind::Text
@@ -1358,7 +1689,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{AspectRatio, FootnoteEntry},
+        domain::{AspectRatio, FootnoteEntry, RawImagePath, RevealSpan},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
@@ -1373,6 +1704,18 @@ mod tests {
         parse_markdown_impl(source, frontmatter, highlighter)
     }
 
+    struct UnusedSvgRunner;
+
+    impl crate::code_images::SvgRunner for UnusedSvgRunner {
+        fn run(
+            &self,
+            _command: &crate::domain::CodeImageCommand,
+            _stdin: &str,
+        ) -> crate::error::Result<Vec<u8>> {
+            panic!("unexpected external code image runner call")
+        }
+    }
+
     fn render_image_slot_html(
         slot_name: &str,
         fragments: Vec<SourceFragment<ResolvedImagePath>>,
@@ -1383,6 +1726,12 @@ mod tests {
         let layout = parse_layout("visual", &layout_html).unwrap();
         let slot = SlotName::new(slot_name).unwrap();
         let contract = layout.slot(slot_name).unwrap().clone();
+        let step_count = fragments
+            .iter()
+            .filter_map(SourceFragment::reveal_span)
+            .map(|span| span.start + span.len - 1)
+            .max()
+            .unwrap_or(0);
         let mut slots = BTreeMap::new();
         slots.insert(slot, CheckedSlot::new(contract, fragments));
         let checked = Deck::checked(
@@ -1394,7 +1743,7 @@ mod tests {
                 layout,
                 slots,
                 false,
-                0,
+                step_count,
                 false,
                 None,
             )],
@@ -1530,6 +1879,231 @@ mod tests {
     }
 
     #[test]
+    fn render_reveal_stamps_blocks_lists_code_and_section_total() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n::: {reveal}\n\n## Sub\n\nBody paragraph.\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n\n:::\n",
+            parse_layout(
+                "title-body-code",
+                r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="1..*"></slot><slot name="code" accepts="code" arity="1"></slot></section>"#,
+            )
+            .unwrap(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="5""#), "{html}");
+        assert!(
+            html.contains(r#"<h2 data-reveal-step="1">Sub</h2>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p data-reveal-step="2">Body paragraph.</p>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li data-reveal-step="3">one</li>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li data-reveal-step="4">two</li>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<pre class="slot-code" data-reveal-step="5"><code"#),
+            "{html}"
+        );
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+
+        let plain = render_checked_deck_with_layout("# Plain\n\nBody", title_body_layout());
+        let plain_html = plain.slides()[0].html();
+        assert!(
+            !plain_html.contains("data-reveal-steps") && !plain_html.contains("data-reveal-step"),
+            "{plain_html}"
+        );
+    }
+
+    #[test]
+    fn render_reveal_keeps_mixed_code_slot_order_and_highlighting() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n```rust\nfn same() {}\n```\n\n::: {reveal}\n\n```rust\nfn same() {}\n```\n\n:::\n",
+            parse_layout(
+                "title-code",
+                r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1..*"></slot></section>"#,
+            )
+            .unwrap(),
+        );
+        let html = rendered.slides()[0].html();
+
+        let plain_prefix = r#"<pre class="slot-code"><code>"#;
+        let revealed_prefix = r#"<pre class="slot-code" data-reveal-step="1"><code>"#;
+        let plain_start = html.find(plain_prefix).unwrap();
+        let revealed_start = html.find(revealed_prefix).unwrap();
+        assert!(plain_start < revealed_start, "{html}");
+        assert_eq!(
+            html.matches(r#"<pre class="slot-code""#).count(),
+            2,
+            "{html}"
+        );
+
+        let plain_body_start = plain_start + plain_prefix.len();
+        let plain_body_end =
+            plain_body_start + html[plain_body_start..].find("</code></pre>").unwrap();
+        let revealed_body_start = revealed_start + revealed_prefix.len();
+        let revealed_body_end =
+            revealed_body_start + html[revealed_body_start..].find("</code></pre>").unwrap();
+
+        assert_eq!(&html[plain_body_end..revealed_start], "</code></pre>\n");
+        assert_eq!(
+            &html[plain_body_start..plain_body_end],
+            &html[revealed_body_start..revealed_body_end],
+            "{html}"
+        );
+        assert!(
+            html[plain_body_start..plain_body_end].contains("hl-"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_reveal_stamps_inline_title_slot_span() {
+        let rendered = render_checked_deck("::: {reveal}\n\n# Revealed Title\n\n:::\n");
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="1""#), "{html}");
+        assert!(
+            html.contains(
+                r#"<h1><span class="slot-title" data-reveal-step="1">Revealed Title</span></h1>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+    }
+
+    #[test]
+    fn render_reveal_flushes_plain_run_before_revealed_fragment() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\nBefore.\n\n::: {reveal}\n\nDuring.\n\n:::\n\nAfter.",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(concat!(
+                r#"<div class="slot-body"><p>Before.</p>"#,
+                "\n",
+                r#"<p data-reveal-step="1">During.</p>"#,
+                "\n",
+                r#"<p>After.</p>"#
+            )),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_reveal_stamps_image_fragments() {
+        let fragments = resolve_fragments(vec![SourceFragment::image(
+            3,
+            "Diagram",
+            RawImagePath::new_unchecked("assets/diagram.png".to_owned()),
+        )
+        .with_reveal_span(RevealSpan { start: 1, len: 1 })]);
+
+        let html = render_image_slot_html("hero", fragments);
+
+        assert!(html.contains(r#"data-reveal-steps="1""#), "{html}");
+        assert!(
+            html.contains(r#"<img src="assets/diagram.png" alt="Diagram" data-reveal-step="1">"#),
+            "{html}"
+        );
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+    }
+
+    #[test]
+    fn render_reveal_keeps_slide_wide_footnotes_unstaged() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n::: {reveal}\n\nClaim[^a].\n\n[^a]: Footnote **body**.\n\n:::\n",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains(
+                r#"<p data-reveal-step="1">Claim<sup class="peitho-footnote-ref">1</sup>.</p>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div class="peitho-footnotes"><ol><li><p>Footnote <strong>body</strong>.</p>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            !html.contains(r#"<div class="peitho-footnotes" data-reveal-step"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "revealed Footnotes fragments are not renderable")]
+    fn revealed_footnotes_fragment_is_unreachable() {
+        let fragments = resolve_fragments(vec![SourceFragment::footnotes(
+            5,
+            vec![FootnoteEntry::new(1, "note", "Footnote body.", 5)],
+        )
+        .with_reveal_span(RevealSpan { start: 1, len: 1 })]);
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
+
+        render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn render_reveal_stamps_transformed_math_fragment() {
+        let rendered = render_checked_deck_with_code_images(
+            "# T\n\n::: {reveal}\n\n```math\n\\frac{1}{2}\n```\n\n:::\n",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="1""#), "{html}");
+        assert!(
+            html.contains(r#"<div class="peitho-math" data-reveal-step="1">"#),
+            "{html}"
+        );
+        assert!(html.contains("katex"), "{html}");
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+    }
+
+    #[test]
+    fn render_reveal_stamps_only_top_level_nested_list_items() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n::: {reveal}\n\n- parent\n  - child\n- sibling\n\n:::\n",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="2""#), "{html}");
+        assert!(
+            html.contains(r#"<li data-reveal-step="1">parent"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li data-reveal-step="2">sibling</li>"#),
+            "{html}"
+        );
+        assert!(html.contains("<li>child</li>"), "{html}");
+        assert_eq!(html.matches(r#"data-reveal-step=""#).count(), 2, "{html}");
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+    }
+
+    #[test]
     fn breaks_true_renders_hard_break() {
         let rendered = render_checked_deck_with_layout(
             "---\nbreaks: true\n---\n# Intro\n\nfirst\nsecond",
@@ -1567,6 +2141,7 @@ mod tests {
             &fragments,
             false,
             &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -1595,6 +2170,7 @@ mod tests {
             &fragments,
             false,
             &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -1627,6 +2203,7 @@ mod tests {
             &fragments,
             false,
             &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -1661,6 +2238,7 @@ mod tests {
             &fragments,
             true,
             &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
 
@@ -2820,6 +3398,18 @@ Paragraph after heading.
     }
 
     #[test]
+    fn pdf_document_keeps_reveal_steps_in_final_state() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n::: {reveal}\n\nBody\n\n:::\n",
+            title_body_layout(),
+        );
+        let html = render_pdf_document(&rendered);
+
+        assert!(html.contains(r#"data-reveal-step="1""#), "{html}");
+        assert!(!html.contains("data-reveal-hidden"), "{html}");
+    }
+
+    #[test]
     fn lint_document_uses_aspect_ratio_canvas_and_ignores_resolution() {
         let rendered = render_checked_deck("---\nresolution: 1920x1080\n---\n# Intro");
 
@@ -2936,6 +3526,23 @@ Paragraph after heading.
 
     fn render_checked_deck_with_layout(markdown: &str, layout: Layout) -> Deck<Rendered> {
         render_checked_deck_with_layout_and_css(markdown, layout, "")
+    }
+
+    fn render_checked_deck_with_code_images(markdown: &str, layout: Layout) -> Deck<Rendered> {
+        let highlighter = crate::highlight::Highlighter::defaults();
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let config = frontmatter.settings().code_images().clone();
+        let parsed = parse_markdown_impl(markdown, frontmatter, &highlighter).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let transformed = crate::code_images::transform_code_images(
+            parsed,
+            &config,
+            &UnusedSvgRunner,
+            temp.path(),
+        )
+        .unwrap();
+        let checked = check_deck(map_by_convention(transformed, &layout).unwrap()).unwrap();
+        render_checked_with_css(checked, "")
     }
 
     fn render_checked_deck_with_layout_and_css(
