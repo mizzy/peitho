@@ -157,6 +157,10 @@ And this to `right`.
 
 Unclosed or nested blocks, unknown slot names, and contract violations inside the routed content are all build errors with line numbers.
 
+### Incremental reveal
+
+Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. Content outside reveal groups is always visible; each direct child block is one step, lists reveal one top-level item per step with nested items attached to their parent, and multiple groups on a slide keep numbering continuously. `peitho preview`, PDF export, lint, and published output show the final state. `{reveal=value}`, empty groups, unclosed fences, nested fences, and multi-attribute fences are line-numbered build errors.
+
 ### Diagrams as code
 
 Fenced `mermaid` blocks render to SVG at build time with Peitho's built-in Mermaid renderer. The generated SVG is cached and then routed as a normal image, so the slide still needs a layout with an `accepts="image"` slot.

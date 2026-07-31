@@ -97,6 +97,57 @@ with the same accepted content.
 The slot name must exist in the chosen layout, and the explicit content still
 has to satisfy that slot's accepted content type and arity.
 
+## Incremental reveal
+
+Use `::: {reveal}` to mark a group of blocks that reveal step by step in
+`peitho present`. Content outside reveal groups is always visible. Each direct
+child block is one step; a list contributes one step per top-level item, and
+nested items appear with their parent. Multiple reveal groups on the same slide
+number continuously.
+
+````markdown
+# Launch plan
+
+Always visible context.
+
+::: {reveal}
+
+- Problem framing
+- Demo path
+  - Setup
+  - Recovery path
+- Decision
+
+:::
+
+Still visible while the first group steps.
+
+::: {reveal}
+
+First, show the architecture.
+
+```rust
+fn main() {
+    println!("ship it");
+}
+```
+
+:::
+````
+
+In this example, the three top-level list items are steps 1-3; the nested items
+appear with "Demo path". The paragraph in the second group is step 4, and the
+code block is step 5.
+
+Leave a blank line after each opening `::: {reveal}` and before a closing `:::`
+that follows a list. Without the opening blank, the following paragraph can be
+swallowed (bug #360); without the closing blank after a list item, the build
+fails loudly with a line-numbered `unclosed reveal fence` error.
+
+`peitho preview`, PDF export, lint, and published output show the final state.
+`{reveal=value}`, empty groups, unclosed fences, nested fences, and
+multi-attribute fences are line-numbered build errors.
+
 ## Speaker notes
 
 Non-JSON HTML comments anywhere in a slide become presenter speaker notes. Empty
