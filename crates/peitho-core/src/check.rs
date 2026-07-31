@@ -80,6 +80,7 @@ fn check_no_unknown_mapped_slots(
 /// so there is exactly one source of contract truth.
 pub(crate) fn check_slide(slide: &MappedSlide) -> Result<()> {
     check_accepts(&slide.slots)?;
+    check_revealed_inline_slots(&slide.slots)?;
     check_arity(&slide.slots, &slide.layout)?;
     check_no_unassigned(&slide.unassigned)
 }
@@ -124,6 +125,29 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Image, FragmentKind::Image { .. })
             | (Accepts::List, FragmentKind::List)
     )
+}
+
+fn check_revealed_inline_slots(slots: &BTreeMap<SlotName, MappedSlot>) -> Result<()> {
+    for mapped_slot in slots.values() {
+        if !matches!(mapped_slot.contract().accepts, Accepts::Inline)
+            || mapped_slot.fragments().len() <= 1
+        {
+            continue;
+        }
+        if let Some(fragment) = mapped_slot
+            .fragments()
+            .iter()
+            .find(|fragment| fragment.reveal_span().is_some())
+        {
+            return Err(BuildError::new(
+                ErrorKind::Accepts,
+                Some(fragment.line()),
+                "a revealed fragment cannot share an inline slot with other content",
+                "give the revealed heading its own slot, or remove the `::: {reveal}` group around it",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, layout: &Layout) -> Result<()> {
@@ -305,6 +329,46 @@ mod tests {
         assert_eq!(
             err.help,
             "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
+    }
+
+    #[test]
+    fn rejects_revealed_heading_sharing_inline_slot_with_other_content() {
+        let layout = parse_layout(
+            "wide",
+            r#"<section><slot name="title" accepts="inline" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "::: {reveal}\n\n# Revealed\n\n:::\n\n::: {slot=title}\n\n## Second\n\n:::\n",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "a revealed fragment cannot share an inline slot with other content"
+        );
+        assert_eq!(
+            err.help,
+            "give the revealed heading its own slot, or remove the `::: {reveal}` group around it"
+        );
+        assert_eq!(
+            err.to_string(),
+            concat!(
+                "slide 1 ('revealed'), line 3: ",
+                "a revealed fragment cannot share an inline slot with other content",
+                "\n  = help: ",
+                "give the revealed heading its own slot, or remove the `::: {reveal}` group around it"
+            )
         );
     }
 
