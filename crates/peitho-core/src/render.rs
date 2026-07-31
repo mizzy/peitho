@@ -21,6 +21,8 @@ use crate::{
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 
+pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES;
+
 /// Render a checked deck whose image paths have already been resolved.
 ///
 /// The `ResolvedImagePath` type parameter is part of the safety boundary:
@@ -306,7 +308,7 @@ fn render_markdown_run(
     }
     let markdown = markdown_run.join("\n\n");
     let mut events = Vec::new();
-    for event in Parser::new_ext(&markdown, Options::ENABLE_OLD_FOOTNOTES) {
+    for event in Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS) {
         let event = match (breaks, event) {
             (true, Event::SoftBreak) => Event::HardBreak,
             (_, event) => event,
@@ -423,7 +425,7 @@ fn render_heading_inline(
 ) -> Result<String> {
     let mut events = Vec::new();
     let mut in_heading = false;
-    for event in Parser::new_ext(markdown, Options::ENABLE_OLD_FOOTNOTES) {
+    for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
         match event {
             Event::Start(Tag::Heading { .. }) => in_heading = true,
             Event::End(TagEnd::Heading(_)) => break,

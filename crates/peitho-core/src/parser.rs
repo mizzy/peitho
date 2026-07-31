@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::{
     domain::{
         AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FootnoteEntry, FragmentKind,
-        RawImagePath, Resolution, SlideKey, SlotName, SourceFragment,
+        RawImagePath, Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
     },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -20,6 +20,7 @@ use crate::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
         PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
+    render::BODY_MARKDOWN_OPTIONS,
 };
 
 /// Page settings comment, deck-style:
@@ -1554,6 +1555,7 @@ fn parse_slide(
     let mut page_number_hidden_flag: Option<PageFlag> = None;
     let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
+    let mut next_reveal_step = 1usize;
     // Stack of open fenced divs. Each frame owns the children collected so far
     // for that group; the top of stack is the current push target.
     let mut div_stack: Vec<(usize, DivOpen, Vec<SourceFragment>)> = Vec::new();
@@ -1930,7 +1932,17 @@ fn parse_slide(
                                             SourceFragment::slot_group(open_line, name, children);
                                         fragments.push(group);
                                     }
-                                    DivOpen::Reveal => fragments.extend(children),
+                                    DivOpen::Reveal => {
+                                        for child in children {
+                                            let len = reveal_span_len(&child);
+                                            let span = RevealSpan {
+                                                start: next_reveal_step,
+                                                len,
+                                            };
+                                            next_reveal_step += len;
+                                            fragments.push(child.with_reveal_span(span));
+                                        }
+                                    }
                                 }
                                 seen_content = true;
                             }
@@ -2192,6 +2204,7 @@ fn parse_slide(
             layout_request,
             fragments,
             skip: skip_flag.unwrap_or(false),
+            step_count: next_reveal_step - 1,
             page_number_hidden: page_number_hidden_flag
                 .as_ref()
                 .map(|flag| flag.enabled)
@@ -2202,6 +2215,30 @@ fn parse_slide(
         draft: draft_flag,
         page_number_hidden: page_number_hidden_flag,
     })
+}
+
+/// Compute the number of reveal steps occupied by one fragment.
+///
+/// Lists count only top-level items; nested items reveal with their parent.
+/// This MUST use the same pulldown-cmark options as slide body rendering so
+/// the counted items are exactly the top-level `<li>` elements the renderer
+/// emits.
+fn reveal_span_len(fragment: &SourceFragment) -> usize {
+    if !matches!(fragment.kind(), FragmentKind::List) {
+        return 1;
+    }
+
+    let mut list_depth = 0usize;
+    let mut item_count = 0usize;
+    for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
+        match event {
+            Event::Start(Tag::List(_)) => list_depth += 1,
+            Event::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
+            Event::Start(Tag::Item) if list_depth == 1 => item_count += 1,
+            _ => {}
+        }
+    }
+    item_count
 }
 
 fn start_paragraph_image(inline: &mut ParagraphInline, start: usize, src: RawImagePath) -> bool {
@@ -2662,7 +2699,7 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{
-        domain::{AspectRatio, FragmentKind},
+        domain::{AspectRatio, FragmentKind, RevealSpan},
         error::ErrorKind,
         phase::{KeySource, PageNumberFormat},
     };
@@ -6266,6 +6303,79 @@ After list
         .unwrap();
         assert_eq!(draft.parsed_slides().len(), 1);
         assert_eq!(draft.parsed_slides()[0].key.as_str(), "live");
+    }
+
+    #[test]
+    fn reveal_group_dissolves_into_fragment_spans_and_counts_list_items() {
+        let deck = parse_markdown(
+            "# T\n\n::: {reveal}\n\nIntro paragraph.\n\n- one\n- two\n  - child\n- three\n\n```rust\nfn main() {}\n```\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 5);
+        assert!(!slide
+            .fragments
+            .iter()
+            .any(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. })));
+        assert_eq!(slide.fragments.len(), 4);
+        assert_eq!(slide.fragments[0].reveal_span(), None);
+        assert_eq!(
+            slide.fragments[1].reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
+        );
+        assert_eq!(
+            slide.fragments[2].reveal_span(),
+            Some(RevealSpan { start: 2, len: 3 })
+        );
+        assert_eq!(
+            slide.fragments[3].reveal_span(),
+            Some(RevealSpan { start: 5, len: 1 })
+        );
+    }
+
+    #[test]
+    fn reveal_steps_do_not_change_slide_indices_or_sections() {
+        let deck = parse_markdown(
+            "---\ntime: 2m\n---\n<!-- {\"section\":\"One\",\"time\":\"1m\"} -->\n# One\n\n::: {reveal}\n\n- a\n- b\n\n:::\n\n---\n<!-- {\"section\":\"Two\",\"time\":\"1m\"} -->\n# Two",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].index, 0);
+        assert_eq!(deck.parsed_slides()[1].index, 1);
+        assert_eq!(deck.parsed_slides()[0].step_count, 2);
+        assert_eq!(deck.parsed_slides()[1].step_count, 0);
+        assert_eq!(deck.settings().sections()[0].start(), 0);
+        assert_eq!(deck.settings().sections()[0].end(), 0);
+        assert_eq!(deck.settings().sections()[1].start(), 1);
+        assert_eq!(deck.settings().sections()[1].end(), 1);
+    }
+
+    #[test]
+    fn reveal_step_numbering_is_continuous_across_multiple_groups() {
+        let slide = parse_first_slide(
+            "# T\n\n::: {reveal}\n\nFirst.\n\n:::\n\nAlways visible.\n\n::: {reveal}\n\n- one\n- two\n\nSecond paragraph.\n\n:::\n\nAfter.",
+        );
+
+        assert_eq!(slide.step_count, 4);
+        assert_eq!(slide.fragments.len(), 6);
+        assert_eq!(slide.fragments[0].reveal_span(), None);
+        assert_eq!(
+            slide.fragments[1].reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
+        );
+        assert_eq!(slide.fragments[2].reveal_span(), None);
+        assert_eq!(
+            slide.fragments[3].reveal_span(),
+            Some(RevealSpan { start: 2, len: 2 })
+        );
+        assert_eq!(
+            slide.fragments[4].reveal_span(),
+            Some(RevealSpan { start: 4, len: 1 })
+        );
+        assert_eq!(slide.fragments[5].reveal_span(), None);
     }
 
     #[test]

@@ -482,6 +482,7 @@ pub struct ParsedSlide {
     pub layout_request: Option<LayoutRequest>,
     pub fragments: Vec<SourceFragment>,
     pub skip: bool,
+    pub step_count: usize,
     pub page_number_hidden: bool,
     pub notes: Option<String>,
 }
@@ -1149,6 +1150,7 @@ mod tests {
                 layout_request: None,
                 fragments: vec![SourceFragment::paragraph(3, "body")],
                 skip: false,
+                step_count: 0,
                 page_number_hidden: false,
                 notes: None,
             }],
