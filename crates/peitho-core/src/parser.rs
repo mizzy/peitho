@@ -1343,25 +1343,30 @@ fn first_nonblank_source_line(source: &str) -> Option<(usize, &str)> {
     None
 }
 
-/// A `:::` line inside a slide, marking the start or end of an explicit
-/// slot group.
+/// A `:::` line inside a slide, marking the start or end of a fenced div.
 #[derive(Debug, Clone)]
-enum SlotDivMarker {
-    Open(ExplicitSlot),
+enum DivMarker {
+    Open(DivOpen),
     Close,
 }
 
-/// Scan the slide's slice line by line and return `line -> SlotDivMarker`.
+#[derive(Debug, Clone)]
+enum DivOpen {
+    Slot(ExplicitSlot),
+    Reveal,
+}
+
+/// Scan the slide's slice line by line and return `line -> DivMarker`.
 /// Lines inside fenced code blocks (` ``` ` or `~~~`) are excluded so the
 /// author can write about the syntax itself in a code block.
 ///
 /// Fences of four or more colons (`::::`) are rejected up front — spec's
 /// forward-compatible reservation for future nested-div notation.
-fn scan_slot_div_markers(
+fn scan_div_markers(
     slice: &str,
     slice_start_offset: usize,
     source: &str,
-) -> Result<std::collections::HashMap<usize, SlotDivMarker>> {
+) -> Result<std::collections::HashMap<usize, DivMarker>> {
     let mut markers = std::collections::HashMap::new();
     let mut in_code_fence: Option<(char, usize)> = None;
     let mut line_start = 0usize;
@@ -1391,8 +1396,8 @@ fn scan_slot_div_markers(
             return Err(BuildError::new(
                 ErrorKind::Parse,
                 Some(line_no),
-                "explicit slot fence uses too many colons",
-                "use exactly three colons: `::: {slot=name}` and `:::`",
+                "fenced div uses too many colons",
+                "use exactly three colons: `::: {slot=name}` or `::: {reveal}`, and `:::` to close",
             ));
         }
 
@@ -1409,10 +1414,10 @@ fn scan_slot_div_markers(
 
         let rest = trimmed[3..].trim_start();
         let marker = if rest.is_empty() {
-            SlotDivMarker::Close
+            DivMarker::Close
         } else {
-            let slot = parse_slot_div_attributes(rest, line_no)?;
-            SlotDivMarker::Open(slot)
+            let div_open = parse_div_attributes(rest, line_no)?;
+            DivMarker::Open(div_open)
         };
         markers.insert(line_no, marker);
         line_start += raw_line.len();
@@ -1448,15 +1453,16 @@ pub(crate) fn is_closing_code_fence(line: &str, ch: char, min_len: usize) -> boo
 }
 
 /// Parse the attribute chunk that follows `:::` on an opening line.
-/// Only `{slot=name}` is accepted; anything else is a parse error.
-fn parse_slot_div_attributes(rest: &str, line: usize) -> Result<ExplicitSlot> {
+/// Only `{slot=name}` and bare `{reveal}` are accepted; anything else is a
+/// parse error.
+fn parse_div_attributes(rest: &str, line: usize) -> Result<DivOpen> {
     let rest = rest.trim_end();
     let Some(inner) = rest.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            "explicit slot fence must use `{slot=name}` attribute syntax",
-            "write the opening as `::: {slot=<name>}`",
+            "fenced div must use `{slot=name}` or `{reveal}` attribute syntax",
+            "write the opening as `::: {slot=<name>}` or `::: {reveal}`",
         ));
     };
     let inner = inner.trim();
@@ -1466,25 +1472,36 @@ fn parse_slot_div_attributes(rest: &str, line: usize) -> Result<ExplicitSlot> {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            "explicit slot fence accepts only one attribute",
-            "use exactly `{slot=<name>}`",
+            "fenced div accepts only one attribute",
+            "use exactly `{slot=<name>}` or `{reveal}`",
         ));
     }
     let attr = key_value[0];
+    if attr == "reveal" {
+        return Ok(DivOpen::Reveal);
+    }
     let Some((key, value)) = attr.split_once('=') else {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            "explicit slot fence attribute must be `slot=<name>`",
-            "write the opening as `::: {slot=<name>}`",
+            "fenced div attribute must be `slot=<name>` or bare `reveal`",
+            "write the opening as `::: {slot=<name>}` or `::: {reveal}`",
         ));
     };
+    if key == "reveal" {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "reveal fence values are reserved for future syntax",
+            "use bare `::: {reveal}` for incremental reveal groups",
+        ));
+    }
     if key != "slot" {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
-            format!("unknown attribute key '{key}' in explicit slot fence"),
-            "only `slot=<name>` is accepted",
+            format!("unknown attribute key '{key}' in fenced div"),
+            "only `slot=<name>` or bare `reveal` is accepted",
         ));
     }
     if value.is_empty() {
@@ -1503,17 +1520,17 @@ fn parse_slot_div_attributes(rest: &str, line: usize) -> Result<ExplicitSlot> {
             "use lowercase ascii letters, digits, or '-'",
         )
     })?;
-    Ok(ExplicitSlot::new(slot))
+    Ok(DivOpen::Slot(ExplicitSlot::new(slot)))
 }
 
 /// Push a fragment into either the outer fragment list or the currently-open
-/// slot group's children, keeping call sites free of stack bookkeeping.
+/// fenced div's children, keeping call sites free of stack bookkeeping.
 fn push_fragment(
     fragments: &mut Vec<SourceFragment>,
-    slot_group_stack: &mut [(usize, ExplicitSlot, Vec<SourceFragment>)],
+    div_stack: &mut [(usize, DivOpen, Vec<SourceFragment>)],
     fragment: SourceFragment,
 ) {
-    if let Some(top) = slot_group_stack.last_mut() {
+    if let Some(top) = div_stack.last_mut() {
         top.2.push(fragment);
     } else {
         fragments.push(fragment);
@@ -1528,7 +1545,7 @@ fn parse_slide(
     code_images: &CodeImagesConfig,
 ) -> Result<PendingSlide> {
     let slice = &source[range.start..range.end];
-    let markers = scan_slot_div_markers(slice, range.start, source)?;
+    let markers = scan_div_markers(slice, range.start, source)?;
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
     let mut section_marker: Option<PageSectionMarker> = None;
@@ -1537,9 +1554,9 @@ fn parse_slide(
     let mut page_number_hidden_flag: Option<PageFlag> = None;
     let mut page_settings_line: Option<usize> = None;
     let mut fragments = Vec::new();
-    // Stack of open SlotGroups. Each frame owns the children collected so far
+    // Stack of open fenced divs. Each frame owns the children collected so far
     // for that group; the top of stack is the current push target.
-    let mut slot_group_stack: Vec<(usize, ExplicitSlot, Vec<SourceFragment>)> = Vec::new();
+    let mut div_stack: Vec<(usize, DivOpen, Vec<SourceFragment>)> = Vec::new();
     let mut note_fragments: Vec<String> = Vec::new();
     let mut block: Option<OpenBlock> = None;
     let mut footnotes = FootnoteAccumulator::default();
@@ -1703,7 +1720,7 @@ fn parse_slide(
                     if let Some(start) = list_start.take() {
                         push_fragment(
                             &mut fragments,
-                            &mut slot_group_stack,
+                            &mut div_stack,
                             SourceFragment::list(
                                 line_for_offset(source, start),
                                 source_slice(source, start, global_end),
@@ -1830,7 +1847,7 @@ fn parse_slide(
                     };
                     push_fragment(
                         &mut fragments,
-                        &mut slot_group_stack,
+                        &mut div_stack,
                         SourceFragment::heading(
                             line_for_offset(source, start),
                             level,
@@ -1854,15 +1871,15 @@ fn parse_slide(
                     };
                     let paragraph_line = line_for_offset(source, start);
                     // If this paragraph was actually a `:::` marker line, drop
-                    // the paragraph and manipulate the slot group stack instead.
+                    // the paragraph and manipulate the fenced div stack instead.
                     if let Some(marker) = markers.get(&paragraph_line).cloned() {
                         match marker {
-                            SlotDivMarker::Open(name) => {
-                                if !slot_group_stack.is_empty() {
+                            DivMarker::Open(div_open) => {
+                                if !div_stack.is_empty() {
                                     let err = BuildError::new(
                                         ErrorKind::Parse,
                                         Some(paragraph_line),
-                                        "nested explicit slot fences are not supported",
+                                        "nested `:::` fences are not supported",
                                         "close the current `:::` before opening another",
                                     );
                                     return Err(attach_slide_context(
@@ -1872,16 +1889,15 @@ fn parse_slide(
                                         &fragments,
                                     ));
                                 }
-                                slot_group_stack.push((paragraph_line, name, Vec::new()));
+                                div_stack.push((paragraph_line, div_open, Vec::new()));
                             }
-                            SlotDivMarker::Close => {
-                                let Some((open_line, name, children)) = slot_group_stack.pop()
-                                else {
+                            DivMarker::Close => {
+                                let Some((open_line, div_open, children)) = div_stack.pop() else {
                                     let err = BuildError::new(
                                         ErrorKind::Parse,
                                         Some(paragraph_line),
                                         "closing `:::` has no matching opening fence",
-                                        "add an opening `::: {slot=name}` before this line",
+                                        "add an opening `::: {slot=name}` or `::: {reveal}` before this line",
                                     );
                                     return Err(attach_slide_context(
                                         err,
@@ -1891,10 +1907,14 @@ fn parse_slide(
                                     ));
                                 };
                                 if children.is_empty() {
+                                    let message = match div_open {
+                                        DivOpen::Slot(_) => "empty explicit slot fence",
+                                        DivOpen::Reveal => "empty reveal fence",
+                                    };
                                     let err = BuildError::new(
                                         ErrorKind::Parse,
                                         Some(open_line),
-                                        "empty explicit slot fence",
+                                        message,
                                         "add content between the opening and closing `:::`, or remove the fence",
                                     );
                                     return Err(attach_slide_context(
@@ -1904,8 +1924,14 @@ fn parse_slide(
                                         &fragments,
                                     ));
                                 }
-                                let group = SourceFragment::slot_group(open_line, name, children);
-                                fragments.push(group);
+                                match div_open {
+                                    DivOpen::Slot(name) => {
+                                        let group =
+                                            SourceFragment::slot_group(open_line, name, children);
+                                        fragments.push(group);
+                                    }
+                                    DivOpen::Reveal => fragments.extend(children),
+                                }
                                 seen_content = true;
                             }
                         }
@@ -1935,7 +1961,7 @@ fn parse_slide(
                             ));
                         }
                     };
-                    push_fragment(&mut fragments, &mut slot_group_stack, fragment);
+                    push_fragment(&mut fragments, &mut div_stack, fragment);
                     seen_content = true;
                 }
             }
@@ -1979,7 +2005,7 @@ fn parse_slide(
                     }
                     push_fragment(
                         &mut fragments,
-                        &mut slot_group_stack,
+                        &mut div_stack,
                         SourceFragment::code(code_line, language, text),
                     );
                     seen_content = true;
@@ -2117,11 +2143,15 @@ fn parse_slide(
         ));
     }
 
-    if let Some((open_line, _, _)) = slot_group_stack.first() {
+    if let Some((open_line, div_open, _)) = div_stack.first() {
+        let message = match div_open {
+            DivOpen::Slot(_) => "unclosed explicit slot fence",
+            DivOpen::Reveal => "unclosed reveal fence",
+        };
         let err = BuildError::new(
             ErrorKind::Parse,
             Some(*open_line),
-            "unclosed explicit slot fence",
+            message,
             "add a closing `:::` line before the end of the slide",
         );
         return Err(attach_slide_context(
@@ -5991,7 +6021,9 @@ After list
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
-        assert!(err.to_string().contains("nested"));
+        assert_eq!(err.line, Some(5));
+        assert_eq!(err.message, "nested `:::` fences are not supported");
+        assert_eq!(err.help, "close the current `:::` before opening another");
     }
 
     #[test]
@@ -6002,7 +6034,12 @@ After list
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
-        assert!(err.to_string().to_lowercase().contains("colon"));
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "fenced div uses too many colons");
+        assert_eq!(
+            err.help,
+            "use exactly three colons: `::: {slot=name}` or `::: {reveal}`, and `:::` to close"
+        );
     }
 
     #[test]
@@ -6028,6 +6065,50 @@ After list
         .unwrap_err();
         // With no opening attr, the first ::: is treated as an unmatched close.
         assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "closing `:::` has no matching opening fence");
+        assert_eq!(
+            err.help,
+            "add an opening `::: {slot=name}` or `::: {reveal}` before this line"
+        );
+    }
+
+    #[test]
+    fn fenced_div_without_braces_is_error() {
+        let err = parse_markdown(
+            "# T\n\n::: left\n\nx\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "fenced div must use `{slot=name}` or `{reveal}` attribute syntax"
+        );
+        assert_eq!(
+            err.help,
+            "write the opening as `::: {slot=<name>}` or `::: {reveal}`"
+        );
+    }
+
+    #[test]
+    fn fenced_div_bare_unknown_attribute_is_error() {
+        let err = parse_markdown(
+            "# T\n\n::: {foo}\n\nx\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "fenced div attribute must be `slot=<name>` or bare `reveal`"
+        );
+        assert_eq!(
+            err.help,
+            "write the opening as `::: {slot=<name>}` or `::: {reveal}`"
+        );
     }
 
     #[test]
@@ -6038,7 +6119,9 @@ After list
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
-        assert!(err.to_string().to_lowercase().contains("slot="));
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unknown attribute key 'layout' in fenced div");
+        assert_eq!(err.help, "only `slot=<name>` or bare `reveal` is accepted");
     }
 
     #[test]
@@ -6049,6 +6132,9 @@ After list
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "fenced div accepts only one attribute");
+        assert_eq!(err.help, "use exactly `{slot=<name>}` or `{reveal}`");
     }
 
     #[test]
@@ -6069,6 +6155,9 @@ After list
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(err.message, "nested `:::` fences are not supported");
+        assert_eq!(err.help, "close the current `:::` before opening another");
     }
 
     #[test]
@@ -6080,6 +6169,103 @@ After list
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
         assert!(err.to_string().to_lowercase().contains("empty"));
+    }
+
+    #[test]
+    fn reveal_fence_validation_errors_are_line_numbered() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal=group}\n\nx\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "reveal fence values are reserved for future syntax"
+        );
+        assert_eq!(
+            err.help,
+            "use bare `::: {reveal}` for incremental reveal groups"
+        );
+
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "empty reveal fence");
+        assert_eq!(
+            err.help,
+            "add content between the opening and closing `:::`, or remove the fence",
+        );
+
+        let err = parse_markdown(
+            "# T\n\n::: {slot=body reveal}\n\nx\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "fenced div accepts only one attribute");
+        assert_eq!(err.help, "use exactly `{slot=<name>}` or `{reveal}`");
+
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\n::: {slot=body}\n\nx\n\n:::\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert_eq!(err.message, "nested `:::` fences are not supported");
+        assert_eq!(err.help, "close the current `:::` before opening another");
+    }
+
+    #[test]
+    fn reveal_group_children_dissolve_into_ordinary_fragments() {
+        let slide = parse_first_slide("# T\n\n::: {reveal}\n\nx\n\n:::\n");
+
+        assert_eq!(slide.fragments.len(), 2);
+        assert_eq!(slide.fragments[0].kind().to_string(), "heading");
+        assert!(matches!(slide.fragments[1].kind(), FragmentKind::Paragraph));
+        assert!(slide.fragments[1].markdown().contains("x"));
+    }
+
+    #[test]
+    fn unclosed_reveal_group_is_error() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\nx\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unclosed reveal fence");
+        assert_eq!(
+            err.help,
+            "add a closing `:::` line before the end of the slide"
+        );
+    }
+
+    #[test]
+    fn reveal_groups_are_allowed_on_draft_and_skip_slides() {
+        let skipped = parse_markdown(
+            "<!-- {\"skip\":true} -->\n# T\n\n::: {reveal}\n\nx\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        assert!(skipped.parsed_slides()[0].skip);
+
+        let draft = parse_markdown(
+            "<!-- {\"draft\":true} -->\n# Draft\n\n::: {reveal}\n\nx\n\n:::\n\n---\n# Live",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        assert_eq!(draft.parsed_slides().len(), 1);
+        assert_eq!(draft.parsed_slides()[0].key.as_str(), "live");
     }
 
     #[test]
