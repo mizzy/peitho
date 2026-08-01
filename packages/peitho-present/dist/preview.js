@@ -533,6 +533,7 @@ function serverSyncChannelFactory(options = {}) {
 
 // src/preview.ts
 var PREVIEW_STATE_KEY = "peitho:preview-state";
+var DEFAULT_PREVIEW_MODE = "grid";
 var GRID_TILE_WIDTH = 320;
 var GRID_GAP = 18;
 var GRID_PADDING = 24;
@@ -615,7 +616,7 @@ var PreviewShellController = class {
   manifest = null;
   currentIndex = -1;
   selectedIndex = -1;
-  mode = "single";
+  mode = DEFAULT_PREVIEW_MODE;
   generation = 0;
   root;
   fetcher;
@@ -703,7 +704,7 @@ var PreviewShellController = class {
       const restoredIndex = restored === null ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
-      this.mode = restored?.mode ?? "single";
+      this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
       this.applyLayout();
       this.dispatchSlideChange(null);
     } catch (error) {
