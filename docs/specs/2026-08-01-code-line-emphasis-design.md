@@ -57,6 +57,12 @@ item      := N | N "-" M          (1-based, inclusive, N <= M)
 - **`|` present** — stepped emphasis. Group *k* is emphasized at reveal step *k*; each group replaces the previous one. Consumes exactly *n* steps for *n* groups.
 - The language token is optional: ` ```{2-4} ` (no language) emphasizes lines of an unhighlighted block. Detection is positional — an info string whose first token starts with `{` has no language.
 
+### Collision with Pandoc attribute syntax
+
+Positional detection means peitho claims a leading `{…}` for itself, which is where Pandoc and some CommonMark extensions put *attributes*: ` ```{.rust} ` and ` ```{=html} ` specify a language or output format, not line numbers. Under this notation those parse as a malformed emphasis spec.
+
+No existing deck regresses — peitho currently treats the whole info string as a language name, so ` ```{.rust} ` is already an `unknown code language` error today. But a block pasted in from Pandoc-flavored Markdown will now fail with a *different* error, and the message must not send the author hunting for a line-number bug. The emphasis parse error therefore names the case explicitly: Pandoc-style attribute blocks are not supported; write the language bare (` ```rust `).
+
 ````markdown
 ```rust {2,5-7|9}
 ```
@@ -97,7 +103,7 @@ No new `FragmentKind` variant, and **`FragmentKind::Code` stays a unit variant**
 Consequences:
 
 - Mapping, slot-contract checking, and `Accepts` validation are unchanged.
-- `code_images.rs` must save and restore `emphasis` across `transform_fragment` the same way it already does for `reveal_span` — that function rebuilds the fragment, so an un-restored annotation would be silently dropped. (In practice a `mermaid`/`math` block carrying emphasis is meaningless; see "Rejected combinations".)
+- `code_images.rs` needs **no** emphasis handling: emphasis on a `code_images` block is rejected at parse time (see "Rejected combinations"), so no annotated fragment ever reaches `transform_fragment`. This must be enforced by ordering, not assumed — the validation has to run at the same point the parser already resolves `renderer_for(language)` to decide whether a block is a diagram, so a rejected combination cannot slip past into the transform. An emphasis annotation surviving into `transform_fragment` would be silently dropped when that function rebuilds the fragment, which is exactly the failure mode pillar ③ forbids; a debug assertion there is cheap insurance against the ordering being broken later.
 - `try_map_image_src_inner` destructures and rebuilds `SourceFragment`; it gains one field.
 
 ### 2. Step counting keeps its single source of truth
@@ -150,6 +156,7 @@ Colors stay in theme CSS, consistent with syntax highlighting: the build emits c
 | Line number `0`, or `N-M` with `N > M` | No valid interpretation |
 | Any line beyond the block's line count | Pillar ③ — an emphasis pointing at nothing must not be silently ignored |
 | Malformed spec (`{2-}`, `{a}`, unclosed `{`) | Parse failure must be loud |
+| Pandoc-style attribute block (`{.rust}`, `{=html}`) | Help names the case and points at the bare-language form, so the author is not sent hunting for a line-number bug |
 | Empty spec `{}` or empty group (`{2||4}`, `{2,,4}`) | Ambiguous intent |
 | Stepped emphasis on a code block inside `::: {reveal}` | See below |
 | Emphasis on a `code_images` block (`mermaid`, `math`, declared external renderers) | The block becomes an image/math node; line emphasis has no meaning |
@@ -161,6 +168,16 @@ Existing behavior that must not regress: an unknown language tag is already a bu
 **Stepped emphasis inside `::: {reveal}`** is an error. The reveal span model is flat (`RevealSpan { start, len }`), and "the code block appears at step 5, then emphasis moves within it at steps 6–8" is a nested step space that representation cannot express. Rather than invent nesting, this is rejected with a line-numbered error suggesting the two supported alternatives: keep the block in the reveal group with static emphasis, or move it out of the group and use stepped emphasis.
 
 **Static emphasis inside `::: {reveal}`** is fine and needs no special handling: the block appears at its reveal step with its emphasis already applied.
+
+## Known tradeoff: line numbers go stale silently
+
+Line numbers address lines **positionally**, so editing the code shifts what gets emphasized. Pillar ③ catches only the out-of-range case: insert a line above the emphasized region and `{2-4}` keeps pointing at lines 2–4, now the wrong ones, with no error and nothing visually wrong at build time. The realistic failure is editing a code block shortly before a talk and having the wrong line light up on stage.
+
+This is accepted, not overlooked. The alternative — marker comments in the code (`// [!hl]`) — makes emphasis robust against edits but contaminates the code itself with presentation vocabulary, which is a worse trade under pillar ① and directly against the direction recorded in #364. Between "the pointer can go stale" and "the content is no longer clean code", peitho takes the first.
+
+No mitigation is planned. A lint heuristic ("this block's line count changed and the emphasis is near the end") would be guessing at intent and would cry wolf on ordinary edits; a warning that fires on correct decks is worse than none. Authors reviewing a deck before presenting will see the emphasis in `peitho preview` (static) or by stepping through in `peitho present` (stepped), which is the real check.
+
+Recorded here so that a future "emphasis pointed at the wrong line" report is recognized as a known consequence of the notation rather than a bug in it. Revisiting means revisiting the notation.
 
 ## Distribution policy
 
@@ -178,7 +195,7 @@ It also requires no code in those paths: stepped emphasis is stamped as `data-em
 
 ## Test plan
 
-- **Parser**: valid specs (static / stepped / multi-item / untagged / with-language); every error row above, asserting line number and help text; unknown-language regression.
+- **Parser**: valid specs (static / stepped / multi-item / untagged / with-language); every error row above, asserting line number and help text; unknown-language regression; `{.rust}` produces the Pandoc-specific help rather than a generic parse failure; an emphasis spec on a `mermaid`/`math`/external-renderer block is rejected at parse time (asserted before any transform runs, pinning the ordering the architecture depends on).
 - **Step counting**: stepped emphasis contributes `groups.len()`; static contributes `0`; a code block inside `::: {reveal}` with static emphasis still contributes `1`; `manifest.json` `revealSteps` reflects the total.
 - **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped step values match the counted span.
 - **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; listeners torn down per test.
