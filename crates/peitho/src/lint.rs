@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 pub(crate) const PEITHO_LINT_DONE: &str = "PEITHO_LINT_DONE";
 const PEITHO_LINT_CHUNK: &str = "PEITHO_LINT_CHUNK";
-const MIN_FONT_SIZE_PX: f64 = 32.0;
+const MIN_FONT_SIZE_PT: f64 = 24.0;
 const OVERFLOW_TOLERANCE_PX: i64 = 1;
 const OVERFLOW_HELP: &str = "shrink or split the slide content, or adjust the layout CSS";
 const FONT_SIZE_HELP: &str =
@@ -63,7 +63,7 @@ struct OverflowWarning {
 #[derive(Debug, Clone, PartialEq)]
 struct FontSizeWarning {
     slide: usize,
-    font_size_px: f64,
+    font_size_pt: f64,
     sample: String,
 }
 
@@ -373,30 +373,29 @@ fn round_px(value: f64) -> i64 {
     value.round() as i64
 }
 
-fn round_font_px(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
+fn round_font_size_pt_for_display(font_size_px: f64) -> f64 {
+    (font_size_px * 0.75 * 10.0).round() / 10.0
 }
 
 fn collect_font_size_warnings(measurements: &[SlideMeasurement]) -> Vec<FontSizeWarning> {
     measurements
         .iter()
         .filter_map(|measurement| {
-            let font_size_px = round_font_px(measurement.min_font_size_px?);
-            (font_size_px < MIN_FONT_SIZE_PX).then(|| FontSizeWarning {
+            let font_size_pt = round_font_size_pt_for_display(measurement.min_font_size_px?);
+            (font_size_pt < MIN_FONT_SIZE_PT).then(|| FontSizeWarning {
                 slide: measurement.slide,
-                font_size_px,
+                font_size_pt,
                 sample: measurement.min_font_sample.clone().unwrap_or_default(),
             })
         })
         .collect()
 }
 
-fn format_font_size_pt(px: f64) -> String {
-    let pt = (px * 0.75 * 10.0).round() / 10.0;
-    if pt.fract() == 0.0 {
-        format!("{pt:.0}pt")
+fn format_rounded_font_size_pt(font_size_pt: f64) -> String {
+    if font_size_pt.fract() == 0.0 {
+        format!("{font_size_pt:.0}pt")
     } else {
-        format!("{pt:.1}pt")
+        format!("{font_size_pt:.1}pt")
     }
 }
 
@@ -424,7 +423,7 @@ fn write_lint_report(
             stdout,
             "warning: slide {} has text at {}, below the recommended 24pt: \"{}\"",
             warning.slide,
-            format_font_size_pt(warning.font_size_px),
+            format_rounded_font_size_pt(warning.font_size_pt),
             warning.sample
         )
         .into_diagnostic()?;
@@ -667,17 +666,25 @@ mod tests {
     }
 
     #[test]
-    fn font_size_warning_collection_rounds_before_comparing() {
-        let warnings = collect_font_size_warnings(&[
-            measurement(1, Some(31.999), Some("rounds clean")),
-            measurement(2, Some(31.994), Some("Tiny caption")),
+    fn font_size_warning_collection_decides_on_displayed_pt() {
+        let measurements = [
+            measurement(1, Some(31.93), Some("Tiny caption")),
+            measurement(2, Some(31.94), Some("Rounds to threshold")),
             measurement(3, None, None),
-        ]);
+        ];
+
+        let warnings = collect_font_size_warnings(&measurements);
 
         assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].slide, 2);
-        assert!((warnings[0].font_size_px - 31.99).abs() < f64::EPSILON);
+        assert_eq!(warnings[0].slide, 1);
+        assert!((warnings[0].font_size_pt - 23.9).abs() < f64::EPSILON);
         assert_eq!(warnings[0].sample, "Tiny caption");
+
+        let mut stdout = Vec::new();
+        assert_eq!(write_lint_report(&measurements, &mut stdout).unwrap(), 1);
+        assert!(String::from_utf8(stdout).unwrap().contains(
+            "warning: slide 1 has text at 23.9pt, below the recommended 24pt: \"Tiny caption\""
+        ));
     }
 
     #[test]
@@ -790,8 +797,8 @@ mod tests {
             "  help: raise the font size in the layout CSS, or move content to another slide instead of shrinking it"
         ));
         assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
-        assert_eq!(format_font_size_pt(23.1), "17.3pt");
-        assert_eq!(format_font_size_pt(32.0), "24pt");
+        assert_eq!(format_rounded_font_size_pt(17.3), "17.3pt");
+        assert_eq!(format_rounded_font_size_pt(24.0), "24pt");
 
         let mut clean_stdout = Vec::new();
         let clean = SlideMeasurement {
