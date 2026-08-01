@@ -9,6 +9,7 @@ deck = "incremental-reveal"
 demo_path = "/demo/incremental-reveal/"
 source_path = "static/deck-sources/incremental-reveal/deck.md"
 github_path = "examples/incremental-reveal"
+demo_label = "Open published deck (final state)"
 +++
 
 ## What it demonstrates
@@ -22,6 +23,8 @@ numbers continue from the first group.
 Content outside reveal groups stays visible in every presenter state. Published
 output, previews, PDF export, and gallery screenshots render the final state, so
 all reveal steps remain visible outside `peitho present`.
+
+To step through the reveal locally, run `peitho present examples/incremental-reveal/deck.md` and use the arrow keys.
 
 ## What to look at
 
