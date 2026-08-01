@@ -57,8 +57,9 @@ fn lint_reports_slide_vertical_overflow() {
         .stdout(predicate::str::contains("vertically"))
         .stdout(predicate::str::contains("px"))
         .stdout(predicate::str::contains(
-            "checked 1 slide(s): 1 overflow warning(s)",
-        ));
+            "has text at 22.5pt, below the recommended 24pt:",
+        ))
+        .stdout(predicate::str::contains("checked 1 slide(s): 2 warning(s)"));
 }
 
 #[test]
@@ -79,5 +80,5 @@ fn lint_accepts_trivially_small_deck() {
         .arg(&deck)
         .assert()
         .success()
-        .stdout(predicate::str::contains("checked 1 slide(s): no overflow"));
+        .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
 }

@@ -42,16 +42,18 @@ preserving the current slide and overview state.
 ## `peitho lint`
 
 Lint renders every slide in headless Chrome and warns when layout content
-overflows the slide box by more than 1px horizontally or vertically.
+overflows the slide box by more than 1px horizontally or vertically. It also
+warns when non-footnote text renders below the recommended 24pt.
 
 ```sh
 peitho lint
 ```
 
-Warnings include the slide number, axis, and overflow delta in pixels. The
-command exits 1 when any overflow is found and 0 when the deck is clean. It
-requires Chrome or Chromium, using the same discovery rules as PDF export and
-`PEITHO_CHROME_PATH`.
+Overflow warnings include the slide number, axis, and overflow delta in pixels.
+Font-size warnings appear once per slide and report the smallest size in pt
+with a short excerpt. The command exits 1 when either warning kind is found and
+0 when the deck is clean. It requires Chrome or Chromium, using the same
+discovery rules as PDF export and `PEITHO_CHROME_PATH`.
 
 ## `peitho present`
 

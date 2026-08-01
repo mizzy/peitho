@@ -11,8 +11,11 @@ use serde::Deserialize;
 
 pub(crate) const PEITHO_LINT_DONE: &str = "PEITHO_LINT_DONE";
 const PEITHO_LINT_CHUNK: &str = "PEITHO_LINT_CHUNK";
+const MIN_FONT_SIZE_PX: f64 = 32.0;
 const OVERFLOW_TOLERANCE_PX: i64 = 1;
 const OVERFLOW_HELP: &str = "shrink or split the slide content, or adjust the layout CSS";
+const FONT_SIZE_HELP: &str =
+    "raise the font size in the layout CSS, or move content to another slide instead of shrinking it";
 const LINT_PARSE_HELP: &str =
     "rerun lint and inspect lint.html and chrome-stderr.log in the kept workspace";
 
@@ -55,6 +58,13 @@ struct OverflowWarning {
     overflow_px: i64,
     content_px: i64,
     box_px: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FontSizeWarning {
+    slide: usize,
+    font_size_px: f64,
+    sample: String,
 }
 
 pub(crate) fn run(input: PathBuf, stdout: &mut dyn Write) -> miette::Result<i32> {
@@ -363,12 +373,40 @@ fn round_px(value: f64) -> i64 {
     value.round() as i64
 }
 
+fn round_font_px(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn collect_font_size_warnings(measurements: &[SlideMeasurement]) -> Vec<FontSizeWarning> {
+    measurements
+        .iter()
+        .filter_map(|measurement| {
+            let font_size_px = round_font_px(measurement.min_font_size_px?);
+            (font_size_px < MIN_FONT_SIZE_PX).then(|| FontSizeWarning {
+                slide: measurement.slide,
+                font_size_px,
+                sample: measurement.min_font_sample.clone().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn format_font_size_pt(px: f64) -> String {
+    let pt = (px * 0.75 * 10.0).round() / 10.0;
+    if pt.fract() == 0.0 {
+        format!("{pt:.0}pt")
+    } else {
+        format!("{pt:.1}pt")
+    }
+}
+
 fn write_lint_report(
     measurements: &[SlideMeasurement],
     stdout: &mut dyn Write,
 ) -> miette::Result<i32> {
-    let warnings = collect_overflow_warnings(measurements);
-    for warning in &warnings {
+    let overflow_warnings = collect_overflow_warnings(measurements);
+    let font_size_warnings = collect_font_size_warnings(measurements);
+    for warning in &overflow_warnings {
         writeln!(
             stdout,
             "warning: slide {} content overflows the slide box {} by {}px (content {}px, box {}px)",
@@ -381,10 +419,23 @@ fn write_lint_report(
         .into_diagnostic()?;
         writeln!(stdout, "  help: {OVERFLOW_HELP}").into_diagnostic()?;
     }
-    if warnings.is_empty() {
+    for warning in &font_size_warnings {
         writeln!(
             stdout,
-            "checked {} slide(s): no overflow",
+            "warning: slide {} has text at {}, below the recommended 24pt: \"{}\"",
+            warning.slide,
+            format_font_size_pt(warning.font_size_px),
+            warning.sample
+        )
+        .into_diagnostic()?;
+        writeln!(stdout, "  help: {FONT_SIZE_HELP}").into_diagnostic()?;
+    }
+
+    let warning_count = overflow_warnings.len() + font_size_warnings.len();
+    if warning_count == 0 {
+        writeln!(
+            stdout,
+            "checked {} slide(s): no warnings",
             measurements.len()
         )
         .into_diagnostic()?;
@@ -392,9 +443,9 @@ fn write_lint_report(
     } else {
         writeln!(
             stdout,
-            "checked {} slide(s): {} overflow warning(s)",
+            "checked {} slide(s): {} warning(s)",
             measurements.len(),
-            warnings.len()
+            warning_count
         )
         .into_diagnostic()?;
         Ok(1)
@@ -427,6 +478,18 @@ mod tests {
             console_chunk(2, 2, second),
             console_chunk(1, 2, first)
         )
+    }
+
+    fn measurement(slide: usize, px: Option<f64>, sample: Option<&str>) -> SlideMeasurement {
+        SlideMeasurement {
+            slide,
+            content_width: 800.0,
+            content_height: 600.0,
+            box_width: 800.0,
+            box_height: 600.0,
+            min_font_size_px: px,
+            min_font_sample: sample.map(str::to_owned),
+        }
     }
 
     fn assert_parse_error_mentions(
@@ -604,6 +667,20 @@ mod tests {
     }
 
     #[test]
+    fn font_size_warning_collection_rounds_before_comparing() {
+        let warnings = collect_font_size_warnings(&[
+            measurement(1, Some(31.999), Some("rounds clean")),
+            measurement(2, Some(31.994), Some("Tiny caption")),
+            measurement(3, None, None),
+        ]);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].slide, 2);
+        assert!((warnings[0].font_size_px - 31.99).abs() < f64::EPSILON);
+        assert_eq!(warnings[0].sample, "Tiny caption");
+    }
+
+    #[test]
     fn overflow_warning_collection_applies_strict_one_pixel_tolerance_per_axis() {
         let measurements = vec![
             SlideMeasurement {
@@ -691,8 +768,8 @@ mod tests {
             content_height: 642.4,
             box_width: 900.0,
             box_height: 600.2,
-            min_font_size_px: None,
-            min_font_sample: None,
+            min_font_size_px: Some(24.0),
+            min_font_sample: Some("excerpt…".to_owned()),
         }];
         let mut stdout = Vec::new();
 
@@ -706,27 +783,30 @@ mod tests {
         assert!(
             output.contains("  help: shrink or split the slide content, or adjust the layout CSS")
         );
-        assert!(output.contains("checked 1 slide(s): 1 overflow warning(s)"));
+        assert!(output.contains(
+            "warning: slide 3 has text at 18pt, below the recommended 24pt: \"excerpt…\""
+        ));
+        assert!(output.contains(
+            "  help: raise the font size in the layout CSS, or move content to another slide instead of shrinking it"
+        ));
+        assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
+        assert_eq!(format_font_size_pt(23.1), "17.3pt");
+        assert_eq!(format_font_size_pt(32.0), "24pt");
 
         let mut clean_stdout = Vec::new();
-        let clean_exit = write_lint_report(
-            &[SlideMeasurement {
-                slide: 1,
-                content_width: 800.0,
-                content_height: 601.4,
-                box_width: 800.0,
-                box_height: 600.0,
-                min_font_size_px: None,
-                min_font_sample: None,
-            }],
-            &mut clean_stdout,
-        )
-        .unwrap();
-
-        assert_eq!(clean_exit, 0);
+        let clean = SlideMeasurement {
+            slide: 1,
+            content_width: 800.0,
+            content_height: 600.0,
+            box_width: 800.0,
+            box_height: 600.0,
+            min_font_size_px: None,
+            min_font_sample: None,
+        };
+        assert_eq!(write_lint_report(&[clean], &mut clean_stdout).unwrap(), 0);
         assert_eq!(
             String::from_utf8(clean_stdout).unwrap(),
-            "checked 1 slide(s): no overflow\n"
+            "checked 1 slide(s): no warnings\n"
         );
     }
 
