@@ -279,7 +279,7 @@ mod tests {
         let mut mapped_slot = MappedSlot::new(layout.slot(slot_name).unwrap().clone());
         mapped_slot.push(SourceFragment::footnotes(
             7,
-            vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+            vec![FootnoteEntry::new(1, "note", "Footnote body.", 7, None)],
         ));
         let mut slots = BTreeMap::new();
         slots.insert(slot, mapped_slot);

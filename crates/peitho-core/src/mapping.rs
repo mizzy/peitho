@@ -952,7 +952,7 @@ mod tests {
                     SourceFragment::paragraph(3, "Body text."),
                     SourceFragment::footnotes(
                         7,
-                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7, None)],
                     ),
                 ],
                 skip: false,
@@ -1006,7 +1006,7 @@ mod tests {
                     SourceFragment::paragraph(3, "Body text."),
                     SourceFragment::footnotes(
                         7,
-                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7)],
+                        vec![FootnoteEntry::new(1, "note", "Footnote body.", 7, None)],
                     ),
                 ],
                 skip: false,

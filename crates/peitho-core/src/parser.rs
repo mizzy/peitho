@@ -20,7 +20,7 @@ use crate::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
         PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
-    render::walk_body_markdown_list_items,
+    render::{walk_body_markdown_list_items, walk_body_markdown_list_items_with_ranges},
 };
 
 /// Page settings comment, deck-style:
@@ -201,6 +201,7 @@ struct DuplicateFootnoteDefinition {
 struct FootnoteAccumulator {
     references: Vec<FootnoteReference>,
     reference_lines: BTreeMap<String, usize>,
+    all_reference_lines: BTreeMap<String, Vec<usize>>,
     definitions: Vec<FootnoteDefinition>,
     definition_lines: BTreeMap<String, usize>,
     duplicate: Option<DuplicateFootnoteDefinition>,
@@ -209,6 +210,10 @@ struct FootnoteAccumulator {
 impl FootnoteAccumulator {
     fn record_reference(&mut self, label: impl Into<String>, line: usize) {
         let label = label.into();
+        self.all_reference_lines
+            .entry(label.clone())
+            .or_default()
+            .push(line);
         if self.reference_lines.contains_key(&label) {
             return;
         }
@@ -233,7 +238,10 @@ impl FootnoteAccumulator {
         self.definitions.push(definition);
     }
 
-    fn into_fragment(self) -> Result<Option<SourceFragment>> {
+    fn into_fragment(
+        self,
+        step_for_line: impl Fn(usize) -> Option<usize>,
+    ) -> Result<Option<SourceFragment>> {
         if let Some(duplicate) = self.duplicate {
             return Err(BuildError::new(
                 ErrorKind::Parse,
@@ -283,9 +291,15 @@ impl FootnoteAccumulator {
                 .expect("undefined references were checked above");
             entries.push(FootnoteEntry::new(
                 index + 1,
-                reference.label,
+                reference.label.clone(),
                 definition.markdown.clone(),
                 definition.line,
+                reveal_step_for_reference_lines(
+                    self.all_reference_lines
+                        .get(reference.label.as_str())
+                        .expect("first references always have recorded lines"),
+                    &step_for_line,
+                ),
             ));
         }
         let line = entries
@@ -2340,8 +2354,9 @@ fn parse_slide(
         ));
     }
 
+    let step_for_footnote_line = footnote_reveal_step_resolver(&fragments);
     if let Some(fragment) = footnotes
-        .into_fragment()
+        .into_fragment(step_for_footnote_line)
         .map_err(|err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments))?
     {
         fragments.push(fragment);
@@ -2401,6 +2416,126 @@ fn reveal_span_len(fragment: &SourceFragment) -> usize {
         }
     });
     item_count
+}
+
+#[derive(Debug)]
+enum RevealedFootnoteReferenceRange {
+    Fragment {
+        start_line: usize,
+        end_line: usize,
+        step: usize,
+    },
+    List {
+        start_line: usize,
+        end_line: usize,
+        span_start: usize,
+        item_start_lines: Vec<usize>,
+    },
+}
+
+impl RevealedFootnoteReferenceRange {
+    fn step_for_line(&self, line: usize) -> Option<usize> {
+        match self {
+            Self::Fragment {
+                start_line,
+                end_line,
+                step,
+            } => (*start_line <= line && line <= *end_line).then_some(*step),
+            Self::List {
+                start_line,
+                end_line,
+                span_start,
+                item_start_lines,
+            } => {
+                if !(*start_line <= line && line <= *end_line) {
+                    return None;
+                }
+                item_start_lines
+                    .iter()
+                    .rposition(|item_start_line| *item_start_line <= line)
+                    .map(|item_index| span_start + item_index)
+            }
+        }
+    }
+}
+
+fn footnote_reveal_step_resolver(fragments: &[SourceFragment]) -> impl Fn(usize) -> Option<usize> {
+    let ranges = fragments
+        .iter()
+        .filter_map(revealed_footnote_reference_range)
+        .collect::<Vec<_>>();
+
+    move |line| ranges.iter().find_map(|range| range.step_for_line(line))
+}
+
+fn revealed_footnote_reference_range(
+    fragment: &SourceFragment,
+) -> Option<RevealedFootnoteReferenceRange> {
+    let span = fragment.reveal_span()?;
+    match fragment.kind() {
+        FragmentKind::Heading { .. } | FragmentKind::Paragraph => {
+            let (start_line, end_line) = fragment_line_range(fragment);
+            Some(RevealedFootnoteReferenceRange::Fragment {
+                start_line,
+                end_line,
+                step: span.start,
+            })
+        }
+        FragmentKind::List => {
+            let (start_line, end_line) = fragment_line_range(fragment);
+            let item_start_lines = top_level_list_item_start_lines(fragment);
+            Some(RevealedFootnoteReferenceRange::List {
+                start_line,
+                end_line,
+                span_start: span.start,
+                item_start_lines,
+            })
+        }
+        FragmentKind::Text
+        | FragmentKind::Code
+        | FragmentKind::Math { .. }
+        | FragmentKind::Footnotes { .. }
+        | FragmentKind::Image { .. }
+        | FragmentKind::SlotGroup { .. } => None,
+    }
+}
+
+fn fragment_line_range(fragment: &SourceFragment) -> (usize, usize) {
+    let start_line = fragment.line();
+    let line_count = fragment.markdown().lines().count().max(1);
+    (start_line, start_line + line_count - 1)
+}
+
+fn top_level_list_item_start_lines(fragment: &SourceFragment) -> Vec<usize> {
+    let mut lines = Vec::new();
+    walk_body_markdown_list_items_with_ranges(
+        fragment.markdown(),
+        |_event, range, top_level_item| {
+            if top_level_item {
+                let relative_line = fragment.markdown()[..range.start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count();
+                lines.push(fragment.line() + relative_line);
+            }
+        },
+    );
+    lines
+}
+
+fn reveal_step_for_reference_lines(
+    lines: &[usize],
+    step_for_line: &impl Fn(usize) -> Option<usize>,
+) -> Option<usize> {
+    let mut min_step: Option<usize> = None;
+    for line in lines {
+        let step = step_for_line(*line)?;
+        min_step = Some(match min_step {
+            Some(current) => current.min(step),
+            None => step,
+        });
+    }
+    min_step
 }
 
 fn start_paragraph_image(inline: &mut ParagraphInline, start: usize, src: RawImagePath) -> bool {
@@ -3862,6 +3997,146 @@ Body refers to beta[^beta], then alpha[^alpha].
                 assert_eq!(entries[1].label(), "alpha");
                 assert_eq!(entries[1].markdown(), "Alpha **note**.");
                 assert_eq!(entries[1].line(), 5);
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revealed_paragraph_footnotes_resolve_to_reference_steps() {
+        let markdown = r#"# Title
+
+::: {reveal}
+
+First reveal[^first].
+
+Second reveal[^second].
+
+:::
+
+[^first]: First note.
+
+[^second]: Second note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].label(), "first");
+                assert_eq!(entries[0].reveal_step(), Some(1));
+                assert_eq!(entries[1].label(), "second");
+                assert_eq!(entries[1].reveal_step(), Some(2));
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footnote_reference_outside_reveal_has_no_reveal_step() {
+        let deck = parse_markdown(
+            "# Title\n\nAlways visible[^note].\n\n[^note]: Note.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "note");
+                assert_eq!(entries[0].reveal_step(), None);
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footnote_reference_mixed_between_revealed_and_plain_content_is_always_visible() {
+        let markdown = r#"# Title
+
+::: {reveal}
+
+Revealed use[^same].
+
+:::
+
+Plain use[^same].
+
+[^same]: Shared note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "same");
+                assert_eq!(entries[0].reveal_step(), None);
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revealed_list_footnotes_resolve_to_containing_top_level_item_steps() {
+        let markdown = r#"# Title
+
+::: {reveal}
+
+- First item
+  - nested note[^first]
+- Second item[^second]
+
+:::
+
+[^first]: First note.
+
+[^second]: Second note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.step_count, 2);
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].label(), "first");
+                assert_eq!(entries[0].reveal_step(), Some(1));
+                assert_eq!(entries[1].label(), "second");
+                assert_eq!(entries[1].reveal_step(), Some(2));
+            }
+            other => panic!("expected footnotes fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reveal_after_plain_footnote_reference_does_not_leak_step_backward() {
+        let markdown = r#"# Title
+
+Before reveal[^note].
+
+::: {reveal}
+
+After reveal.
+
+:::
+
+[^note]: Note.
+"#;
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        match slide.fragments.last().unwrap().kind() {
+            FragmentKind::Footnotes { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].label(), "note");
+                assert_eq!(entries[0].reveal_step(), None);
             }
             other => panic!("expected footnotes fragment, got {other:?}"),
         }

@@ -585,6 +585,7 @@ pub struct FootnoteEntry {
     label: String,
     markdown: String,
     line: usize,
+    reveal_step: Option<usize>,
 }
 
 impl FootnoteEntry {
@@ -593,12 +594,14 @@ impl FootnoteEntry {
         label: impl Into<String>,
         markdown: impl Into<String>,
         line: usize,
+        reveal_step: Option<usize>,
     ) -> Self {
         Self {
             number,
             label: label.into(),
             markdown: markdown.into(),
             line,
+            reveal_step,
         }
     }
 
@@ -616,6 +619,10 @@ impl FootnoteEntry {
 
     pub fn line(&self) -> usize {
         self.line
+    }
+
+    pub fn reveal_step(&self) -> Option<usize> {
+        self.reveal_step
     }
 }
 
@@ -1040,8 +1047,8 @@ mod tests {
     #[test]
     fn source_fragment_footnotes_preserves_entries() {
         let entries = vec![
-            FootnoteEntry::new(1, "alpha", "Alpha **note**.", 12),
-            FootnoteEntry::new(2, "beta", "Beta note.", 15),
+            FootnoteEntry::new(1, "alpha", "Alpha **note**.", 12, None),
+            FootnoteEntry::new(2, "beta", "Beta note.", 15, None),
         ];
         let fragment = SourceFragment::footnotes(12, entries.clone());
 
