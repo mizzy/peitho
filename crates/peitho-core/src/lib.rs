@@ -50,7 +50,7 @@ pub use render::{
     render_present_index, render_presenter_index, render_preview_error_index, render_preview_index,
     render_remote_index,
 };
-pub use theme::{build_theme_css, CssFile};
+pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 
 /// ```compile_fail
 /// use peitho_core::*;

@@ -74,6 +74,14 @@ fn present_no_serve_writes_clean_present_cache() {
     assert!(cache.join("notes.json").exists());
     assert!(cache.join("present.json").exists());
     assert!(cache.join("slides/000-arch-1.html").exists());
+    for font in [
+        "Inter-Regular.woff2",
+        "Inter-SemiBold.woff2",
+        "Inter-Bold.woff2",
+        "JetBrainsMono-Regular.woff2",
+    ] {
+        assert!(cache.join("theme-fonts").join(font).is_file());
+    }
     assert!(fs::read_to_string(cache.join("notes.json"))
         .unwrap()
         .contains(r#""notes": {}"#));

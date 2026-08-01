@@ -1626,6 +1626,7 @@ fn write_shared_assets(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result
     fs::write(dir.join("peitho.css"), artifacts.rendered.css()).into_diagnostic()?;
     write_image_assets(dir, &artifacts.image_assets)?;
     write_fonts_assets(dir, artifacts.fonts_source.as_deref())?;
+    write_theme_fonts_assets(dir)?;
     write_katex_fonts_assets(dir, artifacts.rendered.math_assets())
 }
 
@@ -1713,6 +1714,19 @@ fn write_katex_fonts_assets(
 
     fs::create_dir_all(&fonts_dir).into_diagnostic()?;
     for font in math_assets.fonts() {
+        fs::write(fonts_dir.join(font.file_name()), font.bytes()).into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn write_theme_fonts_assets(out: &Path) -> miette::Result<()> {
+    let fonts_dir = out.join("theme-fonts");
+    if fonts_dir.exists() {
+        fs::remove_dir_all(&fonts_dir).into_diagnostic()?;
+    }
+
+    fs::create_dir_all(&fonts_dir).into_diagnostic()?;
+    for font in peitho_core::theme_fonts() {
         fs::write(fonts_dir.join(font.file_name()), font.bytes()).into_diagnostic()?;
     }
     Ok(())
@@ -3429,11 +3443,8 @@ fn emit_present_cache(
     if let Some(shell) = shell {
         ensure_shell_bundle(shell)?;
     }
-    fs::write(cache.join("peitho.css"), artifacts.rendered.css()).into_diagnostic()?;
+    write_shared_assets(cache, artifacts)?;
     write_slide_fragments(cache, &artifacts.rendered)?;
-    write_image_assets(cache, &artifacts.image_assets)?;
-    write_fonts_assets(cache, artifacts.fonts_source.as_deref())?;
-    write_katex_fonts_assets(cache, artifacts.rendered.math_assets())?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     fs::write(
         cache.join("notes.json"),
@@ -4203,6 +4214,20 @@ contexts:
         write_shared_assets(&out, &artifacts).unwrap();
 
         assert!(!out.join("katex-fonts").exists());
+    }
+
+    #[test]
+    fn write_shared_assets_writes_theme_fonts_for_custom_css() {
+        let fixture = WatchFixture::new("# Intro\n\nBody\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let out = fixture._dir.path().join("dist");
+
+        write_shared_assets(&out, &artifacts).unwrap();
+
+        assert!(fs::read_to_string(out.join("peitho.css"))
+            .unwrap()
+            .contains(".slot-title { font-weight: 700; }"));
+        assert_theme_fonts_written(&out);
     }
 
     #[test]
@@ -6439,6 +6464,7 @@ contexts:
         assert!(!workspace.join("manifest.json").exists());
         assert!(!workspace.join("slides").exists());
         assert!(workspace.join("peitho.css").is_file());
+        assert_theme_fonts_written(&workspace);
     }
 
     #[test]
@@ -7031,6 +7057,7 @@ printf '0 bytes written to file %s\n' "$out" >&2
 
         let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
         assert!(json.contains(r#""presenterOpen": true"#));
+        assert_theme_fonts_written(&fixture.options.out);
     }
 
     #[test]
@@ -7593,6 +7620,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         assert!(!generation_dir.join("shell.js").exists());
         assert!(!generation_dir.join("remote.html").exists());
         assert!(!generation_dir.join("remote.js").exists());
+        assert_theme_fonts_written(&generation_dir);
 
         let index = fs::read_to_string(generation_dir.join("index.html")).unwrap();
         assert!(index.contains("./preview.js"));
@@ -8594,6 +8622,15 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             .find(|font| font.file_name() == file_name)
             .map(peitho_core::MathFontAsset::bytes)
             .expect("expected embedded KaTeX font")
+    }
+
+    fn assert_theme_fonts_written(out: &Path) {
+        for font in peitho_core::theme_fonts() {
+            assert_eq!(
+                fs::read(out.join("theme-fonts").join(font.file_name())).unwrap(),
+                font.bytes()
+            );
+        }
     }
 
     fn write_rehearsal_record(path: &Path, record: peitho_core::RehearsalRecord) {

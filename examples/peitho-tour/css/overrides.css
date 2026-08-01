@@ -6,6 +6,12 @@
   font-size: 26px;
 }
 
+/* The frontmatter block is eight lines of YAML with trailing comments — the
+   panel's own chrome leaves it five pixels short at the deck's default leading. */
+[data-slide-key="frontmatter"] .slot-code code {
+  line-height: 1.45;
+}
+
 /* The sections example is a whole two-section deck — shrink it to fit. */
 [data-slide-key="sections"] .slot-code {
   padding: 18px 24px;
@@ -13,7 +19,7 @@
 
 [data-slide-key="sections"] .slot-code code {
   font-size: 16px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 /* The closing statement gets the accent gradient itself. */

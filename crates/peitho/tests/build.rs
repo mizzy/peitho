@@ -1562,6 +1562,12 @@ fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
 
     assert!(css.contains("width: var(--peitho-canvas-width, 1280px);"));
     assert!(css.contains("height: var(--peitho-canvas-height, 720px);"));
+    assert!(css.contains("url(\"theme-fonts/Inter-Regular.woff2\")"));
+    assert!(css.contains("url(\"theme-fonts/Inter-SemiBold.woff2\")"));
+    assert!(css.contains("url(\"theme-fonts/Inter-Bold.woff2\")"));
+    assert!(css.contains("url(\"theme-fonts/JetBrainsMono-Regular.woff2\")"));
+    assert!(css.contains("font-family: \"Inter\", system-ui"));
+    assert!(css.contains("font-family: \"JetBrains Mono\", ui-monospace"));
     assert!(css.contains("font-size: 56px;"));
     assert!(!css.contains("min-height: 100vh"));
     assert!(!css.contains("font-size: 1.4rem"));
@@ -1727,9 +1733,15 @@ fn build_reads_css_from_frontmatter() {
         .success()
         .stdout(predicate::str::contains("built 1 slide"));
 
-    assert!(fs::read_to_string(out.join("peitho.css"))
-        .unwrap()
-        .contains(".slot-title { color: rebeccapurple; }"));
+    let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+    assert!(css.contains(".slot-title { color: rebeccapurple; }"));
+    assert!(!css.contains("font-family: \"Inter\", system-ui"));
+    for font in peitho_core::theme_fonts() {
+        assert_eq!(
+            fs::read(out.join("theme-fonts").join(font.file_name())).unwrap(),
+            font.bytes()
+        );
+    }
 }
 
 #[test]

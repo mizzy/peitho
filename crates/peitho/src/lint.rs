@@ -14,6 +14,8 @@ const PEITHO_LINT_CHUNK: &str = "PEITHO_LINT_CHUNK";
 const MIN_FONT_SIZE_PT: f64 = 24.0;
 const OVERFLOW_TOLERANCE_PX: i64 = 1;
 const OVERFLOW_HELP: &str = "shrink or split the slide content, or adjust the layout CSS";
+const SCROLLABLE_OVERFLOW_HELP: &str =
+    "a scrollable region cannot be scrolled in a printed or projected deck, so content past the edge will not be seen";
 const FONT_SIZE_HELP: &str =
     "raise the font size in the layout CSS, or move content to another slide instead of shrinking it";
 const LINT_PARSE_HELP: &str =
@@ -34,9 +36,24 @@ struct SlideMeasurement {
     min_font_size_px: Option<f64>,
     #[serde(rename = "minFontSample")]
     min_font_sample: Option<String>,
+    #[serde(default, rename = "slotOverflows")]
+    slot_overflows: Vec<SlotOverflowMeasurement>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct SlotOverflowMeasurement {
+    #[serde(rename = "slotOverflowAxis")]
+    axis: Option<OverflowAxis>,
+    #[serde(rename = "slotOverflowPx")]
+    overflow_px: Option<i64>,
+    #[serde(rename = "slotOverflowValue")]
+    overflow_value: Option<OverflowValue>,
+    #[serde(rename = "slotName")]
+    slot: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum OverflowAxis {
     Horizontal,
     Vertical,
@@ -51,6 +68,24 @@ impl OverflowAxis {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OverflowValue {
+    Hidden,
+    Clip,
+    Auto,
+    Scroll,
+}
+
+impl OverflowValue {
+    fn help(self) -> &'static str {
+        match self {
+            Self::Hidden | Self::Clip => OVERFLOW_HELP,
+            Self::Auto | Self::Scroll => SCROLLABLE_OVERFLOW_HELP,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OverflowWarning {
     slide: usize,
@@ -58,6 +93,15 @@ struct OverflowWarning {
     overflow_px: i64,
     content_px: i64,
     box_px: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlotOverflowWarning {
+    slide: usize,
+    axis: OverflowAxis,
+    overflow_px: i64,
+    overflow_value: Option<OverflowValue>,
+    slot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -369,6 +413,27 @@ fn collect_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<OverflowW
     warnings
 }
 
+fn collect_slot_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<SlotOverflowWarning> {
+    let mut warnings = Vec::new();
+    for measurement in measurements {
+        for overflow in &measurement.slot_overflows {
+            let (Some(axis), Some(overflow_px)) = (overflow.axis, overflow.overflow_px) else {
+                continue;
+            };
+            if overflow_px > OVERFLOW_TOLERANCE_PX {
+                warnings.push(SlotOverflowWarning {
+                    slide: measurement.slide,
+                    axis,
+                    overflow_px,
+                    overflow_value: overflow.overflow_value,
+                    slot: overflow.slot.clone(),
+                });
+            }
+        }
+    }
+    warnings
+}
+
 fn round_px(value: f64) -> i64 {
     value.round() as i64
 }
@@ -404,6 +469,7 @@ fn write_lint_report(
     stdout: &mut dyn Write,
 ) -> miette::Result<i32> {
     let overflow_warnings = collect_overflow_warnings(measurements);
+    let slot_overflow_warnings = collect_slot_overflow_warnings(measurements);
     let font_size_warnings = collect_font_size_warnings(measurements);
     for warning in &overflow_warnings {
         writeln!(
@@ -418,6 +484,25 @@ fn write_lint_report(
         .into_diagnostic()?;
         writeln!(stdout, "  help: {OVERFLOW_HELP}").into_diagnostic()?;
     }
+    for warning in &slot_overflow_warnings {
+        let target = match &warning.slot {
+            Some(slot) => format!("the `{slot}` slot"),
+            None => "a container".to_owned(),
+        };
+        writeln!(
+            stdout,
+            "warning: slide {} content overflows {} {} by {}px",
+            warning.slide,
+            target,
+            warning.axis.adverb(),
+            warning.overflow_px
+        )
+        .into_diagnostic()?;
+        let help = warning
+            .overflow_value
+            .map_or(OVERFLOW_HELP, OverflowValue::help);
+        writeln!(stdout, "  help: {help}").into_diagnostic()?;
+    }
     for warning in &font_size_warnings {
         writeln!(
             stdout,
@@ -430,7 +515,8 @@ fn write_lint_report(
         writeln!(stdout, "  help: {FONT_SIZE_HELP}").into_diagnostic()?;
     }
 
-    let warning_count = overflow_warnings.len() + font_size_warnings.len();
+    let warning_count =
+        overflow_warnings.len() + slot_overflow_warnings.len() + font_size_warnings.len();
     if warning_count == 0 {
         writeln!(
             stdout,
@@ -488,6 +574,39 @@ mod tests {
             box_height: 600.0,
             min_font_size_px: px,
             min_font_sample: sample.map(str::to_owned),
+            slot_overflows: Vec::new(),
+        }
+    }
+
+    fn slot_overflow(
+        axis: Option<OverflowAxis>,
+        overflow_px: Option<i64>,
+        slot: Option<&str>,
+    ) -> SlotOverflowMeasurement {
+        slot_overflow_with_value(axis, overflow_px, None, slot)
+    }
+
+    fn slot_overflow_with_value(
+        axis: Option<OverflowAxis>,
+        overflow_px: Option<i64>,
+        overflow_value: Option<OverflowValue>,
+        slot: Option<&str>,
+    ) -> SlotOverflowMeasurement {
+        SlotOverflowMeasurement {
+            axis,
+            overflow_px,
+            overflow_value,
+            slot: slot.map(str::to_owned),
+        }
+    }
+
+    fn slot_measurement(
+        slide: usize,
+        slot_overflows: Vec<SlotOverflowMeasurement>,
+    ) -> SlideMeasurement {
+        SlideMeasurement {
+            slot_overflows,
+            ..measurement(slide, None, None)
         }
     }
 
@@ -508,6 +627,25 @@ mod tests {
             "actual error: {message}"
         );
         message
+    }
+
+    #[test]
+    fn emit_lint_workspace_writes_theme_fonts() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let workspace = dir.path().join("lint-workspace");
+        fs::write(&deck, "# Intro\n").unwrap();
+        let artifacts = crate::build_artifacts(&deck).unwrap();
+
+        emit_lint_workspace(&workspace, &artifacts).unwrap();
+
+        assert!(workspace.join("lint.html").is_file());
+        for font in peitho_core::theme_fonts() {
+            assert_eq!(
+                fs::read(workspace.join("theme-fonts").join(font.file_name())).unwrap(),
+                font.bytes()
+            );
+        }
     }
 
     #[test]
@@ -534,12 +672,13 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: Some(18.0),
                 min_font_sample: Some("Tiny text".to_owned()),
+                slot_overflows: Vec::new(),
             }]
         );
     }
 
     #[test]
-    fn lint_measurement_payload_defaults_missing_font_fields_to_none() {
+    fn lint_measurement_payload_defaults_missing_optional_fields_to_none() {
         let payload = encoded(
             r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0}]"#,
         );
@@ -548,6 +687,29 @@ mod tests {
 
         assert_eq!(measurements[0].min_font_size_px, None);
         assert_eq!(measurements[0].min_font_sample, None);
+        assert!(measurements[0].slot_overflows.is_empty());
+    }
+
+    #[test]
+    fn lint_measurement_payload_deserializes_slot_overflow_fields() {
+        let payload = encoded(
+            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"slotOverflows":[{"slotOverflowAxis":"horizontal","slotOverflowPx":7,"slotOverflowValue":"scroll","slotName":"body"},{"slotOverflowAxis":"vertical","slotOverflowPx":14,"slotName":"code"}]}]"#,
+        );
+
+        let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
+
+        assert_eq!(
+            measurements[0].slot_overflows,
+            vec![
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(7),
+                    Some(OverflowValue::Scroll),
+                    Some("body"),
+                ),
+                slot_overflow(Some(OverflowAxis::Vertical), Some(14), Some("code"),),
+            ]
+        );
     }
 
     #[test]
@@ -698,6 +860,7 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                slot_overflows: Vec::new(),
             },
             SlideMeasurement {
                 slide: 2,
@@ -707,6 +870,7 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                slot_overflows: Vec::new(),
             },
             SlideMeasurement {
                 slide: 3,
@@ -716,6 +880,7 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                slot_overflows: Vec::new(),
             },
             SlideMeasurement {
                 slide: 4,
@@ -725,6 +890,7 @@ mod tests {
                 box_height: 600.1,
                 min_font_size_px: None,
                 min_font_sample: None,
+                slot_overflows: Vec::new(),
             },
             SlideMeasurement {
                 slide: 5,
@@ -734,6 +900,7 @@ mod tests {
                 box_height: 720.0,
                 min_font_size_px: None,
                 min_font_sample: None,
+                slot_overflows: Vec::new(),
             },
         ];
 
@@ -768,6 +935,148 @@ mod tests {
     }
 
     #[test]
+    fn slot_overflow_warning_collection_handles_axes_slots_and_tolerance() {
+        let measurements = [
+            slot_measurement(1, Vec::new()),
+            slot_measurement(
+                2,
+                vec![
+                    slot_overflow_with_value(
+                        Some(OverflowAxis::Horizontal),
+                        Some(7),
+                        Some(OverflowValue::Auto),
+                        Some("code"),
+                    ),
+                    slot_overflow_with_value(
+                        Some(OverflowAxis::Vertical),
+                        Some(14),
+                        Some(OverflowValue::Hidden),
+                        None,
+                    ),
+                ],
+            ),
+            slot_measurement(
+                3,
+                vec![
+                    slot_overflow(Some(OverflowAxis::Horizontal), Some(1), Some("body")),
+                    slot_overflow(Some(OverflowAxis::Vertical), Some(2), Some("body")),
+                ],
+            ),
+            slot_measurement(
+                4,
+                vec![
+                    slot_overflow(Some(OverflowAxis::Horizontal), None, Some("code")),
+                    slot_overflow(None, Some(9), Some("code")),
+                ],
+            ),
+        ];
+
+        let warnings = collect_slot_overflow_warnings(&measurements);
+
+        assert_eq!(
+            warnings,
+            vec![
+                SlotOverflowWarning {
+                    slide: 2,
+                    axis: OverflowAxis::Horizontal,
+                    overflow_px: 7,
+                    overflow_value: Some(OverflowValue::Auto),
+                    slot: Some("code".to_owned()),
+                },
+                SlotOverflowWarning {
+                    slide: 2,
+                    axis: OverflowAxis::Vertical,
+                    overflow_px: 14,
+                    overflow_value: Some(OverflowValue::Hidden),
+                    slot: None,
+                },
+                SlotOverflowWarning {
+                    slide: 3,
+                    axis: OverflowAxis::Vertical,
+                    overflow_px: 2,
+                    overflow_value: None,
+                    slot: Some("body".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lint_report_renders_named_and_unnamed_slot_overflow_warnings() {
+        let measurements = [
+            slot_measurement(
+                10,
+                vec![slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(8),
+                    Some(OverflowValue::Hidden),
+                    Some("code"),
+                )],
+            ),
+            slot_measurement(
+                11,
+                vec![slot_overflow_with_value(
+                    Some(OverflowAxis::Vertical),
+                    Some(14),
+                    Some(OverflowValue::Clip),
+                    None,
+                )],
+            ),
+        ];
+        let mut stdout = Vec::new();
+
+        let exit_code = write_lint_report(&measurements, &mut stdout).unwrap();
+
+        assert_eq!(exit_code, 1);
+        let output = String::from_utf8(stdout).unwrap();
+        assert!(output
+            .contains("warning: slide 10 content overflows the `code` slot horizontally by 8px"));
+        assert!(
+            output.contains("warning: slide 11 content overflows a container vertically by 14px")
+        );
+        assert_eq!(
+            output.matches(&format!("  help: {OVERFLOW_HELP}")).count(),
+            2
+        );
+        assert!(output.contains("checked 2 slide(s): 2 warning(s)"));
+    }
+
+    #[test]
+    fn lint_report_uses_scrollable_help_for_auto_and_scroll_overflow() {
+        let measurements = [slot_measurement(
+            12,
+            vec![
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Horizontal),
+                    Some(8),
+                    Some(OverflowValue::Auto),
+                    Some("code"),
+                ),
+                slot_overflow_with_value(
+                    Some(OverflowAxis::Vertical),
+                    Some(14),
+                    Some(OverflowValue::Scroll),
+                    Some("code"),
+                ),
+            ],
+        )];
+        let mut stdout = Vec::new();
+
+        let exit_code = write_lint_report(&measurements, &mut stdout).unwrap();
+
+        assert_eq!(exit_code, 1);
+        let output = String::from_utf8(stdout).unwrap();
+        assert_eq!(
+            output
+                .matches(&format!("  help: {SCROLLABLE_OVERFLOW_HELP}"))
+                .count(),
+            2
+        );
+        assert!(!output.contains(&format!("  help: {OVERFLOW_HELP}")));
+        assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
+    }
+
+    #[test]
     fn lint_report_renders_warnings_summary_and_exit_code() {
         let measurements = vec![SlideMeasurement {
             slide: 3,
@@ -777,6 +1086,7 @@ mod tests {
             box_height: 600.2,
             min_font_size_px: Some(24.0),
             min_font_sample: Some("excerpt…".to_owned()),
+            slot_overflows: Vec::new(),
         }];
         let mut stdout = Vec::new();
 
@@ -809,6 +1119,7 @@ mod tests {
             box_height: 600.0,
             min_font_size_px: None,
             min_font_sample: None,
+            slot_overflows: Vec::new(),
         };
         assert_eq!(write_lint_report(&[clean], &mut clean_stdout).unwrap(), 0);
         assert_eq!(

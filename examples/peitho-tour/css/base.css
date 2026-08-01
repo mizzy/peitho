@@ -1,3 +1,35 @@
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("theme-fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 .peitho-slide {
   width: 1280px;
   height: 720px;
@@ -11,14 +43,14 @@
     radial-gradient(900px 520px at -8% 112%, rgba(139, 92, 246, 0.12), transparent 60%),
     #0b1020;
   color: #dce4f2;
-  font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 
 pre,
 code,
 kbd,
 samp {
-  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
 }
 
 .guide h1 {
@@ -58,7 +90,7 @@ samp {
   content: "PEITHO TOUR";
   display: block;
   margin-bottom: 30px;
-  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
   font-size: 17px;
   font-weight: 500;
   letter-spacing: 0.48em;

@@ -3753,10 +3753,27 @@ Paragraph after heading.
     }
 
     #[test]
+    fn lint_measure_script_bounds_window_load_wait_with_a_timeout() {
+        let wait_for_window_load = LINT_MEASURE_JS
+            .split_once("function waitForWindowLoad")
+            .unwrap()
+            .1
+            .split_once("function waitForImage")
+            .unwrap()
+            .0;
+
+        assert!(wait_for_window_load.contains(r#"window.addEventListener("load""#));
+        assert!(wait_for_window_load.contains("WINDOW_LOAD_TIMEOUT_MS"));
+        assert!(wait_for_window_load.contains("setTimeout"));
+        assert!(wait_for_window_load.contains("Promise.race"));
+        assert!(LINT_MEASURE_JS.contains("WINDOW_LOAD_TIMEOUT_MS = 2000"));
+    }
+
+    #[test]
     fn lint_measure_script_bounds_font_wait_with_a_timeout() {
-        // Regression: document.fonts.ready has been observed to hang under
-        // Chrome's --virtual-time-budget, so the script must bound the wait
-        // instead of awaiting it unconditionally.
+        // Regression: explicit font loads and document.fonts.ready can hang
+        // under Chrome's --virtual-time-budget, so the script must bound the
+        // wait instead of awaiting it unconditionally.
         assert!(
             LINT_MEASURE_JS.contains("document.fonts.ready"),
             "expected the script to still reference document.fonts.ready"
@@ -3782,6 +3799,36 @@ Paragraph after heading.
     }
 
     #[test]
+    fn lint_measure_script_requests_document_declared_fonts_before_waiting() {
+        assert!(LINT_MEASURE_JS.contains("document.fonts.forEach(function (face)"));
+        assert!(
+            LINT_MEASURE_JS.contains("document.fonts.load(fontShorthand(face))"),
+            "expected every declared FontFace to be requested through FontFaceSet.load"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("settleFontPromise(face.load())"),
+            "expected unicode-subset faces to be loaded directly as well"
+        );
+        assert!(LINT_MEASURE_JS.contains("Promise.all(loads)"));
+        assert!(LINT_MEASURE_JS.contains("face.family"));
+        assert!(LINT_MEASURE_JS.contains("face.style"));
+        assert!(LINT_MEASURE_JS.contains("face.weight"));
+        assert!(LINT_MEASURE_JS.contains("face.stretch || face.width"));
+        assert!(LINT_MEASURE_JS.contains("return waitForFonts(declaredFontsReady);"));
+        assert!(!LINT_MEASURE_JS.contains(r#""Inter""#));
+        assert!(!LINT_MEASURE_JS.contains(r#""JetBrains Mono""#));
+
+        let request_index = LINT_MEASURE_JS
+            .find("var declaredFontsReady = requestDeclaredFonts();")
+            .unwrap();
+        let load_wait_index = LINT_MEASURE_JS.find("\n  waitForWindowLoad()\n").unwrap();
+        assert!(
+            request_index < load_wait_index,
+            "declared font fetches must start synchronously before the load-event wait"
+        );
+    }
+
+    #[test]
     fn lint_measure_script_does_not_contain_raw_sentinel_strings() {
         assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_BEGIN"));
         assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_END"));
@@ -3791,16 +3838,32 @@ Paragraph after heading.
 
     #[test]
     fn lint_measure_script_uses_descendant_rect_union_with_scroll_floor() {
+        let content_bounds = LINT_MEASURE_JS
+            .split_once("function contentBounds")
+            .unwrap()
+            .1
+            .split_once("function clipsOverflow")
+            .unwrap()
+            .0;
         assert!(LINT_MEASURE_JS.contains("getBoundingClientRect"));
         assert!(LINT_MEASURE_JS.contains("function walkDescendants"));
         assert!(LINT_MEASURE_JS.contains("Array.prototype.forEach.call(element.children"));
         assert!(!LINT_MEASURE_JS.contains(r#"querySelectorAll("*")"#));
-        assert!(!LINT_MEASURE_JS.contains(r#"position === "fixed""#));
+        assert!(!content_bounds.contains(r#"position === "fixed""#));
         assert!(LINT_MEASURE_JS.contains("rect.width === 0 && rect.height === 0"));
         assert!(LINT_MEASURE_JS.contains("bounds.maxRight - bounds.minLeft"));
         assert!(LINT_MEASURE_JS.contains("slide.scrollWidth"));
         assert!(LINT_MEASURE_JS.contains("contentWidth"));
         assert!(LINT_MEASURE_JS.contains("boxWidth"));
+    }
+
+    #[test]
+    fn lint_measure_script_emits_slot_overflow_payload_fields() {
+        assert!(LINT_MEASURE_JS.contains("function measureSlotOverflows"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowAxis"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowPx"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowValue"));
+        assert!(LINT_MEASURE_JS.contains("slotName"));
     }
 
     #[test]
