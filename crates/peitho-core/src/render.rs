@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error};
+use std::{collections::BTreeMap, error::Error, ops::Range};
 
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
@@ -27,21 +27,30 @@ pub(crate) fn walk_body_markdown_list_items<'a>(
     markdown: &'a str,
     mut visit: impl FnMut(Event<'a>, bool),
 ) {
+    walk_body_markdown_list_items_with_ranges(markdown, |event, _range, top_level_item| {
+        visit(event, top_level_item);
+    });
+}
+
+pub(crate) fn walk_body_markdown_list_items_with_ranges<'a>(
+    markdown: &'a str,
+    mut visit: impl FnMut(Event<'a>, Range<usize>, bool),
+) {
     let mut list_depth = 0usize;
-    for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
+    for (event, range) in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).into_offset_iter() {
         match event {
             Event::Start(Tag::List(kind)) => {
                 list_depth += 1;
-                visit(Event::Start(Tag::List(kind)), false);
+                visit(Event::Start(Tag::List(kind)), range, false);
             }
             Event::End(TagEnd::List(kind)) => {
-                visit(Event::End(TagEnd::List(kind)), false);
+                visit(Event::End(TagEnd::List(kind)), range, false);
                 list_depth = list_depth.saturating_sub(1);
             }
             Event::Start(Tag::Item) if list_depth == 1 => {
-                visit(Event::Start(Tag::Item), true);
+                visit(Event::Start(Tag::Item), range, true);
             }
-            event => visit(event, false),
+            event => visit(event, range, false),
         }
     }
 }
@@ -590,14 +599,31 @@ fn render_footnotes_block(
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
 ) -> Result<()> {
-    body.push_str(r#"<div class="peitho-footnotes"><ol>"#);
+    if let Some(step) = wrapper_reveal_step(entries) {
+        body.push_str(&format!(
+            r#"<div class="peitho-footnotes" data-reveal-step="{step}"><ol>"#
+        ));
+    } else {
+        body.push_str(r#"<div class="peitho-footnotes"><ol>"#);
+    }
     for entry in entries {
-        body.push_str("<li>");
+        if let Some(step) = entry.reveal_step() {
+            body.push_str(&format!(r#"<li data-reveal-step="{step}">"#));
+        } else {
+            body.push_str("<li>");
+        }
         render_markdown_run(body, &[entry.markdown()], breaks, footnote_numbers)?;
         body.push_str("</li>");
     }
     body.push_str("</ol></div>");
     Ok(())
+}
+
+fn wrapper_reveal_step(entries: &[FootnoteEntry]) -> Option<usize> {
+    if entries.iter().any(|entry| entry.reveal_step().is_none()) {
+        return None;
+    }
+    entries.iter().filter_map(FootnoteEntry::reveal_step).min()
 }
 
 fn render_markdown_run(
@@ -2018,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn render_reveal_keeps_slide_wide_footnotes_unstaged() {
+    fn render_reveal_stages_slide_wide_footnotes_from_references() {
         let rendered = render_checked_deck_with_layout(
             "# T\n\n::: {reveal}\n\nClaim[^a].\n\n[^a]: Footnote **body**.\n\n:::\n",
             title_body_layout(),
@@ -2033,12 +2059,8 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<div class="peitho-footnotes"><ol><li><p>Footnote <strong>body</strong>.</p>"#
+                r#"<div class="peitho-footnotes" data-reveal-step="1"><ol><li data-reveal-step="1"><p>Footnote <strong>body</strong>.</p>"#
             ),
-            "{html}"
-        );
-        assert!(
-            !html.contains(r#"<div class="peitho-footnotes" data-reveal-step"#),
             "{html}"
         );
     }
@@ -2048,7 +2070,7 @@ mod tests {
     fn revealed_footnotes_fragment_is_unreachable() {
         let fragments = resolve_fragments(vec![SourceFragment::footnotes(
             5,
-            vec![FootnoteEntry::new(1, "note", "Footnote body.", 5)],
+            vec![FootnoteEntry::new(1, "note", "Footnote body.", 5, None)],
         )
         .with_reveal_span(RevealSpan { start: 1, len: 1 })]);
         let footnote_numbers = footnote_numbers_for_fragments(&fragments);
@@ -2192,7 +2214,7 @@ mod tests {
             SourceFragment::paragraph(3, "Before[^note]."),
             SourceFragment::footnotes(
                 5,
-                vec![FootnoteEntry::new(1, "note", "Footnote **body**.", 5)],
+                vec![FootnoteEntry::new(1, "note", "Footnote **body**.", 5, None)],
             ),
         ]);
         let footnote_numbers = footnote_numbers_for_fragments(&fragments);
@@ -2215,6 +2237,52 @@ mod tests {
                 r#"<div class="peitho-footnotes"><ol><li><p>Footnote <strong>body</strong>.</p>"#,
                 "\n",
                 "</li></ol></div></div>"
+            )
+        );
+    }
+
+    #[test]
+    fn footnote_block_stamps_entries_and_wrapper_min_step_when_all_entries_are_revealed() {
+        let entries = vec![
+            FootnoteEntry::new(1, "first", "First note.", 10, Some(1)),
+            FootnoteEntry::new(2, "second", "Second note.", 12, Some(2)),
+        ];
+        let mut body = String::new();
+
+        render_footnotes_block(&mut body, &entries, false, &BTreeMap::new()).unwrap();
+
+        assert_eq!(
+            body,
+            concat!(
+                r#"<div class="peitho-footnotes" data-reveal-step="1"><ol>"#,
+                r#"<li data-reveal-step="1"><p>First note.</p>"#,
+                "\n",
+                r#"</li><li data-reveal-step="2"><p>Second note.</p>"#,
+                "\n",
+                "</li></ol></div>"
+            )
+        );
+    }
+
+    #[test]
+    fn footnote_block_does_not_stamp_wrapper_when_any_entry_is_always_visible() {
+        let entries = vec![
+            FootnoteEntry::new(1, "revealed", "Revealed note.", 10, Some(3)),
+            FootnoteEntry::new(2, "plain", "Plain note.", 12, None),
+        ];
+        let mut body = String::new();
+
+        render_footnotes_block(&mut body, &entries, false, &BTreeMap::new()).unwrap();
+
+        assert_eq!(
+            body,
+            concat!(
+                r#"<div class="peitho-footnotes"><ol>"#,
+                r#"<li data-reveal-step="3"><p>Revealed note.</p>"#,
+                "\n",
+                r#"</li><li><p>Plain note.</p>"#,
+                "\n",
+                "</li></ol></div>"
             )
         );
     }
