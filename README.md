@@ -298,9 +298,11 @@ peitho completions zsh
 ```
 
 `peitho lint` renders each slide in headless Chrome and warns when layout
-content exceeds the slide box by more than 1px on either axis. It exits 1
-when any overflow warning is found and 0 when the deck is clean; it uses the
-same Chrome discovery as `peitho export pdf`.
+content exceeds the slide box by more than 1px on either axis. It also warns
+once per slide when non-footnote text renders below the recommended 24pt,
+reporting the smallest size in pt and a short excerpt. It exits 1 when any
+warning is found and 0 when the deck is clean; it uses the same Chrome
+discovery as `peitho export pdf`.
 
 Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
