@@ -3,6 +3,7 @@
 pub mod check;
 pub mod code_images;
 pub mod domain;
+mod emphasis;
 pub mod error;
 pub mod highlight;
 pub mod include;

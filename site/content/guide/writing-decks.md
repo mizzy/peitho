@@ -148,6 +148,62 @@ fails loudly with a line-numbered `unclosed reveal fence` error.
 `{reveal=value}`, empty groups, unclosed fences, nested fences, and
 multi-attribute fences are line-numbered build errors.
 
+## Code line emphasis
+
+Point at specific lines of a code block — "the line I'm talking about right
+now". This is separate from syntax highlighting: highlighting colors code by
+what it *is*, emphasis marks where you are in the talk.
+
+Write the lines in braces after the language tag:
+
+````markdown
+```rust {3}
+pub struct Deck<Phase> {
+    slides: Vec<Slide>,
+    _phase: PhantomData<Phase>,
+}
+```
+````
+
+A `|` turns emphasis into a walkthrough: each group becomes one step in
+`peitho present`, and the emphasis moves from group to group as you advance.
+
+````markdown
+```rust {3|6-8}
+```
+````
+
+The code is fully visible from the start either way — only the emphasis moves.
+Emphasis steps share the same step space as [incremental reveal](#incremental-reveal),
+so `next` walks through both in source order.
+
+Line numbers are 1-based and count every line of the block, including blank
+ones. Within a group, `,` separates entries and `-` makes a range:
+`{2,5-7|9}` emphasizes lines 2 and 5–7 on the first step, then line 9.
+
+The language tag is optional — ` ```{2-4} ` works on an untagged block.
+
+**Static vs stepped.** The `|` is the only difference:
+
+| Notation | Steps used | Where it appears |
+| --- | --- | --- |
+| `{2-4}` (no `\|`) | none | everywhere, including PDF and published output |
+| `{2-4\|6-8}` | one per group | `peitho present` only |
+
+Static emphasis says "these lines are the important ones" — a property of the
+content, so it ships with the deck. Stepped emphasis is a pointer that follows
+your narration, so freezing an arbitrary moment of it into a PDF would say
+something you never meant; `peitho preview`, PDF export, lint, and published
+output show the code unemphasized.
+
+Emphasis is styled by the theme. Decks that ship their own `css/` can restyle
+it through `--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
+`--peitho-emphasis-dim`.
+
+Line numbers past the end of the block, malformed specs, stepped emphasis
+inside a `::: {reveal}` group (which would nest two step spaces), and emphasis
+on a `code_images` block are all line-numbered build errors.
+
 ## Speaker notes
 
 Non-JSON HTML comments anywhere in a slide become presenter speaker notes. Empty

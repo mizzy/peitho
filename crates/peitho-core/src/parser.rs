@@ -14,6 +14,7 @@ use crate::{
         AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FootnoteEntry, FragmentKind,
         RawImagePath, Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
     },
+    emphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     phase::{
@@ -2146,15 +2147,17 @@ fn parse_slide(
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                let language = match kind {
-                    CodeBlockKind::Fenced(language) if !language.is_empty() => {
-                        Some(language.to_string())
-                    }
+                // The info string carries both the language tag and an
+                // optional line-emphasis spec; splitting is deferred to the
+                // End event, where the code line number is already computed
+                // for error reporting.
+                let info = match kind {
+                    CodeBlockKind::Fenced(info) if !info.is_empty() => Some(info.to_string()),
                     _ => None,
                 };
                 block = Some(OpenBlock::Code {
                     start: global_start,
-                    language,
+                    language: info,
                     text: String::new(),
                 });
             }
@@ -2169,21 +2172,102 @@ fn parse_slide(
                         unreachable!();
                     };
                     let code_line = line_for_offset(source, start);
+                    let mut slide_err =
+                        |err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments);
+
+                    // Order is load-bearing. Language validation runs first so
+                    // its error keeps priority over emphasis parsing, and the
+                    // `renderer_for` check rejects emphasis on diagram blocks
+                    // here — before any annotated fragment could reach
+                    // `code_images::transform_fragment`, which rebuilds the
+                    // fragment and would silently drop the annotation.
+                    let info = language.as_deref().unwrap_or_default();
+                    let split =
+                        emphasis::split_info_string(info, code_line).map_err(&mut slide_err)?;
+                    let language = split.language.map(str::to_owned);
+
+                    let renderer = language
+                        .as_deref()
+                        .and_then(|language| code_images.renderer_for(language));
                     if let Some(language) = &language {
-                        if code_images.renderer_for(language).is_none() {
+                        if renderer.is_none() {
                             highlighter
                                 .validate_language(language, code_line)
-                                .map_err(|err| {
-                                    attach_slide_context(
-                                        err,
-                                        index,
-                                        explicit_key.as_ref(),
-                                        &fragments,
-                                    )
-                                })?;
+                                .map_err(&mut slide_err)?;
                         }
                     }
+
+                    let emphasis = match split.emphasis {
+                        Some(spec) => {
+                            if renderer.is_some() {
+                                let tag = language.as_deref().unwrap_or("this");
+                                return Err(slide_err(BuildError::new(
+                                    ErrorKind::Parse,
+                                    Some(code_line),
+                                    "line emphasis is not supported on rendered code images",
+                                    format!(
+                                        "`{tag}` blocks render to an image, so there are no code lines to emphasize; remove the emphasis spec",
+                                    ),
+                                )));
+                            }
+                            let emphasis = emphasis::parse_emphasis_spec(spec, code_line)
+                                .map_err(&mut slide_err)?;
+                            let line_count = text.lines().count();
+                            if emphasis.max_line() > line_count {
+                                let max = emphasis.max_line();
+                                return Err(slide_err(BuildError::new(
+                                    ErrorKind::Parse,
+                                    Some(code_line),
+                                    format!(
+                                        "emphasis line {max} is past the end of a {line_count}-line code block",
+                                    ),
+                                    format!(
+                                        "this block has {line_count} line(s); emphasize a line in 1-{line_count}",
+                                    ),
+                                )));
+                            }
+                            Some(emphasis)
+                        }
+                        None => None,
+                    };
+
                     let fragment = SourceFragment::code(code_line, language, text);
+                    let fragment = match emphasis {
+                        Some(emphasis) => {
+                            if emphasis.stepped() {
+                                // Stepped emphasis owns steps of its own. Inside
+                                // a reveal group that would nest two step
+                                // spaces ("the block appears at step 5, then
+                                // emphasis moves at 6-8"), which the flat
+                                // `RevealSpan { start, len }` cannot express —
+                                // so reject it rather than invent nesting.
+                                if div_stack
+                                    .iter()
+                                    .any(|(_, open, _)| matches!(open, DivOpen::Reveal))
+                                {
+                                    return Err(slide_err(BuildError::new(
+                                        ErrorKind::Parse,
+                                        Some(code_line),
+                                        "stepped line emphasis cannot be inside a reveal group",
+                                        "use static emphasis (no `|`) here, or move the code block outside the `::: {reveal}` group",
+                                    )));
+                                }
+                                // Outside a group the block is always visible;
+                                // the span exists only to place its emphasis
+                                // groups in the slide's shared step space.
+                                let len = emphasis.groups().len();
+                                let span = RevealSpan {
+                                    start: next_reveal_step,
+                                    len,
+                                };
+                                next_reveal_step += len;
+                                fragment.with_emphasis(emphasis).with_reveal_span(span)
+                            } else {
+                                fragment.with_emphasis(emphasis)
+                            }
+                        }
+                        None => fragment,
+                    };
                     if let Err(err) = push_checked_fragment(
                         source,
                         start,
@@ -2408,6 +2492,10 @@ fn reveal_span_len(fragment: &SourceFragment) -> usize {
     if !matches!(fragment.kind(), FragmentKind::List) {
         return 1;
     }
+    debug_assert!(
+        fragment.emphasis().is_none(),
+        "only code fragments carry line emphasis",
+    );
 
     let mut item_count = 0usize;
     walk_body_markdown_list_items(fragment.markdown(), |_event, top_level_item| {
@@ -5447,6 +5535,123 @@ After list
     }
 
     #[test]
+    fn unknown_language_error_survives_info_splitting() {
+        // Regression: splitting the info string must not steal priority from
+        // the language error, with or without an emphasis spec present.
+        let err = parse_markdown(
+            "# Title\n\n```notalang {1}\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unknown code language 'notalang'"));
+    }
+
+    #[test]
+    fn pandoc_attribute_block_names_itself_in_the_error() {
+        let err = parse_markdown(
+            "# Title\n\n```{.rust}\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "Pandoc-style attribute blocks are not supported"
+        );
+        assert!(err.help.contains("rust"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn emphasis_beyond_the_block_is_an_error() {
+        let err = parse_markdown(
+            "# Title\n\n```rust {2-4}\nfn main() {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "emphasis line 4 is past the end of a 1-line code block"
+        );
+        assert!(err.help.contains("1-1"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn emphasis_at_the_last_line_is_accepted() {
+        // Boundary: max_line == line_count must not error.
+        let deck = parse_markdown(
+            "# Title\n\n```rust {2}\nfn main() {\n}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert!(fragment.emphasis().is_some());
+    }
+
+    #[test]
+    fn emphasis_rides_the_code_fragment_through_parse() {
+        let deck = parse_markdown(
+            "# Title\n\n```rust {1}\nfn main() {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert_eq!(fragment.language(), Some("rust"));
+        let emphasis = fragment.emphasis().expect("emphasis rides the fragment");
+        assert!(!emphasis.stepped());
+        assert_eq!(emphasis.groups().len(), 1);
+    }
+
+    #[test]
+    fn untagged_block_accepts_emphasis() {
+        let deck = parse_markdown(
+            "# Title\n\n```{1}\nplain\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert_eq!(fragment.language(), None);
+        assert!(fragment.emphasis().is_some());
+    }
+
+    #[test]
+    fn emphasis_on_a_code_images_block_is_rejected() {
+        // mermaid resolves to a builtin renderer: the block becomes an image,
+        // so there are no code lines to emphasize. Rejecting here is what
+        // keeps an annotated fragment out of `transform_fragment`.
+        let err = parse_markdown(
+            "---\ncode_images:\n  dot: dot -Tsvg\n---\n# Intro\n\n```dot {1}\ndigraph {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "line emphasis is not supported on rendered code images"
+        );
+        assert!(err.help.contains("dot"), "help: {}", err.help);
+    }
+
+    fn code_fragment(deck: &Deck<Parsed>) -> &SourceFragment<RawImagePath> {
+        deck.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .expect("deck has a code fragment")
+    }
+
+    #[test]
     fn accepts_code_images_language_tag_unknown_to_highlighter() {
         let markdown = "---\ncode_images:\n  mermaid: mmdc -i - -o - -e svg\n---\n# Intro\n\n```mermaid\ngraph TD\n```";
 
@@ -6906,6 +7111,85 @@ After list
             slide.fragments[3].reveal_span(),
             Some(RevealSpan { start: 5, len: 1 })
         );
+    }
+
+    #[test]
+    fn stepped_emphasis_contributes_one_step_per_group() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {1|2|3}\nlet a = 1;\nlet b = 2;\nlet c = 3;\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].step_count, 3);
+    }
+
+    #[test]
+    fn static_emphasis_contributes_no_steps() {
+        // Static emphasis is always visible, so it must not consume a step:
+        // otherwise the slide would open unemphasized and need a keypress to
+        // reach the state the author wrote.
+        let deck = parse_markdown(
+            "# T\n\n```rust {1-2}\nlet a = 1;\nlet b = 2;\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].step_count, 0);
+    }
+
+    #[test]
+    fn static_emphasis_inside_reveal_still_counts_as_one_appearing_block() {
+        let deck = parse_markdown(
+            "# T\n\n::: {reveal}\n\n```rust {1}\nlet a = 1;\n```\n\n:::",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].step_count, 1);
+    }
+
+    #[test]
+    fn stepped_emphasis_shares_the_slide_step_space_with_reveal() {
+        // A reveal group ahead of the block takes steps 1-2; the emphasis
+        // groups continue from 3, because emphasis steps *are* reveal steps.
+        let deck = parse_markdown(
+            "# T\n\n::: {reveal}\n\n- a\n- b\n\n:::\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides()[0].step_count, 4);
+        let code = deck.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .expect("deck has a code fragment");
+        let span = code.reveal_span().expect("stepped emphasis carries a span");
+        assert_eq!(span.start, 3);
+        assert_eq!(span.len, 2);
+    }
+
+    #[test]
+    fn stepped_emphasis_inside_reveal_is_rejected() {
+        // The flat RevealSpan cannot express "the block appears at step N,
+        // then emphasis moves within it at N+1..", so this is an error rather
+        // than an invented nested step space.
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```\n\n:::",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert_eq!(
+            err.message,
+            "stepped line emphasis cannot be inside a reveal group"
+        );
+        // The help must name both supported alternatives.
+        assert!(err.help.contains("static"), "help: {}", err.help);
+        assert!(err.help.contains("outside"), "help: {}", err.help);
     }
 
     #[test]

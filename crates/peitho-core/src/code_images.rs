@@ -79,6 +79,19 @@ fn transform_fragment<R: SvgRunner>(
     runner: &R,
     cache_dir: &Path,
 ) -> Result<SourceFragment> {
+    // Every code fragment passes through here, and one without a renderer is
+    // returned by value with its annotations intact — so carrying emphasis is
+    // normal. What must never happen is emphasis on a fragment that gets
+    // *rebuilt* into an image or math node: that rebuild would drop the
+    // annotation silently, which pillar ③ forbids. The parser rejects that
+    // combination at the `renderer_for` seam; this asserts the ordering holds.
+    debug_assert!(
+        fragment.emphasis().is_none()
+            || fragment
+                .language()
+                .is_none_or(|tag| config.renderer_for(tag).is_none()),
+        "line emphasis on a rendered code image must be rejected at parse time",
+    );
     let reveal_span = fragment.reveal_span();
     let transformed = (|| -> Result<SourceFragment> {
         if let Some(tag) = fragment.language() {
@@ -1240,6 +1253,36 @@ mod tests {
 
         assert!(matches!(fragment.kind(), FragmentKind::Math { .. }));
         assert_eq!(fragment.reveal_span(), Some(span));
+    }
+
+    #[test]
+    fn code_carrying_line_emphasis_passes_through_untouched() {
+        // Regression: every code fragment goes through `transform_fragment`,
+        // not only diagram ones. A plain highlighted block with emphasis has
+        // no renderer, so it must pass through with its annotation intact —
+        // the invariant is only that emphasis never rides a fragment that gets
+        // rebuilt into an image or math node.
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">unused</svg>"#);
+        let markdown = "# T\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```";
+        let highlighter = crate::highlight::Highlighter::defaults();
+        let frontmatter = parse_frontmatter(markdown).unwrap();
+        let parsed = parse_markdown(markdown, frontmatter, &highlighter).unwrap();
+
+        let deck = transform_code_images(parsed, &config(), &runner, &cache_dir).unwrap();
+        let fragment = deck.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .expect("the code fragment survives transformation");
+
+        assert!(fragment.emphasis().is_some());
+        // Stepped emphasis also keeps the span that places it in step space.
+        assert_eq!(
+            fragment.reveal_span(),
+            Some(RevealSpan { start: 1, len: 2 })
+        );
     }
 
     #[test]

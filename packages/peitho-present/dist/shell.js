@@ -983,6 +983,17 @@ var POINTER_TRAIL_DURATION_MS = 500;
 var POINTER_TRAIL_CAP = 64;
 var POINTER_CORE_MIX_TO_WHITE = 0.65;
 var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
+var EMPHASIS_ACTIVE_CSS = [
+  ".code-line{display:inline-block;width:100%}",
+  ".code-line-emphasis,[data-emphasis-active]{",
+  "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+  "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
+  "}",
+  "pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis),",
+  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+  "opacity:var(--peitho-emphasis-dim,0.45)",
+  "}"
+].join("");
 var CSS_NAMED_COLORS = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -1540,7 +1551,7 @@ var PresentShellController = class {
     style.textContent = css;
     shadow.appendChild(style);
     const revealStyle = this.doc.createElement("style");
-    revealStyle.textContent = REVEAL_HIDDEN_CSS;
+    revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
     shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
@@ -1656,6 +1667,27 @@ var PresentShellController = class {
       marker.toggleAttribute(
         "data-reveal-hidden",
         Number.isFinite(revealStep) && revealStep > step
+      );
+    }
+    this.applyEmphasisState(host, step);
+  }
+  /**
+   * Move code line emphasis to the group owning the current step.
+   *
+   * Unlike reveal, emphasis is not cumulative: it points at one group at a
+   * time and moves, so the comparison is equality rather than "step or
+   * earlier". Stepping past the last group leaves the block unemphasized,
+   * which is the correct final state — the pointer is gone once the speaker
+   * has moved on.
+   */
+  applyEmphasisState(host, step) {
+    const markers = host.shadowRoot?.querySelectorAll("[data-emphasis-step]");
+    if (markers == null) return;
+    for (const marker of markers) {
+      const emphasisStep = Number(marker.dataset.emphasisStep);
+      marker.toggleAttribute(
+        "data-emphasis-active",
+        Number.isFinite(emphasisStep) && emphasisStep === step
       );
     }
   }

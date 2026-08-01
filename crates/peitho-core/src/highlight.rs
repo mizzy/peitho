@@ -4,8 +4,8 @@ use std::{
 };
 
 use syntect::{
-    html::{ClassStyle, ClassedHTMLGenerator},
-    parsing::{SyntaxDefinition, SyntaxSet},
+    html::{line_tokens_to_classed_spans, ClassStyle, ClassedHTMLGenerator},
+    parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet},
     util::LinesWithEndings,
 };
 
@@ -83,6 +83,86 @@ impl Highlighter {
             .collect()
     }
 
+    /// Highlight `code` into one HTML string per source line.
+    ///
+    /// [`Self::highlight_html`] appends every line into a single
+    /// `ClassedHTMLGenerator` buffer, so line boundaries vanish and syntect's
+    /// outer scope span wraps the whole block — usable for a plain `<pre>`,
+    /// but not for wrapping individual lines. Line emphasis needs each line to
+    /// stand alone, so this drives `ParseState`/`ScopeStack` directly and
+    /// closes the open scope stack at the end of every line, reopening it at
+    /// the start of the next.
+    ///
+    /// Scopes routinely stay open across lines (multi-line strings, block
+    /// comments), which is exactly why the close/reopen is required: without
+    /// it a line span would inherit unbalanced `<span>` tags from its
+    /// predecessor.
+    pub(crate) fn highlight_lines(
+        &self,
+        code: &str,
+        token: &str,
+        line: usize,
+    ) -> Result<Vec<String>> {
+        let Some(syntax) = self.syntax_set.find_syntax_by_token(token) else {
+            // Unreachable after parse-time validation, but stay a loud error.
+            return self.validate_language(token, line).map(|()| Vec::new());
+        };
+
+        let fail = |err: &dyn std::fmt::Display| {
+            BuildError::new(
+                ErrorKind::Parse,
+                Some(line),
+                format!("failed to highlight {token} code: {err}"),
+                "simplify the code block or remove the language tag",
+            )
+        };
+
+        let mut parse_state = ParseState::new(syntax);
+        let mut scope_stack = ScopeStack::new();
+        let mut lines = Vec::new();
+
+        for source_line in LinesWithEndings::from(code) {
+            let ops = parse_state
+                .parse_line(source_line, &self.syntax_set)
+                .map_err(|err| fail(&err))?;
+
+            // Reopen the scopes inherited from previous lines:
+            // `line_tokens_to_classed_spans` emits tags only for scopes it
+            // pushes on this line, so an inherited multi-line string or block
+            // comment would otherwise lose its classes here.
+            let inherited = scope_stack.as_slice().to_vec();
+            let mut html = String::new();
+            for scope in &inherited {
+                html.push_str("<span class=\"");
+                push_scope_classes(&mut html, *scope);
+                html.push_str("\">");
+            }
+
+            let (line_html, _delta) = line_tokens_to_classed_spans(
+                source_line,
+                ops.as_slice(),
+                CLASS_STYLE,
+                &mut scope_stack,
+            )
+            .map_err(|err| fail(&err))?;
+            html.push_str(line_html.trim_end_matches('\n'));
+
+            // Close every span still open at end of line, which is exactly the
+            // depth of the scope stack now: `line_html` leaves
+            // `stack_after - stack_before` spans unclosed, and `stack_before`
+            // more were reopened above. A line that *closes* an inherited scope
+            // is already accounted for — syntect emitted that `</span>` inside
+            // `line_html`, which is why the reopening has to come first.
+            for _ in 0..scope_stack.len() {
+                html.push_str("</span>");
+            }
+
+            lines.push(html);
+        }
+
+        Ok(lines)
+    }
+
     pub(crate) fn highlight_html(&self, code: &str, token: &str, line: usize) -> Result<String> {
         let Some(syntax) = self.syntax_set.find_syntax_by_token(token) else {
             // Unreachable after parse-time validation, but stay a loud error.
@@ -103,6 +183,29 @@ impl Highlighter {
                 })?;
         }
         Ok(generator.finalize())
+    }
+}
+
+/// Write a scope's atoms as `hl-`-prefixed classes.
+///
+/// Mirrors syntect's own (private) `scope_to_classes` for [`CLASS_STYLE`]:
+/// a scope's `Display` is its dot-separated atoms, which is exactly the atom
+/// sequence the class list needs. Reopening an inherited scope has to produce
+/// the same classes syntect emitted when it first opened, or a multi-line
+/// string would change color partway down the block.
+fn push_scope_classes(out: &mut String, scope: syntect::parsing::Scope) {
+    let ClassStyle::SpacedPrefixed { prefix } = CLASS_STYLE else {
+        unreachable!("CLASS_STYLE is SpacedPrefixed");
+    };
+    for (index, atom) in scope.build_string().split('.').enumerate() {
+        if atom.is_empty() {
+            continue;
+        }
+        if index != 0 {
+            out.push(' ');
+        }
+        out.push_str(prefix);
+        out.push_str(atom);
     }
 }
 
