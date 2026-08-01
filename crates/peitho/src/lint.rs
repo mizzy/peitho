@@ -17,7 +17,7 @@ const LINT_PARSE_HELP: &str =
     "rerun lint and inspect lint.html and chrome-stderr.log in the kept workspace";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct SlideOverflow {
+struct SlideMeasurement {
     slide: usize,
     #[serde(rename = "contentWidth")]
     content_width: f64,
@@ -135,14 +135,14 @@ fn lint_chrome_args(profile: &Path, pdf: &Path, url: &str) -> Vec<OsString> {
 fn parse_lint_measurements(
     chrome_log: &str,
     expected_slide_count: usize,
-) -> miette::Result<Vec<SlideOverflow>> {
+) -> miette::Result<Vec<SlideMeasurement>> {
     let payload = extract_lint_payload(chrome_log)?;
     let json = STANDARD.decode(payload).map_err(|err| {
         miette::miette!(
             "lint measurement payload is not valid base64\nhelp: {LINT_PARSE_HELP}\ncaused by: {err}"
         )
     })?;
-    let measurements: Vec<SlideOverflow> = serde_json::from_slice(&json).map_err(|err| {
+    let measurements: Vec<SlideMeasurement> = serde_json::from_slice(&json).map_err(|err| {
         miette::miette!(
             "lint measurement payload is not valid JSON\nhelp: {LINT_PARSE_HELP}\ncaused by: {err}"
         )
@@ -324,7 +324,7 @@ fn lint_parse_error(message: String) -> miette::Report {
     miette::miette!("{message}\nhelp: {LINT_PARSE_HELP}")
 }
 
-fn collect_overflow_warnings(measurements: &[SlideOverflow]) -> Vec<OverflowWarning> {
+fn collect_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<OverflowWarning> {
     let mut warnings = Vec::new();
     for measurement in measurements {
         let content_width = round_px(measurement.content_width);
@@ -360,7 +360,7 @@ fn round_px(value: f64) -> i64 {
 }
 
 fn write_lint_report(
-    measurements: &[SlideOverflow],
+    measurements: &[SlideMeasurement],
     stdout: &mut dyn Write,
 ) -> miette::Result<i32> {
     let warnings = collect_overflow_warnings(measurements);
@@ -455,7 +455,7 @@ mod tests {
 
         assert_eq!(
             measurements,
-            vec![SlideOverflow {
+            vec![SlideMeasurement {
                 slide: 1,
                 content_width: 1280.4,
                 content_height: 762.49,
@@ -569,35 +569,35 @@ mod tests {
     #[test]
     fn overflow_warning_collection_applies_strict_one_pixel_tolerance_per_axis() {
         let measurements = vec![
-            SlideOverflow {
+            SlideMeasurement {
                 slide: 1,
                 content_width: 1281.49,
                 content_height: 720.0,
                 box_width: 1280.0,
                 box_height: 720.0,
             },
-            SlideOverflow {
+            SlideMeasurement {
                 slide: 2,
                 content_width: 1281.51,
                 content_height: 720.0,
                 box_width: 1280.0,
                 box_height: 720.0,
             },
-            SlideOverflow {
+            SlideMeasurement {
                 slide: 3,
                 content_width: 1280.0,
                 content_height: 715.0,
                 box_width: 1280.0,
                 box_height: 720.0,
             },
-            SlideOverflow {
+            SlideMeasurement {
                 slide: 4,
                 content_width: 503.4,
                 content_height: 604.4,
                 box_width: 500.1,
                 box_height: 600.1,
             },
-            SlideOverflow {
+            SlideMeasurement {
                 slide: 5,
                 content_width: 100.4,
                 content_height: 720.0,
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn lint_report_renders_warnings_summary_and_exit_code() {
-        let measurements = vec![SlideOverflow {
+        let measurements = vec![SlideMeasurement {
             slide: 3,
             content_width: 900.0,
             content_height: 642.4,
@@ -661,7 +661,7 @@ mod tests {
 
         let mut clean_stdout = Vec::new();
         let clean_exit = write_lint_report(
-            &[SlideOverflow {
+            &[SlideMeasurement {
                 slide: 1,
                 content_width: 800.0,
                 content_height: 601.4,
