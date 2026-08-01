@@ -2,6 +2,43 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, ErrorKind, Result};
 
+macro_rules! theme_font {
+    ($name:literal) => {
+        ThemeFontAsset::new($name, include_bytes!(concat!("../assets/fonts/", $name)))
+    };
+}
+
+const THEME_FONTS: &[ThemeFontAsset] = &[
+    theme_font!("Inter-Regular.woff2"),
+    theme_font!("Inter-SemiBold.woff2"),
+    theme_font!("Inter-Bold.woff2"),
+    theme_font!("JetBrainsMono-Regular.woff2"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeFontAsset {
+    file_name: &'static str,
+    bytes: &'static [u8],
+}
+
+impl ThemeFontAsset {
+    const fn new(file_name: &'static str, bytes: &'static [u8]) -> Self {
+        Self { file_name, bytes }
+    }
+
+    pub fn file_name(&self) -> &'static str {
+        self.file_name
+    }
+
+    pub fn bytes(&self) -> &'static [u8] {
+        self.bytes
+    }
+}
+
+pub fn theme_fonts() -> &'static [ThemeFontAsset] {
+    THEME_FONTS
+}
+
 /// One CSS source file; `name` appears in validation errors.
 #[derive(Debug, Clone)]
 pub struct CssFile {
