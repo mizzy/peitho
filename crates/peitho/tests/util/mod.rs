@@ -1,5 +1,16 @@
 use std::{env, path::PathBuf};
 
+// Each integration-test crate compiles this shared module independently.
+#[allow(dead_code)]
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned()
+}
+
 pub fn test_chrome_path() -> Option<PathBuf> {
     if let Some(path) = env::var_os("PEITHO_CHROME_PATH").map(PathBuf::from) {
         if path.is_file() {

@@ -86,6 +86,115 @@
     return bounds;
   }
 
+  function clipsOverflow(value) {
+    return value === "hidden" || value === "auto" || value === "scroll" ||
+      value === "clip";
+  }
+
+  function isVisuallyHidden(style) {
+    return style.visibility === "hidden" || style.visibility === "collapse";
+  }
+
+  function slotNameOn(element) {
+    for (var index = 0; index < element.classList.length; index += 1) {
+      var className = element.classList.item(index);
+      if (className.indexOf("slot-") === 0 && className.length > 5) {
+        return className.slice(5);
+      }
+    }
+    return null;
+  }
+
+  function slotNameFor(element, slide) {
+    var current = element;
+    while (current) {
+      var name = slotNameOn(current);
+      if (name !== null) {
+        return name;
+      }
+      if (current === slide) {
+        break;
+      }
+      current = current.parentElement;
+    }
+
+    // Shipped themes commonly put clipping on a wrapper around the slot element.
+    // Name a descendant slot only when the clip unambiguously belongs to one slot.
+    var descendantNames = [];
+    walkDescendants(element, function (descendant) {
+      var descendantName = slotNameOn(descendant);
+      if (descendantName !== null) {
+        descendantNames.push(descendantName);
+      }
+    });
+    return descendantNames.length === 1 ? descendantNames[0] : null;
+  }
+
+  function measureSlotOverflows(slide) {
+    var worstByAxis = {
+      horizontal: null,
+      vertical: null
+    };
+
+    walkDescendants(slide, function (element) {
+      var style = getComputedStyle(element);
+      if (isVisuallyHidden(style)) {
+        return;
+      }
+
+      function consider(axis, overflowValue, overflowPx) {
+        var worst = worstByAxis[axis];
+        if (
+          !clipsOverflow(overflowValue) ||
+          overflowPx <= 0 ||
+          (worst !== null && overflowPx <= worst.slotOverflowPx)
+        ) {
+          return;
+        }
+        worstByAxis[axis] = {
+          slotOverflowAxis: axis,
+          slotOverflowPx: overflowPx,
+          slotOverflowValue: overflowValue,
+          element: element
+        };
+      }
+
+      // Accessibility copies such as KaTeX's MathML are collapsed to a 1x1px
+      // box. Skip only the collapsed axis so overflow on the other remains visible.
+      if (element.clientWidth > 1) {
+        consider(
+          "horizontal",
+          style.overflowX,
+          element.scrollWidth - element.clientWidth
+        );
+      }
+      if (element.clientHeight > 1) {
+        consider(
+          "vertical",
+          style.overflowY,
+          element.scrollHeight - element.clientHeight
+        );
+      }
+    });
+
+    var overflows = [];
+    function emit(worst) {
+      overflows.push({
+        slotOverflowAxis: worst.slotOverflowAxis,
+        slotOverflowPx: worst.slotOverflowPx,
+        slotOverflowValue: worst.slotOverflowValue,
+        slotName: slotNameFor(worst.element, slide)
+      });
+    }
+    if (worstByAxis.horizontal !== null) {
+      emit(worstByAxis.horizontal);
+    }
+    if (worstByAxis.vertical !== null) {
+      emit(worstByAxis.vertical);
+    }
+    return overflows;
+  }
+
   function truncateSample(sample) {
     if (Array.from(sample).length > 40) {
       return Array.from(sample).slice(0, 40).join("") + "…";
@@ -145,6 +254,7 @@
     var slideRect = slide.getBoundingClientRect();
     var bounds = contentBounds(slide, slideRect);
     var textFont = measureTextFont(slide);
+    var slotOverflows = measureSlotOverflows(slide);
 
     return {
       slide: index + 1,
@@ -153,7 +263,8 @@
       boxWidth: slideRect.width,
       boxHeight: slideRect.height,
       minFontSizePx: textFont.minFontSizePx,
-      minFontSample: textFont.minFontSample
+      minFontSample: textFont.minFontSample,
+      slotOverflows: slotOverflows
     };
   }
 

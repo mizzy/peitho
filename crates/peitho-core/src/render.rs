@@ -3791,16 +3791,32 @@ Paragraph after heading.
 
     #[test]
     fn lint_measure_script_uses_descendant_rect_union_with_scroll_floor() {
+        let content_bounds = LINT_MEASURE_JS
+            .split_once("function contentBounds")
+            .unwrap()
+            .1
+            .split_once("function clipsOverflow")
+            .unwrap()
+            .0;
         assert!(LINT_MEASURE_JS.contains("getBoundingClientRect"));
         assert!(LINT_MEASURE_JS.contains("function walkDescendants"));
         assert!(LINT_MEASURE_JS.contains("Array.prototype.forEach.call(element.children"));
         assert!(!LINT_MEASURE_JS.contains(r#"querySelectorAll("*")"#));
-        assert!(!LINT_MEASURE_JS.contains(r#"position === "fixed""#));
+        assert!(!content_bounds.contains(r#"position === "fixed""#));
         assert!(LINT_MEASURE_JS.contains("rect.width === 0 && rect.height === 0"));
         assert!(LINT_MEASURE_JS.contains("bounds.maxRight - bounds.minLeft"));
         assert!(LINT_MEASURE_JS.contains("slide.scrollWidth"));
         assert!(LINT_MEASURE_JS.contains("contentWidth"));
         assert!(LINT_MEASURE_JS.contains("boxWidth"));
+    }
+
+    #[test]
+    fn lint_measure_script_emits_slot_overflow_payload_fields() {
+        assert!(LINT_MEASURE_JS.contains("function measureSlotOverflows"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowAxis"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowPx"));
+        assert!(LINT_MEASURE_JS.contains("slotOverflowValue"));
+        assert!(LINT_MEASURE_JS.contains("slotName"));
     }
 
     #[test]
