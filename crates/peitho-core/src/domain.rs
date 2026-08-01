@@ -7,6 +7,8 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::emphasis::LineEmphasis;
+
 /// Slide canvas aspect ratio.
 ///
 /// One of `16:9` (default) or `4:3`. Drives the logical width/height of
@@ -718,6 +720,7 @@ pub struct SourceFragment<S = RawImagePath> {
     line: usize,
     kind: FragmentKind<S>,
     reveal_span: Option<RevealSpan>,
+    emphasis: Option<LineEmphasis>,
     markdown: String,
     text: String,
     code: String,
@@ -735,6 +738,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::Heading { level },
             reveal_span: None,
+            emphasis: None,
             markdown: markdown.into(),
             text: text.into(),
             code: String::new(),
@@ -747,6 +751,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::Paragraph,
             reveal_span: None,
+            emphasis: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -759,6 +764,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::List,
             reveal_span: None,
+            emphasis: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -772,6 +778,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::Code,
             reveal_span: None,
+            emphasis: None,
             markdown: code.clone(),
             text: String::new(),
             code,
@@ -789,6 +796,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::Math { html: html.into() },
             reveal_span: None,
+            emphasis: None,
             markdown: latex_source.clone(),
             text: String::new(),
             code: latex_source,
@@ -801,6 +809,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::Footnotes { entries },
             reveal_span: None,
+            emphasis: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -817,6 +826,7 @@ impl SourceFragment<RawImagePath> {
             line,
             kind: FragmentKind::SlotGroup { name, children },
             reveal_span: None,
+            emphasis: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -826,6 +836,16 @@ impl SourceFragment<RawImagePath> {
 
     pub(crate) fn with_reveal_span(mut self, span: RevealSpan) -> Self {
         self.reveal_span = Some(span);
+        self
+    }
+
+    /// Attach a parsed line-emphasis spec to a code fragment.
+    ///
+    /// `pub(crate)` so only the parser can produce one: emphasis is authored
+    /// notation, and a consumer fabricating it would break the invariant that
+    /// what is emphasized comes from the deck source.
+    pub(crate) fn with_emphasis(mut self, emphasis: LineEmphasis) -> Self {
+        self.emphasis = Some(emphasis);
         self
     }
 }
@@ -839,6 +859,7 @@ impl<S> SourceFragment<S> {
                 src,
             },
             reveal_span: None,
+            emphasis: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -864,6 +885,7 @@ impl<S> SourceFragment<S> {
             line,
             kind,
             reveal_span,
+            emphasis,
             markdown,
             text,
             code,
@@ -893,6 +915,7 @@ impl<S> SourceFragment<S> {
             line,
             kind,
             reveal_span,
+            emphasis,
             markdown,
             text,
             code,
@@ -910,6 +933,10 @@ impl<S> SourceFragment<S> {
 
     pub fn reveal_span(&self) -> Option<RevealSpan> {
         self.reveal_span
+    }
+
+    pub(crate) fn emphasis(&self) -> Option<&LineEmphasis> {
+        self.emphasis.as_ref()
     }
 
     pub fn markdown(&self) -> &str {

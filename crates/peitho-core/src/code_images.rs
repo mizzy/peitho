@@ -79,6 +79,15 @@ fn transform_fragment<R: SvgRunner>(
     runner: &R,
     cache_dir: &Path,
 ) -> Result<SourceFragment> {
+    // The parser rejects emphasis on any block whose language resolves to a
+    // renderer, so an annotated fragment must never arrive here: this
+    // function rebuilds the fragment, and an un-restored annotation would be
+    // exactly the silent drop pillar ③ forbids. Cheap insurance in case the
+    // parse-time ordering is broken later.
+    debug_assert!(
+        fragment.emphasis().is_none(),
+        "line emphasis must be rejected at parse time, before code_images transformation",
+    );
     let reveal_span = fragment.reveal_span();
     let transformed = (|| -> Result<SourceFragment> {
         if let Some(tag) = fragment.language() {

@@ -11,6 +11,7 @@ use crate::{
         Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
         RevealSpan, SlideKey, SlotName, SourceFragment,
     },
+    emphasis::LineEmphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     layout::Layout,
@@ -470,10 +471,23 @@ fn render_revealed_fragment(
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
             let code = render_code_fragment(fragment, highlighter)?;
-            body.push_str(&format!(
-                r#"<pre class="{class_name}" data-reveal-step="{}"><code>{code}</code></pre>"#,
-                span.start
-            ));
+            // A stepped-emphasis block owns its span for *emphasis* steps, not
+            // for appearing: the code is visible from the start and only the
+            // emphasized line moves. Stamping `data-reveal-step` on the `<pre>`
+            // would hide the whole block until its first step.
+            let stepped_emphasis = fragment
+                .emphasis()
+                .is_some_and(|emphasis| emphasis.stepped());
+            if stepped_emphasis {
+                body.push_str(&format!(
+                    r#"<pre class="{class_name}"><code>{code}</code></pre>"#
+                ));
+            } else {
+                body.push_str(&format!(
+                    r#"<pre class="{class_name}" data-reveal-step="{}"><code>{code}</code></pre>"#,
+                    span.start
+                ));
+            }
             Ok(())
         }
         FragmentKind::Math { html } => {
@@ -681,17 +695,74 @@ fn render_heading_inline_fragment(
 /// A tagged code block is highlighted at build time into `hl-*` classed
 /// spans (colors live in theme CSS); an untagged block stays escaped plain
 /// text.
+///
+/// A block carrying line emphasis is additionally wrapped line by line (see
+/// [`wrap_emphasis_lines`]). Blocks without emphasis take the original path
+/// untouched, so decks that do not use the notation render byte-identically.
 fn render_code_fragment(
     fragment: &SourceFragment<ResolvedImagePath>,
     highlighter: &Highlighter,
 ) -> Result<String> {
     ensure_fragment_matches_contract(Accepts::Code, fragment)?;
-    match fragment.language() {
-        Some(language) => highlighter
-            .highlight_html(fragment.code_text(), language, fragment.line())
-            .map(|html| html.trim_end().to_owned()),
-        None => Ok(encode_text(fragment.code_text().trim_end()).into_owned()),
+
+    let Some(emphasis) = fragment.emphasis() else {
+        return match fragment.language() {
+            Some(language) => highlighter
+                .highlight_html(fragment.code_text(), language, fragment.line())
+                .map(|html| html.trim_end().to_owned()),
+            None => Ok(encode_text(fragment.code_text().trim_end()).into_owned()),
+        };
+    };
+
+    let code = fragment.code_text().trim_end_matches('\n');
+    let lines: Vec<String> = match fragment.language() {
+        Some(language) => highlighter.highlight_lines(code, language, fragment.line())?,
+        None => code
+            .lines()
+            .map(|line| encode_text(line).into_owned())
+            .collect(),
+    };
+
+    // Stepped emphasis is assigned a reveal span at parse time so its groups
+    // occupy real steps in the slide's shared step space; the span's start is
+    // the step of the first group.
+    let base_step = fragment.reveal_span().map(|span| span.start);
+    Ok(wrap_emphasis_lines(&lines, emphasis, base_step))
+}
+
+/// Wrap each code line in a `code-line` span, marking emphasized lines.
+///
+/// Static emphasis (no `|` in the spec) emits the `code-line-emphasis` class
+/// directly, so it survives into PDF, preview, and `dist/`. Stepped emphasis
+/// emits `data-emphasis-step` instead and stays inert everywhere except the
+/// present shell, which is the only consumer that acts on it.
+fn wrap_emphasis_lines(
+    lines: &[String],
+    emphasis: &LineEmphasis,
+    base_step: Option<usize>,
+) -> String {
+    let mut out = String::new();
+    for (offset, line_html) in lines.iter().enumerate() {
+        // Code lines are 1-based, matching what the author wrote.
+        let group = emphasis.group_of(offset + 1);
+        match (group, emphasis.stepped()) {
+            (Some(group), true) => {
+                let base = base_step.expect("stepped emphasis is assigned a reveal span at parse");
+                out.push_str(&format!(
+                    r#"<span class="code-line" data-emphasis-step="{}">"#,
+                    base + group,
+                ));
+            }
+            (Some(_), false) => out.push_str(r#"<span class="code-line code-line-emphasis">"#),
+            (None, _) => out.push_str(r#"<span class="code-line">"#),
+        }
+        out.push_str(line_html);
+        out.push_str("</span>");
+        if offset + 1 < lines.len() {
+            out.push('\n');
+        }
     }
+    out
 }
 
 fn render_image_fragment(fragment: &SourceFragment<ResolvedImagePath>) -> Result<String> {
@@ -1819,6 +1890,156 @@ mod tests {
         // The tagged rust block is highlighted into hl-* classed spans.
         assert!(html.contains("hl-"));
         assert!(html.contains("main"));
+    }
+
+    /// Render a deck whose layout has a code slot, returning slide 0's HTML.
+    fn render_code_html(markdown: &str) -> String {
+        let layout = parse_layout(
+            "title-code",
+            r#"<section class="slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <figure class="code"><slot name="code" accepts="code" arity="0..*"></slot></figure>
+</section>"#,
+        )
+        .unwrap();
+        render_checked_deck_with_layout(markdown, layout).slides()[0]
+            .html()
+            .to_owned()
+    }
+
+    /// Extract each `code-line` span's *inner* HTML, excluding the wrapper's
+    /// own tags.
+    ///
+    /// Lines are separated by a literal newline in the emitted `<code>`, and
+    /// the wrapper's `</span>` sits immediately before that newline (or before
+    /// `</code>` for the last line), so trimming one trailing `</span>` yields
+    /// exactly the highlighted content the balance check is about.
+    fn extract_line_spans(html: &str) -> Vec<String> {
+        // Isolate the <code> body first: line spans are newline-separated
+        // there, so splitting on '\n' yields exactly one wrapper per line.
+        let start = html.find("<code>").expect("rendered code slot") + "<code>".len();
+        let end = html[start..].find("</code>").expect("closed code slot") + start;
+
+        html[start..end]
+            .split('\n')
+            .map(|line| {
+                let open_end = line.find('>').expect("line span opening tag");
+                line[open_end + 1..]
+                    .strip_suffix("</span>")
+                    .expect("a code-line span closes at the end of its line")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn code_without_emphasis_is_not_line_wrapped() {
+        // Decks that do not use the notation must render exactly as before.
+        let untagged = render_code_html("# T\n\n```\nplain\n```");
+        assert!(untagged.contains("<code>plain</code>"), "{untagged}");
+        assert!(!untagged.contains("code-line"), "{untagged}");
+
+        let tagged = render_code_html("# T\n\n```rust\nfn main() {}\n```");
+        assert!(tagged.contains("hl-"), "{tagged}");
+        assert!(!tagged.contains("code-line"), "{tagged}");
+    }
+
+    #[test]
+    fn static_emphasis_emits_classes_and_no_steps() {
+        let html = render_code_html("# T\n\n```{2}\na\nb\nc\n```");
+
+        assert!(
+            html.contains(r#"<span class="code-line">a</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line code-line-emphasis">b</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line">c</span>"#),
+            "{html}"
+        );
+        // Static emphasis rides no step: it is present in every output.
+        assert!(!html.contains("data-emphasis-step"), "{html}");
+    }
+
+    #[test]
+    fn stepped_emphasis_emits_step_attributes_and_no_classes() {
+        let html = render_code_html("# T\n\n```{1|3}\na\nb\nc\n```");
+
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="1">a</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line">b</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="2">c</span>"#),
+            "{html}"
+        );
+        // Stepped emphasis is present-only: no baked-in emphasis class.
+        assert!(!html.contains("code-line-emphasis"), "{html}");
+        // The block itself is never hidden — only the emphasis moves. (The
+        // section still carries `data-reveal-steps`, the plural total.)
+        assert!(!html.contains(r#"data-reveal-step=""#), "{html}");
+        assert!(html.contains(r#"data-reveal-steps="2""#), "{html}");
+    }
+
+    #[test]
+    fn emphasis_escapes_html_in_the_line_text() {
+        let html = render_code_html("# T\n\n```{1}\n<script>\n```");
+
+        assert!(html.contains("&lt;script&gt;"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
+    }
+
+    #[test]
+    fn highlighted_lines_are_individually_wrapped() {
+        let html = render_code_html("# T\n\n```rust {2}\nfn main() {}\nlet x = 1;\n```");
+
+        assert!(html.contains(r#"<span class="code-line">"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="code-line code-line-emphasis">"#),
+            "{html}"
+        );
+        // Syntax classes survive the wrapping.
+        assert!(html.contains("hl-keyword"), "{html}");
+    }
+
+    #[test]
+    fn scopes_spanning_lines_stay_balanced() {
+        // Adversarial: a multi-line string and a block comment both leave
+        // scopes open at end of line. Each line span must be independently
+        // balanced, or the wrapping emits unbalanced <span> tags.
+        let html = render_code_html(
+            "# T\n\n```rust {1}\nlet s = \"aaa\nbbb\";\n/* c1\n   c2 */\nlet y = 2;\n```",
+        );
+
+        let spans = extract_line_spans(&html);
+        assert_eq!(spans.len(), 5, "one span per source line: {html}");
+        for span in &spans {
+            let opens = span.matches("<span").count();
+            let closes = span.matches("</span>").count();
+            assert_eq!(opens, closes, "unbalanced line span: {span:?}");
+        }
+    }
+
+    #[test]
+    fn a_scope_inherited_across_lines_keeps_its_classes() {
+        // The continuation line of a multi-line string must still carry the
+        // string's highlight classes: reopening the inherited scope stack is
+        // what preserves them.
+        let html = render_code_html("# T\n\n```rust {1}\nlet s = \"aaa\nbbb\";\nlet y = 2;\n```");
+
+        let spans = extract_line_spans(&html);
+        assert!(
+            spans[1].contains("hl-string"),
+            "continuation line lost its string scope: {:?}",
+            spans[1]
+        );
     }
 
     #[test]
