@@ -489,6 +489,20 @@ mod tests {
     }
 
     #[test]
+    fn lint_measurement_payload_accepts_utf8_min_font_sample() {
+        let payload = encoded(
+            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":24.0,"minFontSample":"日本語の小さい文字🙂"}]"#,
+        );
+
+        let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
+
+        assert_eq!(
+            measurements[0].min_font_sample.as_deref(),
+            Some("日本語の小さい文字🙂")
+        );
+    }
+
+    #[test]
     fn lint_measurement_chunk_errors_are_distinct_and_actionable() {
         let missing = assert_parse_error_mentions(
             "Chrome stderr without lint chunks",

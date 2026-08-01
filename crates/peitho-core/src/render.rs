@@ -3574,13 +3574,28 @@ Paragraph after heading.
         assert!(LINT_MEASURE_JS.contains("function walkDescendants"));
         assert!(LINT_MEASURE_JS.contains("Array.prototype.forEach.call(element.children"));
         assert!(!LINT_MEASURE_JS.contains(r#"querySelectorAll("*")"#));
-        assert!(!LINT_MEASURE_JS.contains("getComputedStyle"));
         assert!(!LINT_MEASURE_JS.contains(r#"position === "fixed""#));
         assert!(LINT_MEASURE_JS.contains("rect.width === 0 && rect.height === 0"));
         assert!(LINT_MEASURE_JS.contains("bounds.maxRight - bounds.minLeft"));
         assert!(LINT_MEASURE_JS.contains("slide.scrollWidth"));
         assert!(LINT_MEASURE_JS.contains("contentWidth"));
         assert!(LINT_MEASURE_JS.contains("boxWidth"));
+    }
+
+    #[test]
+    fn lint_measure_script_measures_utf8_safe_min_visible_text_font_size() {
+        assert!(LINT_MEASURE_JS.contains("NodeFilter.SHOW_TEXT"));
+        assert!(LINT_MEASURE_JS.contains("createTreeWalker"));
+        assert!(LINT_MEASURE_JS.contains(r#".peitho-footnotes, sup.peitho-footnote-ref"#));
+        assert!(LINT_MEASURE_JS.contains("getComputedStyle"));
+        assert!(LINT_MEASURE_JS.contains(r#"visibility === "hidden""#));
+        assert!(LINT_MEASURE_JS.contains(r#"visibility === "collapse""#));
+        assert!(LINT_MEASURE_JS.contains("TextEncoder"));
+        assert!(LINT_MEASURE_JS.contains("base64EncodeUtf8"));
+        assert!(!LINT_MEASURE_JS.contains("btoa(JSON.stringify(results))"));
+        assert!(LINT_MEASURE_JS.contains("minFontSizePx"));
+        assert!(LINT_MEASURE_JS.contains("minFontSample"));
+        assert!(LINT_MEASURE_JS.contains(r#"Array.from(sample).slice(0, 40).join("") + "…""#));
     }
 
     fn render_checked_deck(markdown: &str) -> Deck<Rendered> {
