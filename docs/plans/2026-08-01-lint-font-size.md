@@ -230,6 +230,10 @@ cargo test -p peitho utf8_min_font_sample
 
 ## Task 4 -- Collect font warnings
 
+> Superseded (2026-08-01, Issue #387): the decision is now made on the
+> displayed pt value — see the Amendment in
+> `../specs/2026-08-01-lint-font-size-design.md`.
+
 Goal: Warn once per slide when `minFontSizePx` rounded to `0.01px` is below
 `32.0px`.
 

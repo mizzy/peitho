@@ -44,6 +44,19 @@ happens in computed px (`minFontSizePx < 32.0`, after rounding to 0.01px to
 absorb float noise); the report displays pt (px × 0.75, one decimal max)
 because that is the unit presenters think in.
 
+### Amendment (2026-08-01, author-approved)
+
+The warning decision is now made on the same pt value shown in the report.
+Computed px is converted and rounded once to 0.1pt
+(`round-to-0.1pt(px × 0.75)`), and a warning is emitted if and only if that
+display value is below 24.0pt. This gives an effective computed-px threshold
+of approximately 31.933px.
+
+This replaces the 0.01px-rounded comparison against 32px above. The former
+decision and display roundings always left a self-contradictory window in
+which the report could say that text at "24pt" was below the recommended
+24pt; deciding on the displayed value removes that window.
+
 ## Measurement (lint_measure.js)
 
 For each `section.peitho-slide`, walk text nodes (not elements — font size is
