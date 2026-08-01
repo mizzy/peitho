@@ -37,17 +37,72 @@
     return Promise.all(Array.prototype.map.call(document.images, waitForImage));
   }
 
-  function waitForFonts() {
-    if (!document.fonts || !document.fonts.ready) {
+  function settleFontPromise(promise) {
+    return promise.then(function () {}, function () {});
+  }
+
+  function firstFontRangeValue(value) {
+    return String(value || "normal").trim().split(/\s+/)[0];
+  }
+
+  function fontStyleValue(value) {
+    var parts = String(value || "normal").trim().split(/\s+/);
+    if (parts[0] === "oblique" && parts.length > 1) {
+      return parts.slice(0, 2).join(" ");
+    }
+    return parts[0];
+  }
+
+  function fontShorthand(face) {
+    var values = [];
+    var style = fontStyleValue(face.style);
+    var weight = firstFontRangeValue(face.weight);
+    var stretch = firstFontRangeValue(face.stretch || face.width);
+
+    if (style !== "normal") {
+      values.push(style);
+    }
+    if (weight !== "normal") {
+      values.push(weight);
+    }
+    if (stretch !== "normal") {
+      values.push(stretch);
+    }
+    values.push("16px");
+    values.push(face.family);
+    return values.join(" ");
+  }
+
+  function requestDeclaredFonts() {
+    if (!document.fonts || !document.fonts.load || !document.fonts.forEach) {
       return Promise.resolve();
     }
-    // Bound the wait: document.fonts.ready has been observed to hang
+
+    var loads = [];
+    document.fonts.forEach(function (face) {
+      loads.push(settleFontPromise(document.fonts.load(fontShorthand(face))));
+      // FontFaceSet.load defaults to a space sample, which unicode-subset faces
+      // may exclude. Loading the enumerated face directly guarantees that the
+      // declaration itself is requested; repeated loads share its status promise.
+      if (face.load) {
+        loads.push(settleFontPromise(face.load()));
+      }
+    });
+    return Promise.all(loads).then(function () {
+      if (document.fonts.ready) {
+        return settleFontPromise(document.fonts.ready);
+      }
+    });
+  }
+
+  function waitForFonts(declaredFontsReady) {
+    // Bound the wait: explicit font loads and document.fonts.ready can hang
     // indefinitely under Chrome's --virtual-time-budget on Linux headless
     // (same pitfall class as image decode promises). If fonts don't settle
     // in time, publish measurements against whatever font resolves at the
     // next requestAnimationFrame; better than emitting no payload.
     return Promise.race([
-      document.fonts.ready.then(function () {}, function () {}),
+      declaredFontsReady,
       new Promise(function (resolve) {
         setTimeout(resolve, FONT_READY_TIMEOUT_MS);
       })
@@ -305,9 +360,15 @@
     console.log(DONE);
   }
 
+  // Start every declared face while this parser-blocking inline script is running,
+  // before Chrome can consider the lint page complete.
+  var declaredFontsReady = requestDeclaredFonts();
+
   waitForWindowLoad()
     .then(waitForImages)
-    .then(waitForFonts)
+    .then(function () {
+      return waitForFonts(declaredFontsReady);
+    })
     .then(waitForFrame)
     .then(function () {
       publish(measureSlides());

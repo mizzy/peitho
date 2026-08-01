@@ -67,6 +67,23 @@ The asymmetry that makes this subtle: `setTimeout` advances with *virtual* time,
 
 This belongs to the same pitfall family as the `decode()` hang already recorded in CLAUDE.md: **an unbounded wait inside a script running under virtual time is a latent Linux-only failure**, invisible on macOS until something makes that wait slow.
 
+### That timeout was not the actual cause
+
+It did not fix the CI failure. Recording the wrong turns, because each looked plausible and the evidence that killed them is cheap to re-derive:
+
+| Hypothesis | Killed by |
+| --- | --- |
+| Flaky, will pass on rerun | Three consecutive identical failures |
+| `waitForWindowLoad` had no timeout | Chrome's entire stderr spans **~110ms** — a 2s timeout never gets a chance |
+| Virtual-time budget exhausted by a nearly-empty page | All 12 lint E2E tests run at a uniform ~0.45s cadence, the failing one included |
+| `document.fonts.ready` blocks on unused faces | Measured in-browser: it settles promptly with `status: "loaded"` while three of four faces are still `unloaded` |
+
+The real cause is that **lint writes the fonts into its own workspace** (`emit_lint_workspace` → `write_shared_assets` → `theme-fonts/`) and loads its page over `file://`. Chrome starts those four fetches, then — for a deck with almost no content — decides the page is done and exits 0 before they settle and before `lint_measure.js` publishes anything. Heavier decks pass because their content keeps Chrome busy long enough.
+
+Hence the inversion that made this confusing: **the smallest deck fails while every larger one passes**. Any hypothesis predicting "more content, more risk" was pointing the wrong way, and each of the four above does.
+
+`document.fonts.ready` cannot be the barrier because it only tracks faces the page has actually requested, and a title-only slide requests one of the four. The fix is for the measurement script to explicitly `document.fonts.load()` the declared faces and await them, still bounded by the existing timeout. The faces must be derived from the document rather than hardcoded — a deck shipping its own `css/` replaces the built-in theme entirely, which is the common case among the examples.
+
 ## Verification
 
 The claim is "identical rendering across environments", so verifying on macOS alone cannot establish it. CI is the instrument: the `e2e` job runs the lint E2E tests on `ubuntu-latest`, and `lint_peitho_tour_has_no_overflow_warnings` is the assertion that the Linux rendering matches what macOS sees. A green run there is the evidence; a local run is not.

@@ -3771,9 +3771,9 @@ Paragraph after heading.
 
     #[test]
     fn lint_measure_script_bounds_font_wait_with_a_timeout() {
-        // Regression: document.fonts.ready has been observed to hang under
-        // Chrome's --virtual-time-budget, so the script must bound the wait
-        // instead of awaiting it unconditionally.
+        // Regression: explicit font loads and document.fonts.ready can hang
+        // under Chrome's --virtual-time-budget, so the script must bound the
+        // wait instead of awaiting it unconditionally.
         assert!(
             LINT_MEASURE_JS.contains("document.fonts.ready"),
             "expected the script to still reference document.fonts.ready"
@@ -3795,6 +3795,36 @@ Paragraph after heading.
         assert!(
             LINT_MEASURE_JS.contains("FONT_READY_TIMEOUT_MS = 2000"),
             "expected FONT_READY_TIMEOUT_MS to be 2000ms; adjust intentionally if this changes"
+        );
+    }
+
+    #[test]
+    fn lint_measure_script_requests_document_declared_fonts_before_waiting() {
+        assert!(LINT_MEASURE_JS.contains("document.fonts.forEach(function (face)"));
+        assert!(
+            LINT_MEASURE_JS.contains("document.fonts.load(fontShorthand(face))"),
+            "expected every declared FontFace to be requested through FontFaceSet.load"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("settleFontPromise(face.load())"),
+            "expected unicode-subset faces to be loaded directly as well"
+        );
+        assert!(LINT_MEASURE_JS.contains("Promise.all(loads)"));
+        assert!(LINT_MEASURE_JS.contains("face.family"));
+        assert!(LINT_MEASURE_JS.contains("face.style"));
+        assert!(LINT_MEASURE_JS.contains("face.weight"));
+        assert!(LINT_MEASURE_JS.contains("face.stretch || face.width"));
+        assert!(LINT_MEASURE_JS.contains("return waitForFonts(declaredFontsReady);"));
+        assert!(!LINT_MEASURE_JS.contains(r#""Inter""#));
+        assert!(!LINT_MEASURE_JS.contains(r#""JetBrains Mono""#));
+
+        let request_index = LINT_MEASURE_JS
+            .find("var declaredFontsReady = requestDeclaredFonts();")
+            .unwrap();
+        let load_wait_index = LINT_MEASURE_JS.find("\n  waitForWindowLoad()\n").unwrap();
+        assert!(
+            request_index < load_wait_index,
+            "declared font fetches must start synchronously before the load-event wait"
         );
     }
 
