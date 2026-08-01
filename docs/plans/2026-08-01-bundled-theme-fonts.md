@@ -48,6 +48,25 @@ Follow the KaTeX precedent exactly — it already solves this shape. `crates/pei
 5. Revert the #385 CSS tuning on `peitho-tour` — with fonts pinned, those slides no longer need shrunken type, and leaving the workaround in would hide whether the real fix works.
 6. Tests: assets present in output on each path; a deck with its own CSS is unaffected; `peitho-tour` lints clean.
 
+## Consequence: the lint measurement script needed a bounded window-load wait
+
+Bundling the fonts broke a lint E2E test on Linux — deterministically, confirmed across two CI runs, while passing five consecutive times on macOS. `lint_accepts_trivially_small_deck` (a deck containing only `# Tiny`) failed with:
+
+```
+Error: Chrome completed before one-shot output was ready
+  help: expected lint measurement payload before Chrome exited
+```
+
+`font-display: swap` does **not** exclude a font from `window.load`'s completion criteria, so the four new `@font-face` fetches gate the load event. `lint_measure.js` chains `waitForWindowLoad → waitForImages → waitForFonts → waitForFrame → publish`, and the first link waited unconditionally. Under `--virtual-time-budget=10000` on Linux headless, the fetches pushed `load` past the budget; Chrome printed and exited before anything was published.
+
+The asymmetry that makes this subtle: `setTimeout` advances with *virtual* time, which Chrome fast-forwards, while fetch and decode work proceeds in *real* time. A timeout inside this script cannot be reasoned about as if it were wall-clock.
+
+`waitForFonts` already guarded exactly this shape, with a comment explaining that publishing an early measurement beats publishing none. That reasoning applies verbatim to `waitForWindowLoad`; the guard simply had never been extended there, because nothing in the built-in theme previously made `load` slow. Fixed by racing the load event against `WINDOW_LOAD_TIMEOUT_MS = 2000`, matching the existing `FONT_READY_TIMEOUT_MS`. The two bounds together consume at most 4s of the 10s budget.
+
+`waitForImages` was reviewed and deliberately left alone: peitho rejects remote image URLs and copies validated local assets into the workspace before Chrome starts, and the script uses terminal `load`/`error` events rather than `image.decode()` — the Linux-safe pattern from `docs/plans/2026-07-06-pdf-flatten-linux-decode-hang.md`. Adding a timeout there would also risk measuring geometry before an image's dimensions settle. Do not add one without evidence that the event path hangs.
+
+This belongs to the same pitfall family as the `decode()` hang already recorded in CLAUDE.md: **an unbounded wait inside a script running under virtual time is a latent Linux-only failure**, invisible on macOS until something makes that wait slow.
+
 ## Verification
 
 The claim is "identical rendering across environments", so verifying on macOS alone cannot establish it. CI is the instrument: the `e2e` job runs the lint E2E tests on `ubuntu-latest`, and `lint_peitho_tour_has_no_overflow_warnings` is the assertion that the Linux rendering matches what macOS sees. A green run there is the evidence; a local run is not.

@@ -3753,6 +3753,23 @@ Paragraph after heading.
     }
 
     #[test]
+    fn lint_measure_script_bounds_window_load_wait_with_a_timeout() {
+        let wait_for_window_load = LINT_MEASURE_JS
+            .split_once("function waitForWindowLoad")
+            .unwrap()
+            .1
+            .split_once("function waitForImage")
+            .unwrap()
+            .0;
+
+        assert!(wait_for_window_load.contains(r#"window.addEventListener("load""#));
+        assert!(wait_for_window_load.contains("WINDOW_LOAD_TIMEOUT_MS"));
+        assert!(wait_for_window_load.contains("setTimeout"));
+        assert!(wait_for_window_load.contains("Promise.race"));
+        assert!(LINT_MEASURE_JS.contains("WINDOW_LOAD_TIMEOUT_MS = 2000"));
+    }
+
+    #[test]
     fn lint_measure_script_bounds_font_wait_with_a_timeout() {
         // Regression: document.fonts.ready has been observed to hang under
         // Chrome's --virtual-time-budget, so the script must bound the wait

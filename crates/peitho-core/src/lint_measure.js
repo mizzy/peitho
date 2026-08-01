@@ -3,15 +3,24 @@
   var DONE = "PEITHO_LINT_" + "DONE";
   // Keep each console payload comfortably below macOS PIPE_BUF after Chrome's log wrapper.
   var CHUNK_SIZE = 300;
+  // Do not wait unboundedly for window.load: it includes font fetches even with
+  // font-display: swap, and virtual time can outrun real-time resource work under
+  // Chrome's --virtual-time-budget, making Chrome exit before lint publishes.
+  var WINDOW_LOAD_TIMEOUT_MS = 2000;
   var FONT_READY_TIMEOUT_MS = 2000; // Below Chrome --virtual-time-budget=10000.
 
   function waitForWindowLoad() {
     if (document.readyState === "complete") {
       return Promise.resolve();
     }
-    return new Promise(function (resolve) {
-      window.addEventListener("load", resolve, { once: true });
-    });
+    return Promise.race([
+      new Promise(function (resolve) {
+        window.addEventListener("load", resolve, { once: true });
+      }),
+      new Promise(function (resolve) {
+        setTimeout(resolve, WINDOW_LOAD_TIMEOUT_MS);
+      })
+    ]);
   }
 
   function waitForImage(image) {
