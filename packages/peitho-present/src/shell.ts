@@ -104,6 +104,36 @@ const POINTER_TRAIL_CAP = 64;
 const POINTER_CORE_MIX_TO_WHITE = 0.65;
 const REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 
+/**
+ * Code line emphasis defaults, injected by the shell rather than left to the
+ * theme.
+ *
+ * A deck that ships its own `css/` replaces the built-in theme wholesale, so
+ * emphasis rules living only in `themes/base.css` would silently do nothing
+ * for exactly the decks most likely to use the feature. This mirrors how
+ * `REVEAL_HIDDEN_CSS` guarantees reveal works regardless of deck CSS.
+ *
+ * Both forms are styled here so the shell never renders one and not the other:
+ * static emphasis (`.code-line-emphasis`, baked into the build output) and
+ * stepped emphasis (`[data-emphasis-active]`, toggled per step). `themes/base.css`
+ * carries the same defaults for static emphasis, which must also render in
+ * PDF and `dist/` where no shell runs.
+ *
+ * Appearance stays themeable through the custom properties; a deck overriding
+ * them in its own CSS wins, because these rules only supply the fallbacks.
+ */
+const EMPHASIS_ACTIVE_CSS = [
+  ".code-line{display:inline-block;width:100%}",
+  ".code-line-emphasis,[data-emphasis-active]{",
+  "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+  "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
+  "}",
+  "pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis),",
+  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+  "opacity:var(--peitho-emphasis-dim,0.45)",
+  "}"
+].join("");
+
 const CSS_NAMED_COLORS: Record<string, string> = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -713,7 +743,7 @@ class PresentShellController implements PresentShell {
     style.textContent = css;
     shadow.appendChild(style);
     const revealStyle = this.doc.createElement("style");
-    revealStyle.textContent = REVEAL_HIDDEN_CSS;
+    revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
     shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
@@ -837,6 +867,28 @@ class PresentShellController implements PresentShell {
       marker.toggleAttribute(
         "data-reveal-hidden",
         Number.isFinite(revealStep) && revealStep > step
+      );
+    }
+    this.applyEmphasisState(host, step);
+  }
+
+  /**
+   * Move code line emphasis to the group owning the current step.
+   *
+   * Unlike reveal, emphasis is not cumulative: it points at one group at a
+   * time and moves, so the comparison is equality rather than "step or
+   * earlier". Stepping past the last group leaves the block unemphasized,
+   * which is the correct final state — the pointer is gone once the speaker
+   * has moved on.
+   */
+  private applyEmphasisState(host: HTMLElement, step: number): void {
+    const markers = host.shadowRoot?.querySelectorAll<HTMLElement>("[data-emphasis-step]");
+    if (markers == null) return;
+    for (const marker of markers) {
+      const emphasisStep = Number(marker.dataset.emphasisStep);
+      marker.toggleAttribute(
+        "data-emphasis-active",
+        Number.isFinite(emphasisStep) && emphasisStep === step
       );
     }
   }

@@ -434,6 +434,82 @@ it("walks reveal steps before changing slides and hides future step elements", a
   ]);
 });
 
+it("moves code line emphasis to the group owning the current step", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "end" }
+  ]);
+  const root = document.createElement("main");
+
+  const shell = await mountForTest({
+    root,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url.includes("intro")) {
+        return okText(
+          '<section><pre class="slot-code"><code>' +
+            '<span class="code-line" data-emphasis-step="1">a</span>\n' +
+            '<span class="code-line">b</span>\n' +
+            '<span class="code-line" data-emphasis-step="2">c</span>' +
+            "</code></pre></section>"
+        );
+      }
+      if (url.includes("end")) return okText("<section>End</section>");
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as unknown as typeof fetch,
+    window
+  });
+  const intro = root.querySelector<HTMLElement>('[data-slide-index="0"]')!;
+  const active = () =>
+    [...intro.shadowRoot!.querySelectorAll<HTMLElement>("[data-emphasis-step]")]
+      .filter((el) => el.hasAttribute("data-emphasis-active"))
+      .map((el) => el.dataset.emphasisStep);
+
+  // Step 0: the code is visible but nothing is emphasized yet.
+  expect(shell.currentStep).toBe(0);
+  expect(active()).toEqual([]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(active()).toEqual(["1"]);
+
+  // Emphasis moves rather than accumulating: group 1 goes inactive.
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(active()).toEqual(["2"]);
+
+  // Stepping back returns to the earlier group.
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
+  expect(active()).toEqual(["1"]);
+});
+
+it("never hides an emphasis-only code block", async () => {
+  // Emphasis marks where the speaker is; the code itself must stay visible,
+  // so `data-reveal-hidden` must not land on emphasis markers.
+  const responseManifest = manifestWithSlides([{ key: "intro", revealSteps: 1 }, { key: "end" }]);
+  const root = document.createElement("main");
+
+  await mountForTest({
+    root,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url.includes("intro")) {
+        return okText(
+          '<section><pre class="slot-code"><code>' +
+            '<span class="code-line" data-emphasis-step="1">a</span>' +
+            "</code></pre></section>"
+        );
+      }
+      if (url.includes("end")) return okText("<section>End</section>");
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as unknown as typeof fetch,
+    window
+  });
+  const intro = root.querySelector<HTMLElement>('[data-slide-index="0"]')!;
+
+  expect(intro.shadowRoot!.querySelector("[data-reveal-hidden]")).toBeNull();
+});
+
 it("direct navigation lands fully revealed and prev enters previous slide fully revealed", async () => {
   const responseManifest = manifestWithSlides([
     { key: "intro", revealSteps: 2 },

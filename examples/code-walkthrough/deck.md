@@ -1,7 +1,7 @@
 <!-- {"key":"markers"} -->
 # Phases live in the type
 
-```rust
+```rust {3|6-8}
 pub struct Deck<Phase> {
     slides: Vec<Slide>,
     _phase: PhantomData<Phase>,
@@ -15,11 +15,17 @@ pub enum Rendered {}
 - A deck carries its pipeline phase as a type parameter.
 - The phase markers are empty enums: they exist only at compile time.
 
+<!--
+Stepped emphasis: the first press points at the PhantomData field, the
+second at the marker enums. The code is visible from the start; only the
+pointer moves.
+-->
+
 ---
 <!-- {"key":"constructors"} -->
 # Constructors stay private
 
-```rust
+```rust {2}
 impl Deck<Checked> {
     pub(crate) fn checked(
         slides: Vec<Slide>,
