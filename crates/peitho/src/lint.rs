@@ -27,6 +27,10 @@ struct SlideMeasurement {
     box_width: f64,
     #[serde(rename = "boxHeight")]
     box_height: f64,
+    #[serde(rename = "minFontSizePx")]
+    min_font_size_px: Option<f64>,
+    #[serde(rename = "minFontSample")]
+    min_font_sample: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,11 +451,16 @@ mod tests {
     #[test]
     fn lint_measurement_chunks_reassemble_base64_json_and_validate_slide_count() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.4,"contentHeight":762.49,"boxWidth":1280.0,"boxHeight":720.0}]"#,
+            r#"[{"slide":1,"contentWidth":1280.4,"contentHeight":762.49,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":18.0,"minFontSample":"Tiny text"}]"#,
         );
         let stderr = chunked_console_log(&payload, 24);
 
         let measurements = parse_lint_measurements(&stderr, 1).unwrap();
+        assert_eq!(measurements[0].min_font_size_px, Some(18.0));
+        assert_eq!(
+            measurements[0].min_font_sample.as_deref(),
+            Some("Tiny text")
+        );
 
         assert_eq!(
             measurements,
@@ -461,8 +470,22 @@ mod tests {
                 content_height: 762.49,
                 box_width: 1280.0,
                 box_height: 720.0,
+                min_font_size_px: Some(18.0),
+                min_font_sample: Some("Tiny text".to_owned()),
             }]
         );
+    }
+
+    #[test]
+    fn lint_measurement_payload_defaults_missing_font_fields_to_none() {
+        let payload = encoded(
+            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0}]"#,
+        );
+
+        let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
+
+        assert_eq!(measurements[0].min_font_size_px, None);
+        assert_eq!(measurements[0].min_font_sample, None);
     }
 
     #[test]
@@ -538,7 +561,7 @@ mod tests {
                 1,
                 1,
                 &encoded(
-                    r#"[{"slide":1,"contentWidth":1280,"contentHeight":762,"boxWidth":1280,"boxHeight":720}]"#,
+                    r#"[{"slide":1,"contentWidth":1280,"contentHeight":762,"boxWidth":1280,"boxHeight":720,"minFontSizePx":null,"minFontSample":null}]"#,
                 ),
             ),
             2,
@@ -575,6 +598,8 @@ mod tests {
                 content_height: 720.0,
                 box_width: 1280.0,
                 box_height: 720.0,
+                min_font_size_px: None,
+                min_font_sample: None,
             },
             SlideMeasurement {
                 slide: 2,
@@ -582,6 +607,8 @@ mod tests {
                 content_height: 720.0,
                 box_width: 1280.0,
                 box_height: 720.0,
+                min_font_size_px: None,
+                min_font_sample: None,
             },
             SlideMeasurement {
                 slide: 3,
@@ -589,6 +616,8 @@ mod tests {
                 content_height: 715.0,
                 box_width: 1280.0,
                 box_height: 720.0,
+                min_font_size_px: None,
+                min_font_sample: None,
             },
             SlideMeasurement {
                 slide: 4,
@@ -596,6 +625,8 @@ mod tests {
                 content_height: 604.4,
                 box_width: 500.1,
                 box_height: 600.1,
+                min_font_size_px: None,
+                min_font_sample: None,
             },
             SlideMeasurement {
                 slide: 5,
@@ -603,6 +634,8 @@ mod tests {
                 content_height: 720.0,
                 box_width: 98.6,
                 box_height: 720.0,
+                min_font_size_px: None,
+                min_font_sample: None,
             },
         ];
 
@@ -644,6 +677,8 @@ mod tests {
             content_height: 642.4,
             box_width: 900.0,
             box_height: 600.2,
+            min_font_size_px: None,
+            min_font_sample: None,
         }];
         let mut stdout = Vec::new();
 
@@ -667,6 +702,8 @@ mod tests {
                 content_height: 601.4,
                 box_width: 800.0,
                 box_height: 600.0,
+                min_font_size_px: None,
+                min_font_sample: None,
             }],
             &mut clean_stdout,
         )
