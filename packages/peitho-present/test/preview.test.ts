@@ -318,20 +318,25 @@ it("overview requests toggle between single and grid mode", async () => {
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
-  expect(shell.mode).toBe("single");
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   expect(shell.mode).toBe("grid");
   expect(root.dataset.peithoPreviewMode).toBe("grid");
-
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   expect(shell.mode).toBe("single");
   expect(root.dataset.peithoPreviewMode).toBe("single");
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+  expect(shell.mode).toBe("grid");
+  expect(root.dataset.peithoPreviewMode).toBe("grid");
 });
 
 it("exit overview requests exit grid mode and are a no-op in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
+
+  expect(shell.mode).toBe("grid");
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
+  expect(shell.mode).toBe("single");
 
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   expect(shell.mode).toBe("single");
@@ -348,6 +353,7 @@ it("Escape toggles between single and grid mode with the current slide selected"
   const shell = await mountForTest(root, bus);
   cleanups.push(installPreviewKeyboard(window, bus));
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
   const enterGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
   window.dispatchEvent(enterGrid);
@@ -370,6 +376,7 @@ it("Enter activate request enters grid from single mode with the current slide s
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
 
@@ -383,7 +390,6 @@ it("grid arrow navigation moves selection and Enter shows the selected slide", a
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
@@ -403,7 +409,6 @@ it("grid arrow navigation scrolls the selected tile into view", async () => {
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[1];
   const scrollIntoView = vi.fn();
   targetTile.scrollIntoView = scrollIntoView;
@@ -420,8 +425,6 @@ it("grid mode sets scroll padding and single mode clears it", async () => {
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
-
   expect(shell.mode).toBe("grid");
   expect(root.style.scrollPaddingTop).toBe("24px");
   expect(root.style.scrollPaddingBottom).toBe("24px");
@@ -431,14 +434,18 @@ it("grid mode sets scroll padding and single mode clears it", async () => {
   expect(shell.mode).toBe("single");
   expect(root.style.scrollPaddingTop).toBe("");
   expect(root.style.scrollPaddingBottom).toBe("");
+
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
+
+  expect(shell.mode).toBe("grid");
+  expect(root.style.scrollPaddingTop).toBe("24px");
+  expect(root.style.scrollPaddingBottom).toBe("24px");
 });
 
 it("grid selection styling keeps tile size stable without changing selection classes", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
-
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
 
   const [selectedTile, unselectedTile] = root.querySelectorAll<HTMLElement>(
     ".peitho-preview-tile"
@@ -464,6 +471,7 @@ it("entering grid scrolls the current slide tile into view", async () => {
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
   const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2];
   const scrollIntoView = vi.fn();
@@ -481,6 +489,7 @@ it("single mode navigation does not scroll preview tiles into view", async () =>
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   const targetTile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[1];
   const scrollIntoView = vi.fn();
   targetTile.scrollIntoView = scrollIntoView;
@@ -512,6 +521,7 @@ it("single mode next skips one or more skipped slides in preview", async () => {
   });
   shells.push(shell);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
 
   expect(shell.mode).toBe("single");
@@ -539,6 +549,7 @@ it("single mode prev skips one or more skipped slides in preview", async () => {
   });
   shells.push(shell);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "prev" } }));
 
@@ -566,6 +577,7 @@ it("single mode next is a no-op when only skipped slides remain in preview", asy
   });
   shells.push(shell);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   const event = new CustomEvent("peitho:navigate", {
     cancelable: true,
     detail: { to: "next" }
@@ -596,7 +608,6 @@ it("grid next navigation can select and activate a skipped slide in preview", as
   });
   shells.push(shell);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
 
@@ -619,7 +630,6 @@ it("grid vertical navigation moves by one computed row and stops at row edges", 
   });
   shells.push(shell);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } }));
   const handledDown = new CustomEvent("peitho:navigate", {
     cancelable: true,
@@ -668,6 +678,7 @@ it("single mode ignores preview vertical navigation requests", async () => {
   });
   shells.push(shell);
 
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 3 } } }));
   const saved = sessionStorage.getItem("peitho:preview-state");
   const up = new CustomEvent("peitho:navigate", { cancelable: true, detail: { to: "up" } });
@@ -689,7 +700,6 @@ it("clicking a grid tile shows that slide in single mode", async () => {
   const shell = await mountForTest(root, bus);
   mockSelection(true);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2].click();
 
   expect(shell.mode).toBe("single");
@@ -702,7 +712,6 @@ it("dragging across a grid tile does not activate it on the follow-up click", as
   const shell = await mountForTest(root, bus);
   mockSelection(true);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   const tile = root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2];
   tile.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 100, clientY: 100 }));
   tile.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 112, clientY: 100 }));
@@ -719,7 +728,6 @@ it("clicking a grid tile with non-collapsed selection does not activate it", asy
   const shell = await mountForTest(root, bus);
   mockSelection(false);
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   root
     .querySelectorAll<HTMLElement>(".peitho-preview-tile")[2]
     .dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 900 }));
@@ -742,7 +750,7 @@ it("saves and restores mode and slide index from sessionStorage", async () => {
   const secondRoot = document.createElement("main");
   const second = await mountForTest(secondRoot, new EventTarget());
 
-  expect(second.mode).toBe("grid");
+  expect(second.mode).toBe("single");
   expect(second.selectedIndex).toBe(1);
   expect(second.currentIndex).toBe(1);
 });
@@ -798,7 +806,7 @@ it("ignores corrupt preview state JSON and starts at the first slide", async () 
 
   const shell = await mountForTest(root, new EventTarget());
 
-  expect(shell.mode).toBe("single");
+  expect(shell.mode).toBe("grid");
   expect(shell.currentIndex).toBe(0);
   expect(shell.selectedIndex).toBe(0);
 });
@@ -821,7 +829,7 @@ it("starts on the first non-skipped slide in preview when there is no restored s
   });
   shells.push(shell);
 
-  expect(shell.mode).toBe("single");
+  expect(shell.mode).toBe("grid");
   expect(shell.currentIndex).toBe(1);
   expect(shell.selectedIndex).toBe(1);
 });
@@ -927,7 +935,6 @@ it("generation changes save preview state before reloading", async () => {
   const channel = mockChannel();
   const reload = vi.fn();
 
-  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } }));
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
   cleanups.push(installPreviewReload(shell, () => channel, reload));
 

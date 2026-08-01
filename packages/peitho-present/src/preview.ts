@@ -60,6 +60,7 @@ type PreviewState = {
 };
 
 const PREVIEW_STATE_KEY = "peitho:preview-state";
+const DEFAULT_PREVIEW_MODE: PreviewMode = "grid";
 const GRID_TILE_WIDTH = 320;
 const GRID_GAP = 18;
 const GRID_PADDING = 24;
@@ -156,7 +157,7 @@ class PreviewShellController implements PreviewShell {
   manifest: Manifest | null = null;
   currentIndex = -1;
   selectedIndex = -1;
-  mode: PreviewMode = "single";
+  mode: PreviewMode = DEFAULT_PREVIEW_MODE;
   generation = 0;
   private readonly root: HTMLElement;
   private readonly fetcher: typeof fetch;
@@ -249,7 +250,7 @@ class PreviewShellController implements PreviewShell {
           : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
-      this.mode = restored?.mode ?? "single";
+      this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
       this.applyLayout();
       this.dispatchSlideChange(null);
     } catch (error) {
