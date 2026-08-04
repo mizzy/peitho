@@ -348,7 +348,13 @@
     return btoa(binary);
   }
 
+  var published = false;
+
   function publish(results) {
+    if (published) {
+      return;
+    }
+    published = true;
     var payload = base64EncodeUtf8(JSON.stringify(results));
     var total = Math.max(1, Math.ceil(payload.length / CHUNK_SIZE));
     for (var index = 0; index < total; index += 1) {
@@ -363,6 +369,16 @@
   // Start every declared face while this parser-blocking inline script is running,
   // before Chrome can consider the lint page complete.
   var declaredFontsReady = requestDeclaredFonts();
+
+  // Chrome prints when it considers the page ready and exits immediately after,
+  // so the readiness chain below is racing that teardown: bounding its waits
+  // shortens the race but never orders it, and losing means no payload at all.
+  // beforeprint runs after layout settles and before the PDF bytes are written,
+  // so it publishes even when a wait never settles. The latch in publish() keeps
+  // whichever path arrives first as the single payload.
+  window.addEventListener("beforeprint", function () {
+    publish(measureSlides());
+  });
 
   waitForWindowLoad()
     .then(waitForImages)
