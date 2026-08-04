@@ -12,18 +12,6 @@
   font-family: Inter, "Helvetica Neue", Arial, sans-serif;
 }
 
-.tweet-embed-cover {
-  display: grid;
-  align-content: center;
-}
-
-.tweet-embed-cover h1 {
-  max-width: 880px;
-  margin: 0;
-  font-size: 76px;
-  line-height: 1.04;
-}
-
 .tweet-embed-post {
   display: grid;
   grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);

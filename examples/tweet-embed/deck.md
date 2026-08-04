@@ -1,6 +1,3 @@
-# Tweet embeds
-
----
 # Snapshotted at build time
 
 This official X post was captured once, cached locally, and emitted as an image.

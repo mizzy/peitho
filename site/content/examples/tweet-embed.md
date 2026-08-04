@@ -24,7 +24,7 @@ in both outputs and remains available offline.
 
 ## What to look at
 
-The second slide combines a short body line with the generated image in a
+The slide combines a short body line with the generated image in a
 required `accepts="image"` slot. If the cache is absent and the post has been
 deleted or cannot render, Peitho stops with a line-numbered build error instead
 of silently dropping the embed.

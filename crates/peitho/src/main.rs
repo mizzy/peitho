@@ -1845,15 +1845,19 @@ fn embed_wrapper_html(
 ) -> String {
     let width = params.width_css_px;
     let theme = params.theme.as_str();
-    let (script_error_release, timeout_release) = match mode {
+    let (script_error_release, timeout_release, settled_action) = match mode {
         EmbedWrapperMode::Measure => (
             "  js.onerror = releaseLoad;\n",
             "setTimeout(releaseLoad, 15000);\n",
+            concat!(
+                "        document.title = \"peitho-embed-height:\" + stableBottom;\n",
+                "        releaseLoad();\n"
+            ),
         ),
         EmbedWrapperMode::Capture => {
             // Capture has no failure release: a named timeout is safer than
             // completing load and silently caching a non-rendered screenshot.
-            ("", "")
+            ("", "", "        releaseLoad();\n")
         }
     };
     // `{normalized_url}` is safe only under `parse_x_status_url`'s strict grammar; revisit if loosened.
@@ -1863,7 +1867,7 @@ fn embed_wrapper_html(
 <head>
 <meta charset="utf-8">
 <title>peitho-embed-pending</title>
-<style>html,body{{margin:0;padding:0;width:{width}px;background:#fff;overflow:hidden}}blockquote{{margin:0}}</style>
+<style>html,body{{margin:0;padding:0;width:{width}px;background:#fff;overflow:hidden}}blockquote{{margin:0}}div.twitter-tweet-rendered{{margin:0 !important}}</style>
 </head>
 <body>
 <blockquote class="twitter-tweet" data-width="{width}" data-theme="{theme}"><a href="{normalized_url}">View post on X</a></blockquote>
@@ -1895,17 +1899,30 @@ window.twttr = (function(d, s, id) {{
 }}(document, "script", "twitter-wjs"));
 {timeout_release}twttr.ready(function(twttr) {{
   twttr.events.bind("rendered", function(event) {{
-    try {{
-      var iframe = event && event.target && event.target.tagName === "IFRAME"
-        ? event.target
-        : document.querySelector("iframe:not(#peitho-load-holder)");
-      if (!iframe) return;
-      var height = Math.ceil(iframe.getBoundingClientRect().height);
-      if (!Number.isFinite(height) || height <= 0) return;
-      document.title = "peitho-embed-height:" + height;
-    }} finally {{
-      releaseLoad();
+    var iframe = event && event.target && event.target.tagName === "IFRAME"
+      ? event.target
+      : document.querySelector("iframe:not(#peitho-load-holder)");
+    if (!iframe) return;
+    var stableBottom = 0;
+    var stableCount = 0;
+    function pollSettledBottom() {{
+      if (loadReleased) return;
+      var bottom = Math.ceil(iframe.getBoundingClientRect().bottom);
+      if (!Number.isFinite(bottom) || bottom <= 0) {{
+        stableBottom = 0;
+        stableCount = 0;
+      }} else if (bottom === stableBottom) {{
+        stableCount += 1;
+      }} else {{
+        stableBottom = bottom;
+        stableCount = 1;
+      }}
+      if (stableCount >= 3) {{
+{settled_action}        return;
+      }}
+      setTimeout(pollSettledBottom, 100);
     }}
+    setTimeout(pollSettledBottom, 100);
   }});
 }});
 </script>
@@ -4220,18 +4237,25 @@ contexts:
             assert!(html.contains(r#"data-theme="light""#));
             assert!(html.contains("https://platform.x.com/widgets.js"));
             assert!(html.contains("twttr.events.bind(\"rendered\""));
-            assert!(html.contains("peitho-embed-height:"));
-            assert!(html.contains("getBoundingClientRect().height"));
+            assert!(html.contains("getBoundingClientRect().bottom"));
+            assert!(!html.contains("getBoundingClientRect().height"));
+            assert!(html.contains("function pollSettledBottom()"));
+            assert!(html.contains("stableCount += 1;"));
+            assert!(html.contains("stableCount = 1;"));
+            assert!(html.contains("if (stableCount >= 3)"));
+            assert!(html.contains("setTimeout(pollSettledBottom, 100);"));
             assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
             assert!(html.contains("holder.contentDocument.open()"));
             assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
             assert!(html.contains("holder.contentDocument.close()"));
-            assert!(html.contains("finally {\n      releaseLoad();\n    }"));
             assert!(html.contains("margin:0"));
+            assert!(html.contains("div.twitter-tweet-rendered{margin:0 !important}"));
             assert!(!html.contains("image.decode"));
         }
+        assert!(measure.contains("document.title = \"peitho-embed-height:\" + stableBottom;"));
         assert!(measure.contains("js.onerror = releaseLoad;"));
         assert!(measure.contains("setTimeout(releaseLoad, 15000);"));
+        assert!(!capture.contains("document.title = \"peitho-embed-height:"));
         assert!(!capture.contains("js.onerror = releaseLoad;"));
         assert!(!capture.contains("setTimeout(releaseLoad, 15000);"));
     }

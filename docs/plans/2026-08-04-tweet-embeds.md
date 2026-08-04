@@ -447,12 +447,13 @@ missing function.
 
 **Implementation**: Emit `<!doctype html>`, a white, marginless, overflow-hidden
 550px page, one `<blockquote class="twitter-tweet">` containing an anchor to
-the canonical URL, and the official `platform.x.com/widgets.js` loader. Set
+the canonical URL, and the official `platform.x.com/widgets.js` loader. The
+rendered container has inline 10px vertical margins that offset the iframe, so
+override them with `div.twitter-tweet-rendered { margin: 0 !important; }`. Set
 the initial title to `peitho-embed-pending`. Inside `twttr.ready`, bind
 `twttr.events` `rendered`; locate the rendered iframe, compute
-`Math.ceil(getBoundingClientRect().height)`, and set
-`document.title = "peitho-embed-height:" + height` only for a positive finite
-height. `EmbedWrapperMode::{Measure,Capture}` both add a hidden zero-size load
+`Math.ceil(getBoundingClientRect().bottom)` so any residual offset is included,
+and publish it only when positive and finite. `EmbedWrapperMode::{Measure,Capture}` both add a hidden zero-size load
 holder iframe, open/write its child document before loading `widgets.js`, and
 release it from the `rendered` handler's `finally` path. Measure additionally
 sets `js.onerror = releaseLoad` and a 15-second `setTimeout(releaseLoad, 15000)`;
