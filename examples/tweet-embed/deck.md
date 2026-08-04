@@ -3,5 +3,5 @@
 This official X post was captured once, cached locally, and emitted as an image.
 
 ```embed
-https://x.com/gosukenator/status/2083825695709597710
+https://x.com/gosukenator/status/2074821309259973046
 ```
