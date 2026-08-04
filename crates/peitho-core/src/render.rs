@@ -3829,6 +3829,35 @@ Paragraph after heading.
     }
 
     #[test]
+    fn lint_measure_script_publishes_before_chrome_prints() {
+        // Regression: bounding the readiness waits only shortens the race
+        // against Chrome's --print-to-pdf teardown, it does not order it, so
+        // the payload could be missing entirely. beforeprint fires after
+        // layout settles but before the PDF bytes are written, which orders
+        // publication by construction even when a wait never settles.
+        assert!(
+            LINT_MEASURE_JS.contains(r#"window.addEventListener("beforeprint""#),
+            "expected a beforeprint listener so publish cannot lose to the print"
+        );
+        assert!(
+            LINT_MEASURE_JS.contains("published"),
+            "expected a latch so the chain and beforeprint cannot both emit a payload"
+        );
+
+        let publish_body = LINT_MEASURE_JS
+            .split_once("function publish(")
+            .unwrap()
+            .1
+            .split_once("\n  }")
+            .unwrap()
+            .0;
+        assert!(
+            publish_body.contains("if (published)"),
+            "expected publish() itself to hold the latch, not each call site"
+        );
+    }
+
+    #[test]
     fn lint_measure_script_does_not_contain_raw_sentinel_strings() {
         assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_BEGIN"));
         assert!(!LINT_MEASURE_JS.contains("PEITHO_LINT_END"));
