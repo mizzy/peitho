@@ -564,7 +564,7 @@ function installPreviewKeyboard(win = window, bus = win) {
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      dispatchOverviewRequest(bus, "toggle");
+      dispatchOverviewRequest(bus, "enter");
       return;
     }
     if (event.key === "Enter") {
@@ -821,8 +821,7 @@ var PreviewShellController = class {
     this.saveState();
   }
   activateSelection() {
-    if (this.mode === "grid") this.exitGrid();
-    else this.enterGrid();
+    this.exitGrid();
   }
   setIndex(index) {
     const next = this.clampIndex(index);

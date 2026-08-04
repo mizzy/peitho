@@ -97,7 +97,7 @@ export function installPreviewKeyboard(
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      dispatchOverviewRequest(bus, "toggle");
+      dispatchOverviewRequest(bus, "enter");
       return;
     }
     if (event.key === "Enter") {
@@ -384,8 +384,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   private activateSelection(): void {
-    if (this.mode === "grid") this.exitGrid();
-    else this.enterGrid();
+    this.exitGrid();
   }
 
   private setIndex(index: number): void {

@@ -242,7 +242,7 @@ it("preview keyboard emits command requests and ignores chord-modified commands"
     window.dispatchEvent(event);
   }
 
-  expect(requests).toEqual([{ action: "toggle" }, { action: "activate" }]);
+  expect(requests).toEqual([{ action: "enter" }, { action: "activate" }]);
   expect(navigations).toEqual([{ to: "next" }, { to: "up" }, { to: "down" }]);
   expect(bareEscape.defaultPrevented).toBe(true);
   expect(chordEscape.defaultPrevented).toBe(false);
@@ -347,7 +347,7 @@ it("exit overview requests exit grid mode and are a no-op in single mode", async
   expect(shell.mode).toBe("single");
 });
 
-it("Escape toggles between single and grid mode with the current slide selected", async () => {
+it("Escape returns to grid mode with the current slide selected", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
@@ -362,16 +362,27 @@ it("Escape toggles between single and grid mode with the current slide selected"
   expect(shell.mode).toBe("grid");
   expect(shell.currentIndex).toBe(2);
   expect(shell.selectedIndex).toBe(2);
-
-  const exitGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
-  window.dispatchEvent(exitGrid);
-
-  expect(exitGrid.defaultPrevented).toBe(true);
-  expect(shell.mode).toBe("single");
-  expect(shell.currentIndex).toBe(2);
 });
 
-it("Enter activate request enters grid from single mode with the current slide selected", async () => {
+it("Escape in grid mode stays in grid mode", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  cleanups.push(installPreviewKeyboard(window, bus));
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
+  bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } }));
+  expect(shell.mode).toBe("grid");
+
+  const stayInGrid = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  window.dispatchEvent(stayInGrid);
+
+  expect(stayInGrid.defaultPrevented).toBe(true);
+  expect(shell.mode).toBe("grid");
+  expect(shell.selectedIndex).toBe(2);
+});
+
+it("Enter activate request in single mode stays in single mode", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   const shell = await mountForTest(root, bus);
@@ -380,7 +391,7 @@ it("Enter activate request enters grid from single mode with the current slide s
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: { index: 2 } } }));
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } }));
 
-  expect(shell.mode).toBe("grid");
+  expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(2);
   expect(shell.selectedIndex).toBe(2);
 });
