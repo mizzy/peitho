@@ -14,3 +14,10 @@ site/static/giallo.css
 site/static/deck-sources/
 .zola-examples/
 .worktrees/
+
+# Project skills are versioned; local settings are not. A global ignore excludes
+# .claude/, and Git cannot re-include files under an excluded directory, so the
+# directory itself has to be re-included before narrowing again.
+!.claude/
+.claude/*
+!.claude/skills/
