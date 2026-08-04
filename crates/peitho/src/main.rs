@@ -1790,6 +1790,16 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
 
 const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long to keep draining a child's pipes after it exits, waiting for a
+/// completion signal that was written but may not have been delivered yet.
+///
+/// Chrome exits immediately after printing the lint payload, and lingering
+/// grandchildren can hold the pipes open so EOF never arrives — the drain
+/// cannot simply wait for disconnection. Five seconds is far above the
+/// scheduling delays seen on loaded CI runners while staying well under
+/// `CHROME_ONE_SHOT_TIMEOUT`.
+const POST_EXIT_DRAIN_WINDOW: Duration = Duration::from_secs(5);
+
 enum ChromeCompletion {
     PdfWritten { output_path: PathBuf },
     LintResultLogged,
@@ -2060,8 +2070,25 @@ where
         }
 
         if let Some(status) = child.try_wait().map_err(ProcessRunError::Wait)? {
-            drain_process_events_for(&rx, &mut stdout, &mut stderr, Duration::from_millis(100));
-            if is_complete(&stdout, &stderr) {
+            // The child is gone, but its output may still be in flight: the
+            // reader threads are never joined, and lingering grandchildren can
+            // hold the pipes open so EOF never arrives. Keep draining until the
+            // completion signal shows up, the pipes disconnect, or this window
+            // expires — the old fixed 100ms silently truncated the tail of the
+            // stream under load, dropping completion signals that had been
+            // written but not yet delivered.
+            //
+            // The window is bounded well under the overall timeout so a caller
+            // whose completion predicate stays false after exit (PDF export
+            // re-checks the output file instead) is not made to wait it out.
+            let drain_deadline = deadline.min(Instant::now() + POST_EXIT_DRAIN_WINDOW);
+            if drain_until_complete_or_disconnect(
+                &rx,
+                &mut stdout,
+                &mut stderr,
+                drain_deadline,
+                &mut is_complete,
+            ) {
                 return Ok(ProcessOutcome::Ready { stdout, stderr });
             }
             return Ok(ProcessOutcome::Exited {
@@ -2130,24 +2157,44 @@ fn drain_process_events(
     }
 }
 
-fn drain_process_events_for(
+/// Drain remaining pipe output after the child has exited, stopping as soon as
+/// the completion predicate is satisfied. Returns whether it was satisfied.
+///
+/// Output can still be in flight after exit, and the reader threads may never
+/// observe EOF when a grandchild holds a pipe open, so this waits on a real
+/// terminating condition (signal seen, pipes disconnected, or deadline) rather
+/// than a fixed window.
+fn drain_until_complete_or_disconnect<F>(
     rx: &mpsc::Receiver<ProcessPipeEvent>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
-    duration: Duration,
-) {
-    let deadline = Instant::now() + duration;
+    deadline: Instant,
+    is_complete: &mut F,
+) -> bool
+where
+    F: FnMut(&[u8], &[u8]) -> bool,
+{
     loop {
         drain_process_events(rx, stdout, stderr);
+        if is_complete(stdout, stderr) {
+            return true;
+        }
+
         let now = Instant::now();
         if now >= deadline {
-            return;
+            return false;
         }
+
         let remaining = deadline.saturating_duration_since(now);
         let poll = remaining.min(Duration::from_millis(10));
         match receive_process_event_until(rx, stdout, stderr, poll) {
             ProcessReceive::Event | ProcessReceive::Timeout => {}
-            ProcessReceive::Disconnected => return,
+            // Both pipes hit EOF: everything the child wrote has been
+            // delivered, so one last check settles it.
+            ProcessReceive::Disconnected => {
+                drain_process_events(rx, stdout, stderr);
+                return is_complete(stdout, stderr);
+            }
         }
     }
 }
@@ -6774,6 +6821,107 @@ contexts:
                 assert!(status.success());
                 assert_eq!(stdout, b"echoed input");
             }
+            other => panic!("expected exited process, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_sees_completion_signal_written_just_before_exit() {
+        // Regression: the exit path used to drain for a fixed 100ms, so a
+        // completion signal still in flight when the child exited was judged
+        // missing. Chrome does exactly this: it prints the lint payload and
+        // exits immediately after.
+        let args = [
+            OsString::from("-c"),
+            OsString::from(
+                "printf 'noise\\n' >&2; printf '%s\\n' \"$(head -c 200000 /dev/zero | tr '\\0' 'x')\" >&2; printf 'SIGNAL-HERE\\n' >&2; exit 0",
+            ),
+        ];
+        let mut state = 0usize;
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_secs(10),
+            |_, stderr| scan_for_needle(stderr, &mut state, b"SIGNAL-HERE"),
+        )
+        .unwrap();
+
+        let stderr = match outcome {
+            ProcessOutcome::Ready { stderr, .. } => stderr,
+            ProcessOutcome::Exited { status, stderr, .. } => {
+                assert!(status.success());
+                stderr
+            }
+            other => panic!("expected ready or exited process, got {other:?}"),
+        };
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("SIGNAL-HERE"),
+            "completion signal must survive the exit-path drain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_drains_output_arriving_after_the_parent_exits() {
+        // Chrome leaves grandchildren holding stderr open, so the reader
+        // threads never see EOF and the exit-path drain cannot rely on
+        // disconnection. A grandchild that writes the completion signal after
+        // the parent has exited stands in for the CI-loaded case where the
+        // signal is still in flight: a fixed short drain window misses it.
+        let args = [
+            OsString::from("-c"),
+            OsString::from("(sleep 1; printf 'TAIL-MARKER\\n' >&2; sleep 30) & exit 0"),
+        ];
+        let mut state = 0usize;
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_secs(10),
+            |_, stderr| scan_for_needle(stderr, &mut state, b"TAIL-MARKER"),
+        )
+        .unwrap();
+
+        let stderr = match outcome {
+            ProcessOutcome::Ready { stderr, .. } => stderr,
+            ProcessOutcome::Exited { stderr, .. } => stderr,
+            other => panic!("expected ready or exited process, got {other:?}"),
+        };
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("TAIL-MARKER"),
+            "completion signal arriving after parent exit must still be observed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_exit_drain_does_not_wait_out_the_whole_timeout() {
+        // A caller whose predicate never fires (PDF export re-checks the output
+        // file after exit instead) must not be made to sit through the full
+        // timeout just because a grandchild holds the pipes open.
+        let args = [
+            OsString::from("-c"),
+            OsString::from("sleep 30 & printf 'done\\n' >&2; exit 0"),
+        ];
+        let started = std::time::Instant::now();
+        let outcome = run_child_with_timeout(
+            Path::new("/bin/sh"),
+            &args,
+            None,
+            Duration::from_secs(60),
+            |_, _| false,
+        )
+        .unwrap();
+
+        assert!(
+            started.elapsed() < POST_EXIT_DRAIN_WINDOW + Duration::from_secs(3),
+            "exit drain took {:?}, expected to be bounded by POST_EXIT_DRAIN_WINDOW",
+            started.elapsed()
+        );
+        match outcome {
+            ProcessOutcome::Exited { status, .. } => assert!(status.success()),
             other => panic!("expected exited process, got {other:?}"),
         }
     }
