@@ -193,6 +193,7 @@ pub enum CodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
     BuiltinMermaid,
     BuiltinMath,
+    BuiltinEmbed,
 }
 
 impl CodeImagesConfig {
@@ -203,6 +204,7 @@ impl CodeImagesConfig {
         match tag {
             "mermaid" => Some(CodeImageRenderer::BuiltinMermaid),
             "math" => Some(CodeImageRenderer::BuiltinMath),
+            "embed" => Some(CodeImageRenderer::BuiltinEmbed),
             _ => None,
         }
     }
@@ -523,6 +525,10 @@ impl RawImagePath {
 
     pub(crate) fn from_code_images_cache(key: &str) -> Self {
         Self(format!("{}/{key}.svg", crate::CODE_IMAGES_CACHE_DIR))
+    }
+
+    pub(crate) fn from_embeds_cache(key: &str) -> Self {
+        Self(format!("{}/{key}.png", crate::EMBEDS_CACHE_DIR))
     }
 
     /// Return the original deck-relative path.
@@ -1045,6 +1051,27 @@ mod tests {
             Some(CodeImageRenderer::BuiltinMath)
         );
         assert_eq!(empty.renderer_for("plantuml"), None);
+    }
+
+    #[test]
+    fn resolver_selects_builtin_embed_but_explicit_override_wins() {
+        let empty = CodeImagesConfig::default();
+        assert_eq!(
+            empty.renderer_for("embed"),
+            Some(CodeImageRenderer::BuiltinEmbed)
+        );
+
+        let command = CodeImageCommand {
+            argv: vec!["embed-to-svg".to_owned()],
+        };
+        let configured = CodeImagesConfig {
+            entries: BTreeMap::from([("embed".to_owned(), command.clone())]),
+            key_line: Some(2),
+        };
+        assert_eq!(
+            configured.renderer_for("embed"),
+            Some(CodeImageRenderer::External(&command))
+        );
     }
 
     #[test]
