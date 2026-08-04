@@ -84,13 +84,18 @@ with a fixture renderer. The CLI implements it with the existing
 1. Write a wrapper HTML page to a temp dir: the official blockquote snippet
    for the URL + `platform.x.com/widgets.js`, constrained to the standard
    550 CSS px embed width.
-2. Run headless Chrome against it. Completion is signaled by the page
-   itself: the wrapper binds `twttr.events.bind('rendered', …)` and
-   publishes the rendered widget height. Capture uses
-   `--force-device-scale-factor=2` for Retina-quality output. If a
-   measure-then-capture two-pass is needed to size the window to the widget
-   height, both passes go through the one-shot runner; no new dependencies
-   (no CDP client, no image-processing crate) are introduced.
+2. Run headless Chrome against it, wall-clock (no `--virtual-time-budget`
+   — measured 2026-08-05: virtual time expires before the widget's iframe
+   finishes at 10s and stalls past 90s wall at 120s, in both passes).
+   `--dump-dom` and `--screenshot` fire at the page's load event, which is
+   normally too early, so the wrapper holds the load event hostage: a
+   hidden child iframe whose document is kept open (`document.open()`
+   without `close()`) keeps the parent's load pending, and the `rendered`
+   handler publishes the widget height into `document.title` and then
+   closes the holder. Measure (`--dump-dom`) and capture (`--screenshot`,
+   `--force-device-scale-factor=2` for Retina) are two passes through the
+   one-shot runner; no new dependencies (no CDP client, no
+   image-processing crate) are introduced. Measured: ~3s per pass.
 3. A widget that never reaches `rendered` (deleted/private tweet, X blocking
    headless, no network) is a **hard line-numbered build error** naming the
    URL — never a silent blank image. The timeout follows the existing
@@ -147,13 +152,15 @@ constraints scale it.
   rasterization) — same accepted property as external code_images
   commands; the cache makes each machine self-consistent.
 - **Accepted residual risk**: the capture pass reloads the wrapper in a
-  fresh profile, and Chrome's `--screenshot` fires at virtual-time-budget
-  expiry whether or not the widget re-rendered — a transient X failure
-  between the measure and capture passes can cache a valid-but-blank PNG.
-  Accepted because virtual time waits on pending network (in practice the
-  widget settles before expiry), and closing it would require a
-  pixel-inspection dependency. Symptom: a blank/partial embed on the
-  slide; remedy: delete the named cache file to refresh.
+  fresh profile. Its screenshot is gated on the parent load event, which
+  waits for both the load-holder release (fired by `rendered`) and the
+  tweet iframe's own load, so a pre-render capture cannot happen the way
+  it would under a timer; what remains is an inner-iframe subresource
+  racing the shot. A deleted/blocked post releases the holder with the
+  title still `peitho-embed-pending`, failing fast with a line-numbered
+  error instead of waiting out the timeout. Closing the remaining race
+  would require a pixel-inspection dependency. Symptom: a partial embed
+  on the slide; remedy: delete the named cache file to refresh.
 - Text in the slide is not selectable (it is an image). Accepted: fidelity
   was chosen over selectability; the v2 card mode is the selectable option.
 - `code_images.embed:` frontmatter continues to mean "external SVG command

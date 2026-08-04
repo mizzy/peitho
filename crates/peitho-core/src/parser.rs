@@ -5689,6 +5689,23 @@ After list
     }
 
     #[test]
+    fn parser_accepts_bare_embed_and_rejects_its_line_emphasis() {
+        parse_markdown(
+            "# T\n\n```embed\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let err = parse_markdown(
+            "# T\n\n```embed {1}\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.message.contains("line emphasis is not supported"));
+    }
+
+    #[test]
     fn rejects_bare_notmath_language_without_code_images_entry() {
         let err = parse_markdown(
             "# Intro\n\n```notmath\nx\n```",

@@ -22,6 +22,7 @@ pub mod render;
 pub mod theme;
 
 pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";
+pub const EMBEDS_CACHE_DIR: &str = ".peitho/embeds-cache";
 
 pub use check::check_deck;
 pub use code_images::parse_deck_and_transform;

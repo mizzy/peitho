@@ -424,6 +424,10 @@ fn embed_wrapper_html_has_official_widget_and_render_signal() {
     assert!(html.contains("twttr.events.bind(\"rendered\""));
     assert!(html.contains("peitho-embed-height:"));
     assert!(html.contains("getBoundingClientRect().height"));
+    assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
+    assert!(html.contains("holder.contentDocument.open()"));
+    assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
+    assert!(html.contains("holder.contentDocument.close()"));
     assert!(html.contains("margin:0"));
     assert!(!html.contains("image.decode"));
 }
@@ -439,9 +443,15 @@ the initial title to `peitho-embed-pending`. Inside `twttr.ready`, bind
 `twttr.events` `rendered`; locate the rendered iframe, compute
 `Math.ceil(getBoundingClientRect().height)`, and set
 `document.title = "peitho-embed-height:" + height` only for a positive finite
-height. The canonical URL grammar makes interpolation attribute-safe; do not
-accept unvalidated input. Do not call `image.decode()` or place this wrapper
-in any emitted artifact.
+height. Add a hidden zero-size `<iframe id="peitho-load-holder">` and, in the
+inline script before loading `widgets.js`, call its `contentDocument.open()`
+and `contentDocument.write("holding load")` without closing it. The official
+widget's `rendered` handler releases the parent load in a `finally` block by
+calling `holder.contentDocument.close()` inside `try`/`catch`; no tweet iframe
+and an invalid height both leave the title pending but still release the load.
+Exclude the holder from the tweet-iframe fallback selector. The canonical URL
+grammar makes interpolation attribute-safe; do not accept unvalidated input.
+Do not call `image.decode()` or place this wrapper in any emitted artifact.
 
 **Verification**: `cargo test -p peitho embed_wrapper_html` passes.
 
@@ -475,6 +485,8 @@ fn embed_chrome_orchestration_measures_then_captures() {
     assert!(has_arg(&invocations[0], "--dump-dom"));
     assert!(has_arg(&invocations[1], "--window-size=550,742"));
     assert!(has_arg(&invocations[1], "--force-device-scale-factor=2"));
+    assert!(!has_arg_prefix(&invocations[0], "--virtual-time-budget"));
+    assert!(!has_arg_prefix(&invocations[1], "--virtual-time-budget"));
     assert_ne!(user_data_dir(&invocations[0]), user_data_dir(&invocations[1]));
 }
 
@@ -491,12 +503,12 @@ argument/parsing/orchestration functions exist.
 
 **Implementation**: Add pure `embed_measure_args`, `embed_capture_args`, and
 `parse_embed_height` functions; accept heights `1..=10_000`. Both argument
-sets include `--headless=new`, `--disable-gpu`, `--no-sandbox`, the existing
-virtual-time budget, a throwaway `--user-data-dir`, and the wrapper's `file://`
-URL. Measurement adds `--dump-dom`, a 550px-wide staging window, and scale 2;
-capture adds `--screenshot=<temp PNG>`, `--window-size=550,<measured>`, and
-scale 2. Use distinct temp profiles for the two passes and
-`CHROME_ONE_SHOT_TIMEOUT` for each.
+sets include `--headless=new`, `--disable-gpu`, `--no-sandbox`, a throwaway
+`--user-data-dir`, and the wrapper's `file://` URL. Neither pass may include a
+`--virtual-time-budget` argument. Measurement adds `--dump-dom`, a 550px-wide
+staging window, and scale 2; capture adds `--screenshot=<temp PNG>`,
+`--window-size=550,<measured>`, and scale 2. Use distinct temp profiles for the
+two passes and `CHROME_ONE_SHOT_TIMEOUT` for each.
 
 Extend `ChromeCompletion` with exhaustive `EmbedMeasured` and `PngWritten`
 arms. Keep `ChromeOutput.stdout` in non-test builds so the first pass can read
@@ -511,17 +523,31 @@ creating a temp directory, writing the wrapper, running both passes, and
 returning file bytes as an Asset error with no line. Core adds line/cache
 context in Task 5.
 
-**Accepted residual risk**: The capture pass reloads the wrapper in a fresh
-profile, and `--screenshot` fires when the virtual-time budget expires without
-proving that pass 2 observed the widget's `rendered` event. A transient X
-failure after successful measurement can therefore produce a valid-but-blank
-or partial PNG that passes the magic check and is cached. This is accepted
-because Chrome virtual time waits while network work is pending, so the widget
-settles in practice, while v1 explicitly forbids adding pixel inspection or
-an image-decoding dependency. The symptom is a blank or partial tweet image;
-delete that block's named `.peitho/embeds-cache/<key>.png` file and rebuild
-with network access to refresh it. Do not add image decoding to close this
-residual risk.
+**Measured Chrome pitfall**: `--virtual-time-budget=10000` expires while the X
+iframe is still hidden at 0×0 and the title remains `peitho-embed-pending`;
+raising the budget to 120000 can run for more than 90 seconds of wall time
+because a pending resource stalls virtual time. Virtual time is therefore
+unusable in both passes. Wall-clock headless Chrome renders the widget in
+roughly 2–3 seconds, but plain `--dump-dom` and `--screenshot` run at the
+parent page's load event, before the widget renders, yielding the raw “View
+post on X” blockquote. Holding a child iframe document open until the widget's
+`rendered` event gates that load event: measured `--dump-dom` then returned a
+`<title>peitho-embed-height:321</title>` after roughly 3 seconds, and measured
+`--screenshot` returned the complete official widget after roughly 3 seconds,
+without virtual time. Chrome may linger after reporting bytes written; the
+existing one-shot completion and kill path owns that case.
+
+**Accepted residual risk**: The widget's `rendered` event can fire while an
+inner-iframe subresource still races the screenshot. The parent load event
+also waits for the tweet iframe itself, so capture is gated on both the
+official render signal and the widget iframe's own load; v1 does not add pixel
+inspection or an image-decoding dependency for the narrower inner-resource
+race. A deleted or blocked post releases the load holder from the handler's
+no-iframe or invalid-height path, leaving the pending title so measurement
+fails immediately instead of waiting for the 60-second timeout. The residual
+symptom is a partial cached tweet image; delete that block's named
+`.peitho/embeds-cache/<key>.png` file and rebuild with network access to
+refresh it. Do not add image decoding to close this residual risk.
 
 **Verification**: `cargo test -p peitho embed_chrome` passes without Chrome.
 

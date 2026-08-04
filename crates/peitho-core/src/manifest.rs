@@ -430,7 +430,7 @@ mod tests {
 
     use crate::{
         check::check_deck,
-        code_images::{parse_deck_and_transform, SvgRunner},
+        code_images::{parse_deck_and_transform, EmbedRenderParams, EmbedRenderer, SvgRunner},
         domain::{AspectRatio, CodeImageCommand, ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
@@ -1087,7 +1087,9 @@ mod tests {
             frontmatter,
             &crate::highlight::Highlighter::defaults(),
             &NoSvgRunner,
-            cache.path(),
+            &NoEmbedRenderer,
+            &cache.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &cache.path().join(crate::EMBEDS_CACHE_DIR),
         )
         .unwrap();
         check_deck(map_by_convention(parsed, &layout).unwrap()).unwrap()
@@ -1098,6 +1100,18 @@ mod tests {
     impl SvgRunner for NoSvgRunner {
         fn run(&self, _command: &CodeImageCommand, _stdin: &str) -> crate::Result<Vec<u8>> {
             panic!("math manifest test must not invoke external SVG runner");
+        }
+    }
+
+    struct NoEmbedRenderer;
+
+    impl EmbedRenderer for NoEmbedRenderer {
+        fn render(
+            &self,
+            _normalized_url: &str,
+            _params: EmbedRenderParams,
+        ) -> crate::Result<Vec<u8>> {
+            panic!("math manifest test must not invoke embed renderer");
         }
     }
 

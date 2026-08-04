@@ -102,6 +102,47 @@ impl peitho_core::code_images::SvgRunner for CliSvgRunner {
     }
 }
 
+struct CliEmbedRenderer;
+
+impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
+    fn render(
+        &self,
+        normalized_url: &str,
+        params: peitho_core::code_images::EmbedRenderParams,
+    ) -> peitho_core::Result<Vec<u8>> {
+        let chrome = locate_chrome().map_err(|err| {
+            cli_embed_renderer_error(
+                err,
+                "install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
+            )
+        })?;
+        let temp = tempfile::tempdir().map_err(|err| {
+            cli_embed_renderer_error(
+                format!("failed to create temporary tweet embed workspace: {err}"),
+                "make the system temporary directory writable and retry",
+            )
+        })?;
+        render_embed_with_chrome(&chrome, temp.path(), normalized_url, params).map_err(|err| {
+            cli_embed_renderer_error(
+                err,
+                "retry with Chrome and network access to X; set PEITHO_CHROME_PATH=<absolute-path> to choose Chrome",
+            )
+        })
+    }
+}
+
+fn cli_embed_renderer_error(
+    message: impl fmt::Display,
+    help: impl Into<String>,
+) -> peitho_core::BuildError {
+    peitho_core::BuildError::new(
+        peitho_core::error::ErrorKind::Asset,
+        None,
+        message.to_string(),
+        help,
+    )
+}
+
 #[derive(Debug, Clone)]
 struct BuildOptions {
     input: PathBuf,
@@ -687,7 +728,9 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
         loaded.frontmatter.clone(),
         &highlighter,
         &CliSvgRunner::for_deck(&input),
+        &CliEmbedRenderer,
         &code_images_cache_dir(&input),
+        &embeds_cache_dir(&input),
     ))?;
     let Some(slide) = parsed
         .parsed_slides()
@@ -1541,7 +1584,9 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         loaded.frontmatter.clone(),
         &highlighter,
         &CliSvgRunner::for_deck(input),
+        &CliEmbedRenderer,
         &code_images_cache_dir(input),
+        &embeds_cache_dir(input),
     ))?;
     let mapped = loaded.translate(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = loaded.translate(peitho_core::check_deck(mapped))?;
@@ -1597,6 +1642,10 @@ fn read_deck_source(input: &Path) -> miette::Result<String> {
 
 fn code_images_cache_dir(input: &Path) -> PathBuf {
     asset_resolution::deck_parent(input).join(peitho_core::CODE_IMAGES_CACHE_DIR)
+}
+
+fn embeds_cache_dir(input: &Path) -> PathBuf {
+    asset_resolution::deck_parent(input).join(peitho_core::EMBEDS_CACHE_DIR)
 }
 
 fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
@@ -1788,6 +1837,179 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     })
 }
 
+fn embed_wrapper_html(
+    normalized_url: &str,
+    params: peitho_core::code_images::EmbedRenderParams,
+) -> String {
+    let width = params.width_css_px;
+    let theme = params.theme.as_str();
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>peitho-embed-pending</title>
+<style>html,body{{margin:0;padding:0;width:{width}px;background:#fff;overflow:hidden}}blockquote{{margin:0}}</style>
+</head>
+<body>
+<blockquote class="twitter-tweet" data-width="{width}" data-theme="{theme}"><a href="{normalized_url}">View post on X</a></blockquote>
+<iframe id="peitho-load-holder" style="visibility:hidden;width:0;height:0;border:0"></iframe>
+<script>
+var holder = document.getElementById("peitho-load-holder");
+holder.contentDocument.open();
+holder.contentDocument.write("holding load");
+window.twttr = (function(d, s, id) {{
+  var js, first = d.getElementsByTagName(s)[0], twttr = window.twttr || {{}};
+  if (d.getElementById(id)) return twttr;
+  js = d.createElement(s);
+  js.id = id;
+  js.src = "https://platform.x.com/widgets.js";
+  first.parentNode.insertBefore(js, first);
+  twttr._e = [];
+  twttr.ready = function(callback) {{ twttr._e.push(callback); }};
+  return twttr;
+}}(document, "script", "twitter-wjs"));
+twttr.ready(function(twttr) {{
+  twttr.events.bind("rendered", function(event) {{
+    try {{
+      var iframe = event && event.target && event.target.tagName === "IFRAME"
+        ? event.target
+        : document.querySelector("iframe:not(#peitho-load-holder)");
+      if (!iframe) return;
+      var height = Math.ceil(iframe.getBoundingClientRect().height);
+      if (!Number.isFinite(height) || height <= 0) return;
+      document.title = "peitho-embed-height:" + height;
+    }} finally {{
+      try {{
+        holder.contentDocument.close();
+      }} catch (error) {{
+        console.error("failed to release peitho load holder", error);
+      }}
+    }}
+  }});
+}});
+</script>
+</body>
+</html>
+"#
+    )
+}
+
+fn embed_measure_args(
+    profile: &Path,
+    wrapper_url: &str,
+    params: peitho_core::code_images::EmbedRenderParams,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from(format!("--window-size={},10000", params.width_css_px)),
+        OsString::from(format!(
+            "--force-device-scale-factor={}",
+            params.scale_factor
+        )),
+        OsString::from("--dump-dom"),
+        OsString::from(wrapper_url),
+    ]
+}
+
+fn embed_capture_args(
+    profile: &Path,
+    output_path: &Path,
+    wrapper_url: &str,
+    height: u32,
+    params: peitho_core::code_images::EmbedRenderParams,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from(format!("--window-size={},{}", params.width_css_px, height)),
+        OsString::from(format!(
+            "--force-device-scale-factor={}",
+            params.scale_factor
+        )),
+        OsString::from(format!("--screenshot={}", output_path.display())),
+        OsString::from(wrapper_url),
+    ]
+}
+
+fn parse_embed_height(dom: &[u8]) -> miette::Result<u32> {
+    let dom = String::from_utf8_lossy(dom);
+    let title_start = dom.find("<title>").ok_or_else(|| {
+        miette::miette!(
+            "official X embed did not publish a rendered height\nhelp: check network access to X and that the post is public"
+        )
+    })? + "<title>".len();
+    let title_end = dom[title_start..]
+        .find("</title>")
+        .map(|offset| title_start + offset)
+        .ok_or_else(|| {
+            miette::miette!(
+                "official X embed height title was incomplete\nhelp: retry with Chrome and network access to X"
+            )
+        })?;
+    let title = &dom[title_start..title_end];
+    let height = title
+        .strip_prefix("peitho-embed-height:")
+        .and_then(|height| height.parse::<u32>().ok())
+        .filter(|height| (1..=10_000).contains(height))
+        .ok_or_else(|| {
+            miette::miette!(
+                "official X embed did not publish a valid rendered height (title: {title})\nhelp: check network access to X and that the post is public"
+            )
+        })?;
+    Ok(height)
+}
+
+fn render_embed_with_invoker<F>(
+    temp_dir: &Path,
+    normalized_url: &str,
+    params: peitho_core::code_images::EmbedRenderParams,
+    mut invoke: F,
+) -> miette::Result<Vec<u8>>
+where
+    F: FnMut(&[OsString], ChromeCompletion) -> miette::Result<ChromeOutput>,
+{
+    let wrapper_path = temp_dir.join("embed.html");
+    fs::write(&wrapper_path, embed_wrapper_html(normalized_url, params)).into_diagnostic()?;
+    let wrapper_url = file_url(&wrapper_path)?;
+
+    let measure_profile = temp_dir.join("measure-profile");
+    let capture_profile = temp_dir.join("capture-profile");
+    fs::create_dir_all(&measure_profile).into_diagnostic()?;
+    fs::create_dir_all(&capture_profile).into_diagnostic()?;
+
+    let measure_args = embed_measure_args(&measure_profile, &wrapper_url, params);
+    let measured = invoke(&measure_args, ChromeCompletion::EmbedMeasured)?;
+    let height = parse_embed_height(&measured.stdout)?;
+
+    let output_path = temp_dir.join("embed.png");
+    let capture_args =
+        embed_capture_args(&capture_profile, &output_path, &wrapper_url, height, params);
+    invoke(
+        &capture_args,
+        ChromeCompletion::PngWritten {
+            output_path: output_path.clone(),
+        },
+    )?;
+    fs::read(&output_path).into_diagnostic()
+}
+
+fn render_embed_with_chrome(
+    chrome: &Path,
+    temp_dir: &Path,
+    normalized_url: &str,
+    params: peitho_core::code_images::EmbedRenderParams,
+) -> miette::Result<Vec<u8>> {
+    render_embed_with_invoker(temp_dir, normalized_url, params, |args, completion| {
+        run_one_shot_chrome(chrome, args, completion, CHROME_ONE_SHOT_TIMEOUT)
+    })
+}
+
 const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long to keep draining a child's pipes after it exits, waiting for a
@@ -1803,6 +2025,8 @@ const POST_EXIT_DRAIN_WINDOW: Duration = Duration::from_secs(5);
 enum ChromeCompletion {
     PdfWritten { output_path: PathBuf },
     LintResultLogged,
+    EmbedMeasured,
+    PngWritten { output_path: PathBuf },
 }
 
 #[derive(Default)]
@@ -1816,6 +2040,8 @@ impl ChromeCompletion {
         match self {
             Self::PdfWritten { .. } => "PDF output",
             Self::LintResultLogged => "lint measurement payload",
+            Self::EmbedMeasured => "official X embed rendered height",
+            Self::PngWritten { .. } => "tweet embed PNG output",
         }
     }
 
@@ -1824,6 +2050,9 @@ impl ChromeCompletion {
             Self::PdfWritten { .. } => "retry export",
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
+            }
+            Self::EmbedMeasured | Self::PngWritten { .. } => {
+                "retry the build with Chrome and network access to X"
             }
         }
     }
@@ -1836,6 +2065,9 @@ impl ChromeCompletion {
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
+            Self::EmbedMeasured | Self::PngWritten { .. } => {
+                "retry the build with Chrome and network access to X"
+            }
         }
     }
 
@@ -1846,7 +2078,7 @@ impl ChromeCompletion {
         )
     }
 
-    fn is_ready(&self, _stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
+    fn is_ready(&self, stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
         match self {
             Self::PdfWritten { output_path } => {
                 if !state.signal_seen {
@@ -1868,6 +2100,17 @@ impl ChromeCompletion {
                 }
                 state.signal_seen
             }
+            Self::EmbedMeasured => parse_embed_height(stdout).is_ok(),
+            Self::PngWritten { output_path } => {
+                if !state.signal_seen {
+                    state.signal_seen = scan_for_needle(
+                        stderr,
+                        &mut state.stderr_scanned,
+                        b"bytes written to file",
+                    );
+                }
+                output_file_is_nonempty(output_path) && state.signal_seen
+            }
         }
     }
 
@@ -1880,6 +2123,8 @@ impl ChromeCompletion {
         match self {
             Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
             Self::LintResultLogged => self.is_ready(stdout, stderr, state),
+            Self::EmbedMeasured => parse_embed_height(stdout).is_ok(),
+            Self::PngWritten { .. } => self.is_ready(stdout, stderr, state),
         }
     }
 }
@@ -1947,21 +2192,12 @@ fn run_one_shot_chrome(
 
 #[derive(Debug)]
 pub(crate) struct ChromeOutput {
-    #[cfg(test)]
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
 }
 
 fn chrome_output(stdout: Vec<u8>, stderr: Vec<u8>) -> ChromeOutput {
-    #[cfg(test)]
-    {
-        ChromeOutput { stdout, stderr }
-    }
-    #[cfg(not(test))]
-    {
-        let _ = stdout;
-        ChromeOutput { stderr }
-    }
+    ChromeOutput { stdout, stderr }
 }
 
 #[derive(Debug)]
@@ -3842,6 +4078,7 @@ mod tests {
     use super::*;
     use assert_cmd::Command as AssertCommand;
     use chrono::TimeZone;
+    use peitho_core::code_images::BUILTIN_EMBED_PARAMS;
     use std::cell::{Cell, RefCell};
 
     const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
@@ -3855,6 +4092,118 @@ contexts:
       scope: keyword.control.carina
 "#;
     const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
+
+    fn has_arg(args: &[OsString], expected: &str) -> bool {
+        args.iter().any(|arg| arg == OsStr::new(expected))
+    }
+
+    fn has_arg_prefix(args: &[OsString], prefix: &str) -> bool {
+        args.iter()
+            .any(|arg| arg.to_string_lossy().starts_with(prefix))
+    }
+
+    fn user_data_dir(args: &[OsString]) -> String {
+        args.iter()
+            .find_map(|arg| {
+                arg.to_str()
+                    .and_then(|arg| arg.strip_prefix("--user-data-dir="))
+            })
+            .expect("Chrome args include a user-data-dir")
+            .to_owned()
+    }
+
+    fn fake_embed_chrome_output(
+        args: &[OsString],
+        completion: ChromeCompletion,
+        height: u32,
+        png: &[u8],
+    ) -> miette::Result<ChromeOutput> {
+        match completion {
+            ChromeCompletion::EmbedMeasured => Ok(chrome_output(
+                format!(
+                    "<!doctype html><html><head><title>peitho-embed-height:{height}</title></head></html>"
+                )
+                .into_bytes(),
+                Vec::new(),
+            )),
+            ChromeCompletion::PngWritten { output_path } => {
+                assert!(has_arg(
+                    args,
+                    &format!("--screenshot={}", output_path.display())
+                ));
+                fs::write(output_path, png).into_diagnostic()?;
+                Ok(chrome_output(
+                    Vec::new(),
+                    b"bytes written to file".to_vec(),
+                ))
+            }
+            ChromeCompletion::PdfWritten { .. } => {
+                panic!("embed orchestration must not request PDF completion")
+            }
+            ChromeCompletion::LintResultLogged => {
+                panic!("embed orchestration must not request lint completion")
+            }
+        }
+    }
+
+    #[test]
+    fn embed_wrapper_html_has_official_widget_and_render_signal() {
+        let html = embed_wrapper_html(
+            "https://x.com/gosukenator/status/2083825695709597710",
+            BUILTIN_EMBED_PARAMS,
+        );
+        assert!(html.contains(r#"class="twitter-tweet""#));
+        assert!(html.contains(r#"data-width="550""#));
+        assert!(html.contains(r#"data-theme="light""#));
+        assert!(html.contains("https://platform.x.com/widgets.js"));
+        assert!(html.contains("twttr.events.bind(\"rendered\""));
+        assert!(html.contains("peitho-embed-height:"));
+        assert!(html.contains("getBoundingClientRect().height"));
+        assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
+        assert!(html.contains("holder.contentDocument.open()"));
+        assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
+        assert!(html.contains("holder.contentDocument.close()"));
+        assert!(html.contains("margin:0"));
+        assert!(!html.contains("image.decode"));
+    }
+
+    #[test]
+    fn embed_chrome_orchestration_measures_then_captures() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut invocations = Vec::new();
+        let png = render_embed_with_invoker(
+            temp.path(),
+            "https://x.com/a/status/1",
+            BUILTIN_EMBED_PARAMS,
+            |args, completion| {
+                invocations.push(args.to_vec());
+                fake_embed_chrome_output(args, completion, 742, b"\x89PNG\r\n\x1a\nfixture")
+            },
+        )
+        .unwrap();
+        assert_eq!(png, b"\x89PNG\r\n\x1a\nfixture");
+        assert_eq!(invocations.len(), 2);
+        assert!(has_arg(&invocations[0], "--dump-dom"));
+        assert!(has_arg(&invocations[1], "--window-size=550,742"));
+        assert!(has_arg(&invocations[1], "--force-device-scale-factor=2"));
+        assert!(!has_arg_prefix(&invocations[0], "--virtual-time-budget"));
+        assert!(!has_arg_prefix(&invocations[1], "--virtual-time-budget"));
+        assert_ne!(
+            user_data_dir(&invocations[0]),
+            user_data_dir(&invocations[1])
+        );
+    }
+
+    #[test]
+    fn embed_chrome_height_parser_rejects_pending_zero_and_oversized_titles() {
+        assert_eq!(
+            parse_embed_height(b"<title>peitho-embed-height:742</title>").unwrap(),
+            742
+        );
+        assert!(parse_embed_height(b"<title>peitho-embed-pending</title>").is_err());
+        assert!(parse_embed_height(b"<title>peitho-embed-height:0</title>").is_err());
+        assert!(parse_embed_height(b"<title>peitho-embed-height:10001</title>").is_err());
+    }
 
     #[test]
     fn load_and_expand_deck_source_returns_source_frontmatter_and_line_map() {

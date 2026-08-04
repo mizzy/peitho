@@ -1813,6 +1813,18 @@ mod tests {
         }
     }
 
+    struct UnusedEmbedRenderer;
+
+    impl crate::code_images::EmbedRenderer for UnusedEmbedRenderer {
+        fn render(
+            &self,
+            _normalized_url: &str,
+            _params: crate::code_images::EmbedRenderParams,
+        ) -> crate::error::Result<Vec<u8>> {
+            panic!("unexpected embed renderer call")
+        }
+    }
+
     fn render_image_slot_html(
         slot_name: &str,
         fragments: Vec<SourceFragment<ResolvedImagePath>>,
@@ -3905,7 +3917,9 @@ Paragraph after heading.
             parsed,
             &config,
             &UnusedSvgRunner,
-            temp.path(),
+            &UnusedEmbedRenderer,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
         .unwrap();
         let checked = check_deck(map_by_convention(transformed, &layout).unwrap()).unwrap();

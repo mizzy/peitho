@@ -28,35 +28,196 @@ use crate::{
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static BUILTIN_MERMAID_RENDERER: LazyLock<merman::render::HeadlessRenderer> =
     LazyLock::new(merman::render::HeadlessRenderer::new);
+const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 pub trait SvgRunner {
     fn run(&self, command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>>;
 }
 
-/// Typed narrowing that keeps the SVG tail unable to see BuiltinMath; a future
-/// SVG-emitting built-in must extend this seam explicitly.
+pub trait EmbedRenderer {
+    fn render(&self, normalized_url: &str, params: EmbedRenderParams) -> crate::Result<Vec<u8>>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedTheme {
+    Light,
+    Dark,
+}
+
+impl EmbedTheme {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbedRenderParams {
+    pub width_css_px: u32,
+    pub scale_factor: u32,
+    pub theme: EmbedTheme,
+}
+
+impl EmbedRenderParams {
+    pub const fn new(width_css_px: u32, scale_factor: u32, theme: EmbedTheme) -> Self {
+        Self {
+            width_css_px,
+            scale_factor,
+            theme,
+        }
+    }
+}
+
+pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams = EmbedRenderParams {
+    width_css_px: 550,
+    scale_factor: 2,
+    theme: EmbedTheme::Light,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EmbedTarget {
+    X(TweetStatusUrl),
+}
+
+impl EmbedTarget {
+    fn normalized_url(&self) -> &str {
+        match self {
+            Self::X(status) => status.normalized_url(),
+        }
+    }
+
+    fn user(&self) -> &str {
+        match self {
+            Self::X(status) => &status.user,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TweetStatusUrl {
+    normalized_url: String,
+    user: String,
+    status_id: String,
+}
+
+impl TweetStatusUrl {
+    fn normalized_url(&self) -> &str {
+        debug_assert!(self.normalized_url.ends_with(&self.status_id));
+        &self.normalized_url
+    }
+}
+
+fn parse_embed_block(line: usize, body: &str) -> Result<EmbedTarget> {
+    let mut non_blank_lines = body.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(url) = non_blank_lines.next() else {
+        return Err(code_image_error(
+            line,
+            "embed",
+            "embed block is empty",
+            embed_url_help(),
+        ));
+    };
+    if non_blank_lines.next().is_some() {
+        return Err(code_image_error(
+            line,
+            "embed",
+            "embed block must contain exactly one non-blank line",
+            embed_url_help(),
+        ));
+    }
+    parse_embed_url(line, url)
+}
+
+fn parse_embed_url(line: usize, url: &str) -> Result<EmbedTarget> {
+    for prefix in ["https://x.com/", "https://twitter.com/"] {
+        if let Some(path) = url.strip_prefix(prefix) {
+            return parse_x_status_url(line, path);
+        }
+    }
+    Err(unsupported_embed_url_error(line))
+}
+
+fn parse_x_status_url(line: usize, path: &str) -> Result<EmbedTarget> {
+    if path.contains(['%', '?', '#']) {
+        return Err(unsupported_embed_url_error(line));
+    }
+    let mut segments = path.split('/');
+    let (Some(user), Some("status"), Some(status_id), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return Err(unsupported_embed_url_error(line));
+    };
+    if user.is_empty()
+        || !user
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || status_id.is_empty()
+        || !status_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(unsupported_embed_url_error(line));
+    }
+
+    let user = user.to_ascii_lowercase();
+    Ok(EmbedTarget::X(TweetStatusUrl {
+        normalized_url: format!("https://x.com/{user}/status/{status_id}"),
+        user,
+        status_id: status_id.to_owned(),
+    }))
+}
+
+fn unsupported_embed_url_error(line: usize) -> BuildError {
+    code_image_error(
+        line,
+        "embed",
+        "embed block must contain a supported X status URL",
+        embed_url_help(),
+    )
+}
+
+fn embed_url_help() -> &'static str {
+    "use https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; other providers belong to the generic-oEmbed follow-up"
+}
+
+/// Typed narrowing that keeps the SVG tail unable to see BuiltinMath or
+/// BuiltinEmbed; a future SVG-emitting built-in must extend this seam explicitly.
 enum SvgCodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
     BuiltinMermaid,
 }
 
-pub fn parse_deck_and_transform<R: SvgRunner>(
+pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer>(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
-    runner: &R,
-    cache_dir: &Path,
+    svg_runner: &S,
+    embed_renderer: &E,
+    code_images_cache_dir: &Path,
+    embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
     let config = frontmatter.settings().code_images().clone();
     let parsed = parse_markdown(source, frontmatter, highlighter)?;
-    transform_code_images(parsed, &config, runner, cache_dir)
+    transform_code_images(
+        parsed,
+        &config,
+        svg_runner,
+        embed_renderer,
+        code_images_cache_dir,
+        embeds_cache_dir,
+    )
 }
 
-pub fn transform_code_images<R: SvgRunner>(
+pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer>(
     deck: Deck<Parsed>,
     config: &CodeImagesConfig,
-    runner: &R,
-    cache_dir: &Path,
+    svg_runner: &S,
+    embed_renderer: &E,
+    code_images_cache_dir: &Path,
+    embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
     let (settings, slides) = deck.into_parsed_parts();
     let mut transformed_slides = Vec::with_capacity(slides.len());
@@ -65,7 +226,16 @@ pub fn transform_code_images<R: SvgRunner>(
         slide.fragments = slide
             .fragments
             .into_iter()
-            .map(|fragment| transform_fragment(fragment, config, runner, cache_dir))
+            .map(|fragment| {
+                transform_fragment(
+                    fragment,
+                    config,
+                    svg_runner,
+                    embed_renderer,
+                    code_images_cache_dir,
+                    embeds_cache_dir,
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         transformed_slides.push(slide);
     }
@@ -73,11 +243,13 @@ pub fn transform_code_images<R: SvgRunner>(
     Ok(Deck::parsed(settings, transformed_slides))
 }
 
-fn transform_fragment<R: SvgRunner>(
+fn transform_fragment<S: SvgRunner, E: EmbedRenderer>(
     fragment: SourceFragment,
     config: &CodeImagesConfig,
-    runner: &R,
-    cache_dir: &Path,
+    svg_runner: &S,
+    embed_renderer: &E,
+    code_images_cache_dir: &Path,
+    embeds_cache_dir: &Path,
 ) -> Result<SourceFragment> {
     // Every code fragment passes through here, and one without a renderer is
     // returned by value with its annotations intact — so carrying emphasis is
@@ -109,6 +281,21 @@ fn transform_fragment<R: SvgRunner>(
                                 fragment.code_text(),
                             );
                         }
+                        CodeImageRenderer::BuiltinEmbed => {
+                            let status = parse_embed_block(fragment.line(), fragment.code_text())?;
+                            let key = cache_or_render_embed(
+                                fragment.line(),
+                                &status,
+                                BUILTIN_EMBED_PARAMS,
+                                embed_renderer,
+                                embeds_cache_dir,
+                            )?;
+                            return Ok(SourceFragment::image(
+                                fragment.line(),
+                                format!("X post by @{}", status.user()),
+                                RawImagePath::from_embeds_cache(&key),
+                            ));
+                        }
                     };
                     let key = match &renderer {
                         SvgCodeImageRenderer::External(command) => {
@@ -118,8 +305,8 @@ fn transform_fragment<R: SvgRunner>(
                             builtin_mermaid_cache_key(fragment.code_text())
                         }
                     };
-                    let cache_path = cache_dir.join(format!("{key}.svg"));
-                    fs::create_dir_all(cache_dir).map_err(|err| {
+                    let cache_path = code_images_cache_dir.join(format!("{key}.svg"));
+                    fs::create_dir_all(code_images_cache_dir).map_err(|err| {
                         code_image_error(
                             fragment.line(),
                             tag,
@@ -131,15 +318,16 @@ fn transform_fragment<R: SvgRunner>(
                     if !cache_hit {
                         let (bytes, output_context) = match &renderer {
                             SvgCodeImageRenderer::External(command) => {
-                                let bytes =
-                                    runner.run(command, fragment.code_text()).map_err(|err| {
+                                let bytes = svg_runner.run(command, fragment.code_text()).map_err(
+                                    |err| {
                                         code_image_error(
                                             fragment.line(),
                                             tag,
                                             err.message,
                                             err.help,
                                         )
-                                    })?;
+                                    },
+                                )?;
                                 (bytes, CodeImageOutputContext::ExternalCommand)
                             }
                             SvgCodeImageRenderer::BuiltinMermaid => {
@@ -187,7 +375,16 @@ fn transform_fragment<R: SvgRunner>(
                 let children = children
                     .clone()
                     .into_iter()
-                    .map(|child| transform_fragment(child, config, runner, cache_dir))
+                    .map(|child| {
+                        transform_fragment(
+                            child,
+                            config,
+                            svg_runner,
+                            embed_renderer,
+                            code_images_cache_dir,
+                            embeds_cache_dir,
+                        )
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(SourceFragment::slot_group(
                     fragment.line(),
@@ -324,6 +521,125 @@ fn builtin_mermaid_cache_key(code_text: &str) -> String {
     hasher.update(b"\0");
     hasher.update(code_text.as_bytes());
     hex_encode(&hasher.finalize())
+}
+
+fn builtin_embed_cache_key(target: &EmbedTarget, params: EmbedRenderParams) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"\0peitho-builtin-embed\0");
+    hasher.update(target.normalized_url().as_bytes());
+    hasher.update(format!("\0width={}", params.width_css_px).as_bytes());
+    hasher.update(format!("\0scale={}", params.scale_factor).as_bytes());
+    hasher.update(format!("\0theme={}", params.theme.as_str()).as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
+fn cache_or_render_embed<R: EmbedRenderer>(
+    line: usize,
+    target: &EmbedTarget,
+    params: EmbedRenderParams,
+    renderer: &R,
+    cache_dir: &Path,
+) -> Result<String> {
+    let key = builtin_embed_cache_key(target, params);
+    let cache_path = cache_dir.join(format!("{key}.png"));
+    fs::create_dir_all(cache_dir).map_err(|err| {
+        embed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("failed to create embed cache directory: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+    if valid_cached_png(&cache_path) {
+        return Ok(key);
+    }
+
+    let bytes = renderer
+        .render(target.normalized_url(), params)
+        .map_err(|err| {
+            embed_cache_error(
+                line,
+                target,
+                &cache_path,
+                format!(
+                    "failed to render {}: {}",
+                    target.normalized_url(),
+                    err.message
+                ),
+                &err.help,
+            )
+        })?;
+    if bytes.is_empty() {
+        return Err(embed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!(
+                "renderer returned empty PNG output for {}",
+                target.normalized_url()
+            ),
+            "retry with Chrome and network access to X",
+        ));
+    }
+    if !bytes.starts_with(PNG_MAGIC) {
+        return Err(embed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!(
+                "renderer returned not PNG output for {}",
+                target.normalized_url()
+            ),
+            "retry with Chrome and network access to X",
+        ));
+    }
+    write_cache_file_atomic(&cache_path, &bytes).map_err(|err| {
+        embed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("failed to write embed cache file: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+    Ok(key)
+}
+
+fn embed_cache_error(
+    line: usize,
+    target: &EmbedTarget,
+    cache_path: &Path,
+    message: impl Into<String>,
+    extra_help: &str,
+) -> BuildError {
+    let cache_help = format!(
+        "a valid cache hit works offline without Chrome or network; this cache miss requires Chrome and network access to X; cache file: {}; delete the cache file to refresh",
+        cache_path.display()
+    );
+    let help = if extra_help.is_empty() {
+        cache_help
+    } else {
+        format!("{cache_help}; {extra_help}")
+    };
+    code_image_error(
+        line,
+        "embed",
+        format!("{} ({})", message.into(), target.normalized_url()),
+        help,
+    )
+}
+
+fn valid_cached_png(path: &Path) -> bool {
+    let cache_hit = fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() >= PNG_MAGIC.len() as u64)
+        .unwrap_or(false);
+    if !cache_hit {
+        return false;
+    }
+    fs::read(path)
+        .map(|bytes| bytes.starts_with(PNG_MAGIC))
+        .unwrap_or(false)
 }
 
 fn write_cache_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -999,17 +1315,19 @@ fn code_image_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_math_override_help, builtin_mermaid_cache_key, builtin_mermaid_override_help,
-        code_image_cache_key, hex_encode, is_svg_output, render_builtin_math_with,
+        builtin_embed_cache_key, builtin_math_override_help, builtin_mermaid_cache_key,
+        builtin_mermaid_override_help, cache_or_render_embed, code_image_cache_key, hex_encode,
+        is_svg_output, parse_deck_and_transform, parse_embed_block, render_builtin_math_with,
         render_builtin_mermaid_with, svg_empty_output_error, svg_has_usable_intrinsic_size,
         svg_intrinsic_size_error, svg_not_document_error, svg_root_not_found_error,
-        transform_code_images, CodeImageOutputContext, SvgRunner,
+        transform_code_images, valid_cached_png, CodeImageOutputContext, EmbedRenderParams,
+        EmbedRenderer, EmbedTarget, EmbedTheme, SvgRunner, BUILTIN_EMBED_PARAMS,
     };
     use crate::error::ErrorKind;
     use crate::{
         check::check_deck,
         domain::{
-            CodeImageCommand, CodeImagesConfig, FragmentKind, ResolvedImageAsset,
+            CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath, ResolvedImageAsset,
             ResolvedImagePath, RevealSpan, SlotName, SourceFragment,
         },
         layout::{parse_layout, Layouts},
@@ -1019,13 +1337,490 @@ mod tests {
         BuildError, Result,
     };
     use sha2::{Digest, Sha256};
-    use std::{cell::Cell, collections::BTreeMap, fs, path::PathBuf};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const MERMAID_KEY: &str = "4dba32c8d19de69fc2671719f51c327b802adf382763f36d20c1bffd972745f1";
+
+    mod embed_cache_key_test_vector {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/embed_cache_key.rs"
+        ));
+    }
+
+    #[test]
+    fn embed_cache_key_covers_url_width_scale_and_theme_without_crate_version() {
+        let status =
+            parse_embed_block(7, "https://x.com/gosukenator/status/2083825695709597710").unwrap();
+        let base = EmbedRenderParams::new(550, 2, EmbedTheme::Light);
+        assert_eq!(
+            builtin_embed_cache_key(&status, base),
+            embed_cache_key_test_vector::PINNED_BUILTIN_EMBED_CACHE_KEY
+        );
+        assert_ne!(
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(551, 2, EmbedTheme::Light))
+        );
+        assert_ne!(
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 1, EmbedTheme::Light))
+        );
+        assert_ne!(
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 2, EmbedTheme::Dark))
+        );
+    }
+
+    #[test]
+    fn embed_cache_raw_path_uses_png_cache_namespace() {
+        let raw = RawImagePath::from_embeds_cache("abc123");
+        assert_eq!(raw.as_str(), ".peitho/embeds-cache/abc123.png");
+    }
+
+    #[test]
+    fn embed_block_accepts_x_and_twitter_status_urls() {
+        let x = parse_embed_block(
+            7,
+            "\n  https://x.com/Gosukenator/status/2083825695709597710  \n",
+        )
+        .unwrap();
+        let twitter = parse_embed_block(
+            7,
+            "https://twitter.com/gosukenator/status/2083825695709597710\n",
+        )
+        .unwrap();
+        assert_eq!(
+            x.normalized_url(),
+            "https://x.com/gosukenator/status/2083825695709597710"
+        );
+        assert_eq!(x, twitter);
+    }
+
+    fn assert_embed_error(body: &str, message: &str) {
+        let err = parse_embed_block(7, body).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains(message), "{}", err.message);
+        assert!(err.help.contains("https://x.com/<user>/status/<id>"));
+        assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
+    }
+
+    #[test]
+    fn embed_block_rejects_empty_body() {
+        assert_embed_error("\n \n", "empty");
+    }
+
+    #[test]
+    fn embed_block_rejects_multiple_non_blank_lines() {
+        assert_embed_error(
+            "https://x.com/a/status/1\nhttps://x.com/b/status/2\n",
+            "exactly one non-blank line",
+        );
+    }
+
+    #[test]
+    fn embed_block_rejects_surrounding_junk() {
+        assert_embed_error("see https://x.com/a/status/1", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_non_https_url() {
+        assert_embed_error("http://x.com/a/status/1", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_non_x_provider() {
+        assert_embed_error("https://example.com/a/status/1", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_malformed_status_path() {
+        assert_embed_error("https://x.com/a/status/1/", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_non_numeric_status_id() {
+        assert_embed_error(
+            "https://x.com/a/status/not-a-number",
+            "supported X status URL",
+        );
+    }
+
+    #[test]
+    fn embed_block_rejects_query() {
+        assert_embed_error("https://x.com/a/status/1?s=20", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_fragment() {
+        assert_embed_error("https://x.com/a/status/1#quoted", "supported X status URL");
+    }
+
+    #[test]
+    fn embed_block_rejects_percent_encoding() {
+        assert_embed_error("https://x.com/a%20b/status/1", "supported X status URL");
+    }
 
     struct FakeRunner {
         calls: Cell<usize>,
         result: Result<Vec<u8>>,
+    }
+
+    struct NoSvgRunner;
+
+    impl SvgRunner for NoSvgRunner {
+        fn run(&self, _command: &CodeImageCommand, _stdin: &str) -> Result<Vec<u8>> {
+            panic!("a plain deck must not run an SVG renderer");
+        }
+    }
+
+    fn embed_cache_dir(code_images_cache_dir: &Path) -> PathBuf {
+        code_images_cache_dir
+            .parent()
+            .expect("code image cache has a .peitho parent")
+            .join("embeds-cache")
+    }
+
+    struct FixtureEmbedRenderer {
+        calls: Cell<usize>,
+        urls: RefCell<Vec<String>>,
+        params: RefCell<Vec<EmbedRenderParams>>,
+        result: Result<Vec<u8>>,
+    }
+
+    impl FixtureEmbedRenderer {
+        fn png(output: Vec<u8>) -> Self {
+            Self {
+                calls: Cell::new(0),
+                urls: RefCell::new(Vec::new()),
+                params: RefCell::new(Vec::new()),
+                result: Ok(output),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.get()
+        }
+
+        fn urls(&self) -> Vec<String> {
+            self.urls.borrow().clone()
+        }
+
+        fn params(&self) -> Vec<EmbedRenderParams> {
+            self.params.borrow().clone()
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                calls: Cell::new(0),
+                urls: RefCell::new(Vec::new()),
+                params: RefCell::new(Vec::new()),
+                result: Err(BuildError::new(
+                    ErrorKind::Asset,
+                    None,
+                    message,
+                    "set PEITHO_CHROME_PATH to a Chrome executable and retry",
+                )),
+            }
+        }
+    }
+
+    impl EmbedRenderer for FixtureEmbedRenderer {
+        fn render(&self, normalized_url: &str, params: EmbedRenderParams) -> Result<Vec<u8>> {
+            self.calls.set(self.calls.get() + 1);
+            self.urls.borrow_mut().push(normalized_url.to_owned());
+            self.params.borrow_mut().push(params);
+            self.result.clone()
+        }
+    }
+
+    struct PanicEmbedRenderer;
+
+    impl EmbedRenderer for PanicEmbedRenderer {
+        fn render(&self, _normalized_url: &str, _params: EmbedRenderParams) -> Result<Vec<u8>> {
+            panic!("a valid embed cache hit must not invoke the renderer");
+        }
+    }
+
+    struct SeededEmbedCache {
+        _temp: tempfile::TempDir,
+        cache_dir: PathBuf,
+        target: EmbedTarget,
+    }
+
+    thread_local! {
+        static SEEDED_EMBED_CACHE: RefCell<Option<SeededEmbedCache>> = const { RefCell::new(None) };
+    }
+
+    fn seed_embed_cache(bytes: &[u8]) -> String {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
+        let cache_path = cache_dir.join(format!("{key}.png"));
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&cache_path, bytes).unwrap();
+        assert!(valid_cached_png(&cache_path));
+        SEEDED_EMBED_CACHE.with(|seeded| {
+            seeded.replace(Some(SeededEmbedCache {
+                _temp: temp,
+                cache_dir,
+                target,
+            }));
+        });
+        key
+    }
+
+    fn cache_or_render_seeded_embed<R: EmbedRenderer>(renderer: &R) -> Result<String> {
+        SEEDED_EMBED_CACHE.with(|seeded| {
+            let seeded = seeded.borrow();
+            let seeded = seeded.as_ref().expect("seed an embed cache first");
+            cache_or_render_embed(
+                7,
+                &seeded.target,
+                BUILTIN_EMBED_PARAMS,
+                renderer,
+                &seeded.cache_dir,
+            )
+        })
+    }
+
+    fn assert_embed_cache_self_heals(old_bytes: &[u8]) {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
+        let cache_path = cache_dir.join(format!("{key}.png"));
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&cache_path, old_bytes).unwrap();
+        assert!(!valid_cached_png(&cache_path));
+        let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nreplacement".to_vec());
+
+        let returned_key =
+            cache_or_render_embed(7, &target, BUILTIN_EMBED_PARAMS, &renderer, &cache_dir).unwrap();
+
+        assert_eq!(returned_key, key);
+        assert_eq!(renderer.calls(), 1);
+        assert_eq!(
+            fs::read(cache_path).unwrap(),
+            b"\x89PNG\r\n\x1a\nreplacement"
+        );
+    }
+
+    fn cache_embed_with_renderer_error(message: &str) -> Result<String> {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        cache_or_render_embed(
+            7,
+            &target,
+            BUILTIN_EMBED_PARAMS,
+            &FixtureEmbedRenderer::err(message),
+            &cache_dir,
+        )
+    }
+
+    fn assert_invalid_embed_png(bytes: &[u8], message: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let err = cache_or_render_embed(
+            7,
+            &target,
+            BUILTIN_EMBED_PARAMS,
+            &FixtureEmbedRenderer::png(bytes.to_vec()),
+            &cache_dir,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains(message), "{}", err.message);
+        assert!(err.help.contains(".peitho/embeds-cache/"));
+    }
+
+    fn assert_embed_cache_path_collision_is_asset_error_at_line(line: usize) {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
+        fs::write(&cache_dir, b"regular file blocks cache directory").unwrap();
+        let target = parse_embed_block(line, "https://x.com/a/status/1").unwrap();
+
+        let err = cache_or_render_embed(
+            line,
+            &target,
+            BUILTIN_EMBED_PARAMS,
+            &PanicEmbedRenderer,
+            &cache_dir,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(line));
+        assert!(err
+            .message
+            .contains("failed to create embed cache directory"));
+        assert!(err.help.contains(".peitho"));
+        assert!(err.help.contains("writable"));
+    }
+
+    #[test]
+    fn embed_renderer_error_names_line_url_and_cache_path() {
+        let err = cache_embed_with_renderer_error("Chrome not found").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("https://x.com/a/status/1"));
+        assert!(err.message.contains("Chrome not found"));
+        assert!(err.help.contains(".peitho/embeds-cache/"));
+        assert!(err.help.contains("cache hit works offline"));
+        assert!(err.help.contains("delete the cache file to refresh"));
+    }
+
+    #[test]
+    fn embed_invalid_renderer_output_empty_is_line_numbered() {
+        assert_invalid_embed_png(b"", "empty PNG output");
+    }
+
+    #[test]
+    fn embed_invalid_renderer_output_non_png_is_line_numbered() {
+        assert_invalid_embed_png(b"<html>blocked</html>", "not PNG output");
+    }
+
+    #[test]
+    fn embed_cache_directory_failure_is_line_numbered() {
+        assert_embed_cache_path_collision_is_asset_error_at_line(7);
+    }
+
+    #[test]
+    fn threads_embed_renderer_without_calling_it_for_plain_deck() {
+        let temp = tempfile::tempdir().unwrap();
+        let markdown = "# Plain\n\nParagraph\n";
+        let deck = parse_deck_and_transform(
+            markdown,
+            parse_frontmatter(markdown).unwrap(),
+            &crate::highlight::Highlighter::defaults(),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+        assert_eq!(deck.parsed_slides().len(), 1);
+    }
+
+    fn transform_embed_fixture(url: &str) -> Result<Deck<Parsed>> {
+        let temp = tempfile::tempdir().unwrap();
+        let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        transform_code_images(
+            deck_with_spanned_code("embed", url, RevealSpan { start: 1, len: 1 }),
+            &CodeImagesConfig::default(),
+            &NoSvgRunner,
+            &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
+            &code_images_cache_dir,
+            &embeds_cache_dir,
+        )
+    }
+
+    #[test]
+    fn builtin_embed_becomes_png_image_and_preserves_reveal_span() {
+        let transformed = transform_embed_fixture("https://twitter.com/A/status/1").unwrap();
+        let fragment = &transformed.parsed_slides()[0].fragments[0];
+        assert_eq!(fragment.line(), 7);
+        assert_eq!(
+            fragment.reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
+        );
+        match fragment.kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "X post by @a");
+                assert!(src.as_str().starts_with(".peitho/embeds-cache/"));
+                assert!(src.as_str().ends_with(".png"));
+            }
+            kind => panic!("expected image, got {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_embed_override_uses_svg_runner_without_url_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let svg_runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">embed</svg>"#);
+        let embed_renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nunused".to_vec());
+        let config = CodeImagesConfig {
+            entries: BTreeMap::from([(
+                "embed".to_owned(),
+                CodeImageCommand {
+                    argv: vec!["embed-to-svg".to_owned()],
+                },
+            )]),
+            key_line: Some(2),
+        };
+
+        let transformed = transform_code_images(
+            deck_with_spanned_code(
+                "embed",
+                "plain external input",
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &config,
+            &svg_runner,
+            &embed_renderer,
+            &code_images_cache_dir,
+            &embeds_cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(svg_runner.calls.get(), 1);
+        assert_eq!(embed_renderer.calls(), 0);
+        match transformed.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::Image { src, .. } => {
+                assert!(src.as_str().starts_with(".peitho/code-images-cache/"));
+                assert!(src.as_str().ends_with(".svg"));
+            }
+            kind => panic!("expected image, got {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_valid_cache_hit_skips_renderer() {
+        let renderer = PanicEmbedRenderer;
+        let key = seed_embed_cache(b"\x89PNG\r\n\x1a\ncached");
+        assert_eq!(cache_or_render_seeded_embed(&renderer).unwrap(), key);
+    }
+
+    #[test]
+    fn embed_cache_entry_empty_is_rerendered() {
+        assert_embed_cache_self_heals(b"");
+    }
+
+    #[test]
+    fn embed_cache_entry_non_png_is_rerendered() {
+        assert_embed_cache_self_heals(b"not a png");
+    }
+
+    #[test]
+    fn embed_cache_miss_renders_once_and_writes_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
+        let status = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let key =
+            cache_or_render_embed(7, &status, BUILTIN_EMBED_PARAMS, &renderer, &cache_dir).unwrap();
+
+        assert_eq!(renderer.calls(), 1);
+        assert_eq!(renderer.urls(), vec![status.normalized_url().to_owned()]);
+        assert_eq!(renderer.params(), vec![BUILTIN_EMBED_PARAMS]);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.png"))).unwrap(),
+            b"\x89PNG\r\n\x1a\nfixture"
+        );
+        assert_eq!(fs::read_dir(cache_dir).unwrap().count(), 1);
     }
 
     impl FakeRunner {
@@ -1161,7 +1956,9 @@ mod tests {
             parsed,
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#),
+            &PanicEmbedRenderer,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
     }
 
@@ -1174,7 +1971,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1192,7 +1991,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1226,7 +2027,9 @@ mod tests {
             deck_with_spanned_code("mermaid", "graph TD", span),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1246,7 +2049,9 @@ mod tests {
             deck_with_spanned_code("math", r#"\frac{1}{2}"#, span),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1270,7 +2075,15 @@ mod tests {
         let frontmatter = parse_frontmatter(markdown).unwrap();
         let parsed = parse_markdown(markdown, frontmatter, &highlighter).unwrap();
 
-        let deck = transform_code_images(parsed, &config(), &runner, &cache_dir).unwrap();
+        let deck = transform_code_images(
+            parsed,
+            &config(),
+            &runner,
+            &PanicEmbedRenderer,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap();
         let fragment = deck.parsed_slides()[0]
             .fragments
             .iter()
@@ -1301,7 +2114,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1334,7 +2149,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1385,7 +2202,9 @@ mod tests {
             deck_with_mermaid(code),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1416,7 +2235,9 @@ mod tests {
             deck_with_mermaid("graph TD\n  A-->B\n"),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1448,7 +2269,9 @@ mod tests {
             deck_with_math(latex),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[0];
@@ -1478,7 +2301,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1498,9 +2323,15 @@ mod tests {
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external math</svg>"#);
 
-        let deck =
-            transform_code_images(deck_with_math(latex), &math_config(), &runner, &cache_dir)
-                .unwrap();
+        let deck = transform_code_images(
+            deck_with_math(latex),
+            &math_config(),
+            &runner,
+            &PanicEmbedRenderer,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap();
 
         assert_eq!(runner.calls.get(), 1);
         assert_eq!(
@@ -1530,7 +2361,9 @@ mod tests {
             deck_with_mermaid("flowchart TD\n  A[unterminated\n"),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected built-in mermaid render failure"),
             Err(err) => err,
@@ -1554,7 +2387,9 @@ mod tests {
             deck_with_math(r#"\frac{1}{"#),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected built-in math render failure"),
             Err(err) => err,
@@ -1603,7 +2438,9 @@ mod tests {
             deck_with_mermaid("this is not a diagram"),
             &CodeImagesConfig::default(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected built-in mermaid non-diagram failure"),
             Err(err) => err,
@@ -1745,7 +2582,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected root-not-found failure"),
             Err(err) => err,
@@ -1884,7 +2723,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected intrinsic size failure"),
             Err(err) => err,
@@ -1921,7 +2762,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &first_runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1937,7 +2780,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &second_runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -1969,7 +2814,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected missing intrinsic size failure"),
             Err(err) => err,
@@ -2003,7 +2850,9 @@ mod tests {
                 deck_with_mermaid("graph TD"),
                 &config(),
                 &runner,
+                &PanicEmbedRenderer,
                 &cache_dir,
+                &embed_cache_dir(&cache_dir),
             ) {
                 Ok(_) => panic!("expected invalid viewBox failure"),
                 Err(err) => err,
@@ -2040,7 +2889,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -2067,7 +2918,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
 
@@ -2088,7 +2941,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected runner failure"),
             Err(err) => err,
@@ -2112,7 +2967,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected empty stdout failure"),
             Err(err) => err,
@@ -2142,7 +2999,9 @@ mod tests {
             deck_with_mermaid("graph TD"),
             &config(),
             &runner,
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         ) {
             Ok(_) => panic!("expected non-SVG stdout failure"),
             Err(err) => err,
@@ -2222,7 +3081,9 @@ mod tests {
             parsed,
             &config,
             &runner,
+            &PanicEmbedRenderer,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
         .unwrap();
         let fragment = &deck.parsed_slides()[0].fragments[1];
@@ -2252,7 +3113,9 @@ mod tests {
             parsed,
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">slot</svg>"#),
+            &PanicEmbedRenderer,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
         .unwrap();
 
@@ -2297,8 +3160,15 @@ mod tests {
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
-        let body_transformed =
-            transform_code_images(body_parsed, &body_config, &runner, &cache_dir).unwrap();
+        let body_transformed = transform_code_images(
+            body_parsed,
+            &body_config,
+            &runner,
+            &PanicEmbedRenderer,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap();
         let body_checked =
             check_deck(map_by_convention(body_transformed, &layout).unwrap()).unwrap();
         let body = SlotName::new("body").unwrap();
@@ -2319,8 +3189,15 @@ mod tests {
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
-        let code_transformed =
-            transform_code_images(code_parsed, &code_config, &runner, &cache_dir).unwrap();
+        let code_transformed = transform_code_images(
+            code_parsed,
+            &code_config,
+            &runner,
+            &PanicEmbedRenderer,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap();
         let err = check_deck(map_by_convention(code_transformed, &layout).unwrap()).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Accepts);
@@ -2349,7 +3226,9 @@ mod tests {
             parsed,
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">same</svg>"#),
+            &PanicEmbedRenderer,
             &cache_dir,
+            &embed_cache_dir(&cache_dir),
         )
         .unwrap();
         let layout = parse_layout(
