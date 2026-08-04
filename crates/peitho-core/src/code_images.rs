@@ -61,7 +61,7 @@ pub struct EmbedRenderParams {
 }
 
 impl EmbedRenderParams {
-    pub const fn new(width_css_px: u32, scale_factor: u32, theme: EmbedTheme) -> Self {
+    pub(crate) const fn new(width_css_px: u32, scale_factor: u32, theme: EmbedTheme) -> Self {
         Self {
             width_css_px,
             scale_factor,
@@ -70,11 +70,8 @@ impl EmbedRenderParams {
     }
 }
 
-pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams = EmbedRenderParams {
-    width_css_px: 550,
-    scale_factor: 2,
-    theme: EmbedTheme::Light,
-};
+pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams =
+    EmbedRenderParams::new(550, 2, EmbedTheme::Light);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmbedTarget {
@@ -104,7 +101,6 @@ struct TweetStatusUrl {
 
 impl TweetStatusUrl {
     fn normalized_url(&self) -> &str {
-        debug_assert!(self.normalized_url.ends_with(&self.status_id));
         &self.normalized_url
     }
 }
@@ -132,8 +128,11 @@ fn parse_embed_block(line: usize, body: &str) -> Result<EmbedTarget> {
 
 fn parse_embed_url(line: usize, url: &str) -> Result<EmbedTarget> {
     for prefix in ["https://x.com/", "https://twitter.com/"] {
-        if let Some(path) = url.strip_prefix(prefix) {
-            return parse_x_status_url(line, path);
+        if url
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        {
+            return parse_x_status_url(line, &url[prefix.len()..]);
         }
     }
     Err(unsupported_embed_url_error(line))
@@ -1399,6 +1398,22 @@ mod tests {
             "https://x.com/gosukenator/status/2083825695709597710"
         );
         assert_eq!(x, twitter);
+    }
+
+    #[test]
+    fn embed_block_accepts_case_insensitive_scheme_and_host() {
+        let canonical =
+            parse_embed_block(7, "https://x.com/gosukenator/status/2083825695709597710").unwrap();
+        let uppercase_x_host =
+            parse_embed_block(7, "https://X.com/Gosukenator/status/2083825695709597710").unwrap();
+        let uppercase_twitter_scheme = parse_embed_block(
+            7,
+            "HTTPS://twitter.com/gosukenator/status/2083825695709597710",
+        )
+        .unwrap();
+
+        assert_eq!(uppercase_x_host, canonical);
+        assert_eq!(uppercase_twitter_scheme, canonical);
     }
 
     fn assert_embed_error(body: &str, message: &str) {

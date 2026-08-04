@@ -110,12 +110,7 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
         normalized_url: &str,
         params: peitho_core::code_images::EmbedRenderParams,
     ) -> peitho_core::Result<Vec<u8>> {
-        let chrome = locate_chrome().map_err(|err| {
-            cli_embed_renderer_error(
-                err,
-                "install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
-            )
-        })?;
+        let chrome = locate_chrome().map_err(|err| cli_embed_renderer_error(err, ""))?;
         let temp = tempfile::tempdir().map_err(|err| {
             cli_embed_renderer_error(
                 format!("failed to create temporary tweet embed workspace: {err}"),
@@ -1837,12 +1832,31 @@ fn find_chrome_in_path(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     })
 }
 
+#[derive(Clone, Copy)]
+enum EmbedWrapperMode {
+    Measure,
+    Capture,
+}
+
 fn embed_wrapper_html(
     normalized_url: &str,
     params: peitho_core::code_images::EmbedRenderParams,
+    mode: EmbedWrapperMode,
 ) -> String {
     let width = params.width_css_px;
     let theme = params.theme.as_str();
+    let (script_error_release, timeout_release) = match mode {
+        EmbedWrapperMode::Measure => (
+            "  js.onerror = releaseLoad;\n",
+            "setTimeout(releaseLoad, 15000);\n",
+        ),
+        EmbedWrapperMode::Capture => {
+            // Capture has no failure release: a named timeout is safer than
+            // completing load and silently caching a non-rendered screenshot.
+            ("", "")
+        }
+    };
+    // `{normalized_url}` is safe only under `parse_x_status_url`'s strict grammar; revisit if loosened.
     format!(
         r#"<!doctype html>
 <html>
@@ -1858,18 +1872,28 @@ fn embed_wrapper_html(
 var holder = document.getElementById("peitho-load-holder");
 holder.contentDocument.open();
 holder.contentDocument.write("holding load");
+var loadReleased = false;
+function releaseLoad() {{
+  if (loadReleased) return;
+  loadReleased = true;
+  try {{
+    holder.contentDocument.close();
+  }} catch (error) {{
+    console.error("failed to release peitho load holder", error);
+  }}
+}}
 window.twttr = (function(d, s, id) {{
   var js, first = d.getElementsByTagName(s)[0], twttr = window.twttr || {{}};
   if (d.getElementById(id)) return twttr;
   js = d.createElement(s);
   js.id = id;
   js.src = "https://platform.x.com/widgets.js";
-  first.parentNode.insertBefore(js, first);
+{script_error_release}  first.parentNode.insertBefore(js, first);
   twttr._e = [];
   twttr.ready = function(callback) {{ twttr._e.push(callback); }};
   return twttr;
 }}(document, "script", "twitter-wjs"));
-twttr.ready(function(twttr) {{
+{timeout_release}twttr.ready(function(twttr) {{
   twttr.events.bind("rendered", function(event) {{
     try {{
       var iframe = event && event.target && event.target.tagName === "IFRAME"
@@ -1880,11 +1904,7 @@ twttr.ready(function(twttr) {{
       if (!Number.isFinite(height) || height <= 0) return;
       document.title = "peitho-embed-height:" + height;
     }} finally {{
-      try {{
-        holder.contentDocument.close();
-      }} catch (error) {{
-        console.error("failed to release peitho load holder", error);
-      }}
+      releaseLoad();
     }}
   }});
 }});
@@ -1951,18 +1971,38 @@ fn parse_embed_height(dom: &[u8]) -> miette::Result<u32> {
             miette::miette!(
                 "official X embed height title was incomplete\nhelp: retry with Chrome and network access to X"
             )
-        })?;
+    })?;
     let title = &dom[title_start..title_end];
     let height = title
         .strip_prefix("peitho-embed-height:")
         .and_then(|height| height.parse::<u32>().ok())
-        .filter(|height| (1..=10_000).contains(height))
+        .filter(|height| *height > 0)
         .ok_or_else(|| {
             miette::miette!(
                 "official X embed did not publish a valid rendered height (title: {title})\nhelp: check network access to X and that the post is public"
             )
         })?;
+    if height >= 10_000 {
+        return Err(miette::miette!(
+            "rendered embed height {height} reaches the 10000px measurement viewport; the post is too tall to embed"
+        ));
+    }
     Ok(height)
+}
+
+fn embed_dump_has_complete_title(stdout: &[u8]) -> bool {
+    const TITLE_PREFIX: &[u8] = b"<title>peitho-embed-";
+    const TITLE_END: &[u8] = b"</title>";
+
+    let Some(start) = stdout
+        .windows(TITLE_PREFIX.len())
+        .position(|window| window == TITLE_PREFIX)
+    else {
+        return false;
+    };
+    stdout[start + TITLE_PREFIX.len()..]
+        .windows(TITLE_END.len())
+        .any(|window| window == TITLE_END)
 }
 
 fn render_embed_with_invoker<F>(
@@ -1974,28 +2014,40 @@ fn render_embed_with_invoker<F>(
 where
     F: FnMut(&[OsString], ChromeCompletion) -> miette::Result<ChromeOutput>,
 {
-    let wrapper_path = temp_dir.join("embed.html");
-    fs::write(&wrapper_path, embed_wrapper_html(normalized_url, params)).into_diagnostic()?;
-    let wrapper_url = file_url(&wrapper_path)?;
+    let measure_wrapper_path = temp_dir.join("embed-measure.html");
+    fs::write(
+        &measure_wrapper_path,
+        embed_wrapper_html(normalized_url, params, EmbedWrapperMode::Measure),
+    )
+    .into_diagnostic()?;
+    let measure_wrapper_url = file_url(&measure_wrapper_path)?;
 
     let measure_profile = temp_dir.join("measure-profile");
-    let capture_profile = temp_dir.join("capture-profile");
     fs::create_dir_all(&measure_profile).into_diagnostic()?;
-    fs::create_dir_all(&capture_profile).into_diagnostic()?;
 
-    let measure_args = embed_measure_args(&measure_profile, &wrapper_url, params);
+    let measure_args = embed_measure_args(&measure_profile, &measure_wrapper_url, params);
     let measured = invoke(&measure_args, ChromeCompletion::EmbedMeasured)?;
     let height = parse_embed_height(&measured.stdout)?;
 
+    let capture_wrapper_path = temp_dir.join("embed-capture.html");
+    fs::write(
+        &capture_wrapper_path,
+        embed_wrapper_html(normalized_url, params, EmbedWrapperMode::Capture),
+    )
+    .into_diagnostic()?;
+    let capture_wrapper_url = file_url(&capture_wrapper_path)?;
+    let capture_profile = temp_dir.join("capture-profile");
+    fs::create_dir_all(&capture_profile).into_diagnostic()?;
+
     let output_path = temp_dir.join("embed.png");
-    let capture_args =
-        embed_capture_args(&capture_profile, &output_path, &wrapper_url, height, params);
-    invoke(
-        &capture_args,
-        ChromeCompletion::PngWritten {
-            output_path: output_path.clone(),
-        },
-    )?;
+    let capture_args = embed_capture_args(
+        &capture_profile,
+        &output_path,
+        &capture_wrapper_url,
+        height,
+        params,
+    );
+    invoke(&capture_args, ChromeCompletion::PngWritten)?;
     fs::read(&output_path).into_diagnostic()
 }
 
@@ -2026,7 +2078,7 @@ enum ChromeCompletion {
     PdfWritten { output_path: PathBuf },
     LintResultLogged,
     EmbedMeasured,
-    PngWritten { output_path: PathBuf },
+    PngWritten,
 }
 
 #[derive(Default)]
@@ -2041,7 +2093,7 @@ impl ChromeCompletion {
             Self::PdfWritten { .. } => "PDF output",
             Self::LintResultLogged => "lint measurement payload",
             Self::EmbedMeasured => "official X embed rendered height",
-            Self::PngWritten { .. } => "tweet embed PNG output",
+            Self::PngWritten => "tweet embed PNG output",
         }
     }
 
@@ -2051,7 +2103,7 @@ impl ChromeCompletion {
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
-            Self::EmbedMeasured | Self::PngWritten { .. } => {
+            Self::EmbedMeasured | Self::PngWritten => {
                 "retry the build with Chrome and network access to X"
             }
         }
@@ -2065,7 +2117,7 @@ impl ChromeCompletion {
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
-            Self::EmbedMeasured | Self::PngWritten { .. } => {
+            Self::EmbedMeasured | Self::PngWritten => {
                 "retry the build with Chrome and network access to X"
             }
         }
@@ -2100,8 +2152,8 @@ impl ChromeCompletion {
                 }
                 state.signal_seen
             }
-            Self::EmbedMeasured => parse_embed_height(stdout).is_ok(),
-            Self::PngWritten { output_path } => {
+            Self::EmbedMeasured => embed_dump_has_complete_title(stdout),
+            Self::PngWritten => {
                 if !state.signal_seen {
                     state.signal_seen = scan_for_needle(
                         stderr,
@@ -2109,7 +2161,7 @@ impl ChromeCompletion {
                         b"bytes written to file",
                     );
                 }
-                output_file_is_nonempty(output_path) && state.signal_seen
+                state.signal_seen
             }
         }
     }
@@ -2123,8 +2175,8 @@ impl ChromeCompletion {
         match self {
             Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
             Self::LintResultLogged => self.is_ready(stdout, stderr, state),
-            Self::EmbedMeasured => parse_embed_height(stdout).is_ok(),
-            Self::PngWritten { .. } => self.is_ready(stdout, stderr, state),
+            Self::EmbedMeasured => embed_dump_has_complete_title(stdout),
+            Self::PngWritten => self.is_ready(stdout, stderr, state),
         }
     }
 }
@@ -4126,11 +4178,15 @@ contexts:
                 .into_bytes(),
                 Vec::new(),
             )),
-            ChromeCompletion::PngWritten { output_path } => {
-                assert!(has_arg(
-                    args,
-                    &format!("--screenshot={}", output_path.display())
-                ));
+            ChromeCompletion::PngWritten => {
+                let output_path = args
+                    .iter()
+                    .find_map(|arg| {
+                        arg.to_str()
+                            .and_then(|arg| arg.strip_prefix("--screenshot="))
+                    })
+                    .map(PathBuf::from)
+                    .expect("embed capture args include a screenshot path");
                 fs::write(output_path, png).into_diagnostic()?;
                 Ok(chrome_output(
                     Vec::new(),
@@ -4147,24 +4203,37 @@ contexts:
     }
 
     #[test]
-    fn embed_wrapper_html_has_official_widget_and_render_signal() {
-        let html = embed_wrapper_html(
+    fn embed_wrapper_html_splits_measure_failure_release_from_strict_capture() {
+        let measure = embed_wrapper_html(
             "https://x.com/gosukenator/status/2083825695709597710",
             BUILTIN_EMBED_PARAMS,
+            EmbedWrapperMode::Measure,
         );
-        assert!(html.contains(r#"class="twitter-tweet""#));
-        assert!(html.contains(r#"data-width="550""#));
-        assert!(html.contains(r#"data-theme="light""#));
-        assert!(html.contains("https://platform.x.com/widgets.js"));
-        assert!(html.contains("twttr.events.bind(\"rendered\""));
-        assert!(html.contains("peitho-embed-height:"));
-        assert!(html.contains("getBoundingClientRect().height"));
-        assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
-        assert!(html.contains("holder.contentDocument.open()"));
-        assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
-        assert!(html.contains("holder.contentDocument.close()"));
-        assert!(html.contains("margin:0"));
-        assert!(!html.contains("image.decode"));
+        let capture = embed_wrapper_html(
+            "https://x.com/gosukenator/status/2083825695709597710",
+            BUILTIN_EMBED_PARAMS,
+            EmbedWrapperMode::Capture,
+        );
+        for html in [&measure, &capture] {
+            assert!(html.contains(r#"class="twitter-tweet""#));
+            assert!(html.contains(r#"data-width="550""#));
+            assert!(html.contains(r#"data-theme="light""#));
+            assert!(html.contains("https://platform.x.com/widgets.js"));
+            assert!(html.contains("twttr.events.bind(\"rendered\""));
+            assert!(html.contains("peitho-embed-height:"));
+            assert!(html.contains("getBoundingClientRect().height"));
+            assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
+            assert!(html.contains("holder.contentDocument.open()"));
+            assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
+            assert!(html.contains("holder.contentDocument.close()"));
+            assert!(html.contains("finally {\n      releaseLoad();\n    }"));
+            assert!(html.contains("margin:0"));
+            assert!(!html.contains("image.decode"));
+        }
+        assert!(measure.contains("js.onerror = releaseLoad;"));
+        assert!(measure.contains("setTimeout(releaseLoad, 15000);"));
+        assert!(!capture.contains("js.onerror = releaseLoad;"));
+        assert!(!capture.contains("setTimeout(releaseLoad, 15000);"));
     }
 
     #[test]
@@ -4188,6 +4257,16 @@ contexts:
         assert!(has_arg(&invocations[1], "--force-device-scale-factor=2"));
         assert!(!has_arg_prefix(&invocations[0], "--virtual-time-budget"));
         assert!(!has_arg_prefix(&invocations[1], "--virtual-time-budget"));
+        assert!(invocations[0]
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("embed-measure.html"));
+        assert!(invocations[1]
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("embed-capture.html"));
         assert_ne!(
             user_data_dir(&invocations[0]),
             user_data_dir(&invocations[1])
@@ -4195,14 +4274,59 @@ contexts:
     }
 
     #[test]
-    fn embed_chrome_height_parser_rejects_pending_zero_and_oversized_titles() {
+    fn embed_chrome_height_parser_enforces_exclusive_measurement_ceiling() {
         assert_eq!(
             parse_embed_height(b"<title>peitho-embed-height:742</title>").unwrap(),
             742
         );
+        assert_eq!(
+            parse_embed_height(b"<title>peitho-embed-height:9999</title>").unwrap(),
+            9999
+        );
         assert!(parse_embed_height(b"<title>peitho-embed-pending</title>").is_err());
         assert!(parse_embed_height(b"<title>peitho-embed-height:0</title>").is_err());
-        assert!(parse_embed_height(b"<title>peitho-embed-height:10001</title>").is_err());
+        let err = parse_embed_height(b"<title>peitho-embed-height:10000</title>").unwrap_err();
+        assert!(err.to_string().contains(
+            "rendered embed height 10000 reaches the 10000px measurement viewport; the post is too tall to embed"
+        ));
+    }
+
+    #[test]
+    fn embed_measurement_completion_accepts_only_complete_peitho_titles() {
+        let pending = b"<html><title>peitho-embed-pending</title></html>";
+        let partial = b"<html><title>peitho-embed-pending";
+
+        let mut running_state = ChromeCompletionState::default();
+        assert!(ChromeCompletion::EmbedMeasured.is_ready(pending, &[], &mut running_state));
+        let mut exited_state = ChromeCompletionState::default();
+        assert!(
+            ChromeCompletion::EmbedMeasured.is_ready_after_successful_exit(
+                pending,
+                &[],
+                &mut exited_state
+            )
+        );
+        let mut partial_running_state = ChromeCompletionState::default();
+        assert!(!ChromeCompletion::EmbedMeasured.is_ready(
+            partial,
+            &[],
+            &mut partial_running_state
+        ));
+        let mut partial_exited_state = ChromeCompletionState::default();
+        assert!(
+            !ChromeCompletion::EmbedMeasured.is_ready_after_successful_exit(
+                partial,
+                &[],
+                &mut partial_exited_state
+            )
+        );
+
+        let err = parse_embed_height(pending).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("official X embed did not publish a valid rendered height"));
+        assert!(err.to_string().contains("check network access to X"));
+        assert!(err.to_string().contains("post is public"));
     }
 
     #[test]
@@ -7509,6 +7633,21 @@ exec sleep 30
             !message.contains("export command"),
             "actual error: {message}"
         );
+    }
+
+    #[test]
+    fn png_completion_accepts_zero_byte_write_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("embed.png");
+        fs::write(&out, []).unwrap();
+        let completion = ChromeCompletion::PngWritten;
+        let stderr = b"0 bytes written to file embed.png\n";
+
+        let mut running_state = ChromeCompletionState::default();
+        assert!(completion.is_ready(&[], stderr, &mut running_state));
+
+        let mut exited_state = ChromeCompletionState::default();
+        assert!(completion.is_ready_after_successful_exit(&[], stderr, &mut exited_state));
     }
 
     #[cfg(unix)]

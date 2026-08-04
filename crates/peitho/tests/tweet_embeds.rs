@@ -102,7 +102,7 @@ fn build_reports_cache_miss_when_chrome_is_unavailable() {
     ));
     write_tweet_deck(&deck);
 
-    Command::cargo_bin("peitho")
+    let assert = Command::cargo_bin("peitho")
         .unwrap()
         .env("PEITHO_CHROME_PATH", dir.path().join("missing-chrome"))
         .arg("build")
@@ -123,6 +123,13 @@ fn build_reports_cache_miss_when_chrome_is_unavailable() {
         .stderr(predicate::str::contains("Chrome not found"))
         .stderr(predicate::str::contains("PEITHO_CHROME_PATH"))
         .stderr(predicate::str::contains("delete the cache file to refresh"));
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert_eq!(
+        stderr.matches("install Google Chrome or Chromium").count(),
+        1,
+        "actual stderr: {stderr}"
+    );
 }
 
 #[test]

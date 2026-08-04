@@ -39,16 +39,13 @@ pub struct EmbedRenderParams {
 }
 
 impl EmbedRenderParams {
-    pub const fn new(width_css_px: u32, scale_factor: u32, theme: EmbedTheme) -> Self {
+    pub(crate) const fn new(width_css_px: u32, scale_factor: u32, theme: EmbedTheme) -> Self {
         Self { width_css_px, scale_factor, theme }
     }
 }
 
-pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams = EmbedRenderParams {
-    width_css_px: 550,
-    scale_factor: 2,
-    theme: EmbedTheme::Light,
-};
+pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams =
+    EmbedRenderParams::new(550, 2, EmbedTheme::Light);
 
 pub trait EmbedRenderer {
     fn render(
@@ -89,6 +86,13 @@ fn embed_block_accepts_x_and_twitter_status_urls() {
         "https://x.com/gosukenator/status/2083825695709597710"
     );
     assert_eq!(x, twitter);
+}
+
+#[test]
+fn embed_block_accepts_case_insensitive_scheme_and_host() {
+    let canonical = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+    assert_eq!(parse_embed_block(7, "https://X.com/A/status/1").unwrap(), canonical);
+    assert_eq!(parse_embed_block(7, "HTTPS://twitter.com/a/status/1").unwrap(), canonical);
 }
 
 fn assert_embed_error(body: &str, message: &str) {
@@ -161,8 +165,10 @@ First run `cargo test -p peitho-core embed_block`; it must fail because
 `EmbedTarget::X(TweetStatusUrl { normalized_url, user, status_id })`. Trim each
 line, discard blank lines, require exactly one remaining line, then send it
 through `parse_embed_url`, the single URL→provider dispatcher. Its only v1
-arm recognizes exact `https://x.com/` or `https://twitter.com/` prefixes and
-delegates to the X parser; another host produces the provider-follow-up error.
+arm recognizes the `https://x.com/` and `https://twitter.com/` prefixes with
+ASCII-case-insensitive scheme/host matching, then delegates the untouched,
+case-sensitive path to the X parser; another host produces the
+provider-follow-up error.
 The X parser requires three path segments:
 `<user>/status/<id>`. Require a nonempty ASCII alphanumeric/underscore user
 and a nonempty ASCII-decimal ID; reject trailing slash, query, fragment,
@@ -402,9 +408,9 @@ directory writable. Never install an `_ => {}` arm.
 
 ## Task 6: Generate the official-widget wrapper as a pure function
 
-**Goal**: Produce a temporary 550-CSS-pixel wrapper whose only completion
-signal is the official widget's `rendered` event and whose measured height is
-machine-readable from `document.title`.
+**Goal**: Produce measure and capture variants of a temporary 550-CSS-pixel
+wrapper, with successful rendering gated by the official widget's `rendered`
+event and measured height published through `document.title`.
 
 **Files**: `crates/peitho/src/main.rs`
 
@@ -412,24 +418,27 @@ machine-readable from `document.title`.
 
 ```rust
 #[test]
-fn embed_wrapper_html_has_official_widget_and_render_signal() {
-    let html = embed_wrapper_html(
+fn embed_wrapper_html_splits_measure_failure_release_from_strict_capture() {
+    let measure = embed_wrapper_html(
         "https://x.com/gosukenator/status/2083825695709597710",
         BUILTIN_EMBED_PARAMS,
+        EmbedWrapperMode::Measure,
     );
-    assert!(html.contains(r#"class="twitter-tweet""#));
-    assert!(html.contains(r#"data-width="550""#));
-    assert!(html.contains(r#"data-theme="light""#));
-    assert!(html.contains("https://platform.x.com/widgets.js"));
-    assert!(html.contains("twttr.events.bind(\"rendered\""));
-    assert!(html.contains("peitho-embed-height:"));
-    assert!(html.contains("getBoundingClientRect().height"));
-    assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
-    assert!(html.contains("holder.contentDocument.open()"));
-    assert!(html.contains(r#"holder.contentDocument.write("holding load")"#));
-    assert!(html.contains("holder.contentDocument.close()"));
-    assert!(html.contains("margin:0"));
-    assert!(!html.contains("image.decode"));
+    let capture = embed_wrapper_html(
+        "https://x.com/gosukenator/status/2083825695709597710",
+        BUILTIN_EMBED_PARAMS,
+        EmbedWrapperMode::Capture,
+    );
+    for html in [&measure, &capture] {
+        assert!(html.contains(r#"<iframe id="peitho-load-holder""#));
+        assert!(html.contains("twttr.events.bind(\"rendered\""));
+        assert!(html.contains("finally {\n      releaseLoad();\n    }"));
+        assert!(html.contains("holder.contentDocument.close()"));
+    }
+    assert!(measure.contains("js.onerror = releaseLoad;"));
+    assert!(measure.contains("setTimeout(releaseLoad, 15000);"));
+    assert!(!capture.contains("js.onerror = releaseLoad;"));
+    assert!(!capture.contains("setTimeout(releaseLoad, 15000);"));
 }
 ```
 
@@ -443,15 +452,17 @@ the initial title to `peitho-embed-pending`. Inside `twttr.ready`, bind
 `twttr.events` `rendered`; locate the rendered iframe, compute
 `Math.ceil(getBoundingClientRect().height)`, and set
 `document.title = "peitho-embed-height:" + height` only for a positive finite
-height. Add a hidden zero-size `<iframe id="peitho-load-holder">` and, in the
-inline script before loading `widgets.js`, call its `contentDocument.open()`
-and `contentDocument.write("holding load")` without closing it. The official
-widget's `rendered` handler releases the parent load in a `finally` block by
-calling `holder.contentDocument.close()` inside `try`/`catch`; no tweet iframe
-and an invalid height both leave the title pending but still release the load.
-Exclude the holder from the tweet-iframe fallback selector. The canonical URL
-grammar makes interpolation attribute-safe; do not accept unvalidated input.
-Do not call `image.decode()` or place this wrapper in any emitted artifact.
+height. `EmbedWrapperMode::{Measure,Capture}` both add a hidden zero-size load
+holder iframe, open/write its child document before loading `widgets.js`, and
+release it from the `rendered` handler's `finally` path. Measure additionally
+sets `js.onerror = releaseLoad` and a 15-second `setTimeout(releaseLoad, 15000)`;
+both failure paths leave the pending title so dump-dom completes and the
+specific network/public-post error is returned. Capture deliberately has
+neither fallback: releasing before `rendered` would cache a valid-but-blank
+PNG, while a named 60-second timeout is safe. Exclude the holder from the
+tweet-iframe selector. Attribute interpolation remains safe only under Task
+1's strict URL grammar; loosening it must add escaping. Do not call
+`image.decode()` or emit the wrapper.
 
 **Verification**: `cargo test -p peitho embed_wrapper_html` passes.
 
@@ -487,14 +498,18 @@ fn embed_chrome_orchestration_measures_then_captures() {
     assert!(has_arg(&invocations[1], "--force-device-scale-factor=2"));
     assert!(!has_arg_prefix(&invocations[0], "--virtual-time-budget"));
     assert!(!has_arg_prefix(&invocations[1], "--virtual-time-budget"));
+    assert!(invocations[0].last().unwrap().to_string_lossy().ends_with("embed-measure.html"));
+    assert!(invocations[1].last().unwrap().to_string_lossy().ends_with("embed-capture.html"));
     assert_ne!(user_data_dir(&invocations[0]), user_data_dir(&invocations[1]));
 }
 
 #[test]
-fn embed_chrome_height_parser_rejects_pending_zero_and_oversized_titles() {
+fn embed_chrome_height_parser_enforces_exclusive_measurement_ceiling() {
+    assert_eq!(parse_embed_height(b"<title>peitho-embed-height:9999</title>").unwrap(), 9999);
     assert!(parse_embed_height(b"<title>peitho-embed-pending</title>").is_err());
     assert!(parse_embed_height(b"<title>peitho-embed-height:0</title>").is_err());
-    assert!(parse_embed_height(b"<title>peitho-embed-height:10001</title>").is_err());
+    let err = parse_embed_height(b"<title>peitho-embed-height:10000</title>").unwrap_err();
+    assert!(err.to_string().contains("reaches the 10000px measurement viewport"));
 }
 ```
 
@@ -502,8 +517,10 @@ First run `cargo test -p peitho embed_chrome`; it must fail before the pure
 argument/parsing/orchestration functions exist.
 
 **Implementation**: Add pure `embed_measure_args`, `embed_capture_args`, and
-`parse_embed_height` functions; accept heights `1..=10_000`. Both argument
-sets include `--headless=new`, `--disable-gpu`, `--no-sandbox`, a throwaway
+`parse_embed_height` functions; accept heights `1..10_000`. A height at or
+above the staging viewport is the distinct error `rendered embed height {h}
+reaches the 10000px measurement viewport; the post is too tall to embed`.
+Both argument sets include `--headless=new`, `--disable-gpu`, `--no-sandbox`, a throwaway
 `--user-data-dir`, and the wrapper's `file://` URL. Neither pass may include a
 `--virtual-time-budget` argument. Measurement adds `--dump-dom`, a 550px-wide
 staging window, and scale 2; capture adds `--screenshot=<temp PNG>`,
@@ -512,10 +529,13 @@ two passes and `CHROME_ONE_SHOT_TIMEOUT` for each.
 
 Extend `ChromeCompletion` with exhaustive `EmbedMeasured` and `PngWritten`
 arms. Keep `ChromeOutput.stdout` in non-test builds so the first pass can read
-the title. Measurement completes only when stdout contains the height prefix;
-capture completes only when the PNG is nonempty and Chrome reports bytes
-written. A successful Chrome exit with the pending title is a renderer error
-and must stop before capture. `render_embed_with_chrome` supplies an invoker that calls
+the title. Measurement completes while running only when stdout contains the
+height prefix; a successful exit returns pending-title stdout to
+`parse_embed_height` for the specific network/public-post diagnostic.
+`PngWritten` completes on Chrome's `bytes written to file` needle alone
+because that signal follows the write; read the file afterward so zero bytes
+reach core's existing line-numbered `empty PNG output` error.
+`render_embed_with_chrome` supplies an invoker that calls
 `run_one_shot_chrome`, whose only process path is
 `run_child_with_timeout`; never use `Command::output()`. Implement
 `CliEmbedRenderer::render` by locating Chrome lazily inside the method,
@@ -538,13 +558,13 @@ without virtual time. Chrome may linger after reporting bytes written; the
 existing one-shot completion and kill path owns that case.
 
 **Accepted residual risk**: The widget's `rendered` event can fire while an
-inner-iframe subresource still races the screenshot. The parent load event
-also waits for the tweet iframe itself, so capture is gated on both the
-official render signal and the widget iframe's own load; v1 does not add pixel
-inspection or an image-decoding dependency for the narrower inner-resource
-race. A deleted or blocked post releases the load holder from the handler's
-no-iframe or invalid-height path, leaving the pending title so measurement
-fails immediately instead of waiting for the 60-second timeout. The residual
+inner-iframe subresource still races the screenshot. The parent load also
+waits for the tweet iframe itself, so capture is gated on both the official
+render signal and the iframe load. A deleted/blocked post or script failure is
+rejected during measure via `onerror` or the 15-second fallback. Capture has
+no non-rendered release; only a transient failure between passes pays the
+named 60-second timeout instead of caching a blank PNG. v1 adds no pixel
+inspection or image decoder for the remaining inner-resource race. Its
 symptom is a partial cached tweet image; delete that block's named
 `.peitho/embeds-cache/<key>.png` file and rebuild with network access to
 refresh it. Do not add image decoding to close this residual risk.

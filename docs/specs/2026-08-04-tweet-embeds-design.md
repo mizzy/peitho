@@ -101,8 +101,8 @@ with a fixture renderer. The CLI implements it with the existing
    URL — never a silent blank image. The timeout follows the existing
    Chrome one-shot budget.
 
-The `--virtual-time-budget` + `image.decode()` Linux hang pitfall applies:
-the wrapper page must wait on load/error events only.
+The `image.decode()` hang pitfall's remedy applies by construction: the
+wrapper waits on load/error events and never calls `decode()`.
 
 ### Cache
 
@@ -151,16 +151,21 @@ constraints scale it.
 - Screenshot output is not pixel-deterministic across platforms (font
   rasterization) — same accepted property as external code_images
   commands; the cache makes each machine self-consistent.
-- **Accepted residual risk**: the capture pass reloads the wrapper in a
-  fresh profile. Its screenshot is gated on the parent load event, which
-  waits for both the load-holder release (fired by `rendered`) and the
-  tweet iframe's own load, so a pre-render capture cannot happen the way
-  it would under a timer; what remains is an inner-iframe subresource
-  racing the shot. A deleted/blocked post releases the holder with the
-  title still `peitho-embed-pending`, failing fast with a line-numbered
-  error instead of waiting out the timeout. Closing the remaining race
-  would require a pixel-inspection dependency. Symptom: a partial embed
-  on the slide; remedy: delete the named cache file to refresh.
+- **Failure-mode asymmetry (deliberate)**: the measure wrapper releases
+  the load holder on widget failure too (script `onerror`, 15s fallback
+  timer) with the title still `peitho-embed-pending`, so deleted/blocked
+  posts and network failures fail in seconds with a line-numbered error.
+  The capture wrapper releases the holder **only** on `rendered`: a
+  non-rendered release would screenshot a valid-but-blank PNG and cache
+  it silently, and hanging into the one-shot timeout with a named error
+  is strictly better. Dead posts never reach capture (measure fails
+  first); only a transient X failure between the passes pays the timeout.
+- **Accepted residual risk**: the capture screenshot is gated on the
+  parent load event, which waits for the `rendered`-fired holder release
+  and the tweet iframe's own load; what remains is an inner-iframe
+  subresource racing the shot. Closing that would require a
+  pixel-inspection dependency. Symptom: a partial embed on the slide;
+  remedy: delete the named cache file to refresh.
 - Text in the slide is not selectable (it is an image). Accepted: fidelity
   was chosen over selectability; the v2 card mode is the selectable option.
 - `code_images.embed:` frontmatter continues to mean "external SVG command
