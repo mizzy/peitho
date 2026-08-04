@@ -77,8 +77,9 @@ and overview mode.
 
 ![peitho preview showing a single slide in the browser](/guide-shots/preview-single.png)
 
-In preview, `o`, Enter, or Esc toggles single-slide and tile overview modes;
-arrows move through slides and overview tiles, and clicking a tile opens it.
+In preview, `o` toggles single-slide and tile overview modes, while Esc returns
+to the overview and Enter opens the selected tile; arrows move through slides
+and overview tiles, and clicking a tile opens it.
 
 ![The overview view: every slide as a tile in a scrollable grid](/guide-shots/preview-overview.png)
 
