@@ -1,6 +1,13 @@
 /target
 /dist
 .peitho/
+
+# Demo embed snapshots are versioned; re-include the ignored parent before
+# narrowing back to only the embeds cache.
+!examples/*/.peitho/
+examples/*/.peitho/*
+!examples/*/.peitho/embeds-cache/
+!examples/*/.peitho/embeds-cache/**
 node_modules/
 packages/peitho-present/node_modules/
 packages/peitho-present/dist/*
