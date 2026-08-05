@@ -43,7 +43,7 @@ fn write_tweet_deck(path: &Path) {
     fs::write(path, format!("# Tweet\n\n```embed\n{STATUS_URL}\n```\n")).unwrap();
 }
 
-fn write_embed_deck(path: &Path, blocks: &[(&str, &str)]) {
+fn write_embed_deck(path: &Path, blocks: &[(&str, Option<&str>)]) {
     let layouts = path.parent().unwrap().join("layouts");
     fs::create_dir_all(&layouts).unwrap();
     fs::write(
@@ -52,14 +52,15 @@ fn write_embed_deck(path: &Path, blocks: &[(&str, &str)]) {
     )
     .unwrap();
     let mut markdown = "# Tweet\n\n".to_owned();
-    for (url, option) in blocks {
-        markdown.push_str("```embed\n");
+    for (url, options) in blocks {
+        markdown.push_str("```embed");
+        if let Some(options) = options {
+            markdown.push(' ');
+            markdown.push_str(options);
+        }
+        markdown.push('\n');
         markdown.push_str(url);
         markdown.push('\n');
-        if !option.is_empty() {
-            markdown.push_str(option);
-            markdown.push('\n');
-        }
         markdown.push_str("```\n\n");
     }
     fs::write(path, markdown).unwrap();
@@ -125,7 +126,7 @@ fn build_card_embed_from_cached_oembed_without_chrome() {
     let deck = dir.path().join("deck.md");
     let out = dir.path().join("dist");
     seed_oembed_cache(dir.path());
-    write_embed_deck(&deck, &[(CARD_STATUS_URL, "mode: card")]);
+    write_embed_deck(&deck, &[(CARD_STATUS_URL, Some("mode=card"))]);
 
     Command::cargo_bin("peitho")
         .unwrap()
@@ -163,8 +164,8 @@ fn build_all_card_embeds_never_create_png_assets() {
     write_embed_deck(
         &deck,
         &[
-            (CARD_STATUS_URL, "mode: card"),
-            (CARD_STATUS_URL, "mode: card"),
+            (CARD_STATUS_URL, Some("mode=card")),
+            (CARD_STATUS_URL, Some("mode=card")),
         ],
     );
 
@@ -204,7 +205,7 @@ fn build_card_cache_miss_reports_curl_failure_with_refresh_help() {
     )
     .unwrap();
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
-    write_embed_deck(&deck, &[(CARD_STATUS_URL, "mode: card")]);
+    write_embed_deck(&deck, &[(CARD_STATUS_URL, Some("mode=card"))]);
     Command::cargo_bin("peitho")
         .unwrap()
         .env("PATH", &bin)
@@ -246,8 +247,8 @@ fn build_mixed_embed_modes_use_only_their_required_backends() {
     write_embed_deck(
         &deck,
         &[
-            (CARD_STATUS_URL, "mode: card"),
-            (STATUS_URL, "mode: screenshot"),
+            (CARD_STATUS_URL, Some("mode=card")),
+            (STATUS_URL, Some("mode=screenshot")),
         ],
     );
 

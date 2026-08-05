@@ -81,3 +81,46 @@
   max-height: 100%;
   object-fit: contain;
 }
+
+.tweet-embed-card-mode {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 48px;
+  align-items: center;
+  --peitho-embed-card-color: #172033;
+  --peitho-embed-card-background: #ffffff;
+  --peitho-embed-card-border-color: #cfd9de;
+  --peitho-embed-card-link-color: #0f6fc6;
+  --peitho-embed-card-muted-color: #536471;
+}
+
+.tweet-embed-card-mode h1 {
+  margin: 0;
+  font-size: 48px;
+  line-height: 1.08;
+}
+
+.tweet-card-column {
+  min-width: 0;
+}
+
+.tweet-card-column .slot-body {
+  display: grid;
+  gap: 24px;
+  color: #536471;
+}
+
+.tweet-card-column .slot-body > p {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.5;
+}
+
+.tweet-card-column .peitho-embed-card {
+  width: 100%;
+  max-width: none;
+  font-size: 18px;
+  line-height: 1.45;
+  box-shadow: 0 18px 50px rgba(23, 32, 51, 0.1);
+}

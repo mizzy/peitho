@@ -11,8 +11,9 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, CodeImageCommand, CodeImagesConfig, ExplicitSlot, FootnoteEntry, FragmentKind,
-        RawImagePath, Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
+        AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedMode,
+        ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath, Resolution, RevealSpan, SlideKey,
+        SlotName, SourceFragment,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -44,6 +45,69 @@ struct PageSectionMarker {
     name: String,
     planned: PlannedTime,
     line: usize,
+}
+
+pub(crate) fn embed_fence_options_help() -> &'static str {
+    "write card mode on the opening fence as ```embed mode=card```, or use mode=screenshot"
+}
+
+fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedMode> {
+    let Some(tail) = tail else {
+        return Ok(EmbedMode::Screenshot);
+    };
+
+    let mut mode = EmbedMode::Screenshot;
+    let mut mode_seen = false;
+    for token in tail.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            return Err(embed_fence_option_error(
+                line,
+                format!("embed option '{token}' must use key=value syntax"),
+            ));
+        };
+        if key.is_empty() {
+            return Err(embed_fence_option_error(line, "embed option key is empty"));
+        }
+        if value.is_empty() {
+            return Err(embed_fence_option_error(
+                line,
+                "embed option value is empty",
+            ));
+        }
+        if key != "mode" {
+            return Err(embed_fence_option_error(
+                line,
+                format!("unknown embed option '{key}'"),
+            ));
+        }
+        if mode_seen {
+            return Err(embed_fence_option_error(
+                line,
+                "duplicate embed option 'mode'",
+            ));
+        }
+        mode_seen = true;
+        mode = match value {
+            "card" => EmbedMode::Card,
+            "screenshot" => EmbedMode::Screenshot,
+            _ => {
+                return Err(embed_fence_option_error(
+                    line,
+                    format!("unknown embed mode '{value}'"),
+                ));
+            }
+        };
+    }
+    Ok(mode)
+}
+
+fn embed_fence_option_error(line: usize, message: impl Into<String>) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        Some(line),
+        message,
+        embed_fence_options_help(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -2147,10 +2211,10 @@ fn parse_slide(
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                // The info string carries both the language tag and an
-                // optional line-emphasis spec; splitting is deferred to the
-                // End event, where the code line number is already computed
-                // for error reporting.
+                // The info string carries the language tag plus either line
+                // emphasis or a renderer-owned option tail. Splitting is
+                // deferred to the End event, where the code line number is
+                // already computed for error reporting.
                 let info = match kind {
                     CodeBlockKind::Fenced(info) if !info.is_empty() => Some(info.to_string()),
                     _ => None,
@@ -2197,6 +2261,33 @@ fn parse_slide(
                         }
                     }
 
+                    let embed_mode = match (renderer.as_ref(), split.tail) {
+                        (Some(CodeImageRenderer::BuiltinEmbed), tail) => Some(
+                            parse_embed_fence_options(tail, code_line).map_err(&mut slide_err)?,
+                        ),
+                        (Some(CodeImageRenderer::ExternalEmbed(_)), Some(_)) => {
+                            return Err(slide_err(BuildError::new(
+                                ErrorKind::Parse,
+                                Some(code_line),
+                                "mode= options require the built-in embed renderer",
+                                "remove the option or the code_images.embed override",
+                            )));
+                        }
+                        (Some(CodeImageRenderer::External(_)), Some(tail))
+                        | (Some(CodeImageRenderer::BuiltinMermaid), Some(tail))
+                        | (Some(CodeImageRenderer::BuiltinMath), Some(tail))
+                        | (None, Some(tail)) => {
+                            return Err(slide_err(emphasis::unexpected_info_tail_error(
+                                tail, code_line,
+                            )));
+                        }
+                        (Some(CodeImageRenderer::ExternalEmbed(_)), None)
+                        | (Some(CodeImageRenderer::External(_)), None)
+                        | (Some(CodeImageRenderer::BuiltinMermaid), None)
+                        | (Some(CodeImageRenderer::BuiltinMath), None)
+                        | (None, None) => None,
+                    };
+
                     let emphasis = match split.emphasis {
                         Some(spec) => {
                             if renderer.is_some() {
@@ -2232,6 +2323,10 @@ fn parse_slide(
                     };
 
                     let fragment = SourceFragment::code(code_line, language, text);
+                    let fragment = match embed_mode {
+                        Some(mode) => fragment.with_embed_mode(mode),
+                        None => fragment,
+                    };
                     let fragment = match emphasis {
                         Some(emphasis) => {
                             if emphasis.stepped() {
@@ -3085,7 +3180,7 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{
-        domain::{AspectRatio, FragmentKind, RevealSpan},
+        domain::{AspectRatio, EmbedMode, FragmentKind, RevealSpan},
         error::ErrorKind,
         phase::{KeySource, PageNumberFormat},
     };
@@ -5690,12 +5785,101 @@ After list
     }
 
     #[test]
-    fn parser_accepts_bare_embed_and_rejects_its_line_emphasis() {
-        parse_markdown(
+    fn parser_attaches_embed_mode_from_the_fence_info_string() {
+        let bare = parse_markdown(
             "# T\n\n```embed\nhttps://x.com/a/status/1\n```",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
+        let card = parse_markdown(
+            "# T\n\n```embed mode=card\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let screenshot = parse_markdown(
+            "# T\n\n```embed mode=screenshot\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            code_fragment(&bare).embed_mode(),
+            Some(EmbedMode::Screenshot)
+        );
+        assert_eq!(code_fragment(&card).embed_mode(), Some(EmbedMode::Card));
+        assert_eq!(
+            code_fragment(&screenshot).embed_mode(),
+            Some(EmbedMode::Screenshot)
+        );
+    }
+
+    fn embed_info_error(info: &str) -> BuildError {
+        parse_markdown(
+            &format!("# T\n\n```{info}\nhttps://x.com/a/status/1\n```"),
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn embed_info_string_rejects_unknown_key() {
+        let err = embed_info_error("embed theme=dark");
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unknown embed option 'theme'");
+        assert!(err.help.contains("mode=card"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn embed_info_string_rejects_unknown_mode_value() {
+        let err = embed_info_error("embed mode=compact");
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unknown embed mode 'compact'");
+        assert!(err.help.contains("mode=card"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn embed_info_string_rejects_duplicate_mode() {
+        let err = embed_info_error("embed mode=card mode=screenshot");
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "duplicate embed option 'mode'");
+        assert!(err.help.contains("mode=card"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn embed_info_string_rejects_bare_tokens_with_fence_syntax_help() {
+        let err = embed_info_error("embed card");
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "embed option 'card' must use key=value syntax");
+        assert!(err.help.contains("mode=card"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn embed_info_string_rejects_empty_keys_and_values() {
+        let empty_value = embed_info_error("embed mode=");
+        assert_eq!(empty_value.line, Some(3));
+        assert_eq!(empty_value.message, "embed option value is empty");
+        assert!(
+            empty_value.help.contains("mode=card"),
+            "help: {}",
+            empty_value.help
+        );
+
+        let empty_key = embed_info_error("embed =card");
+        assert_eq!(empty_key.line, Some(3));
+        assert_eq!(empty_key.message, "embed option key is empty");
+        assert!(
+            empty_key.help.contains("mode=card"),
+            "help: {}",
+            empty_key.help
+        );
+    }
+
+    #[test]
+    fn embed_braced_info_keeps_the_rendered_image_emphasis_error() {
         let err = parse_markdown(
             "# T\n\n```embed {1}\nhttps://x.com/a/status/1\n```",
             &crate::highlight::Highlighter::defaults(),
@@ -5704,6 +5888,56 @@ After list
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(3));
         assert!(err.message.contains("line emphasis is not supported"));
+    }
+
+    #[test]
+    fn non_embed_info_tails_keep_the_existing_error_and_language_priority() {
+        for info in ["rust mode=card", "rust 2-4", "mermaid mode=card"] {
+            let err = parse_markdown(
+                &format!("# T\n\n```{info}\nx\n```"),
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap_err();
+            assert_eq!(err.line, Some(3), "info: {info}");
+            assert_eq!(
+                err.message, "unexpected text after the code language",
+                "info: {info}"
+            );
+        }
+
+        let err = parse_markdown(
+            "# T\n\n```notalang mode=card\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("unknown code language 'notalang'"));
+
+        let err = parse_markdown(
+            "---\ncode_images:\n  dot: dot -Tsvg\n---\n# T\n\n```dot mode=card\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        assert_eq!(err.line, Some(7));
+        assert_eq!(err.message, "unexpected text after the code language");
+    }
+
+    #[test]
+    fn external_embed_override_rejects_info_string_options() {
+        let err = parse_markdown(
+            "---\ncode_images:\n  embed: embed-to-svg\n---\n# T\n\n```embed mode=card\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "mode= options require the built-in embed renderer"
+        );
+        assert_eq!(
+            err.help,
+            "remove the option or the code_images.embed override"
+        );
     }
 
     #[test]

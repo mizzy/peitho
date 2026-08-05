@@ -178,12 +178,11 @@ Fenced `math` blocks render to KaTeX HTML+MathML at build time. The result is bo
 ### X post embeds
 
 An `embed` fence defaults to the existing official-widget PNG screenshot. Add
-`mode: card` after the X status URL for selectable, themeable HTML instead:
+`mode=card` to the opening fence for selectable, themeable HTML instead:
 
 ````markdown
-```embed
+```embed mode=card
 https://x.com/gosukenator/status/2074821309259973046
-mode: card
 ```
 ````
 
@@ -191,11 +190,11 @@ Card mode is body content and needs an `accepts="blocks"` slot; screenshot mode
 is an image and needs an `accepts="image"` slot. On a cache miss, cards use
 system `curl` to fetch raw oEmbed JSON into `.peitho/embeds-cache/*.json` and
 never start Chrome. Screenshots use the existing `.png` cache and Chrome path.
-`mode: screenshot` states the default explicitly.
+`mode=screenshot` states the default explicitly.
 
-An explicit `code_images.embed` command bypasses this built-in grammar: Peitho
-sends the complete fence body, including option lines, verbatim on stdin and
-treats the returned SVG as an image.
+An explicit `code_images.embed` command rejects `mode=` fence options. With a
+bare `embed` fence, Peitho sends the complete body verbatim on stdin and treats
+the returned SVG as an image.
 
 Use `code_images:` for other diagram tags, or to override a built-in renderer.
 Peitho pipes the fence source to the declared command, expects SVG on stdout,

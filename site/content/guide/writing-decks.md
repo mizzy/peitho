@@ -54,27 +54,26 @@ body slots. No client-side math JavaScript or `code_images:` entry is needed.
 Fenced `mermaid` source becomes an SVG image during the build with Peitho's
 built-in Mermaid renderer.
 
-An `embed` fence accepts an X status URL. It defaults to an official-widget PNG
-screenshot; `mode: card` opts into selectable, themeable HTML without Chrome:
+An `embed` fence accepts one X status URL. It defaults to an official-widget PNG
+screenshot; `mode=card` on the fence opts into selectable, themeable HTML
+without Chrome:
 
 ````markdown
-```embed
+```embed mode=card
 https://x.com/gosukenator/status/2074821309259973046
-mode: card
 ```
 ````
 
 Cards flow into `accepts="blocks"` slots. Screenshots flow into
 `accepts="image"` slots. Card cache misses fetch raw oEmbed JSON with system
-`curl`; screenshot cache misses use Chrome. `mode: screenshot` is the explicit
+`curl`; screenshot cache misses use Chrome. `mode=screenshot` is the explicit
 default.
 
 For other diagram tags, or to override Mermaid, math, or embed with an external
 SVG renderer, add `code_images:` frontmatter. Each entry uses the fence language
 tag as the key and a command string as the value. Peitho sends the fenced source
-to stdin and reads SVG from stdout. An `embed` override receives the complete
-block body verbatim, including option lines; the built-in option grammar does
-not apply.
+to stdin and reads SVG from stdout. An `embed` override rejects `mode=` fence
+options; with a bare fence it receives the complete block body verbatim.
 
 ```yaml
 code_images:

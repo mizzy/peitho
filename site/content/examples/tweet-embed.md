@@ -13,32 +13,26 @@ github_path = "examples/tweet-embed"
 
 ## What it demonstrates
 
-Tweet Embed turns one X status URL in an `embed` fence into a PNG screenshot of
-the official widget during the build. Peitho caches that snapshot and sends it
-through the ordinary image pipeline, so the published deck has no external
-script or live social embed. The example deck uses this default screenshot mode.
+Tweet Embed shows both build-time representations of one X status URL: the
+default PNG screenshot of the official widget and the opt-in static card. The
+published deck has no external script or live social embed.
 
-The committed cache snapshot lets CI and the demo site build without Chrome or
-network access to X. HTML and PDF use the same PNG, so the post looks identical
-in both outputs and remains available offline.
-
-For selectable text and deck-theme styling, add `mode: card` after the URL:
-
-````markdown
-```embed
-https://x.com/gosukenator/status/2074821309259973046
-mode: card
-```
-````
-
-Card mode caches raw oEmbed JSON, rebuilds escaped card HTML on every build,
-and uses system `curl` only on a cache miss. It never invokes Chrome. Cards
-route to `accepts="blocks"` slots; screenshots route to `accepts="image"`
-slots. `mode: screenshot` states the default explicitly.
+Committed PNG and oEmbed JSON caches let CI and the demo site build both slides
+without Chrome or network access to X.
 
 ## What to look at
 
-The slide combines a short body line with the generated image in a
-required `accepts="image"` slot. If the cache is absent and the post has been
-deleted or cannot render, Peitho stops with a line-numbered build error instead
-of silently dropping the embed.
+Slide 1 sends the cached screenshot through a required `accepts="image"` slot,
+preserving the official widget's pixels in HTML and PDF.
+
+Slide 2 opts into card mode:
+
+````markdown
+```embed mode=card
+https://x.com/gosukenator/status/2074821309259973046
+```
+````
+
+The card is selectable HTML regenerated from cached raw JSON, routes to an
+`accepts="blocks"` slot, and follows deck CSS variables such as
+`--peitho-embed-card-link-color`. It never invokes Chrome.

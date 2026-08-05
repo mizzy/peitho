@@ -4107,12 +4107,10 @@ Paragraph after heading.
     fn render_checked_deck_with_code_images(markdown: &str, layout: Layout) -> Deck<Rendered> {
         let highlighter = crate::highlight::Highlighter::defaults();
         let frontmatter = parse_frontmatter(markdown).unwrap();
-        let config = frontmatter.settings().code_images().clone();
         let parsed = parse_markdown_impl(markdown, frontmatter, &highlighter).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let transformed = crate::code_images::transform_code_images(
             parsed,
-            &config,
             &UnusedSvgRunner,
             &UnusedEmbedRenderer,
             &UnusedOEmbedFetcher,

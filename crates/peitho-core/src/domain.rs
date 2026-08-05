@@ -191,15 +191,26 @@ pub struct CodeImagesConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
+    ExternalEmbed(&'a CodeImageCommand),
     BuiltinMermaid,
     BuiltinMath,
     BuiltinEmbed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedMode {
+    Screenshot,
+    Card,
+}
+
 impl CodeImagesConfig {
     pub fn renderer_for(&self, tag: &str) -> Option<CodeImageRenderer<'_>> {
         if let Some(command) = self.entries.get(tag) {
-            return Some(CodeImageRenderer::External(command));
+            return Some(if tag == "embed" {
+                CodeImageRenderer::ExternalEmbed(command)
+            } else {
+                CodeImageRenderer::External(command)
+            });
         }
         match tag {
             "mermaid" => Some(CodeImageRenderer::BuiltinMermaid),
@@ -733,6 +744,7 @@ pub struct SourceFragment<S = RawImagePath> {
     kind: FragmentKind<S>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
+    embed_mode: Option<EmbedMode>,
     markdown: String,
     text: String,
     code: String,
@@ -751,6 +763,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Heading { level },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: text.into(),
             code: String::new(),
@@ -764,6 +777,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Paragraph,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -777,6 +791,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::List,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -791,6 +806,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Code,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: code.clone(),
             text: String::new(),
             code,
@@ -809,6 +825,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Math { html: html.into() },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: latex_source.clone(),
             text: String::new(),
             code: latex_source,
@@ -826,6 +843,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::EmbedCard { html: html.into() },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: plain_text.into(),
             code: String::new(),
@@ -839,6 +857,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Footnotes { entries },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -856,6 +875,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::SlotGroup { name, children },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -877,6 +897,12 @@ impl SourceFragment<RawImagePath> {
         self.emphasis = Some(emphasis);
         self
     }
+
+    /// Attach the parser-resolved built-in embed mode to a code fragment.
+    pub(crate) fn with_embed_mode(mut self, mode: EmbedMode) -> Self {
+        self.embed_mode = Some(mode);
+        self
+    }
 }
 
 impl<S> SourceFragment<S> {
@@ -889,6 +915,7 @@ impl<S> SourceFragment<S> {
             },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -915,6 +942,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            embed_mode,
             markdown,
             text,
             code,
@@ -946,6 +974,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            embed_mode,
             markdown,
             text,
             code,
@@ -967,6 +996,10 @@ impl<S> SourceFragment<S> {
 
     pub(crate) fn emphasis(&self) -> Option<&LineEmphasis> {
         self.emphasis.as_ref()
+    }
+
+    pub(crate) fn embed_mode(&self) -> Option<EmbedMode> {
+        self.embed_mode
     }
 
     pub fn markdown(&self) -> &str {
@@ -1094,7 +1127,7 @@ mod tests {
         };
         assert_eq!(
             configured.renderer_for("embed"),
-            Some(CodeImageRenderer::External(&command))
+            Some(CodeImageRenderer::ExternalEmbed(&command))
         );
     }
 

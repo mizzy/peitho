@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     domain::{
-        CodeImageCommand, CodeImageRenderer, CodeImagesConfig, FragmentKind, RawImagePath,
-        SourceFragment,
+        CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedMode, FragmentKind,
+        RawImagePath, SourceFragment,
     },
     embed_card::{
         build_embed_card_html, builtin_embed_card_cache_key, hex_encode, parse_oembed_document,
@@ -25,7 +25,7 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     math::{KatexRenderer, MathOutput, MathRenderer},
-    parser::{parse_markdown, ParsedFrontmatter},
+    parser::{embed_fence_options_help, parse_markdown, ParsedFrontmatter},
     phase::{Deck, Parsed},
     MAX_OEMBED_RESPONSE_BYTES,
 };
@@ -87,18 +87,6 @@ enum EmbedTarget {
     X(TweetStatusUrl),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmbedMode {
-    Screenshot,
-    Card,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedEmbedBlock {
-    target: EmbedTarget,
-    mode: EmbedMode,
-}
-
 impl EmbedTarget {
     fn normalized_url(&self) -> &str {
         match self {
@@ -126,86 +114,36 @@ impl TweetStatusUrl {
     }
 }
 
-fn parse_embed_block(line: usize, body: &str) -> Result<ParsedEmbedBlock> {
+fn parse_embed_block(line: usize, body: &str) -> Result<EmbedTarget> {
     let mut non_blank_lines = body
         .lines()
         .enumerate()
         .map(|(index, text)| (line + index + 1, text.trim()))
         .filter(|(_, text)| !text.is_empty());
-    let Some((url_line, url)) = non_blank_lines.next() else {
+    let Some((_, url)) = non_blank_lines.next() else {
         return Err(code_image_error(
             line,
             "embed",
             "embed block is empty",
-            format!("{}; {}", embed_option_help(), embed_url_help()),
+            format!(
+                "put the X status URL first (exactly one non-blank body line); {}; {}",
+                embed_fence_options_help(),
+                embed_url_help()
+            ),
         ));
     };
-
-    if let Some((key, _)) = url
-        .split_once(':')
-        .filter(|(_, value)| !value.trim_start().starts_with('/'))
-    {
-        return Err(embed_option_error(
-            url_line,
-            format!("option '{}' must follow the URL", key.trim()),
+    if let Some((extra_line, _)) = non_blank_lines.next() {
+        return Err(code_image_error(
+            extra_line,
+            "embed",
+            "embed block must contain exactly one non-blank line",
+            format!(
+                "keep only the X status URL in the block body; {}",
+                embed_fence_options_help()
+            ),
         ));
     }
-
-    let target = parse_embed_url(line, url)?;
-    let mut mode = EmbedMode::Screenshot;
-    let mut mode_seen = false;
-    for (option_line, option) in non_blank_lines {
-        let Some((key, value)) = option.split_once(':') else {
-            return Err(embed_option_error(
-                option_line,
-                "embed option must use 'key: value' syntax",
-            ));
-        };
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty() {
-            return Err(embed_option_error(option_line, "embed option key is empty"));
-        }
-        if value.is_empty() {
-            return Err(embed_option_error(
-                option_line,
-                "embed option value is empty",
-            ));
-        }
-        if key != "mode" {
-            return Err(embed_option_error(
-                option_line,
-                format!("unknown embed option '{key}'"),
-            ));
-        }
-        if mode_seen {
-            return Err(embed_option_error(
-                option_line,
-                "duplicate embed option 'mode'",
-            ));
-        }
-        mode_seen = true;
-        mode = match value {
-            "card" => EmbedMode::Card,
-            "screenshot" => EmbedMode::Screenshot,
-            _ => {
-                return Err(embed_option_error(
-                    option_line,
-                    format!("unknown embed mode '{value}'"),
-                ));
-            }
-        };
-    }
-
-    Ok(ParsedEmbedBlock { target, mode })
-}
-
-fn embed_option_error(line: usize, message: impl Into<String>) -> BuildError {
-    code_image_error(line, "embed", message, embed_option_help())
-}
-
-fn embed_option_help() -> &'static str {
-    "put the X status URL first, then use at most one option: mode: card or mode: screenshot"
+    parse_embed_url(line, url)
 }
 
 fn parse_embed_url(line: usize, url: &str) -> Result<EmbedTarget> {
@@ -282,11 +220,9 @@ pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher
     code_images_cache_dir: &Path,
     embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
-    let config = frontmatter.settings().code_images().clone();
     let parsed = parse_markdown(source, frontmatter, highlighter)?;
     transform_code_images(
         parsed,
-        &config,
         svg_runner,
         embed_renderer,
         oembed_fetcher,
@@ -297,7 +233,6 @@ pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher
 
 pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     deck: Deck<Parsed>,
-    config: &CodeImagesConfig,
     svg_runner: &S,
     embed_renderer: &E,
     oembed_fetcher: &F,
@@ -305,6 +240,7 @@ pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
     let (settings, slides) = deck.into_parsed_parts();
+    let config = settings.code_images();
     let mut transformed_slides = Vec::with_capacity(slides.len());
 
     for mut slide in slides {
@@ -357,7 +293,8 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
             if matches!(fragment.kind(), FragmentKind::Code) {
                 if let Some(renderer) = config.renderer_for(tag) {
                     let renderer = match renderer {
-                        CodeImageRenderer::External(command) => {
+                        CodeImageRenderer::External(command)
+                        | CodeImageRenderer::ExternalEmbed(command) => {
                             SvgCodeImageRenderer::External(command)
                         }
                         CodeImageRenderer::BuiltinMermaid => SvgCodeImageRenderer::BuiltinMermaid,
@@ -369,9 +306,11 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                             );
                         }
                         CodeImageRenderer::BuiltinEmbed => {
-                            let parsed = parse_embed_block(fragment.line(), fragment.code_text())?;
-                            let status = parsed.target;
-                            return match parsed.mode {
+                            let mode = fragment
+                                .embed_mode()
+                                .expect("built-in embed mode is attached by the parser");
+                            let status = parse_embed_block(fragment.line(), fragment.code_text())?;
+                            return match mode {
                                 EmbedMode::Screenshot => {
                                     let key = cache_or_render_embed(
                                         fragment.line(),
@@ -1550,13 +1489,15 @@ mod tests {
     use crate::{
         check::check_deck,
         domain::{
-            CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath, ResolvedImageAsset,
-            ResolvedImagePath, RevealSpan, SlotName, SourceFragment,
+            AspectRatio, CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath,
+            ResolvedImageAsset, ResolvedImagePath, RevealSpan, SlotName, SourceFragment,
         },
         layout::{parse_layout, Layouts},
         mapping::{dispatch_by_convention, map_by_convention},
         parser::{parse_frontmatter, parse_markdown},
-        phase::{resolve_image_paths, Deck, DeckSettings, KeySource, Parsed, ParsedSlide},
+        phase::{
+            resolve_image_paths, Deck, DeckLang, DeckSettings, KeySource, Parsed, ParsedSlide,
+        },
         BuildError, Result,
     };
     use sha2::{Digest, Sha256};
@@ -1582,29 +1523,20 @@ mod tests {
             parse_embed_block(7, "https://x.com/gosukenator/status/2083825695709597710").unwrap();
         let base = EmbedRenderParams::new(550, 2, EmbedTheme::Light);
         assert_eq!(
-            builtin_embed_cache_key(&status.target, base),
+            builtin_embed_cache_key(&status, base),
             embed_cache_key_test_vector::PINNED_BUILTIN_EMBED_CACHE_KEY
         );
         assert_ne!(
-            builtin_embed_cache_key(&status.target, base),
-            builtin_embed_cache_key(
-                &status.target,
-                EmbedRenderParams::new(551, 2, EmbedTheme::Light)
-            )
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(551, 2, EmbedTheme::Light))
         );
         assert_ne!(
-            builtin_embed_cache_key(&status.target, base),
-            builtin_embed_cache_key(
-                &status.target,
-                EmbedRenderParams::new(550, 1, EmbedTheme::Light)
-            )
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 1, EmbedTheme::Light))
         );
         assert_ne!(
-            builtin_embed_cache_key(&status.target, base),
-            builtin_embed_cache_key(
-                &status.target,
-                EmbedRenderParams::new(550, 2, EmbedTheme::Dark)
-            )
+            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 2, EmbedTheme::Dark))
         );
     }
 
@@ -1627,7 +1559,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            x.target.normalized_url(),
+            x.normalized_url(),
             "https://x.com/gosukenator/status/2083825695709597710"
         );
         assert_eq!(x, twitter);
@@ -1650,48 +1582,29 @@ mod tests {
     }
 
     #[test]
-    fn embed_block_defaults_to_screenshot_and_accepts_explicit_modes() {
-        let implicit = parse_embed_block(7, "https://x.com/a/status/1\n").unwrap();
-        let screenshot =
-            parse_embed_block(7, "https://x.com/a/status/1\nmode: screenshot\n").unwrap();
-        let card = parse_embed_block(7, "https://x.com/a/status/1\nmode: card\n").unwrap();
+    fn embed_block_accepts_exactly_one_non_blank_url_line() {
+        let parsed = parse_embed_block(7, "\n  https://x.com/a/status/1  \n\n").unwrap();
 
-        assert_eq!(implicit.mode, EmbedMode::Screenshot);
-        assert_eq!(screenshot.mode, EmbedMode::Screenshot);
-        assert_eq!(card.mode, EmbedMode::Card);
-        assert_eq!(implicit.target, screenshot.target);
-        assert_eq!(implicit.target, card.target);
+        assert_eq!(parsed.normalized_url(), "https://x.com/a/status/1");
     }
 
     #[test]
-    fn embed_block_allows_blank_lines_between_url_and_options() {
-        let parsed =
-            parse_embed_block(7, "\nhttps://x.com/a/status/1\n\n   \nmode: card\n\n").unwrap();
+    fn embed_block_rejects_body_options_as_a_second_non_blank_line() {
+        let err = parse_embed_block(7, "https://x.com/a/status/1\n\nmode: card\n").unwrap_err();
 
-        assert_eq!(parsed.mode, EmbedMode::Card);
-        assert_eq!(parsed.target.normalized_url(), "https://x.com/a/status/1");
-    }
-
-    fn assert_embed_option_error(body: &str, line: usize, message: &str) {
-        let err = parse_embed_block(7, body).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Asset);
-        assert_eq!(err.line, Some(line));
-        assert!(err.message.contains(message), "{}", err.message);
-        assert!(err.help.contains("mode: card"), "{}", err.help);
-        assert!(err.help.contains("mode: screenshot"), "{}", err.help);
-    }
-
-    #[test]
-    fn embed_block_rejects_option_before_url_at_source_line() {
-        assert_embed_option_error(
-            "\nmode: card\nhttps://x.com/a/status/1\n",
-            9,
-            "option 'mode' must follow the URL",
+        assert_eq!(err.line, Some(10));
+        assert!(
+            err.message
+                .contains("embed block must contain exactly one non-blank line"),
+            "{}",
+            err.message
         );
+        assert!(err.help.contains("mode=card"), "{}", err.help);
     }
 
     #[test]
-    fn embed_block_distinguishes_malformed_url_from_option_before_url() {
+    fn embed_block_reports_a_malformed_url_as_unsupported() {
         let err = parse_embed_block(7, "https:/x.com/a/status/1\n").unwrap_err();
         assert_eq!(err.kind, ErrorKind::Asset);
         assert_eq!(err.line, Some(7));
@@ -1707,49 +1620,6 @@ mod tests {
         );
         assert!(err.help.contains("https://x.com/<user>/status/<id>"));
         assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
-
-        assert_embed_option_error(
-            "mode: card\nhttps://x.com/a/status/1\n",
-            8,
-            "option 'mode' must follow the URL",
-        );
-    }
-
-    #[test]
-    fn embed_block_rejects_unknown_option_key_at_source_line() {
-        assert_embed_option_error(
-            "https://x.com/a/status/1\ntheme: dark\n",
-            9,
-            "unknown embed option 'theme'",
-        );
-    }
-
-    #[test]
-    fn embed_block_rejects_unknown_mode_value_at_source_line() {
-        assert_embed_option_error(
-            "https://x.com/a/status/1\nmode: compact\n",
-            9,
-            "unknown embed mode 'compact'",
-        );
-    }
-
-    #[test]
-    fn embed_block_rejects_duplicate_or_malformed_options_at_source_line() {
-        assert_embed_option_error(
-            "https://x.com/a/status/1\nmode: card\nmode: screenshot\n",
-            10,
-            "duplicate embed option 'mode'",
-        );
-        assert_embed_option_error(
-            "https://x.com/a/status/1\nmode card\n",
-            9,
-            "embed option must use 'key: value' syntax",
-        );
-        assert_embed_option_error(
-            "https://x.com/a/status/1\nmode:\n",
-            9,
-            "embed option value is empty",
-        );
     }
 
     fn assert_embed_error(body: &str, message: &str) {
@@ -1770,16 +1640,21 @@ mod tests {
         assert!(err.help.contains("https://x.com/<user>/status/<id>"));
         assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
         assert!(err.help.contains("URL first"), "{}", err.help);
-        assert!(err.help.contains("mode: card"), "{}", err.help);
-        assert!(err.help.contains("mode: screenshot"), "{}", err.help);
+        assert!(err.help.contains("mode=card"), "{}", err.help);
+        assert!(err.help.contains("mode=screenshot"), "{}", err.help);
     }
 
     #[test]
-    fn embed_block_rejects_second_url_as_unknown_option() {
-        assert_embed_option_error(
-            "https://x.com/a/status/1\nhttps://x.com/b/status/2\n",
-            9,
-            "unknown embed option 'https'",
+    fn embed_block_rejects_a_second_url_as_an_extra_non_blank_line() {
+        let err = parse_embed_block(7, "https://x.com/a/status/1\nhttps://x.com/b/status/2\n")
+            .unwrap_err();
+
+        assert_eq!(err.line, Some(9));
+        assert!(
+            err.message
+                .contains("embed block must contain exactly one non-blank line"),
+            "{}",
+            err.message
         );
     }
 
@@ -1960,9 +1835,7 @@ mod tests {
     fn oembed_cache_miss_fetches_once_and_writes_raw_json_atomically() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
 
         let document = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
@@ -1982,9 +1855,7 @@ mod tests {
     fn oembed_valid_cache_hit_skips_fetcher() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_card_cache_key(target.normalized_url());
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(cache_dir.join(format!("{key}.json")), OEMBED_JSON).unwrap();
@@ -1999,9 +1870,7 @@ mod tests {
     fn oembed_non_regular_cache_path_is_a_miss_and_fetches() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         fs::create_dir_all(&cache_path).unwrap();
@@ -2022,9 +1891,7 @@ mod tests {
     fn oembed_oversized_cache_is_a_miss_and_self_heals() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -2042,9 +1909,7 @@ mod tests {
     fn oembed_oversized_fetch_is_line_numbered_error_and_not_cached() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(41, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(41, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         let oversized = oversized_oembed_json();
@@ -2076,9 +1941,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-            let target = parse_embed_block(7, "https://x.com/a/status/1")
-                .unwrap()
-                .target;
+            let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
             let key = builtin_embed_card_cache_key(target.normalized_url());
             let cache_path = cache_dir.join(format!("{key}.json"));
             fs::create_dir_all(&cache_dir).unwrap();
@@ -2097,9 +1960,7 @@ mod tests {
     fn oembed_fetch_failure_names_line_url_cache_and_refresh() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(41, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(41, "https://x.com/a/status/1").unwrap();
 
         let err = cache_or_fetch_oembed(
             41,
@@ -2143,9 +2004,7 @@ mod tests {
     fn seed_embed_cache(bytes: &[u8]) -> String {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -2178,9 +2037,7 @@ mod tests {
     fn assert_embed_cache_self_heals(old_bytes: &[u8]) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -2202,9 +2059,7 @@ mod tests {
     fn cache_embed_with_renderer_error(message: &str) -> Result<String> {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         cache_or_render_embed(
             7,
             &target,
@@ -2217,9 +2072,7 @@ mod tests {
     fn assert_invalid_embed_png(bytes: &[u8], message: &str) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let err = cache_or_render_embed(
             7,
             &target,
@@ -2239,9 +2092,7 @@ mod tests {
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
         fs::write(&cache_dir, b"regular file blocks cache directory").unwrap();
-        let target = parse_embed_block(line, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let target = parse_embed_block(line, "https://x.com/a/status/1").unwrap();
 
         let err = cache_or_render_embed(
             line,
@@ -2311,8 +2162,7 @@ mod tests {
         let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         transform_code_images(
-            deck_with_spanned_code("embed", url, RevealSpan { start: 1, len: 1 }),
-            &CodeImagesConfig::default(),
+            deck_with_spanned_embed(url, EmbedMode::Screenshot, RevealSpan { start: 1, len: 1 }),
             &NoSvgRunner,
             &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
             &PanicOEmbedFetcher,
@@ -2352,12 +2202,11 @@ mod tests {
         let span = RevealSpan { start: 1, len: 1 };
 
         let transformed = transform_code_images(
-            deck_with_spanned_code(
-                "embed",
-                "https://x.com/gosukenator/status/2074821309259973046\nmode: card\n",
+            deck_with_spanned_embed(
+                "https://x.com/gosukenator/status/2074821309259973046\n",
+                EmbedMode::Card,
                 span,
             ),
-            &CodeImagesConfig::default(),
             &NoSvgRunner,
             &PanicEmbedRenderer,
             &fetcher,
@@ -2406,12 +2255,11 @@ mod tests {
         .unwrap();
 
         let err = transform_code_images(
-            deck_with_spanned_code(
-                "embed",
-                "https://x.com/a/status/1\nmode: card\n",
+            deck_with_spanned_embed(
+                "https://x.com/a/status/1\n",
+                EmbedMode::Card,
                 RevealSpan { start: 1, len: 1 },
             ),
-            &CodeImagesConfig::default(),
             &NoSvgRunner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2436,40 +2284,40 @@ mod tests {
     }
 
     #[test]
-    fn builtin_screenshot_modes_never_fetch_oembed() {
-        for body in [
-            "https://x.com/a/status/1\n",
-            "https://x.com/a/status/1\nmode: screenshot\n",
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
-            let transformed = transform_code_images(
-                deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
-                &CodeImagesConfig::default(),
-                &NoSvgRunner,
-                &renderer,
-                &PanicOEmbedFetcher,
-                &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
-                &temp.path().join(crate::EMBEDS_CACHE_DIR),
-            )
-            .unwrap();
+    fn builtin_screenshot_mode_never_fetches_oembed() {
+        let temp = tempfile::tempdir().unwrap();
+        let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
+        let transformed = transform_code_images(
+            deck_with_spanned_embed(
+                "https://x.com/a/status/1\n",
+                EmbedMode::Screenshot,
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &NoSvgRunner,
+            &renderer,
+            &PanicOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
 
-            assert_eq!(renderer.calls(), 1);
-            assert!(matches!(
-                transformed.parsed_slides()[0].fragments[0].kind(),
-                FragmentKind::Image { .. }
-            ));
-        }
+        assert_eq!(renderer.calls(), 1);
+        assert!(matches!(
+            transformed.parsed_slides()[0].fragments[0].kind(),
+            FragmentKind::Image { .. }
+        ));
     }
 
     #[test]
-    fn legacy_embed_without_options_matches_explicit_screenshot_bytes() {
-        fn transform(body: &str) -> (SourceFragment, Vec<u8>) {
+    fn bare_embed_matches_explicit_screenshot_bytes() {
+        fn transform(info: &str) -> (SourceFragment, Vec<u8>) {
             let temp = tempfile::tempdir().unwrap();
             let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-            let transformed = transform_code_images(
-                deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
-                &CodeImagesConfig::default(),
+            let markdown = format!("# Intro\n\n```{info}\nhttps://x.com/a/status/1\n```\n");
+            let transformed = parse_deck_and_transform(
+                &markdown,
+                parse_frontmatter(&markdown).unwrap(),
+                &crate::highlight::Highlighter::defaults(),
                 &NoSvgRunner,
                 &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
                 &PanicOEmbedFetcher,
@@ -2486,11 +2334,11 @@ mod tests {
                     .path(),
             )
             .unwrap();
-            (transformed.parsed_slides()[0].fragments[0].clone(), bytes)
+            (transformed.parsed_slides()[0].fragments[1].clone(), bytes)
         }
 
-        let implicit = transform("https://x.com/a/status/1\n");
-        let explicit = transform("https://x.com/a/status/1\nmode: screenshot\n");
+        let implicit = transform("embed");
+        let explicit = transform("embed mode=screenshot");
 
         assert_eq!(implicit, explicit);
     }
@@ -2507,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_embed_override_receives_option_lines_verbatim() {
+    fn explicit_embed_override_with_a_bare_fence_receives_body_verbatim() {
         let temp = tempfile::tempdir().unwrap();
         let body = "\n  https://x.com/A/status/1  \n\nmode: card\n  future: exact whitespace  \n";
         let runner = RecordingSvgRunner {
@@ -2524,8 +2372,7 @@ mod tests {
         };
 
         let transformed = transform_code_images(
-            deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
-            &config,
+            deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }, config),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2563,8 +2410,8 @@ mod tests {
                 "embed",
                 "plain external input",
                 RevealSpan { start: 1, len: 1 },
+                config,
             ),
-            &config,
             &svg_runner,
             &embed_renderer,
             &PanicOEmbedFetcher,
@@ -2606,9 +2453,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
-        let status = parse_embed_block(7, "https://x.com/a/status/1")
-            .unwrap()
-            .target;
+        let status = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
         let key =
             cache_or_render_embed(7, &status, BUILTIN_EMBED_PARAMS, &renderer, &cache_dir).unwrap();
 
@@ -2674,9 +2519,28 @@ mod tests {
         }
     }
 
-    fn deck_with_mermaid(code: &str) -> Deck<Parsed> {
+    fn deck_settings_with_code_images(code_images: CodeImagesConfig) -> DeckSettings {
+        DeckSettings::new(
+            None,
+            AspectRatio::default(),
+            None,
+            false,
+            None,
+            None,
+            DeckLang::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            code_images,
+        )
+        .unwrap()
+    }
+
+    fn deck_with_mermaid(code: &str, code_images: CodeImagesConfig) -> Deck<Parsed> {
         Deck::parsed(
-            DeckSettings::default(),
+            deck_settings_with_code_images(code_images),
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
@@ -2696,9 +2560,9 @@ mod tests {
         )
     }
 
-    fn deck_with_math(latex: &str) -> Deck<Parsed> {
+    fn deck_with_math(latex: &str, code_images: CodeImagesConfig) -> Deck<Parsed> {
         Deck::parsed(
-            DeckSettings::default(),
+            deck_settings_with_code_images(code_images),
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
@@ -2718,21 +2582,42 @@ mod tests {
         )
     }
 
-    fn deck_with_spanned_code(language: &str, body: &str, span: RevealSpan) -> Deck<Parsed> {
+    fn deck_with_spanned_embed(body: &str, mode: EmbedMode, span: RevealSpan) -> Deck<Parsed> {
+        deck_with_spanned_fragment(
+            SourceFragment::code(7, Some("embed".to_owned()), body.to_owned())
+                .with_embed_mode(mode),
+            span,
+            CodeImagesConfig::default(),
+        )
+    }
+
+    fn deck_with_spanned_code(
+        language: &str,
+        body: &str,
+        span: RevealSpan,
+        code_images: CodeImagesConfig,
+    ) -> Deck<Parsed> {
+        deck_with_spanned_fragment(
+            SourceFragment::code(7, Some(language.to_owned()), body.to_owned()),
+            span,
+            code_images,
+        )
+    }
+
+    fn deck_with_spanned_fragment(
+        fragment: SourceFragment,
+        span: RevealSpan,
+        code_images: CodeImagesConfig,
+    ) -> Deck<Parsed> {
         Deck::parsed(
-            DeckSettings::default(),
+            deck_settings_with_code_images(code_images),
             vec![ParsedSlide {
                 index: 0,
                 source_index: 0,
                 key: crate::domain::SlideKey::new("intro").unwrap(),
                 key_source: KeySource::Derived { line: Some(1) },
                 layout_request: None,
-                fragments: vec![SourceFragment::code(
-                    7,
-                    Some(language.to_owned()),
-                    body.to_owned(),
-                )
-                .with_reveal_span(span)],
+                fragments: vec![fragment.with_reveal_span(span)],
                 skip: false,
                 step_count: span.len,
                 page_number_hidden: false,
@@ -2743,7 +2628,6 @@ mod tests {
 
     fn transform_markdown_with_code_images(markdown: &str) -> Result<Deck<Parsed>> {
         let frontmatter = parse_frontmatter(markdown).unwrap();
-        let config = frontmatter.settings().code_images().clone();
         let parsed = parse_markdown(
             markdown,
             frontmatter,
@@ -2753,7 +2637,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         transform_code_images(
             parsed,
-            &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2768,8 +2651,7 @@ mod tests {
         let runner = FakeRunner::svg(input);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2789,8 +2671,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">diagram</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2826,8 +2707,7 @@ mod tests {
         let span = RevealSpan { start: 1, len: 1 };
 
         let deck = transform_code_images(
-            deck_with_spanned_code("mermaid", "graph TD", span),
-            &config(),
+            deck_with_spanned_code("mermaid", "graph TD", span, config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2849,8 +2729,7 @@ mod tests {
         let span = RevealSpan { start: 1, len: 1 };
 
         let deck = transform_code_images(
-            deck_with_spanned_code("math", r#"\frac{1}{2}"#, span),
-            &CodeImagesConfig::default(),
+            deck_with_spanned_code("math", r#"\frac{1}{2}"#, span, CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2881,7 +2760,6 @@ mod tests {
 
         let deck = transform_code_images(
             parsed,
-            &config(),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2916,8 +2794,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg width="1" height="1">new</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -2952,8 +2829,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">new</svg>"#);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3006,8 +2882,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_mermaid(code),
-            &CodeImagesConfig::default(),
+            deck_with_mermaid(code, CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3040,8 +2915,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_mermaid("graph TD\n  A-->B\n"),
-            &CodeImagesConfig::default(),
+            deck_with_mermaid("graph TD\n  A-->B\n", CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3075,8 +2949,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_math(latex),
-            &CodeImagesConfig::default(),
+            deck_with_math(latex, CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3108,8 +2981,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external override</svg>"#);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3135,8 +3007,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external math</svg>"#);
 
         let deck = transform_code_images(
-            deck_with_math(latex),
-            &math_config(),
+            deck_with_math(latex, math_config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3170,8 +3041,10 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let err = match transform_code_images(
-            deck_with_mermaid("flowchart TD\n  A[unterminated\n"),
-            &CodeImagesConfig::default(),
+            deck_with_mermaid(
+                "flowchart TD\n  A[unterminated\n",
+                CodeImagesConfig::default(),
+            ),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3197,8 +3070,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let err = match transform_code_images(
-            deck_with_math(r#"\frac{1}{"#),
-            &CodeImagesConfig::default(),
+            deck_with_math(r#"\frac{1}{"#, CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3249,8 +3121,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
 
         let err = match transform_code_images(
-            deck_with_mermaid("this is not a diagram"),
-            &CodeImagesConfig::default(),
+            deck_with_mermaid("this is not a diagram", CodeImagesConfig::default()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3394,8 +3265,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"junk<svg viewBox="0 0 10 10"></svg>"#);
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3536,8 +3406,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg width="100%" viewbox="0 0 10 10"></svg>"#);
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3576,8 +3445,7 @@ mod tests {
         let first_runner = FakeRunner::svg(r#"<svg width="100%" viewBox="0 0 1e3 70"></svg>"#);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &first_runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3595,8 +3463,7 @@ mod tests {
 
         let second_runner = FakeRunner::svg(r#"<svg width="1" height="1"></svg>"#);
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &second_runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3630,8 +3497,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg width="100%"></svg>"#);
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3667,8 +3533,7 @@ mod tests {
             let runner = FakeRunner::svg(svg);
 
             let err = match transform_code_images(
-                deck_with_mermaid("graph TD"),
-                &config(),
+                deck_with_mermaid("graph TD", config()),
                 &runner,
                 &PanicEmbedRenderer,
                 &PanicOEmbedFetcher,
@@ -3707,8 +3572,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg width="100%" viewBox="0 0 10 10">new</svg>"#);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3737,8 +3601,7 @@ mod tests {
         let runner = FakeRunner::svg(r#"<svg width="1" height="1">new</svg>"#);
 
         transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3761,8 +3624,7 @@ mod tests {
         let runner = FakeRunner::err("command exited with status 1; stderr: boom");
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3788,8 +3650,7 @@ mod tests {
         let runner = FakeRunner::svg(Vec::new());
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3821,8 +3682,7 @@ mod tests {
         let runner = FakeRunner::svg("<html>not svg</html>");
 
         let err = match transform_code_images(
-            deck_with_mermaid("graph TD"),
-            &config(),
+            deck_with_mermaid("graph TD", config()),
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3893,7 +3753,6 @@ mod tests {
         let markdown =
             "---\ncode_images:\n  json: json-to-svg\n---\n# Intro\n\n```json\n{\"ok\": true}\n```";
         let frontmatter = parse_frontmatter(markdown).unwrap();
-        let config = frontmatter.settings().code_images().clone();
         let parsed = parse_markdown(
             markdown,
             frontmatter,
@@ -3905,7 +3764,6 @@ mod tests {
 
         let deck = transform_code_images(
             parsed,
-            &config,
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3928,7 +3786,6 @@ mod tests {
     fn transforms_code_images_inside_slot_group() {
         let markdown = "---\ncode_images:\n  mermaid: mmdc -i -\n---\n# Intro\n\n::: {slot=main}\n\n```mermaid\ngraph TD\n```\n:::\n";
         let frontmatter = parse_frontmatter(markdown).unwrap();
-        let config = frontmatter.settings().code_images().clone();
         let parsed = parse_markdown(
             markdown,
             frontmatter,
@@ -3938,7 +3795,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let transformed = transform_code_images(
             parsed,
-            &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">slot</svg>"#),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3981,7 +3837,6 @@ mod tests {
 
         let body_markdown = "# Intro\n\n::: {slot=body}\n\n```math\n\\frac{1}{2}\n```\n:::\n";
         let body_frontmatter = parse_frontmatter(body_markdown).unwrap();
-        let body_config = body_frontmatter.settings().code_images().clone();
         let body_parsed = parse_markdown(
             body_markdown,
             body_frontmatter,
@@ -3990,7 +3845,6 @@ mod tests {
         .unwrap();
         let body_transformed = transform_code_images(
             body_parsed,
-            &body_config,
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -4011,7 +3865,6 @@ mod tests {
 
         let code_markdown = "# Intro\n\n::: {slot=code}\n\n```math\n\\frac{1}{2}\n```\n:::\n";
         let code_frontmatter = parse_frontmatter(code_markdown).unwrap();
-        let code_config = code_frontmatter.settings().code_images().clone();
         let code_parsed = parse_markdown(
             code_markdown,
             code_frontmatter,
@@ -4020,7 +3873,6 @@ mod tests {
         .unwrap();
         let code_transformed = transform_code_images(
             code_parsed,
-            &code_config,
             &runner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -4043,7 +3895,6 @@ mod tests {
     fn duplicate_diagrams_share_one_cache_file_and_one_dist_asset() {
         let markdown = "---\ncode_images:\n  mermaid: mmdc -i -\n---\n# One\n\n```mermaid\ngraph TD\n```\n\n---\n# Two\n\n```mermaid\ngraph TD\n```";
         let frontmatter = parse_frontmatter(markdown).unwrap();
-        let config = frontmatter.settings().code_images().clone();
         let parsed = parse_markdown(
             markdown,
             frontmatter,
@@ -4054,7 +3905,6 @@ mod tests {
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let transformed = transform_code_images(
             parsed,
-            &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">same</svg>"#),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,

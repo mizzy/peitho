@@ -53,19 +53,18 @@ Peitho prepends KaTeX CSS to `peitho.css` and writes fonts under
 `katex-fonts/`.
 
 Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
-then treated as images. Bare `embed` blocks accept an X status URL and default
-to a cached PNG screenshot. An option line after the URL selects card mode:
+then treated as images. Bare `embed` blocks accept one X status URL and default
+to a cached PNG screenshot. A fence option selects card mode:
 
 ````markdown
-```embed
+```embed mode=card
 https://x.com/gosukenator/status/2074821309259973046
-mode: card
 ```
 ````
 
 Card mode fetches raw oEmbed JSON with system `curl` on a cache miss, regenerates
 escaped HTML on every build, and never invokes Chrome. Cards are body content
-for `accepts="blocks"` slots; default or explicit `mode: screenshot` embeds are
+for `accepts="blocks"` slots; default or explicit `mode=screenshot` embeds are
 images for `accepts="image"` slots.
 
 Use `code_images` for other diagram tags, or when a deck needs to override the
@@ -97,9 +96,9 @@ to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
 then flows through the normal image resolver, so layouts should provide an
 `accepts="image"` slot. This also applies to `code_images.math` overrides; the
 built-in math renderer is the body-inline HTML path. An explicit
-`code_images.embed` override also uses the external SVG/image path and receives
-the entire fence body verbatim on stdin, including any option lines; Peitho does
-not parse the built-in embed grammar in that branch.
+`code_images.embed` override also uses the external SVG/image path. It rejects
+`mode=` fence options; with a bare `embed` fence it receives the entire body
+verbatim on stdin.
 
 Bare boolean values such as `mermaid: false` and `math: true` are reserved for
 possible future built-in opt-out syntax and are rejected with a line-numbered

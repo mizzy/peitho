@@ -15,15 +15,15 @@ output bytes.
 
 ## Decisions
 
-1. The first non-blank block line remains the X status URL. Every later
-   non-blank line is `key: value`; v1 accepts exactly `mode: card` and
-   `mode: screenshot`. No option means screenshot. Options before the URL,
-   malformed lines, unknown keys or values, and duplicates are line-numbered
-   build errors with help. The option parser is key-oriented so future
-   `theme` or `width` keys require no grammar change.
+1. The author revised the trigger to typed `key=value` tokens on the opening
+   fence; the body is exactly one non-blank X status URL. No option means
+   screenshot; v1 accepts `mode=card` and `mode=screenshot`. See
+   [Syntax revision](#syntax-revision-author-decision-2026-08-05), which
+   supersedes the original body-option grammar retained elsewhere as plan
+   history. Future `theme` or `width` keys require no regrammar.
 2. An explicit `code_images.embed: <command>` remains the external SVG path.
-   The complete fence body, including option lines and whitespace, goes to the
-   command verbatim on stdin; built-in option parsing does not run.
+   It rejects `mode=` fence options. With a bare `embed` fence, the complete
+   body and whitespace go to the command verbatim on stdin.
 3. Core adds `OEmbedFetcher`, with one method taking the normalized status URL
    and returning the raw JSON response body as `String`. The CLI implementation
    runs system
@@ -83,6 +83,52 @@ output bytes.
    A valid JSON cache hit works offline. Missing curl or any fetch failure on a
    miss is a line-numbered error naming the URL, cache path, and delete-to-refresh
    story.
+
+## Syntax revision (author decision, 2026-08-05)
+
+The original plan put a mixed grammar in the body: a bare URL followed by a
+`key: value` option line.
+
+````markdown
+```embed
+https://x.com/gosukenator/status/2074821309259973046
+mode: card
+```
+````
+
+The implemented grammar keeps the v1 body pure—exactly one non-blank URL—and
+puts whitespace-separated `key=value` modifiers on the fence info string:
+
+````markdown
+```embed mode=card
+https://x.com/gosukenator/status/2074821309259973046
+```
+````
+
+Only bare `embed` resolves these tokens; v1 accepts `mode=card` and
+`mode=screenshot`. Unknown or duplicate keys, unknown values, bare tokens, and
+empty keys/values are line-numbered errors with fence-syntax help. A braced
+tail remains line emphasis and therefore keeps the rendered-code-image error.
+An explicit `code_images.embed` override rejects `mode=` tokens; its bare fence
+still sends the body verbatim to the external command.
+
+The parser owns the single interpretation point: `emphasis::split_info_string`
+returns a non-braced tail, `CodeImagesConfig::renderer_for` identifies built-in
+and overridden embeds with typed variants, and `SourceFragment` carries the
+parsed `EmbedMode` to `code_images::transform_fragment`. The transform parses
+only the URL and never re-parses mode text.
+
+Rationale: the old body mixed a bare URL line with `key: value` options. Fence
+modifiers instead occupy the same syntactic position as language tags and
+`{2-4}` emphasis, while `key=value` matches the existing `::: {slot=name}`
+fence-attribute vocabulary. This token grammar can accept future `theme` or
+`width` keys without another grammar change. **Measured 2026-08-05:** the
+opening-fence form with info string `embed mode=card` was a hard error—
+"unexpected text after the code language"—so the syntax slot was unclaimed and
+no existing deck changes meaning.
+
+When later historical task or edge-case text conflicts with this section, this
+revision controls; the original task record is otherwise left intact.
 
 ## Approach
 
