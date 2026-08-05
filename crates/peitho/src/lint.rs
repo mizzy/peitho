@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -170,7 +169,7 @@ fn run_chrome_lint(chrome: &Path, workspace: &Path) -> miette::Result<Vec<u8>> {
     let lint_html = workspace.join("lint.html");
     let lint_pdf = workspace.join("lint.pdf");
     let url = crate::file_url(&lint_html)?;
-    let args = lint_chrome_args(&profile, &lint_pdf, &url);
+    let args = crate::chrome_print_args(&profile, &lint_pdf, &url);
     let output = crate::run_one_shot_chrome(
         chrome,
         &args,
@@ -178,16 +177,6 @@ fn run_chrome_lint(chrome: &Path, workspace: &Path) -> miette::Result<Vec<u8>> {
         crate::CHROME_ONE_SHOT_TIMEOUT,
     )?;
     Ok(output.stderr)
-}
-
-fn lint_chrome_args(profile: &Path, pdf: &Path, url: &str) -> Vec<OsString> {
-    let mut args = crate::chrome_print_args(profile, pdf, url);
-    let insert_at = args
-        .iter()
-        .position(|arg| arg.to_string_lossy().starts_with("--user-data-dir="))
-        .unwrap_or_else(|| args.len().saturating_sub(1));
-    args.insert(insert_at, OsString::from("--enable-logging=stderr"));
-    args
 }
 
 fn parse_lint_measurements(
@@ -1150,12 +1139,12 @@ mod tests {
     }
 
     #[test]
-    fn lint_chrome_args_print_pdf_and_enable_stderr_console_logging() {
+    fn lint_uses_pdf_chrome_args_with_stderr_console_logging() {
         let profile = Path::new("/tmp/peitho-lint/chrome-profile");
         let pdf = Path::new("/tmp/peitho-lint/lint.pdf");
         let url = "file:///tmp/peitho-lint/lint.html";
 
-        let args = lint_chrome_args(profile, pdf, url);
+        let args = crate::chrome_print_args(profile, pdf, url);
 
         assert_eq!(
             args,

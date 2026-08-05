@@ -4261,12 +4261,41 @@ Paragraph after heading.
     }
 
     #[test]
+    fn pdf_flatten_script_bounds_window_load_wait_with_a_timeout() {
+        let wait_for_window_load = PDF_FLATTEN_JS
+            .split_once("function waitForWindowLoad")
+            .unwrap()
+            .1
+            .split_once("async function waitForStableLayout")
+            .unwrap()
+            .0;
+
+        assert!(wait_for_window_load.contains(r#"window.addEventListener("load""#));
+        assert!(wait_for_window_load.contains("WINDOW_LOAD_TIMEOUT_MS"));
+        assert!(wait_for_window_load.contains("setTimeout"));
+        assert!(wait_for_window_load.contains("Promise.race"));
+        assert!(PDF_FLATTEN_JS.contains("WINDOW_LOAD_TIMEOUT_MS = 2000"));
+    }
+
+    #[test]
     fn pdf_flatten_script_bounds_font_wait_with_a_timeout() {
         // Same class-of-bug as lint_measure.js: see Issue #337.
         assert!(PDF_FLATTEN_JS.contains("document.fonts.ready"));
         assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS"));
         assert!(PDF_FLATTEN_JS.contains("Promise.race"));
         assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS = 2000"));
+    }
+
+    #[test]
+    fn pdf_flatten_script_publishes_a_single_completion_signal() {
+        assert!(PDF_FLATTEN_JS.contains("console.log(DONE)"));
+        assert!(PDF_FLATTEN_JS.contains(r#""PEITHO_PDF_FLATTEN_" + "DONE""#));
+        assert_eq!(PDF_FLATTEN_JS.matches("console.log(DONE)").count(), 1);
+    }
+
+    #[test]
+    fn pdf_flatten_script_does_not_contain_raw_completion_sentinel() {
+        assert!(!PDF_FLATTEN_JS.contains("PEITHO_PDF_FLATTEN_DONE"));
     }
 
     #[test]

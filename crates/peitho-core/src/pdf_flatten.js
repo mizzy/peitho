@@ -1,8 +1,13 @@
 (function () {
+  var DONE = "PEITHO_PDF_FLATTEN_" + "DONE";
   var PSEUDOS = ["::before", "::after"];
   var SCALE = 2;
   var MAX_CANVAS_DIMENSION = 16384;
   var MAX_CANVAS_AREA = 268000000;
+  // Bound window.load because Chrome's virtual clock can outrun real font and
+  // image loading. Without a timeout the flatten chain never settles, so its
+  // completion signal is never published and PDF export fails.
+  var WINDOW_LOAD_TIMEOUT_MS = 2000;
   var FONT_READY_TIMEOUT_MS = 2000; // Below Chrome --virtual-time-budget=10000.
   var nextClassId = 0;
   var pseudoStyleElement = null;
@@ -922,10 +927,17 @@
   }
 
   function waitForWindowLoad() {
-    if (document.readyState === "complete") return Promise.resolve();
-    return new Promise(function (resolve) {
-      window.addEventListener("load", resolve, { once: true });
-    });
+    if (document.readyState === "complete") {
+      return Promise.resolve();
+    }
+    return Promise.race([
+      new Promise(function (resolve) {
+        window.addEventListener("load", resolve, { once: true });
+      }),
+      new Promise(function (resolve) {
+        setTimeout(resolve, WINDOW_LOAD_TIMEOUT_MS);
+      })
+    ]);
   }
 
   async function waitForStableLayout() {
@@ -986,9 +998,15 @@
     return gradientCount + shadowCount;
   }
 
-  flattenPdfArtifacts().catch(function (err) {
-    console.error("peitho pdf flatten: top-level failure", err);
-    document.documentElement.setAttribute("data-peitho-pdf-flattened", "0");
-    document.documentElement.setAttribute("data-peitho-pdf-shadow-flattened", "0");
-  });
+  function publishDone() {
+    console.log(DONE);
+  }
+
+  flattenPdfArtifacts()
+    .catch(function (err) {
+      console.error("peitho pdf flatten: top-level failure", err);
+      document.documentElement.setAttribute("data-peitho-pdf-flattened", "0");
+      document.documentElement.setAttribute("data-peitho-pdf-shadow-flattened", "0");
+    })
+    .finally(publishDone);
 })();

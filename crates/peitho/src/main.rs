@@ -2339,13 +2339,14 @@ fn render_embed_with_chrome(
 }
 
 const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
+const PEITHO_PDF_FLATTEN_DONE: &str = "PEITHO_PDF_FLATTEN_DONE";
 
 /// How long to keep draining a child's pipes after it exits, waiting for a
 /// completion signal that was written but may not have been delivered yet.
 ///
-/// Chrome exits immediately after printing the lint payload, and lingering
-/// grandchildren can hold the pipes open so EOF never arrives — the drain
-/// cannot simply wait for disconnection. Five seconds is far above the
+/// Chrome can exit while a completion console message is still in flight, and
+/// lingering grandchildren can hold the pipes open so EOF never arrives — the
+/// drain cannot simply wait for disconnection. Five seconds is far above the
 /// scheduling delays seen on loaded CI runners while staying well under
 /// `CHROME_ONE_SHOT_TIMEOUT`.
 const POST_EXIT_DRAIN_WINDOW: Duration = Duration::from_secs(5);
@@ -2366,7 +2367,7 @@ struct ChromeCompletionState {
 impl ChromeCompletion {
     fn description(&self) -> &'static str {
         match self {
-            Self::PdfWritten { .. } => "PDF output",
+            Self::PdfWritten { .. } => "PDF flattening completion signal",
             Self::LintResultLogged => "lint measurement payload",
             Self::EmbedMeasured => "official X embed rendered height",
             Self::PngWritten => "tweet embed PNG output",
@@ -2375,7 +2376,9 @@ impl ChromeCompletion {
 
     fn retry_help(&self) -> &'static str {
         match self {
-            Self::PdfWritten { .. } => "retry export",
+            Self::PdfWritten { .. } => {
+                "if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
+            }
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
@@ -2388,7 +2391,7 @@ impl ChromeCompletion {
     fn timeout_help(&self) -> &'static str {
         match self {
             Self::PdfWritten { .. } => {
-                "retry export or check the generated HTML in the workspace path reported by the export command"
+                "if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
             }
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
@@ -2413,7 +2416,7 @@ impl ChromeCompletion {
                     state.signal_seen = scan_for_needle(
                         stderr,
                         &mut state.stderr_scanned,
-                        b"bytes written to file",
+                        PEITHO_PDF_FLATTEN_DONE.as_bytes(),
                     );
                 }
                 output_file_is_nonempty(output_path) && state.signal_seen
@@ -2449,7 +2452,7 @@ impl ChromeCompletion {
         state: &mut ChromeCompletionState,
     ) -> bool {
         match self {
-            Self::PdfWritten { output_path } => output_file_is_nonempty(output_path),
+            Self::PdfWritten { .. } => self.is_ready(stdout, stderr, state),
             Self::LintResultLogged => self.is_ready(stdout, stderr, state),
             Self::EmbedMeasured => embed_dump_has_complete_title(stdout),
             Self::PngWritten => self.is_ready(stdout, stderr, state),
@@ -2643,8 +2646,8 @@ where
             // written but not yet delivered.
             //
             // The window is bounded well under the overall timeout so a caller
-            // whose completion predicate stays false after exit (PDF export
-            // re-checks the output file instead) is not made to wait it out.
+            // whose completion predicate stays false after exit is not made to
+            // wait indefinitely.
             let drain_deadline = deadline.min(Instant::now() + POST_EXIT_DRAIN_WINDOW);
             if drain_until_complete_or_disconnect(
                 &rx,
@@ -2947,6 +2950,7 @@ fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
         OsString::from("--no-sandbox"),
         OsString::from("--no-pdf-header-footer"),
         OsString::from("--virtual-time-budget=10000"),
+        OsString::from("--enable-logging=stderr"),
         OsString::from(format!("--user-data-dir={}", profile.display())),
         OsString::from(format!("--print-to-pdf={}", out.display())),
         OsString::from(url),
@@ -7250,11 +7254,28 @@ contexts:
             OsString::from("--no-sandbox"),
             OsString::from("--no-pdf-header-footer"),
             OsString::from("--virtual-time-budget=10000"),
+            OsString::from("--enable-logging=stderr"),
             OsString::from(format!("--user-data-dir={}", profile.display())),
             OsString::from(format!("--print-to-pdf={}", out.display())),
             OsString::from(url),
         ];
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn chrome_print_args_enable_stderr_console_logging_once() {
+        let args = chrome_print_args(
+            Path::new("/tmp/peitho-profile"),
+            Path::new("/tmp/out.pdf"),
+            "file:///tmp/pdf.html",
+        );
+
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.to_string_lossy() == "--enable-logging=stderr")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -7422,9 +7443,12 @@ contexts:
             "actual error: {message}"
         );
         assert!(
-            message.contains("help: retry export"),
+            message.contains(
+                "help: if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
+            ),
             "actual error: {message}"
         );
+        assert!(!message.contains("retry export"), "actual error: {message}");
         assert!(
             !message.contains("install Google Chrome"),
             "actual error: {message}"
@@ -8058,7 +8082,7 @@ contexts:
 
     #[cfg(unix)]
     #[test]
-    fn one_shot_chrome_runner_returns_after_pdf_completion_signal_and_kills_child() {
+    fn one_shot_chrome_runner_returns_after_pdf_flatten_signal_and_kills_child() {
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
         let out = dir.path().join("out.pdf");
@@ -8066,6 +8090,7 @@ contexts:
             &fake_chrome,
             r#"#!/bin/sh
 out="$1"
+printf 'PEITHO_PDF_FLATTEN_DONE\n' >&2
 printf '%s' '%PDF-test' > "$out"
 printf '9 bytes written to file %s\n' "$out" >&2
 exec sleep 30
@@ -8092,7 +8117,7 @@ exec sleep 30
         assert!(out.is_file());
         assert!(output.stdout.is_empty());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("bytes written to file"),
+            String::from_utf8_lossy(&output.stderr).contains("PEITHO_PDF_FLATTEN_DONE"),
             "actual stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -8100,7 +8125,7 @@ exec sleep 30
 
     #[cfg(unix)]
     #[test]
-    fn one_shot_chrome_runner_accepts_successful_pdf_exit_without_stderr_signal() {
+    fn one_shot_chrome_runner_rejects_successful_pdf_exit_without_flatten_signal() {
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
         let out = dir.path().join("out.pdf");
@@ -8109,10 +8134,11 @@ exec sleep 30
             r#"#!/bin/sh
 out="$1"
 printf '%s' '%PDF-test' > "$out"
+printf '9 bytes written to file %s\n' "$out" >&2
 "#,
         );
 
-        let output = run_one_shot_chrome(
+        let err = run_one_shot_chrome(
             Path::new("/bin/sh"),
             &[
                 fake_chrome.clone().into_os_string(),
@@ -8123,27 +8149,38 @@ printf '%s' '%PDF-test' > "$out"
             },
             CHROME_ONE_SHOT_TIMEOUT,
         )
-        .unwrap();
+        .unwrap_err();
 
         assert!(out.is_file());
-        assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        let message = err.to_string();
+        assert!(
+            message.contains("completed before one-shot output was ready"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("expected PDF flattening completion signal before Chrome exited"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("bytes written to file"),
+            "actual error: {message}"
+        );
     }
 
     #[test]
-    fn pdf_completion_scan_detects_needles_across_buffer_boundaries() {
+    fn pdf_completion_scan_detects_flatten_signal_across_buffer_boundaries() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.pdf");
         fs::write(&out, "%PDF-test").unwrap();
         let mut state = ChromeCompletionState::default();
-        let mut stderr = b"9 bytes written to fi".to_vec();
+        let mut stderr = b"PEITHO_PDF_FLATTEN_DO".to_vec();
 
         assert!(!ChromeCompletion::PdfWritten {
             output_path: out.clone()
         }
         .is_ready(&[], &stderr, &mut state));
 
-        stderr.extend_from_slice(b"le /tmp/out.pdf\n");
+        stderr.extend_from_slice(b"NE\n");
 
         assert!(ChromeCompletion::PdfWritten { output_path: out }.is_ready(
             &[],
@@ -8231,6 +8268,17 @@ exec sleep 30
         assert!(started.elapsed() < Duration::from_secs(10));
         let message = err.to_string();
         assert!(message.contains("timed out"), "actual error: {message}");
+        assert!(
+            message.contains("waiting for PDF flattening completion signal"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains(
+                "help: if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
+            ),
+            "actual error: {message}"
+        );
+        assert!(!message.contains("retry export"), "actual error: {message}");
     }
 
     #[cfg(unix)]
@@ -8298,6 +8346,7 @@ exec sleep 30
             r#"#!/bin/sh
 out="$1"
 : > "$out"
+printf 'PEITHO_PDF_FLATTEN_DONE\n' >&2
 printf '0 bytes written to file %s\n' "$out" >&2
 "#,
         );
