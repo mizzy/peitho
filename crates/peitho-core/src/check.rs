@@ -119,6 +119,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
+            | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
@@ -243,6 +244,44 @@ mod tests {
             7,
             r#"<span class="katex-display">math html</span>"#,
             r#"\frac{1}{2}"#,
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert(slot, mapped_slot);
+
+        Deck::mapped(
+            DeckSettings::default(),
+            vec![MappedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                unassigned: Vec::new(),
+                skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        )
+    }
+
+    fn mapped_deck_with_embed_card_slot(
+        slot_name: &str,
+        accepts: &str,
+    ) -> crate::phase::Deck<crate::phase::Mapped> {
+        let layout = parse_layout(
+            "embed-card-layout",
+            &format!(
+                r#"<section><slot name="{slot_name}" accepts="{accepts}" arity="1"></slot></section>"#
+            ),
+        )
+        .unwrap();
+        let slot = SlotName::new(slot_name).unwrap();
+        let mut mapped_slot = MappedSlot::new(layout.slot(slot_name).unwrap().clone());
+        mapped_slot.push(SourceFragment::embed_card(
+            9,
+            "<article>card</article>",
+            "tweet text",
         ));
         let mut slots = BTreeMap::new();
         slots.insert(slot, mapped_slot);
@@ -426,6 +465,31 @@ mod tests {
             checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
             FragmentKind::Math { .. }
         ));
+    }
+
+    #[test]
+    fn accepts_embed_card_in_blocks_slot() {
+        let checked = check_deck(mapped_deck_with_embed_card_slot("body", "blocks")).unwrap();
+        let body = SlotName::new("body").unwrap();
+
+        assert!(matches!(
+            checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
+            FragmentKind::EmbedCard { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_embed_card_in_image_slot_with_contract_error() {
+        let err = check_deck(mapped_deck_with_embed_card_slot("hero", "image")).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(9));
+        assert!(err.message.contains("slot 'hero' accepts image"));
+        assert!(err.message.contains("embed card"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
     }
 
     #[test]

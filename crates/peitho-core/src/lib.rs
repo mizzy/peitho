@@ -3,6 +3,7 @@
 pub mod check;
 pub mod code_images;
 pub mod domain;
+mod embed_card;
 mod emphasis;
 pub mod error;
 pub mod highlight;
@@ -23,10 +24,12 @@ pub mod theme;
 
 pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";
 pub const EMBEDS_CACHE_DIR: &str = ".peitho/embeds-cache";
+pub const MAX_OEMBED_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub use check::check_deck;
 pub use code_images::parse_deck_and_transform;
 pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
+pub use embed_card::builtin_oembed_request_url;
 pub use error::{BuildError, Result};
 pub use layout::{describe_layouts, parse_layout, Layout, LayoutSummary, Layouts, SlotSummary};
 pub use manifest::{

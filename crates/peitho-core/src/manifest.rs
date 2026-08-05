@@ -430,7 +430,9 @@ mod tests {
 
     use crate::{
         check::check_deck,
-        code_images::{parse_deck_and_transform, EmbedRenderParams, EmbedRenderer, SvgRunner},
+        code_images::{
+            parse_deck_and_transform, EmbedRenderParams, EmbedRenderer, OEmbedFetcher, SvgRunner,
+        },
         domain::{AspectRatio, CodeImageCommand, ResolvedImageAsset, ResolvedImagePath, SlideKey},
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
@@ -1088,6 +1090,7 @@ mod tests {
             &crate::highlight::Highlighter::defaults(),
             &NoSvgRunner,
             &NoEmbedRenderer,
+            &NoOEmbedFetcher,
             &cache.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &cache.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -1112,6 +1115,14 @@ mod tests {
             _params: EmbedRenderParams,
         ) -> crate::Result<Vec<u8>> {
             panic!("math manifest test must not invoke embed renderer");
+        }
+    }
+
+    struct NoOEmbedFetcher;
+
+    impl OEmbedFetcher for NoOEmbedFetcher {
+        fn fetch(&self, _normalized_url: &str) -> crate::Result<String> {
+            panic!("math manifest test must not invoke oEmbed fetcher");
         }
     }
 

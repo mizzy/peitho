@@ -4,7 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     panic::{catch_unwind, AssertUnwindSafe},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         LazyLock,
@@ -18,11 +18,16 @@ use crate::{
         CodeImageCommand, CodeImageRenderer, CodeImagesConfig, FragmentKind, RawImagePath,
         SourceFragment,
     },
+    embed_card::{
+        build_embed_card_html, builtin_embed_card_cache_key, hex_encode, parse_oembed_document,
+        OEmbedDocument,
+    },
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     math::{KatexRenderer, MathOutput, MathRenderer},
     parser::{parse_markdown, ParsedFrontmatter},
     phase::{Deck, Parsed},
+    MAX_OEMBED_RESPONSE_BYTES,
 };
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -36,6 +41,10 @@ pub trait SvgRunner {
 
 pub trait EmbedRenderer {
     fn render(&self, normalized_url: &str, params: EmbedRenderParams) -> crate::Result<Vec<u8>>;
+}
+
+pub trait OEmbedFetcher {
+    fn fetch(&self, normalized_url: &str) -> crate::Result<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +87,18 @@ enum EmbedTarget {
     X(TweetStatusUrl),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbedMode {
+    Screenshot,
+    Card,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedEmbedBlock {
+    target: EmbedTarget,
+    mode: EmbedMode,
+}
+
 impl EmbedTarget {
     fn normalized_url(&self) -> &str {
         match self {
@@ -105,25 +126,86 @@ impl TweetStatusUrl {
     }
 }
 
-fn parse_embed_block(line: usize, body: &str) -> Result<EmbedTarget> {
-    let mut non_blank_lines = body.lines().map(str::trim).filter(|line| !line.is_empty());
-    let Some(url) = non_blank_lines.next() else {
+fn parse_embed_block(line: usize, body: &str) -> Result<ParsedEmbedBlock> {
+    let mut non_blank_lines = body
+        .lines()
+        .enumerate()
+        .map(|(index, text)| (line + index + 1, text.trim()))
+        .filter(|(_, text)| !text.is_empty());
+    let Some((url_line, url)) = non_blank_lines.next() else {
         return Err(code_image_error(
             line,
             "embed",
             "embed block is empty",
-            embed_url_help(),
+            format!("{}; {}", embed_option_help(), embed_url_help()),
         ));
     };
-    if non_blank_lines.next().is_some() {
-        return Err(code_image_error(
-            line,
-            "embed",
-            "embed block must contain exactly one non-blank line",
-            embed_url_help(),
+
+    if let Some((key, _)) = url
+        .split_once(':')
+        .filter(|(_, value)| !value.trim_start().starts_with('/'))
+    {
+        return Err(embed_option_error(
+            url_line,
+            format!("option '{}' must follow the URL", key.trim()),
         ));
     }
-    parse_embed_url(line, url)
+
+    let target = parse_embed_url(line, url)?;
+    let mut mode = EmbedMode::Screenshot;
+    let mut mode_seen = false;
+    for (option_line, option) in non_blank_lines {
+        let Some((key, value)) = option.split_once(':') else {
+            return Err(embed_option_error(
+                option_line,
+                "embed option must use 'key: value' syntax",
+            ));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err(embed_option_error(option_line, "embed option key is empty"));
+        }
+        if value.is_empty() {
+            return Err(embed_option_error(
+                option_line,
+                "embed option value is empty",
+            ));
+        }
+        if key != "mode" {
+            return Err(embed_option_error(
+                option_line,
+                format!("unknown embed option '{key}'"),
+            ));
+        }
+        if mode_seen {
+            return Err(embed_option_error(
+                option_line,
+                "duplicate embed option 'mode'",
+            ));
+        }
+        mode_seen = true;
+        mode = match value {
+            "card" => EmbedMode::Card,
+            "screenshot" => EmbedMode::Screenshot,
+            _ => {
+                return Err(embed_option_error(
+                    option_line,
+                    format!("unknown embed mode '{value}'"),
+                ));
+            }
+        };
+    }
+
+    Ok(ParsedEmbedBlock { target, mode })
+}
+
+fn embed_option_error(line: usize, message: impl Into<String>) -> BuildError {
+    code_image_error(line, "embed", message, embed_option_help())
+}
+
+fn embed_option_help() -> &'static str {
+    "put the X status URL first, then use at most one option: mode: card or mode: screenshot"
 }
 
 fn parse_embed_url(line: usize, url: &str) -> Result<EmbedTarget> {
@@ -189,12 +271,14 @@ enum SvgCodeImageRenderer<'a> {
     BuiltinMermaid,
 }
 
-pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer>(
+#[allow(clippy::too_many_arguments)]
+pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
     svg_runner: &S,
     embed_renderer: &E,
+    oembed_fetcher: &F,
     code_images_cache_dir: &Path,
     embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
@@ -205,16 +289,18 @@ pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer>(
         &config,
         svg_runner,
         embed_renderer,
+        oembed_fetcher,
         code_images_cache_dir,
         embeds_cache_dir,
     )
 }
 
-pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer>(
+pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     deck: Deck<Parsed>,
     config: &CodeImagesConfig,
     svg_runner: &S,
     embed_renderer: &E,
+    oembed_fetcher: &F,
     code_images_cache_dir: &Path,
     embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
@@ -231,6 +317,7 @@ pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer>(
                     config,
                     svg_runner,
                     embed_renderer,
+                    oembed_fetcher,
                     code_images_cache_dir,
                     embeds_cache_dir,
                 )
@@ -242,11 +329,12 @@ pub fn transform_code_images<S: SvgRunner, E: EmbedRenderer>(
     Ok(Deck::parsed(settings, transformed_slides))
 }
 
-fn transform_fragment<S: SvgRunner, E: EmbedRenderer>(
+fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     fragment: SourceFragment,
     config: &CodeImagesConfig,
     svg_runner: &S,
     embed_renderer: &E,
+    oembed_fetcher: &F,
     code_images_cache_dir: &Path,
     embeds_cache_dir: &Path,
 ) -> Result<SourceFragment> {
@@ -281,19 +369,46 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer>(
                             );
                         }
                         CodeImageRenderer::BuiltinEmbed => {
-                            let status = parse_embed_block(fragment.line(), fragment.code_text())?;
-                            let key = cache_or_render_embed(
-                                fragment.line(),
-                                &status,
-                                BUILTIN_EMBED_PARAMS,
-                                embed_renderer,
-                                embeds_cache_dir,
-                            )?;
-                            return Ok(SourceFragment::image(
-                                fragment.line(),
-                                format!("X post by @{}", status.user()),
-                                RawImagePath::from_embeds_cache(&key),
-                            ));
+                            let parsed = parse_embed_block(fragment.line(), fragment.code_text())?;
+                            let status = parsed.target;
+                            return match parsed.mode {
+                                EmbedMode::Screenshot => {
+                                    let key = cache_or_render_embed(
+                                        fragment.line(),
+                                        &status,
+                                        BUILTIN_EMBED_PARAMS,
+                                        embed_renderer,
+                                        embeds_cache_dir,
+                                    )?;
+                                    Ok(SourceFragment::image(
+                                        fragment.line(),
+                                        format!("X post by @{}", status.user()),
+                                        RawImagePath::from_embeds_cache(&key),
+                                    ))
+                                }
+                                EmbedMode::Card => {
+                                    let cache_path = oembed_cache_path(embeds_cache_dir, &status);
+                                    let document = cache_or_fetch_oembed(
+                                        fragment.line(),
+                                        &status,
+                                        oembed_fetcher,
+                                        embeds_cache_dir,
+                                    )?;
+                                    let markup = build_embed_card_html(
+                                        fragment.line(),
+                                        status.normalized_url(),
+                                        &document,
+                                    )
+                                    .map_err(|err| {
+                                        with_oembed_cache_refresh_help(err, &cache_path)
+                                    })?;
+                                    Ok(SourceFragment::embed_card(
+                                        fragment.line(),
+                                        markup.html,
+                                        markup.plain_text,
+                                    ))
+                                }
+                            };
                         }
                     };
                     let key = match &renderer {
@@ -380,6 +495,7 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer>(
                             config,
                             svg_runner,
                             embed_renderer,
+                            oembed_fetcher,
                             code_images_cache_dir,
                             embeds_cache_dir,
                         )
@@ -396,6 +512,7 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer>(
             | FragmentKind::Text
             | FragmentKind::Code
             | FragmentKind::Math { .. }
+            | FragmentKind::EmbedCard { .. }
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List => Ok(fragment),
@@ -530,6 +647,120 @@ fn builtin_embed_cache_key(target: &EmbedTarget, params: EmbedRenderParams) -> S
     hasher.update(format!("\0scale={}", params.scale_factor).as_bytes());
     hasher.update(format!("\0theme={}", params.theme.as_str()).as_bytes());
     hex_encode(&hasher.finalize())
+}
+
+fn valid_cached_oembed_json(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() <= MAX_OEMBED_RESPONSE_BYTES as u64)
+        .unwrap_or(false)
+}
+
+fn oembed_cache_path(cache_dir: &Path, target: &EmbedTarget) -> PathBuf {
+    let key = builtin_embed_card_cache_key(target.normalized_url());
+    cache_dir.join(format!("{key}.json"))
+}
+
+fn cache_or_fetch_oembed<F: OEmbedFetcher>(
+    line: usize,
+    target: &EmbedTarget,
+    fetcher: &F,
+    cache_dir: &Path,
+) -> Result<OEmbedDocument> {
+    let cache_path = oembed_cache_path(cache_dir, target);
+    fs::create_dir_all(cache_dir).map_err(|err| {
+        oembed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("failed to create embed cache directory: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+
+    if valid_cached_oembed_json(&cache_path) {
+        if let Ok(raw) = fs::read_to_string(&cache_path) {
+            if let Ok(document) = parse_oembed_document(&raw) {
+                return Ok(document);
+            }
+        }
+    }
+
+    let raw = fetcher.fetch(target.normalized_url()).map_err(|err| {
+        oembed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("failed to fetch oEmbed data: {}", err.message),
+            &err.help,
+        )
+    })?;
+    if raw.len() > MAX_OEMBED_RESPONSE_BYTES {
+        return Err(oembed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!(
+                "oEmbed response size {} bytes exceeds the maximum of {MAX_OEMBED_RESPONSE_BYTES} bytes",
+                raw.len()
+            ),
+            "retry the oEmbed fetch; X must return a bounded JSON response",
+        ));
+    }
+    let document = parse_oembed_document(&raw).map_err(|err| {
+        oembed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("oEmbed response was not valid data: {err}"),
+            "retry with network access to X",
+        )
+    })?;
+    write_cache_file_atomic(&cache_path, raw.as_bytes()).map_err(|err| {
+        oembed_cache_error(
+            line,
+            target,
+            &cache_path,
+            format!("failed to write oEmbed cache file: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+    Ok(document)
+}
+
+fn oembed_cache_error(
+    line: usize,
+    target: &EmbedTarget,
+    cache_path: &Path,
+    message: impl Into<String>,
+    extra_help: &str,
+) -> BuildError {
+    let cache_help = format!(
+        "a valid JSON cache hit works offline without curl or network; {}",
+        oembed_cache_refresh_help(cache_path)
+    );
+    let help = if extra_help.is_empty() {
+        cache_help
+    } else {
+        format!("{cache_help}; {extra_help}")
+    };
+    code_image_error(
+        line,
+        "embed",
+        format!("{} ({})", message.into(), target.normalized_url()),
+        help,
+    )
+}
+
+fn oembed_cache_refresh_help(cache_path: &Path) -> String {
+    format!(
+        "cache file: {}; delete the cache file to refresh",
+        cache_path.display()
+    )
+}
+
+fn with_oembed_cache_refresh_help(mut error: BuildError, cache_path: &Path) -> BuildError {
+    error.help = format!("{}; {}", error.help, oembed_cache_refresh_help(cache_path));
+    error
 }
 
 fn cache_or_render_embed<R: EmbedRenderer>(
@@ -669,16 +900,6 @@ fn write_cache_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp_path);
     }
     result
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 #[derive(Clone, Copy)]
@@ -1315,13 +1536,16 @@ fn code_image_error(
 mod tests {
     use super::{
         builtin_embed_cache_key, builtin_math_override_help, builtin_mermaid_cache_key,
-        builtin_mermaid_override_help, cache_or_render_embed, code_image_cache_key, hex_encode,
-        is_svg_output, parse_deck_and_transform, parse_embed_block, render_builtin_math_with,
-        render_builtin_mermaid_with, svg_empty_output_error, svg_has_usable_intrinsic_size,
-        svg_intrinsic_size_error, svg_not_document_error, svg_root_not_found_error,
-        transform_code_images, valid_cached_png, CodeImageOutputContext, EmbedRenderParams,
-        EmbedRenderer, EmbedTarget, EmbedTheme, SvgRunner, BUILTIN_EMBED_PARAMS,
+        builtin_mermaid_override_help, cache_or_fetch_oembed, cache_or_render_embed,
+        code_image_cache_key, hex_encode, is_svg_output, parse_deck_and_transform,
+        parse_embed_block, render_builtin_math_with, render_builtin_mermaid_with,
+        svg_empty_output_error, svg_has_usable_intrinsic_size, svg_intrinsic_size_error,
+        svg_not_document_error, svg_root_not_found_error, transform_code_images,
+        valid_cached_oembed_json, valid_cached_png, CodeImageOutputContext, EmbedMode,
+        EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme, OEmbedFetcher, SvgRunner,
+        BUILTIN_EMBED_PARAMS,
     };
+    use crate::embed_card::builtin_embed_card_cache_key;
     use crate::error::ErrorKind;
     use crate::{
         check::check_deck,
@@ -1358,20 +1582,29 @@ mod tests {
             parse_embed_block(7, "https://x.com/gosukenator/status/2083825695709597710").unwrap();
         let base = EmbedRenderParams::new(550, 2, EmbedTheme::Light);
         assert_eq!(
-            builtin_embed_cache_key(&status, base),
+            builtin_embed_cache_key(&status.target, base),
             embed_cache_key_test_vector::PINNED_BUILTIN_EMBED_CACHE_KEY
         );
         assert_ne!(
-            builtin_embed_cache_key(&status, base),
-            builtin_embed_cache_key(&status, EmbedRenderParams::new(551, 2, EmbedTheme::Light))
+            builtin_embed_cache_key(&status.target, base),
+            builtin_embed_cache_key(
+                &status.target,
+                EmbedRenderParams::new(551, 2, EmbedTheme::Light)
+            )
         );
         assert_ne!(
-            builtin_embed_cache_key(&status, base),
-            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 1, EmbedTheme::Light))
+            builtin_embed_cache_key(&status.target, base),
+            builtin_embed_cache_key(
+                &status.target,
+                EmbedRenderParams::new(550, 1, EmbedTheme::Light)
+            )
         );
         assert_ne!(
-            builtin_embed_cache_key(&status, base),
-            builtin_embed_cache_key(&status, EmbedRenderParams::new(550, 2, EmbedTheme::Dark))
+            builtin_embed_cache_key(&status.target, base),
+            builtin_embed_cache_key(
+                &status.target,
+                EmbedRenderParams::new(550, 2, EmbedTheme::Dark)
+            )
         );
     }
 
@@ -1394,7 +1627,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            x.normalized_url(),
+            x.target.normalized_url(),
             "https://x.com/gosukenator/status/2083825695709597710"
         );
         assert_eq!(x, twitter);
@@ -1416,6 +1649,109 @@ mod tests {
         assert_eq!(uppercase_twitter_scheme, canonical);
     }
 
+    #[test]
+    fn embed_block_defaults_to_screenshot_and_accepts_explicit_modes() {
+        let implicit = parse_embed_block(7, "https://x.com/a/status/1\n").unwrap();
+        let screenshot =
+            parse_embed_block(7, "https://x.com/a/status/1\nmode: screenshot\n").unwrap();
+        let card = parse_embed_block(7, "https://x.com/a/status/1\nmode: card\n").unwrap();
+
+        assert_eq!(implicit.mode, EmbedMode::Screenshot);
+        assert_eq!(screenshot.mode, EmbedMode::Screenshot);
+        assert_eq!(card.mode, EmbedMode::Card);
+        assert_eq!(implicit.target, screenshot.target);
+        assert_eq!(implicit.target, card.target);
+    }
+
+    #[test]
+    fn embed_block_allows_blank_lines_between_url_and_options() {
+        let parsed =
+            parse_embed_block(7, "\nhttps://x.com/a/status/1\n\n   \nmode: card\n\n").unwrap();
+
+        assert_eq!(parsed.mode, EmbedMode::Card);
+        assert_eq!(parsed.target.normalized_url(), "https://x.com/a/status/1");
+    }
+
+    fn assert_embed_option_error(body: &str, line: usize, message: &str) {
+        let err = parse_embed_block(7, body).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(line));
+        assert!(err.message.contains(message), "{}", err.message);
+        assert!(err.help.contains("mode: card"), "{}", err.help);
+        assert!(err.help.contains("mode: screenshot"), "{}", err.help);
+    }
+
+    #[test]
+    fn embed_block_rejects_option_before_url_at_source_line() {
+        assert_embed_option_error(
+            "\nmode: card\nhttps://x.com/a/status/1\n",
+            9,
+            "option 'mode' must follow the URL",
+        );
+    }
+
+    #[test]
+    fn embed_block_distinguishes_malformed_url_from_option_before_url() {
+        let err = parse_embed_block(7, "https:/x.com/a/status/1\n").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(
+            err.message.contains("supported X status URL"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("must follow the URL"),
+            "{}",
+            err.message
+        );
+        assert!(err.help.contains("https://x.com/<user>/status/<id>"));
+        assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
+
+        assert_embed_option_error(
+            "mode: card\nhttps://x.com/a/status/1\n",
+            8,
+            "option 'mode' must follow the URL",
+        );
+    }
+
+    #[test]
+    fn embed_block_rejects_unknown_option_key_at_source_line() {
+        assert_embed_option_error(
+            "https://x.com/a/status/1\ntheme: dark\n",
+            9,
+            "unknown embed option 'theme'",
+        );
+    }
+
+    #[test]
+    fn embed_block_rejects_unknown_mode_value_at_source_line() {
+        assert_embed_option_error(
+            "https://x.com/a/status/1\nmode: compact\n",
+            9,
+            "unknown embed mode 'compact'",
+        );
+    }
+
+    #[test]
+    fn embed_block_rejects_duplicate_or_malformed_options_at_source_line() {
+        assert_embed_option_error(
+            "https://x.com/a/status/1\nmode: card\nmode: screenshot\n",
+            10,
+            "duplicate embed option 'mode'",
+        );
+        assert_embed_option_error(
+            "https://x.com/a/status/1\nmode card\n",
+            9,
+            "embed option must use 'key: value' syntax",
+        );
+        assert_embed_option_error(
+            "https://x.com/a/status/1\nmode:\n",
+            9,
+            "embed option value is empty",
+        );
+    }
+
     fn assert_embed_error(body: &str, message: &str) {
         let err = parse_embed_block(7, body).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Asset);
@@ -1427,14 +1763,23 @@ mod tests {
 
     #[test]
     fn embed_block_rejects_empty_body() {
-        assert_embed_error("\n \n", "empty");
+        let err = parse_embed_block(7, "\n \n").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("empty"), "{}", err.message);
+        assert!(err.help.contains("https://x.com/<user>/status/<id>"));
+        assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
+        assert!(err.help.contains("URL first"), "{}", err.help);
+        assert!(err.help.contains("mode: card"), "{}", err.help);
+        assert!(err.help.contains("mode: screenshot"), "{}", err.help);
     }
 
     #[test]
-    fn embed_block_rejects_multiple_non_blank_lines() {
-        assert_embed_error(
+    fn embed_block_rejects_second_url_as_unknown_option() {
+        assert_embed_option_error(
             "https://x.com/a/status/1\nhttps://x.com/b/status/2\n",
-            "exactly one non-blank line",
+            9,
+            "unknown embed option 'https'",
         );
     }
 
@@ -1554,6 +1899,229 @@ mod tests {
         }
     }
 
+    const OEMBED_JSON: &str = concat!(
+        r#"{"html":"<blockquote><p>hello</p><a href=\"https://x.com/a/status/1\">January 1, 2026</a></blockquote>","author_name":"A","url":"https://x.com/a/status/1","extra":true}"#,
+        "\n"
+    );
+
+    fn oversized_oembed_json() -> String {
+        format!(
+            r#"{{"html":"x","author_name":"Oversized","url":"https://x.com/a/status/1","padding":"{}"}}"#,
+            "x".repeat(crate::MAX_OEMBED_RESPONSE_BYTES)
+        )
+    }
+
+    struct FixtureOEmbedFetcher {
+        calls: Cell<usize>,
+        urls: RefCell<Vec<String>>,
+        result: Result<String>,
+    }
+
+    impl FixtureOEmbedFetcher {
+        fn json(response: &str) -> Self {
+            Self {
+                calls: Cell::new(0),
+                urls: RefCell::new(Vec::new()),
+                result: Ok(response.to_owned()),
+            }
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                calls: Cell::new(0),
+                urls: RefCell::new(Vec::new()),
+                result: Err(BuildError::new(
+                    ErrorKind::Asset,
+                    None,
+                    message,
+                    "install curl and retry with network access",
+                )),
+            }
+        }
+    }
+
+    impl OEmbedFetcher for FixtureOEmbedFetcher {
+        fn fetch(&self, normalized_url: &str) -> Result<String> {
+            self.calls.set(self.calls.get() + 1);
+            self.urls.borrow_mut().push(normalized_url.to_owned());
+            self.result.clone()
+        }
+    }
+
+    struct PanicOEmbedFetcher;
+
+    impl OEmbedFetcher for PanicOEmbedFetcher {
+        fn fetch(&self, _normalized_url: &str) -> Result<String> {
+            panic!("a valid oEmbed cache hit must not invoke the fetcher");
+        }
+    }
+
+    #[test]
+    fn oembed_cache_miss_fetches_once_and_writes_raw_json_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+        let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
+
+        let document = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
+
+        assert_eq!(fetcher.calls.get(), 1);
+        assert_eq!(fetcher.urls.borrow().as_slice(), [target.normalized_url()]);
+        assert_eq!(document.author_name, "A");
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.json"))).unwrap(),
+            OEMBED_JSON.as_bytes()
+        );
+        assert_eq!(fs::read_dir(cache_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn oembed_valid_cache_hit_skips_fetcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join(format!("{key}.json")), OEMBED_JSON).unwrap();
+
+        let document = cache_or_fetch_oembed(7, &target, &PanicOEmbedFetcher, &cache_dir).unwrap();
+
+        assert_eq!(document.html, "<blockquote><p>hello</p><a href=\"https://x.com/a/status/1\">January 1, 2026</a></blockquote>");
+        assert_eq!(document.url, "https://x.com/a/status/1");
+    }
+
+    #[test]
+    fn oembed_non_regular_cache_path_is_a_miss_and_fetches() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        let cache_path = cache_dir.join(format!("{key}.json"));
+        fs::create_dir_all(&cache_path).unwrap();
+        let fetcher = FixtureOEmbedFetcher::err("expected cache miss");
+
+        assert!(!valid_cached_oembed_json(&cache_path));
+        let err = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap_err();
+
+        assert_eq!(fetcher.calls.get(), 1);
+        assert!(
+            err.message.contains("expected cache miss"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn oembed_oversized_cache_is_a_miss_and_self_heals() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        let cache_path = cache_dir.join(format!("{key}.json"));
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&cache_path, oversized_oembed_json()).unwrap();
+        let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
+
+        let document = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
+
+        assert_eq!(fetcher.calls.get(), 1);
+        assert_eq!(document.author_name, "A");
+        assert_eq!(fs::read(&cache_path).unwrap(), OEMBED_JSON.as_bytes());
+    }
+
+    #[test]
+    fn oembed_oversized_fetch_is_line_numbered_error_and_not_cached() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(41, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        let cache_path = cache_dir.join(format!("{key}.json"));
+        let oversized = oversized_oembed_json();
+        let fetcher = FixtureOEmbedFetcher::json(&oversized);
+
+        let err = cache_or_fetch_oembed(41, &target, &fetcher, &cache_dir).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(41));
+        assert!(err.message.contains("exceeds"), "{}", err.message);
+        assert!(
+            err.message
+                .contains(&crate::MAX_OEMBED_RESPONSE_BYTES.to_string()),
+            "{}",
+            err.message
+        );
+        assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn oembed_invalid_cache_self_heals() {
+        for invalid in [
+            "",
+            "{",
+            "{}",
+            r#"{"html":1,"author_name":"A","url":"https://x.com/a/status/1"}"#,
+            r#"{"html":"x","author_name":false,"url":"https://x.com/a/status/1"}"#,
+            r#"{"html":"x","author_name":"A","url":null}"#,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let target = parse_embed_block(7, "https://x.com/a/status/1")
+                .unwrap()
+                .target;
+            let key = builtin_embed_card_cache_key(target.normalized_url());
+            let cache_path = cache_dir.join(format!("{key}.json"));
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(&cache_path, invalid).unwrap();
+            let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
+
+            cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
+
+            assert_eq!(fetcher.calls.get(), 1, "invalid cache: {invalid:?}");
+            assert_eq!(fs::read(&cache_path).unwrap(), OEMBED_JSON.as_bytes());
+            assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn oembed_fetch_failure_names_line_url_cache_and_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = parse_embed_block(41, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
+
+        let err = cache_or_fetch_oembed(
+            41,
+            &target,
+            &FixtureOEmbedFetcher::err("curl exited with status 22"),
+            &cache_dir,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(41));
+        assert!(
+            err.message.contains(target.normalized_url()),
+            "{}",
+            err.message
+        );
+        assert!(err.help.contains(".peitho/embeds-cache/"), "{}", err.help);
+        assert!(err.help.contains(".json"), "{}", err.help);
+        assert!(err.help.contains("delete"), "{}", err.help);
+        assert!(err.help.contains("offline"), "{}", err.help);
+    }
+
     struct PanicEmbedRenderer;
 
     impl EmbedRenderer for PanicEmbedRenderer {
@@ -1575,7 +2143,9 @@ mod tests {
     fn seed_embed_cache(bytes: &[u8]) -> String {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -1608,7 +2178,9 @@ mod tests {
     fn assert_embed_cache_self_heals(old_bytes: &[u8]) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -1630,7 +2202,9 @@ mod tests {
     fn cache_embed_with_renderer_error(message: &str) -> Result<String> {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
         cache_or_render_embed(
             7,
             &target,
@@ -1643,7 +2217,9 @@ mod tests {
     fn assert_invalid_embed_png(bytes: &[u8], message: &str) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
         let err = cache_or_render_embed(
             7,
             &target,
@@ -1663,7 +2239,9 @@ mod tests {
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
         fs::write(&cache_dir, b"regular file blocks cache directory").unwrap();
-        let target = parse_embed_block(line, "https://x.com/a/status/1").unwrap();
+        let target = parse_embed_block(line, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
 
         let err = cache_or_render_embed(
             line,
@@ -1720,6 +2298,7 @@ mod tests {
             &crate::highlight::Highlighter::defaults(),
             &NoSvgRunner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -1736,6 +2315,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &NoSvgRunner,
             &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
+            &PanicOEmbedFetcher,
             &code_images_cache_dir,
             &embeds_cache_dir,
         )
@@ -1758,6 +2338,207 @@ mod tests {
             }
             kind => panic!("expected image, got {kind:?}"),
         }
+    }
+
+    #[test]
+    fn builtin_card_mode_fetches_without_rendering_png() {
+        let temp = tempfile::tempdir().unwrap();
+        let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let fetcher = FixtureOEmbedFetcher::json(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/x-oembed-response.json"
+        )));
+        let span = RevealSpan { start: 1, len: 1 };
+
+        let transformed = transform_code_images(
+            deck_with_spanned_code(
+                "embed",
+                "https://x.com/gosukenator/status/2074821309259973046\nmode: card\n",
+                span,
+            ),
+            &CodeImagesConfig::default(),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &fetcher,
+            &code_images_cache_dir,
+            &embeds_cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(fetcher.calls.get(), 1);
+        assert_eq!(
+            fetcher.urls.borrow().as_slice(),
+            ["https://x.com/gosukenator/status/2074821309259973046"]
+        );
+        assert_eq!(fs::read_dir(&embeds_cache_dir).unwrap().count(), 1);
+        assert!(fs::read_dir(&embeds_cache_dir).unwrap().all(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .unwrap()
+            == "json"));
+        let fragment = &transformed.parsed_slides()[0].fragments[0];
+        assert_eq!(fragment.reveal_span(), Some(span));
+        assert_eq!(fragment.plain_text(), "自前プレゼンツール、スライド作成中に表示確認したり、スライド一覧をグリッドで表示したり、Markdownの修正をリアルタイムに反映したりする機能を入れたhttps://t.co/c3iJNbu3uw pic.twitter.com/mhIvL0JQFA");
+        match fragment.kind() {
+            FragmentKind::EmbedCard { html } => {
+                assert!(html.contains("peitho-embed-card__tweet-text"));
+                assert!(!html.contains("twitter-tweet"));
+            }
+            kind => panic!("expected embed card, got {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_card_structure_error_names_cache_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let normalized_url = "https://x.com/a/status/1";
+        let key = builtin_embed_card_cache_key(normalized_url);
+        let cache_path = embeds_cache_dir.join(format!("{key}.json"));
+        fs::create_dir_all(&embeds_cache_dir).unwrap();
+        fs::write(
+            &cache_path,
+            r#"{"html":"<blockquote class=\"twitter-tweet\"><p>hello</p></blockquote>","author_name":"A","url":"https://x.com/a/status/1"}"#,
+        )
+        .unwrap();
+
+        let err = transform_code_images(
+            deck_with_spanned_code(
+                "embed",
+                "https://x.com/a/status/1\nmode: card\n",
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &CodeImagesConfig::default(),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &code_images_cache_dir,
+            &embeds_cache_dir,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("date anchor"), "{}", err.message);
+        assert!(
+            err.help
+                .contains(&format!("cache file: {}", cache_path.display())),
+            "{}",
+            err.help
+        );
+        assert!(
+            err.help.contains("delete the cache file to refresh"),
+            "{}",
+            err.help
+        );
+    }
+
+    #[test]
+    fn builtin_screenshot_modes_never_fetch_oembed() {
+        for body in [
+            "https://x.com/a/status/1\n",
+            "https://x.com/a/status/1\nmode: screenshot\n",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
+            let transformed = transform_code_images(
+                deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
+                &CodeImagesConfig::default(),
+                &NoSvgRunner,
+                &renderer,
+                &PanicOEmbedFetcher,
+                &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+                &temp.path().join(crate::EMBEDS_CACHE_DIR),
+            )
+            .unwrap();
+
+            assert_eq!(renderer.calls(), 1);
+            assert!(matches!(
+                transformed.parsed_slides()[0].fragments[0].kind(),
+                FragmentKind::Image { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_embed_without_options_matches_explicit_screenshot_bytes() {
+        fn transform(body: &str) -> (SourceFragment, Vec<u8>) {
+            let temp = tempfile::tempdir().unwrap();
+            let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let transformed = transform_code_images(
+                deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
+                &CodeImagesConfig::default(),
+                &NoSvgRunner,
+                &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
+                &PanicOEmbedFetcher,
+                &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+                &embeds_cache_dir,
+            )
+            .unwrap();
+            let bytes = fs::read(
+                fs::read_dir(&embeds_cache_dir)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path(),
+            )
+            .unwrap();
+            (transformed.parsed_slides()[0].fragments[0].clone(), bytes)
+        }
+
+        let implicit = transform("https://x.com/a/status/1\n");
+        let explicit = transform("https://x.com/a/status/1\nmode: screenshot\n");
+
+        assert_eq!(implicit, explicit);
+    }
+
+    struct RecordingSvgRunner {
+        inputs: RefCell<Vec<String>>,
+    }
+
+    impl SvgRunner for RecordingSvgRunner {
+        fn run(&self, _command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>> {
+            self.inputs.borrow_mut().push(stdin.to_owned());
+            Ok(br#"<svg viewBox="0 0 10 10">external embed</svg>"#.to_vec())
+        }
+    }
+
+    #[test]
+    fn explicit_embed_override_receives_option_lines_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let body = "\n  https://x.com/A/status/1  \n\nmode: card\n  future: exact whitespace  \n";
+        let runner = RecordingSvgRunner {
+            inputs: RefCell::new(Vec::new()),
+        };
+        let config = CodeImagesConfig {
+            entries: BTreeMap::from([(
+                "embed".to_owned(),
+                CodeImageCommand {
+                    argv: vec!["embed-to-svg".to_owned()],
+                },
+            )]),
+            key_line: Some(2),
+        };
+
+        let transformed = transform_code_images(
+            deck_with_spanned_code("embed", body, RevealSpan { start: 1, len: 1 }),
+            &config,
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(runner.inputs.borrow().as_slice(), [body]);
+        assert!(matches!(
+            transformed.parsed_slides()[0].fragments[0].kind(),
+            FragmentKind::Image { .. }
+        ));
     }
 
     #[test]
@@ -1786,6 +2567,7 @@ mod tests {
             &config,
             &svg_runner,
             &embed_renderer,
+            &PanicOEmbedFetcher,
             &code_images_cache_dir,
             &embeds_cache_dir,
         )
@@ -1824,7 +2606,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
-        let status = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let status = parse_embed_block(7, "https://x.com/a/status/1")
+            .unwrap()
+            .target;
         let key =
             cache_or_render_embed(7, &status, BUILTIN_EMBED_PARAMS, &renderer, &cache_dir).unwrap();
 
@@ -1972,6 +2756,7 @@ mod tests {
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#),
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -1987,6 +2772,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2007,6 +2793,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2043,6 +2830,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2065,6 +2853,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2095,6 +2884,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2130,6 +2920,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2165,6 +2956,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2218,6 +3010,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2251,6 +3044,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2285,6 +3079,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2317,6 +3112,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2343,6 +3139,7 @@ mod tests {
             &math_config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2377,6 +3174,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2403,6 +3201,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2454,6 +3253,7 @@ mod tests {
             &CodeImagesConfig::default(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2598,6 +3398,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2739,6 +3540,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2778,6 +3580,7 @@ mod tests {
             &config(),
             &first_runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2796,6 +3599,7 @@ mod tests {
             &config(),
             &second_runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2830,6 +3634,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2866,6 +3671,7 @@ mod tests {
                 &config(),
                 &runner,
                 &PanicEmbedRenderer,
+                &PanicOEmbedFetcher,
                 &cache_dir,
                 &embed_cache_dir(&cache_dir),
             ) {
@@ -2905,6 +3711,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2934,6 +3741,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -2957,6 +3765,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -2983,6 +3792,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -3015,6 +3825,7 @@ mod tests {
             &config(),
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         ) {
@@ -3097,6 +3908,7 @@ mod tests {
             &config,
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -3129,6 +3941,7 @@ mod tests {
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">slot</svg>"#),
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -3180,6 +3993,7 @@ mod tests {
             &body_config,
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -3209,6 +4023,7 @@ mod tests {
             &code_config,
             &runner,
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )
@@ -3242,6 +4057,7 @@ mod tests {
             &config,
             &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">same</svg>"#),
             &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
             &cache_dir,
             &embed_cache_dir(&cache_dir),
         )

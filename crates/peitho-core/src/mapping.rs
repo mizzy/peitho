@@ -312,6 +312,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::Math { .. }
+            | FragmentKind::EmbedCard { .. }
             | FragmentKind::List
             | FragmentKind::Text => {
                 SlotName::new("body").expect("conventional slot names are valid")
@@ -403,6 +404,7 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
             | FragmentKind::Text
             | FragmentKind::Code
             | FragmentKind::Math { .. }
+            | FragmentKind::EmbedCard { .. }
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List
@@ -925,6 +927,46 @@ mod tests {
             }
             other => panic!("expected math fragment, got {other:?}"),
         }
+        assert!(slide.unassigned.is_empty());
+    }
+
+    #[test]
+    fn maps_embed_card_to_body_slot() {
+        let layout = parse_layout(
+            "title-body",
+            r#"<section>
+               <slot name="title" accepts="inline" arity="1"></slot>
+               <slot name="body" accepts="blocks" arity="0..*"></slot>
+               </section>"#,
+        )
+        .unwrap();
+        let parsed = Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![
+                    SourceFragment::heading(1, 1, "# Intro", "Intro"),
+                    SourceFragment::embed_card(7, "<article>card</article>", "tweet text"),
+                ],
+                skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        );
+
+        let mapped = map_by_convention(parsed, &layout).unwrap();
+        let slide = &mapped.mapped_slides()[0];
+        let body = SlotName::new("body").unwrap();
+
+        assert!(matches!(
+            slide.slots[&body].fragments()[0].kind(),
+            FragmentKind::EmbedCard { .. }
+        ));
         assert!(slide.unassigned.is_empty());
     }
 

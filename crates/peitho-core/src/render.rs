@@ -11,6 +11,7 @@ use crate::{
         Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
         RevealSpan, SlideKey, SlotName, SourceFragment,
     },
+    embed_card::EmbedCardAssets,
     emphasis::LineEmphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -72,8 +73,10 @@ pub fn render_deck(
     let slide_count = checked_slides.len();
     let mut slides = Vec::new();
     let mut uses_math = false;
+    let mut uses_embed_card = false;
     for slide in checked_slides {
         uses_math |= slide_uses_math(slide.slots());
+        uses_embed_card |= slide_uses_embed_card(slide.slots());
         let (page_number, page_total) = match (slide.page_number_hidden(), page_numbers) {
             (true, _) | (false, None) => (None, None),
             (false, Some(PageNumberFormat::Current)) => (Some(slide.index() + 1), None),
@@ -102,14 +105,12 @@ pub fn render_deck(
         ));
     }
     let math_assets = uses_math.then_some(MathAssets::katex());
-    let css = if let Some(assets) = math_assets {
-        let mut css = String::with_capacity(assets.css().len() + 1 + theme_css.len());
-        css.push_str(assets.css());
-        css.push('\n');
-        css.push_str(&theme_css);
-        css
-    } else {
-        theme_css
+    let embed_card_assets = uses_embed_card.then_some(EmbedCardAssets::builtin());
+    let css = match (math_assets, embed_card_assets) {
+        (None, None) => theme_css,
+        (Some(math), None) => format!("{}\n{theme_css}", math.css()),
+        (None, Some(card)) => format!("{}\n{theme_css}", card.css()),
+        (Some(math), Some(card)) => format!("{}\n{}\n{theme_css}", math.css(), card.css()),
     };
     Ok(Deck::rendered(settings, slides, css, math_assets))
 }
@@ -119,6 +120,14 @@ fn slide_uses_math(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -
         slot.fragments()
             .iter()
             .any(|fragment| matches!(fragment.kind(), FragmentKind::Math { .. }))
+    })
+}
+
+fn slide_uses_embed_card(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
+    slots.values().any(|slot| {
+        slot.fragments()
+            .iter()
+            .any(|fragment| matches!(fragment.kind(), FragmentKind::EmbedCard { .. }))
     })
 }
 
@@ -424,6 +433,13 @@ fn render_block_slot(
                 body.push_str(html);
                 body.push_str("</div>");
             }
+            FragmentKind::EmbedCard { html } => {
+                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                markdown_run.clear();
+                body.push_str(r#"<div class="peitho-embed-card">"#);
+                body.push_str(html);
+                body.push_str("</div>");
+            }
             FragmentKind::Footnotes { entries } => {
                 render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
                 markdown_run.clear();
@@ -493,6 +509,15 @@ fn render_revealed_fragment(
         FragmentKind::Math { html } => {
             body.push_str(&format!(
                 r#"<div class="peitho-math" data-reveal-step="{}">"#,
+                span.start
+            ));
+            body.push_str(html);
+            body.push_str("</div>");
+            Ok(())
+        }
+        FragmentKind::EmbedCard { html } => {
+            body.push_str(&format!(
+                r#"<div class="peitho-embed-card" data-reveal-step="{}">"#,
                 span.start
             ));
             body.push_str(html);
@@ -798,6 +823,7 @@ fn render_image_fragment_inner(
         | FragmentKind::Text
         | FragmentKind::Code
         | FragmentKind::Math { .. }
+        | FragmentKind::EmbedCard { .. }
         | FragmentKind::Footnotes { .. }
         | FragmentKind::List
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
@@ -839,6 +865,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
+            | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
@@ -1787,6 +1814,7 @@ mod tests {
     use crate::{
         check::check_deck,
         domain::{AspectRatio, FootnoteEntry, RawImagePath, RevealSpan},
+        embed_card::EmbedCardAssets,
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
@@ -1822,6 +1850,14 @@ mod tests {
             _params: crate::code_images::EmbedRenderParams,
         ) -> crate::error::Result<Vec<u8>> {
             panic!("unexpected embed renderer call")
+        }
+    }
+
+    struct UnusedOEmbedFetcher;
+
+    impl crate::code_images::OEmbedFetcher for UnusedOEmbedFetcher {
+        fn fetch(&self, _normalized_url: &str) -> crate::error::Result<String> {
+            panic!("unexpected oEmbed fetcher call")
         }
     }
 
@@ -2442,6 +2478,62 @@ mod tests {
     }
 
     #[test]
+    fn render_block_slot_splices_embed_card_between_markdown_runs() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "Before."),
+            SourceFragment::embed_card(5, "<article>card html</article>", "tweet text"),
+            SourceFragment::paragraph(8, "After."),
+        ]);
+        let footnote_numbers = footnote_numbers_for_fragments(&fragments);
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &footnote_numbers,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            html,
+            concat!(
+                r#"<div class="slot-body"><p>Before.</p>"#,
+                "\n",
+                r#"<div class="peitho-embed-card"><article>card html</article></div><p>After.</p>"#,
+                "\n",
+                "</div>"
+            )
+        );
+    }
+
+    #[test]
+    fn render_revealed_embed_card_stamps_its_wrapper() {
+        let fragments = resolve_fragments(vec![SourceFragment::embed_card(
+            5,
+            "<article>card html</article>",
+            "tweet text",
+        )
+        .with_reveal_span(RevealSpan { start: 3, len: 1 })]);
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &BTreeMap::new(),
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            html,
+            r#"<div class="slot-body"><div class="peitho-embed-card" data-reveal-step="3"><article>card html</article></div></div>"#
+        );
+    }
+
+    #[test]
     fn block_slot_renders_footnotes_after_markdown_run() {
         let fragments = resolve_fragments(vec![
             SourceFragment::paragraph(3, "Before[^note]."),
@@ -2693,6 +2785,82 @@ mod tests {
         assert!(with_math.css().starts_with(MathAssets::katex().css()));
         assert!(with_math.css().ends_with(theme_css));
         assert_eq!(without_math.css(), theme_css);
+    }
+
+    #[test]
+    fn rendered_deck_prepends_card_css_before_theme_only_when_used() {
+        let theme_css = ".peitho-slide { color: red; }\n";
+        let with_card = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+        let without_card = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+        let card_css = EmbedCardAssets::builtin().css();
+
+        assert_eq!(with_card.css(), format!("{card_css}\n{theme_css}"));
+        assert_eq!(without_card.css(), theme_css);
+        assert_eq!(with_card.css().matches(".peitho-embed-card {").count(), 1);
+        for line in card_css.lines().map(str::trim) {
+            if line.starts_with("color:")
+                || line.starts_with("background:")
+                || line.starts_with("border-color:")
+                || line.starts_with("font-family:")
+            {
+                assert!(line.contains("var(--peitho-embed-card-"), "{line}");
+            }
+        }
+        assert!(!card_css.contains("url("));
+        assert!(!card_css.contains("@font-face"));
+        assert!(!card_css.contains("background-image"));
+    }
+
+    #[test]
+    fn rendered_deck_with_math_and_card_keeps_theme_last() {
+        let theme_css = ".theme { color: rebeccapurple; }\n";
+        let rendered = render_checked_with_css(checked_deck_with_card_body(true), theme_css);
+
+        assert_eq!(
+            rendered.css(),
+            format!(
+                "{}\n{}\n{theme_css}",
+                MathAssets::katex().css(),
+                EmbedCardAssets::builtin().css()
+            )
+        );
+        assert!(rendered.math_assets().is_some());
+    }
+
+    #[test]
+    fn render_deck_without_embed_cards_keeps_existing_bytes() {
+        let theme_css = ".theme { color: red; }\n";
+        let plain = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+        let math = render_checked_with_css(checked_deck_with_math_body(), theme_css);
+        let screenshot = render_checked_screenshot_with_css(theme_css);
+
+        assert_eq!(
+            plain.slides()[0].html(),
+            r#"<section data-slide-key="intro" class="peitho-slide"><h1><span class="slot-title">Intro</span></h1><div class="slot-body"><p>Body</p>
+</div></section>"#
+        );
+        assert_eq!(plain.css(), theme_css);
+        assert_eq!(
+            math.slides()[0].html(),
+            r#"<section data-slide-key="intro" class="peitho-slide"><h1><span class="slot-title">Intro</span></h1><div class="slot-body"><div class="peitho-math"><span class="katex-display">math html</span></div></div></section>"#
+        );
+        assert_eq!(
+            math.css(),
+            format!("{}\n{theme_css}", MathAssets::katex().css())
+        );
+        assert_eq!(
+            screenshot.slides()[0].html(),
+            r#"<section data-slide-key="tweet" class="peitho-slide"><div class="slot-hero"><img src="assets/embed.png" alt="X post by @a"></div></section>"#
+        );
+        assert_eq!(screenshot.css(), theme_css);
     }
 
     #[test]
@@ -3947,6 +4115,7 @@ Paragraph after heading.
             &config,
             &UnusedSvgRunner,
             &UnusedEmbedRenderer,
+            &UnusedOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
             &temp.path().join(crate::EMBEDS_CACHE_DIR),
         )
@@ -4055,6 +4224,102 @@ Paragraph after heading.
                 None,
             )],
         )
+    }
+
+    fn checked_deck_with_card_body(include_math: bool) -> Deck<Checked> {
+        let layout = title_body_layout();
+        let title = SlotName::new("title").unwrap();
+        let body = SlotName::new("body").unwrap();
+        let mut fragments = vec![SourceFragment::embed_card(
+            3,
+            "<article>card html</article>",
+            "tweet text",
+        )];
+        if include_math {
+            fragments.insert(
+                0,
+                SourceFragment::math(
+                    2,
+                    r#"<span class="katex-display">math html</span>"#,
+                    r#"\frac{1}{2}"#,
+                ),
+            );
+        }
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            title,
+            CheckedSlot::new(
+                layout.slot("title").unwrap().clone(),
+                vec![SourceFragment::heading(1, 1, "# Intro", "Intro")],
+            ),
+        );
+        slots.insert(
+            body,
+            CheckedSlot::new(layout.slot("body").unwrap().clone(), fragments),
+        );
+        Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                false,
+                0,
+                false,
+                None,
+            )],
+        )
+    }
+
+    fn render_checked_screenshot_with_css(theme_css: &str) -> Deck<Rendered> {
+        let layout = parse_layout(
+            "image",
+            r#"<section><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            CheckedSlot::new(
+                layout.slot("hero").unwrap().clone(),
+                vec![SourceFragment::image(
+                    3,
+                    "X post by @a",
+                    RawImagePath::from_embeds_cache("pinned"),
+                )],
+            ),
+        );
+        let checked = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("tweet").unwrap(),
+                layout,
+                slots,
+                false,
+                0,
+                false,
+                None,
+            )],
+        );
+        let (resolved, assets) = crate::phase::resolve_image_paths(checked, |_| {
+            Ok(crate::domain::ResolvedImageAsset {
+                source_abs: std::path::PathBuf::from(".peitho/embeds-cache/pinned.png"),
+                dist_rel: ResolvedImagePath::from_string("assets/embed.png".to_owned()),
+            })
+        })
+        .unwrap();
+        assert_eq!(assets.len(), 1);
+        render_deck(
+            resolved,
+            &crate::highlight::Highlighter::defaults(),
+            theme_css.to_owned(),
+        )
+        .unwrap()
     }
 
     fn render_checked(checked: Deck<Checked>) -> Deck<Rendered> {

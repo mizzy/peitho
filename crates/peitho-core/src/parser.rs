@@ -2582,6 +2582,7 @@ fn revealed_footnote_reference_range(
         FragmentKind::Text
         | FragmentKind::Code
         | FragmentKind::Math { .. }
+        | FragmentKind::EmbedCard { .. }
         | FragmentKind::Footnotes { .. }
         | FragmentKind::Image { .. }
         | FragmentKind::SlotGroup { .. } => None,
