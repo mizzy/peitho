@@ -28,6 +28,7 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                             body_fragment_text(fragment.markdown())
                         }
                         FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
+                        FragmentKind::EmbedCard { .. } => fragment.plain_text().to_owned(),
                         FragmentKind::Footnotes { entries } => entries
                             .iter()
                             .map(|entry| body_fragment_text(entry.markdown()))
@@ -222,6 +223,40 @@ mod tests {
         let text = slide_text(&slide);
 
         assert_eq!(text.body(), "");
+    }
+
+    #[test]
+    fn embed_card_text_enters_manifest_body() {
+        let layout = all_slots_layout();
+        let body = SlotName::new("body").unwrap();
+        let contract = layout.slot("body").unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            body,
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::embed_card(
+                    7,
+                    "<article>generated card</article>",
+                    "selectable tweet text",
+                )],
+            ),
+        );
+        let slide = CheckedSlide::new(
+            0,
+            0,
+            SlideKey::new("card").unwrap(),
+            layout,
+            slots,
+            false,
+            0,
+            false,
+            None,
+        );
+
+        let text = slide_text(&slide);
+
+        assert_eq!(text.body(), "selectable tweet text");
     }
 
     #[test]

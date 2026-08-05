@@ -52,22 +52,42 @@ Fenced `math` blocks render to KaTeX HTML+MathML at build time and flow into
 body slots. No client-side math JavaScript or `code_images:` entry is needed.
 
 Fenced `mermaid` source becomes an SVG image during the build with Peitho's
-built-in Mermaid renderer. For other diagram tags, or to override Mermaid or
-math with an external SVG renderer, add `code_images:` frontmatter. Each mapping
-entry uses the fence language tag as the key and a command string as the value;
-Peitho sends the fenced source to stdin and reads SVG from stdout.
+built-in Mermaid renderer.
+
+An `embed` fence accepts one X status URL. It defaults to an official-widget PNG
+screenshot; `mode=card` on the fence opts into selectable, themeable HTML
+without Chrome:
+
+````markdown
+```embed mode=card
+https://x.com/gosukenator/status/2074821309259973046
+```
+````
+
+Cards flow into `accepts="blocks"` slots. Screenshots flow into
+`accepts="image"` slots. Card cache misses fetch raw oEmbed JSON with system
+`curl`; screenshot cache misses use Chrome. `mode=screenshot` is the explicit
+default.
+
+For other diagram tags, or to override Mermaid, math, or embed with an external
+SVG renderer, add `code_images:` frontmatter. Each entry uses the fence language
+tag as the key and a command string as the value. Peitho sends the fenced source
+to stdin and reads SVG from stdout. An `embed` override rejects `mode=` fence
+options; with a bare fence it receives the complete block body verbatim.
 
 ```yaml
 code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
   math: latex-to-svg              # optional override
+  embed: tweet-to-svg             # optional override; receives the full body
 ```
 
 After external conversion, those blocks behave like normal images and need an
 `accepts="image"` slot. See [Frontmatter](@/guide/frontmatter.md#code-images),
 the [Code Images example](@/examples/code-images.md), and the
-[Math example](@/examples/math.md).
+[Math example](@/examples/math.md). See [Tweet Embed](@/examples/tweet-embed.md)
+for the built-in embed path.
 
 ## Explicit slot syntax
 

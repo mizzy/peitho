@@ -126,6 +126,168 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
     }
 }
 
+const OEMBED_CURL_MAX_TIME_SECS: u64 = 30;
+const OEMBED_CURL_RUNNER_MARGIN_SECS: u64 = 5;
+
+struct CliOEmbedFetcher;
+
+impl peitho_core::code_images::OEmbedFetcher for CliOEmbedFetcher {
+    fn fetch(&self, normalized_url: &str) -> peitho_core::Result<String> {
+        fetch_oembed_with_invoker(normalized_url, &SystemOEmbedCurlInvoker)
+    }
+}
+
+#[derive(Debug)]
+enum OEmbedCurlOutcome {
+    Exited {
+        success: bool,
+        code: Option<i32>,
+        status: String,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    TimedOut {
+        stderr: Vec<u8>,
+    },
+}
+
+trait OEmbedCurlInvoker {
+    fn invoke(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<OEmbedCurlOutcome, ProcessRunError>;
+}
+
+struct SystemOEmbedCurlInvoker;
+
+impl OEmbedCurlInvoker for SystemOEmbedCurlInvoker {
+    fn invoke(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<OEmbedCurlOutcome, ProcessRunError> {
+        match run_child_with_timeout(program, args, stdin, timeout, |_, _| false)? {
+            ProcessOutcome::Ready { .. } => {
+                unreachable!("oEmbed curl completion predicate never fires")
+            }
+            ProcessOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+            } => Ok(OEmbedCurlOutcome::Exited {
+                success: status.success(),
+                code: status.code(),
+                status: status.to_string(),
+                stdout,
+                stderr,
+            }),
+            ProcessOutcome::TimedOut { stderr } => Ok(OEmbedCurlOutcome::TimedOut { stderr }),
+        }
+    }
+}
+
+fn fetch_oembed_with_invoker<I: OEmbedCurlInvoker>(
+    normalized_url: &str,
+    invoker: &I,
+) -> peitho_core::Result<String> {
+    let endpoint = peitho_core::builtin_oembed_request_url(normalized_url);
+    debug_assert!(endpoint.starts_with("https://publish.x.com/oembed?"));
+    let args = [
+        OsString::from("-fsS"),
+        OsString::from("--max-time"),
+        OsString::from(OEMBED_CURL_MAX_TIME_SECS.to_string()),
+        OsString::from("--max-filesize"),
+        OsString::from(peitho_core::MAX_OEMBED_RESPONSE_BYTES.to_string()),
+        OsString::from(endpoint),
+    ];
+    let timeout = Duration::from_secs(OEMBED_CURL_MAX_TIME_SECS + OEMBED_CURL_RUNNER_MARGIN_SECS);
+    let outcome = invoker
+        .invoke(OsStr::new("curl"), &args, None, timeout)
+        .map_err(oembed_curl_process_error)?;
+
+    match outcome {
+        OEmbedCurlOutcome::Exited {
+            success: true,
+            stdout,
+            ..
+        } => String::from_utf8(stdout).map_err(|err| {
+            cli_oembed_fetcher_error(
+                format!("curl returned non-UTF-8 oEmbed data: {err}"),
+                "retry the oEmbed fetch; X must return UTF-8 JSON",
+            )
+        }),
+        OEmbedCurlOutcome::Exited {
+            success: false,
+            code,
+            status,
+            stderr,
+            ..
+        } => {
+            let help = if code == Some(22) {
+                "the X post may have been deleted or made private; check network access to publish.x.com and retry"
+            } else {
+                "check network access to publish.x.com and retry with curl installed"
+            };
+            Err(cli_oembed_fetcher_error(
+                format!(
+                    "curl exited with {status}; stderr: {}",
+                    stderr_excerpt(&stderr)
+                ),
+                help,
+            ))
+        }
+        OEmbedCurlOutcome::TimedOut { stderr } => Err(cli_oembed_fetcher_error(
+            format!(
+                "curl timed out after {}s; stderr: {}",
+                timeout.as_secs(),
+                stderr_excerpt(&stderr)
+            ),
+            "retry with network access to publish.x.com",
+        )),
+    }
+}
+
+fn oembed_curl_process_error(err: ProcessRunError) -> peitho_core::BuildError {
+    match err {
+        ProcessRunError::Spawn(err) => cli_oembed_fetcher_error(
+            format!("failed to start curl: {err}"),
+            "install curl and retry; curl ships with macOS, common Linux CI images, and Windows 10+",
+        ),
+        ProcessRunError::CaptureStdout => cli_oembed_fetcher_error(
+            "failed to capture curl stdout",
+            "retry the oEmbed fetch and report the process setup failure",
+        ),
+        ProcessRunError::CaptureStderr => cli_oembed_fetcher_error(
+            "failed to capture curl stderr",
+            "retry the oEmbed fetch and report the process setup failure",
+        ),
+        ProcessRunError::CaptureStdin => cli_oembed_fetcher_error(
+            "failed to capture curl stdin",
+            "report this error; the oEmbed curl command must not receive stdin",
+        ),
+        ProcessRunError::Wait(err) => cli_oembed_fetcher_error(
+            format!("failed to wait on curl: {err}"),
+            "retry the oEmbed fetch",
+        ),
+        ProcessRunError::Kill(err) => cli_oembed_fetcher_error(
+            format!("failed to terminate curl: {err}"),
+            "report the underlying process error",
+        ),
+    }
+}
+
+fn cli_oembed_fetcher_error(
+    message: impl Into<String>,
+    help: impl Into<String>,
+) -> peitho_core::BuildError {
+    peitho_core::BuildError::new(peitho_core::error::ErrorKind::Asset, None, message, help)
+}
+
 fn cli_embed_renderer_error(
     message: impl fmt::Display,
     help: impl Into<String>,
@@ -724,6 +886,7 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
         &highlighter,
         &CliSvgRunner::for_deck(&input),
         &CliEmbedRenderer,
+        &CliOEmbedFetcher,
         &code_images_cache_dir(&input),
         &embeds_cache_dir(&input),
     ))?;
@@ -1580,6 +1743,7 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &highlighter,
         &CliSvgRunner::for_deck(input),
         &CliEmbedRenderer,
+        &CliOEmbedFetcher,
         &code_images_cache_dir(input),
         &embeds_cache_dir(input),
     ))?;
@@ -2626,11 +2790,18 @@ fn run_code_image_command(
 }
 
 fn stderr_excerpt(stderr: &[u8]) -> String {
-    let excerpt = String::from_utf8_lossy(stderr)
-        .trim()
+    let sanitized = String::from_utf8_lossy(stderr)
         .chars()
-        .take(200)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>();
+    let normalized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let excerpt = normalized.chars().take(200).collect::<String>();
     if excerpt.is_empty() {
         "(empty)".to_owned()
     } else {
@@ -7217,6 +7388,203 @@ contexts:
             !message.contains("install Google Chrome"),
             "actual error: {message}"
         );
+    }
+
+    #[test]
+    fn stderr_excerpt_replaces_control_characters_before_truncation() {
+        let excerpt = stderr_excerpt(b"\x1b]0;pwned\x07\nnormal stderr");
+
+        assert_eq!(excerpt, "]0;pwned normal stderr");
+        assert!(!excerpt.chars().any(char::is_control), "{excerpt:?}");
+    }
+
+    type OEmbedCurlCall = (OsString, Vec<OsString>, bool, Duration);
+
+    struct FixtureOEmbedCurlInvoker {
+        calls: RefCell<Vec<OEmbedCurlCall>>,
+        result: RefCell<Option<Result<OEmbedCurlOutcome, ProcessRunError>>>,
+    }
+
+    impl FixtureOEmbedCurlInvoker {
+        fn outcome(outcome: OEmbedCurlOutcome) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: RefCell::new(Some(Ok(outcome))),
+            }
+        }
+
+        fn error(error: ProcessRunError) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: RefCell::new(Some(Err(error))),
+            }
+        }
+    }
+
+    impl OEmbedCurlInvoker for FixtureOEmbedCurlInvoker {
+        fn invoke(
+            &self,
+            program: &OsStr,
+            args: &[OsString],
+            stdin: Option<&[u8]>,
+            timeout: Duration,
+        ) -> Result<OEmbedCurlOutcome, ProcessRunError> {
+            self.calls.borrow_mut().push((
+                program.to_os_string(),
+                args.to_vec(),
+                stdin.is_some(),
+                timeout,
+            ));
+            self.result
+                .borrow_mut()
+                .take()
+                .expect("fixture curl outcome is consumed once")
+        }
+    }
+
+    fn successful_oembed_outcome(stdout: &[u8]) -> OEmbedCurlOutcome {
+        OEmbedCurlOutcome::Exited {
+            success: true,
+            code: Some(0),
+            status: "exit status: 0".to_owned(),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn oembed_curl_runner_targets_publish_x_without_redirect_following() {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(b"{}"));
+
+        fetch_oembed_with_invoker("https://x.com/A/status/1", &invoker).unwrap();
+
+        let calls = invoker.calls.borrow();
+        let args = &calls[0].1;
+        let endpoint = args.last().unwrap().to_string_lossy();
+        assert!(endpoint.starts_with("https://publish.x.com/oembed?"));
+        assert!(!endpoint.contains("publish.twitter.com"));
+        assert!(!has_arg(args, "-L"));
+        assert!(!has_arg(args, "--location"));
+    }
+
+    #[test]
+    fn oembed_curl_runner_uses_fixed_flags_encoded_endpoint_and_no_stdin() {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(b"{}"));
+
+        fetch_oembed_with_invoker("https://x.com/A/status/1", &invoker).unwrap();
+
+        let calls = invoker.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, OsStr::new("curl"));
+        assert_eq!(
+            calls[0].1,
+            [
+                OsString::from("-fsS"),
+                OsString::from("--max-time"),
+                OsString::from("30"),
+                OsString::from("--max-filesize"),
+                OsString::from(peitho_core::MAX_OEMBED_RESPONSE_BYTES.to_string()),
+                OsString::from(
+                    "https://publish.x.com/oembed?url=https%3A%2F%2Fx.com%2FA%2Fstatus%2F1&omit_script=1&dnt=1&hide_thread=1"
+                ),
+            ]
+        );
+        assert!(!calls[0].2, "curl must receive no stdin pipe");
+        assert_eq!(calls[0].3, Duration::from_secs(35));
+    }
+
+    #[test]
+    fn oembed_curl_runner_returns_complete_stdout_after_successful_exit() {
+        let response = b"{\"html\":\"complete\"}\n";
+        let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(response));
+
+        let raw = fetch_oembed_with_invoker("https://x.com/a/status/1", &invoker).unwrap();
+
+        assert_eq!(raw.as_bytes(), response);
+    }
+
+    #[test]
+    fn oembed_curl_runner_reports_exit_status_and_stderr() {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(OEmbedCurlOutcome::Exited {
+            success: false,
+            code: Some(7),
+            status: "exit status: 7".to_owned(),
+            stdout: Vec::new(),
+            stderr: b"curl: (7) Failed to connect\n".to_vec(),
+        });
+
+        let err = fetch_oembed_with_invoker("https://x.com/a/status/1", &invoker).unwrap_err();
+
+        assert_eq!(err.kind, peitho_core::error::ErrorKind::Asset);
+        assert_eq!(err.line, None);
+        assert!(err.message.contains("exit status: 7"), "{}", err.message);
+        assert!(err.message.contains("Failed to connect"), "{}", err.message);
+        assert_eq!(
+            err.help,
+            "check network access to publish.x.com and retry with curl installed"
+        );
+    }
+
+    #[test]
+    fn oembed_curl_runner_reports_deleted_or_private_post_for_http_failure() {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(OEmbedCurlOutcome::Exited {
+            success: false,
+            code: Some(22),
+            status: "exit status: 22".to_owned(),
+            stdout: Vec::new(),
+            stderr: b"curl: (22) HTTP 404\n".to_vec(),
+        });
+
+        let err = fetch_oembed_with_invoker("https://x.com/a/status/1", &invoker).unwrap_err();
+
+        assert!(
+            err.help
+                .starts_with("the X post may have been deleted or made private"),
+            "{}",
+            err.help
+        );
+        assert!(err.help.contains("network access"), "{}", err.help);
+        assert!(err.help.contains("retry"), "{}", err.help);
+    }
+
+    #[test]
+    fn oembed_curl_runner_reports_timeout_and_stderr() {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(OEmbedCurlOutcome::TimedOut {
+            stderr: b"operation timed out".to_vec(),
+        });
+
+        let err = fetch_oembed_with_invoker("https://x.com/a/status/1", &invoker).unwrap_err();
+
+        assert!(
+            err.message.contains("timed out after 35s"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("operation timed out"),
+            "{}",
+            err.message
+        );
+        assert!(err.help.contains("network access"), "{}", err.help);
+    }
+
+    #[test]
+    fn oembed_curl_runner_reports_missing_curl() {
+        let invoker = FixtureOEmbedCurlInvoker::error(ProcessRunError::Spawn(io::Error::new(
+            io::ErrorKind::NotFound,
+            "curl not found",
+        )));
+
+        let err = fetch_oembed_with_invoker("https://x.com/a/status/1", &invoker).unwrap_err();
+
+        assert_eq!(err.line, None);
+        assert!(
+            err.message.contains("failed to start curl"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("curl not found"), "{}", err.message);
+        assert!(err.help.contains("install curl"), "{}", err.help);
     }
 
     #[cfg(unix)]

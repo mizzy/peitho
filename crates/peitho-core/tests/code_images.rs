@@ -4,7 +4,7 @@ use std::fs;
 
 use peitho_core::{
     check_deck,
-    code_images::{EmbedRenderParams, EmbedRenderer, SvgRunner},
+    code_images::{EmbedRenderParams, EmbedRenderer, OEmbedFetcher, SvgRunner},
     dispatch_by_convention,
     domain::CodeImageCommand,
     highlight::Highlighter,
@@ -44,6 +44,14 @@ impl EmbedRenderer for PanicEmbedRenderer {
     }
 }
 
+struct PanicOEmbedFetcher;
+
+impl OEmbedFetcher for PanicOEmbedFetcher {
+    fn fetch(&self, _normalized_url: &str) -> Result<String> {
+        panic!("integration test must not invoke oEmbed fetcher");
+    }
+}
+
 #[test]
 fn renders_code_image_as_resolved_svg_img() {
     let markdown =
@@ -58,6 +66,7 @@ fn renders_code_image_as_resolved_svg_img() {
         &Highlighter::defaults(),
         &FakeRunner,
         &PanicEmbedRenderer,
+        &PanicOEmbedFetcher,
         &cache_dir,
         &embeds_cache_dir,
     )
@@ -104,6 +113,7 @@ fn renders_builtin_embed_through_existing_png_image_pipeline() {
         &Highlighter::defaults(),
         &PanicSvgRunner,
         &FixtureEmbedRenderer,
+        &PanicOEmbedFetcher,
         &code_images_cache_dir,
         &embeds_cache_dir,
     )

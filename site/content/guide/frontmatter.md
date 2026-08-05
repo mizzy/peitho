@@ -53,9 +53,22 @@ Peitho prepends KaTeX CSS to `peitho.css` and writes fonts under
 `katex-fonts/`.
 
 Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
-then treated as images. Use `code_images` for other diagram tags, or when a
-deck needs to override the built-in Mermaid or math renderer with an external
-command.
+then treated as images. Bare `embed` blocks accept one X status URL and default
+to a cached PNG screenshot. A fence option selects card mode:
+
+````markdown
+```embed mode=card
+https://x.com/gosukenator/status/2074821309259973046
+```
+````
+
+Card mode fetches raw oEmbed JSON with system `curl` on a cache miss, regenerates
+escaped HTML on every build, and never invokes Chrome. Cards are body content
+for `accepts="blocks"` slots; default or explicit `mode=screenshot` embeds are
+images for `accepts="image"` slots.
+
+Use `code_images` for other diagram tags, or when a deck needs to override the
+built-in Mermaid, math, or embed renderer with an external command.
 
 Each `code_images` entry maps a language tag to a command string. Peitho
 shell-splits the string into argv and executes the program directly; it does
@@ -67,6 +80,7 @@ code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
   math: latex-to-svg              # optional override
+  embed: tweet-to-svg             # optional override; receives the full body
 ---
 
 # Flow
@@ -81,7 +95,10 @@ The command receives the code block text on stdin and must write an SVG document
 to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
 then flows through the normal image resolver, so layouts should provide an
 `accepts="image"` slot. This also applies to `code_images.math` overrides; the
-built-in math renderer is the body-inline HTML path.
+built-in math renderer is the body-inline HTML path. An explicit
+`code_images.embed` override also uses the external SVG/image path. It rejects
+`mode=` fence options; with a bare `embed` fence it receives the entire body
+verbatim on stdin.
 
 Bare boolean values such as `mermaid: false` and `math: true` are reserved for
 possible future built-in opt-out syntax and are rejected with a line-numbered
@@ -92,7 +109,8 @@ files read by the command itself, such as Mermaid theme files or config JSON.
 Restart preview or touch the deck after changing those command inputs.
 
 See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
-and Graphviz example deck, and [Math](@/examples/math.md) for built-in math.
+and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and
+[Tweet Embed](@/examples/tweet-embed.md) for X embeds.
 
 ## Asset resolution order
 

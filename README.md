@@ -175,16 +175,43 @@ Fenced `math` blocks render to KaTeX HTML+MathML at build time. The result is bo
 ```
 ````
 
-Use `code_images:` for other diagram tags, or to override the built-in Mermaid renderer with an external command. Peitho pipes the fence source to the declared command, expects SVG on stdout, caches the result, and then routes it as a normal image:
+### X post embeds
+
+An `embed` fence defaults to the existing official-widget PNG screenshot. Add
+`mode=card` to the opening fence for selectable, themeable HTML instead:
+
+````markdown
+```embed mode=card
+https://x.com/gosukenator/status/2074821309259973046
+```
+````
+
+Card mode is body content and needs an `accepts="blocks"` slot; screenshot mode
+is an image and needs an `accepts="image"` slot. On a cache miss, cards use
+system `curl` to fetch raw oEmbed JSON into `.peitho/embeds-cache/*.json` and
+never start Chrome. Screenshots use the existing `.png` cache and Chrome path.
+`mode=screenshot` states the default explicitly.
+
+An explicit `code_images.embed` command rejects `mode=` fence options. With a
+bare `embed` fence, Peitho sends the complete body verbatim on stdin and treats
+the returned SVG as an image.
+
+Use `code_images:` for other diagram tags, or to override a built-in renderer.
+Peitho pipes the fence source to the declared command, expects SVG on stdout,
+caches the result, and then routes it as a normal image:
 
 ```yaml
 code_images:
   dot: dot -Tsvg
   mermaid: mmdc -i - -o - -e svg  # optional override
   math: latex-to-svg              # optional override
+  embed: tweet-to-svg             # optional override; receives the full body
 ```
 
-See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images), the [Code Images example](https://peitho.gosu.ke/examples/code-images/), and the [Math example](https://peitho.gosu.ke/examples/math/).
+See the [frontmatter guide](https://peitho.gosu.ke/guide/frontmatter/#code-images),
+the [Code Images example](https://peitho.gosu.ke/examples/code-images/), the
+[Math example](https://peitho.gosu.ke/examples/math/), and the
+[Tweet Embed example](https://peitho.gosu.ke/examples/tweet-embed/).
 
 ### Deck frontmatter
 
@@ -200,7 +227,7 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
 | `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
-| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid and math are built in unless overridden) |
+| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid, math, and embed are built in unless overridden) |
 
 Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 

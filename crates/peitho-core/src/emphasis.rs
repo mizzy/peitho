@@ -188,20 +188,31 @@ fn error(line: usize, message: impl Into<String>, help: impl Into<String>) -> Bu
     BuildError::new(ErrorKind::Parse, Some(line), message, help)
 }
 
-/// The two halves of a fence info string: the language tag and the emphasis
-/// spec, either of which may be absent.
+pub(crate) fn unexpected_info_tail_error(rest: &str, line: usize) -> BuildError {
+    error(
+        line,
+        "unexpected text after the code language",
+        format!("`{rest}` is not an emphasis spec; write line emphasis as `{{2-4}}`"),
+    )
+}
+
+/// The parsed parts of a fence info string.
+///
+/// A braced tail is line emphasis. A non-braced tail is returned untouched so
+/// the parser can interpret it through the typed code-image resolver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InfoString<'a> {
     pub(crate) language: Option<&'a str>,
     pub(crate) emphasis: Option<&'a str>,
+    pub(crate) tail: Option<&'a str>,
 }
 
 /// Split a fence info string into its language token and emphasis spec.
 ///
 /// The language is the first whitespace-delimited token unless it starts with
-/// `{`, which claims the token for emphasis instead. Everything after the
-/// language must be a single `{…}` group; trailing junk is an error rather
-/// than something silently ignored.
+/// `{`, which claims the token for emphasis instead. A braced tail must be a
+/// single `{…}` group. A non-braced tail is returned to the parser, which
+/// either consumes it for a typed renderer or reports the existing error.
 ///
 /// Positional detection means peitho claims a leading `{…}` for itself, which
 /// is where Pandoc puts *attributes* (```` ```{.rust} ````). Those decks
@@ -214,6 +225,7 @@ pub(crate) fn split_info_string(info: &str, line: usize) -> Result<InfoString<'_
         return Ok(InfoString {
             language: None,
             emphasis: None,
+            tail: None,
         });
     }
 
@@ -233,23 +245,29 @@ pub(crate) fn split_info_string(info: &str, line: usize) -> Result<InfoString<'_
         return Ok(InfoString {
             language,
             emphasis: None,
+            tail: None,
         });
     }
 
-    let spec = extract_braced_spec(rest, line)?;
-    Ok(InfoString {
-        language,
-        emphasis: Some(spec),
-    })
+    if rest.starts_with('{') {
+        let spec = extract_braced_spec(rest, line)?;
+        Ok(InfoString {
+            language,
+            emphasis: Some(spec),
+            tail: None,
+        })
+    } else {
+        Ok(InfoString {
+            language,
+            emphasis: None,
+            tail: Some(rest),
+        })
+    }
 }
 
 fn extract_braced_spec(rest: &str, line: usize) -> Result<&str> {
     let Some(inner) = rest.strip_prefix('{') else {
-        return Err(error(
-            line,
-            "unexpected text after the code language",
-            format!("`{rest}` is not an emphasis spec; write line emphasis as `{{2-4}}`"),
-        ));
+        return Err(unexpected_info_tail_error(rest, line));
     };
 
     let Some(spec) = inner.strip_suffix('}') else {
@@ -380,28 +398,32 @@ mod tests {
             split("rust"),
             InfoString {
                 language: Some("rust"),
-                emphasis: None
+                emphasis: None,
+                tail: None,
             }
         );
         assert_eq!(
             split("rust {2-4}"),
             InfoString {
                 language: Some("rust"),
-                emphasis: Some("2-4")
+                emphasis: Some("2-4"),
+                tail: None,
             }
         );
         assert_eq!(
             split("{2-4}"),
             InfoString {
                 language: None,
-                emphasis: Some("2-4")
+                emphasis: Some("2-4"),
+                tail: None,
             }
         );
         assert_eq!(
             split(""),
             InfoString {
                 language: None,
-                emphasis: None
+                emphasis: None,
+                tail: None,
             }
         );
         // Extra whitespace is tolerated; the language is the first token.
@@ -409,16 +431,27 @@ mod tests {
             split("rust  {2-4}"),
             InfoString {
                 language: Some("rust"),
-                emphasis: Some("2-4")
+                emphasis: Some("2-4"),
+                tail: None,
             }
         );
         assert_eq!(
             split("  rust {1|3}  "),
             InfoString {
                 language: Some("rust"),
-                emphasis: Some("1|3")
+                emphasis: Some("1|3"),
+                tail: None,
             }
         );
+    }
+
+    #[test]
+    fn split_info_string_returns_a_non_braced_tail_to_the_parser() {
+        let split = split_info_string("embed mode=card", 3).unwrap();
+
+        assert_eq!(split.language, Some("embed"));
+        assert_eq!(split.emphasis, None);
+        assert_eq!(split.tail, Some("mode=card"));
     }
 
     #[test]
@@ -438,7 +471,6 @@ mod tests {
     fn malformed_info_strings_are_line_numbered() {
         for (info, message) in [
             ("rust {2-4", "unclosed emphasis spec"),
-            ("rust 2-4", "unexpected text after the code language"),
             ("rust {2}{4}", "malformed emphasis spec"),
         ] {
             let err = split_info_string(info, 9).unwrap_err();

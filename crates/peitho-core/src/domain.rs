@@ -191,15 +191,26 @@ pub struct CodeImagesConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
+    ExternalEmbed(&'a CodeImageCommand),
     BuiltinMermaid,
     BuiltinMath,
     BuiltinEmbed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedMode {
+    Screenshot,
+    Card,
+}
+
 impl CodeImagesConfig {
     pub fn renderer_for(&self, tag: &str) -> Option<CodeImageRenderer<'_>> {
         if let Some(command) = self.entries.get(tag) {
-            return Some(CodeImageRenderer::External(command));
+            return Some(if tag == "embed" {
+                CodeImageRenderer::ExternalEmbed(command)
+            } else {
+                CodeImageRenderer::External(command)
+            });
         }
         match tag {
             "mermaid" => Some(CodeImageRenderer::BuiltinMermaid),
@@ -645,6 +656,9 @@ pub enum FragmentKind<S = RawImagePath> {
     Math {
         html: String,
     },
+    EmbedCard {
+        html: String,
+    },
     Footnotes {
         entries: Vec<FootnoteEntry>,
     },
@@ -680,6 +694,7 @@ impl<S> FragmentKind<S> {
             Self::Text => Accepts::Text,
             Self::Code => Accepts::Code,
             Self::Math { .. } => Accepts::Blocks,
+            Self::EmbedCard { .. } => Accepts::Blocks,
             Self::Footnotes { .. } => Accepts::Blocks,
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
@@ -697,6 +712,7 @@ impl<S> FragmentKind<S> {
             Self::Text => "text block",
             Self::Code => "code block",
             Self::Math { .. } => "math block",
+            Self::EmbedCard { .. } => "embed card",
             Self::Footnotes { .. } => "footnote block",
             Self::Image { .. } => "image",
             Self::List => "list",
@@ -713,6 +729,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Text => "text",
             Self::Code => "code",
             Self::Math { .. } => "math",
+            Self::EmbedCard { .. } => "embed card",
             Self::Footnotes { .. } => "footnotes",
             Self::Image { .. } => "image",
             Self::List => "list",
@@ -727,6 +744,7 @@ pub struct SourceFragment<S = RawImagePath> {
     kind: FragmentKind<S>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
+    embed_mode: Option<EmbedMode>,
     markdown: String,
     text: String,
     code: String,
@@ -745,6 +763,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Heading { level },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: text.into(),
             code: String::new(),
@@ -758,6 +777,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Paragraph,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -771,6 +791,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::List,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -785,6 +806,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Code,
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: code.clone(),
             text: String::new(),
             code,
@@ -803,9 +825,28 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Math { html: html.into() },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: latex_source.clone(),
             text: String::new(),
             code: latex_source,
+            language: None,
+        }
+    }
+
+    pub(crate) fn embed_card(
+        line: usize,
+        html: impl Into<String>,
+        plain_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::EmbedCard { html: html.into() },
+            reveal_span: None,
+            emphasis: None,
+            embed_mode: None,
+            markdown: String::new(),
+            text: plain_text.into(),
+            code: String::new(),
             language: None,
         }
     }
@@ -816,6 +857,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Footnotes { entries },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -833,6 +875,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::SlotGroup { name, children },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -854,6 +897,12 @@ impl SourceFragment<RawImagePath> {
         self.emphasis = Some(emphasis);
         self
     }
+
+    /// Attach the parser-resolved built-in embed mode to a code fragment.
+    pub(crate) fn with_embed_mode(mut self, mode: EmbedMode) -> Self {
+        self.embed_mode = Some(mode);
+        self
+    }
 }
 
 impl<S> SourceFragment<S> {
@@ -866,6 +915,7 @@ impl<S> SourceFragment<S> {
             },
             reveal_span: None,
             emphasis: None,
+            embed_mode: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -892,6 +942,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            embed_mode,
             markdown,
             text,
             code,
@@ -903,6 +954,7 @@ impl<S> SourceFragment<S> {
             FragmentKind::Text => FragmentKind::Text,
             FragmentKind::Code => FragmentKind::Code,
             FragmentKind::Math { html } => FragmentKind::Math { html },
+            FragmentKind::EmbedCard { html } => FragmentKind::EmbedCard { html },
             FragmentKind::Footnotes { entries } => FragmentKind::Footnotes { entries },
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
@@ -922,6 +974,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            embed_mode,
             markdown,
             text,
             code,
@@ -943,6 +996,10 @@ impl<S> SourceFragment<S> {
 
     pub(crate) fn emphasis(&self) -> Option<&LineEmphasis> {
         self.emphasis.as_ref()
+    }
+
+    pub(crate) fn embed_mode(&self) -> Option<EmbedMode> {
+        self.embed_mode
     }
 
     pub fn markdown(&self) -> &str {
@@ -1070,7 +1127,7 @@ mod tests {
         };
         assert_eq!(
             configured.renderer_for("embed"),
-            Some(CodeImageRenderer::External(&command))
+            Some(CodeImageRenderer::ExternalEmbed(&command))
         );
     }
 
@@ -1096,6 +1153,28 @@ mod tests {
         assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
         assert_eq!(fragment.kind().removal_noun(), "math block");
         assert_eq!(fragment.kind().to_string(), "math");
+    }
+
+    #[test]
+    fn source_fragment_embed_card_preserves_html_and_plain_text() {
+        let fragment = SourceFragment::embed_card(
+            14,
+            r#"<article class="peitho-embed-card__content">card</article>"#,
+            "selectable tweet text",
+        );
+
+        assert_eq!(fragment.line(), 14);
+        assert_eq!(fragment.markdown(), "");
+        assert_eq!(fragment.plain_text(), "selectable tweet text");
+        assert_eq!(fragment.code_text(), "");
+        assert_eq!(fragment.language(), None);
+        match fragment.kind() {
+            FragmentKind::EmbedCard { html } => assert!(html.contains("card")),
+            other => panic!("expected embed card fragment, got {other:?}"),
+        }
+        assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
+        assert_eq!(fragment.kind().removal_noun(), "embed card");
+        assert_eq!(fragment.kind().to_string(), "embed card");
     }
 
     #[test]
