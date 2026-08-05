@@ -26,12 +26,12 @@
 }
 
 .peitho-generic-embed-card__title {
+  display: block;
   color: var(--peitho-embed-card-color, inherit);
   font-weight: 700;
 }
 
-.peitho-generic-embed-card__author,
-.peitho-generic-embed-card__provider,
-.peitho-generic-embed-card__separator {
+.peitho-generic-embed-card__meta {
+  display: block;
   color: var(--peitho-embed-card-muted-color, currentColor);
 }

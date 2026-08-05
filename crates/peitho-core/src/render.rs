@@ -519,17 +519,26 @@ fn render_generic_embed_card_content(
         html.push_str(r#"">"#);
     }
 
-    let fields = [
-        ("peitho-generic-embed-card__title", title_html),
+    let meta_fields = [
         ("peitho-generic-embed-card__author", author_html),
         ("peitho-generic-embed-card__provider", provider_html),
-    ]
-    .into_iter()
-    .filter_map(|(class, value)| value.map(|value| (class, value)))
-    .collect::<Vec<_>>();
-    if !fields.is_empty() {
+    ];
+    let has_meta = meta_fields.iter().any(|(_, value)| value.is_some());
+    if title_html.is_some() || has_meta {
         html.push_str(r#"<span class="peitho-generic-embed-card__caption">"#);
-        for (index, (class, value)) in fields.into_iter().enumerate() {
+        if let Some(title_html) = title_html {
+            html.push_str(r#"<span class="peitho-generic-embed-card__title">"#);
+            html.push_str(title_html);
+            html.push_str("</span>");
+        }
+        if has_meta {
+            html.push_str(r#"<span class="peitho-generic-embed-card__meta">"#);
+        }
+        for (index, (class, value)) in meta_fields
+            .into_iter()
+            .filter_map(|(class, value)| value.map(|value| (class, value)))
+            .enumerate()
+        {
             if index > 0 {
                 html.push_str(
                     r#"<span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span>"#,
@@ -539,6 +548,9 @@ fn render_generic_embed_card_content(
             html.push_str(class);
             html.push_str(r#"">"#);
             html.push_str(value);
+            html.push_str("</span>");
+        }
+        if has_meta {
             html.push_str("</span>");
         }
         html.push_str("</span>");
@@ -2983,6 +2995,13 @@ mod tests {
         assert!(html.contains("Title &lt;safe&gt;"), "{html}");
         assert!(html.contains("Author &amp; Co"), "{html}");
         assert!(html.contains("Provider"), "{html}");
+        assert!(html.contains(GENERIC_CARD_FULL_CAPTION_HTML), "{html}");
+        assert!(
+            !html.contains(
+                r#"<span class="peitho-generic-embed-card__title">Title &lt;safe&gt;</span><span class="peitho-generic-embed-card__separator""#
+            ),
+            "{html}"
+        );
         assert!(!html.contains("cdn.example.com"), "{html}");
         assert!(!html.contains(".peitho/embeds-cache"), "{html}");
         assert!(!html.contains("<iframe"), "{html}");
@@ -3007,10 +3026,71 @@ mod tests {
         assert!(html.contains("Title &lt;safe&gt;"), "{html}");
         assert!(html.contains("Author &amp; Co"), "{html}");
         assert!(html.contains("Provider"), "{html}");
+        assert!(html.contains(GENERIC_CARD_FULL_CAPTION_HTML), "{html}");
         assert!(
             html.contains(r#"href="https://example.com/post?a=1&amp;b=2""#),
             "{html}"
         );
+    }
+
+    #[test]
+    fn render_generic_thumbnail_card_with_title_only_omits_meta() {
+        let fragment = resolved_generic_card_with_caption(
+            Some("assets/hashed-thumbnail.jpg"),
+            Some("Title only"),
+            None,
+            None,
+        );
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &[fragment],
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(
+            html.contains(
+                r#"<span class="peitho-generic-embed-card__caption"><span class="peitho-generic-embed-card__title">Title only</span></span>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("peitho-generic-embed-card__meta"), "{html}");
+        assert!(
+            !html.contains("peitho-generic-embed-card__separator"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_generic_text_card_without_title_renders_meta_only() {
+        let fragment = resolved_generic_card_with_caption(
+            None,
+            None,
+            Some("Author &amp; Co"),
+            Some("Provider"),
+        );
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &[fragment],
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(
+            html.contains(
+                r#"<span class="peitho-generic-embed-card__caption"><span class="peitho-generic-embed-card__meta"><span class="peitho-generic-embed-card__author">Author &amp; Co</span><span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span><span class="peitho-generic-embed-card__provider">Provider</span></span></span>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("peitho-generic-embed-card__title"), "{html}");
     }
 
     #[test]
@@ -3109,6 +3189,16 @@ mod tests {
         ] {
             assert!(supplement.contains(variable), "missing {variable}");
         }
+        assert!(
+            supplement.contains(".peitho-generic-embed-card__title {\n  display: block;"),
+            "{supplement}"
+        );
+        assert!(
+            supplement.contains(
+                ".peitho-generic-embed-card__meta {\n  display: block;\n  color: var(--peitho-embed-card-muted-color, currentColor);\n}"
+            ),
+            "{supplement}"
+        );
         assert!(!supplement.contains("url("));
         assert!(!supplement.contains("@font-face"));
     }
@@ -4608,14 +4698,30 @@ Paragraph after heading.
         )
     }
 
+    const GENERIC_CARD_FULL_CAPTION_HTML: &str = r#"<span class="peitho-generic-embed-card__caption"><span class="peitho-generic-embed-card__title">Title &lt;safe&gt;</span><span class="peitho-generic-embed-card__meta"><span class="peitho-generic-embed-card__author">Author &amp; Co</span><span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span><span class="peitho-generic-embed-card__provider">Provider</span></span></span>"#;
+
     fn resolved_generic_card(image: Option<&str>) -> SourceFragment<ResolvedImagePath> {
+        resolved_generic_card_with_caption(
+            image,
+            Some("Title &lt;safe&gt;"),
+            Some("Author &amp; Co"),
+            Some("Provider"),
+        )
+    }
+
+    fn resolved_generic_card_with_caption(
+        image: Option<&str>,
+        title_html: Option<&str>,
+        author_html: Option<&str>,
+        provider_html: Option<&str>,
+    ) -> SourceFragment<ResolvedImagePath> {
         SourceFragment::generic_embed_card(
             5,
             image.map(|src| ResolvedImagePath::from_string(src.to_owned())),
             "Title &amp; alt",
-            Some("Title &lt;safe&gt;".to_owned()),
-            Some("Author &amp; Co".to_owned()),
-            Some("Provider".to_owned()),
+            title_html.map(str::to_owned),
+            author_html.map(str::to_owned),
+            provider_html.map(str::to_owned),
             "https://example.com/post?a=1&amp;b=2",
             "Title <safe>\nAuthor & Co",
         )
