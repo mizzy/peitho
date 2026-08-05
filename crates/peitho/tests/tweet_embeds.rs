@@ -261,9 +261,12 @@ fn build_cached_youtube_generic_embed_offline_without_chrome_or_curl() {
 
     let html = emitted_slide_html(&out);
     assert!(html.contains("peitho-generic-embed-card"), "{html}");
-    assert!(html.contains("Never Gonna Give You Up"), "{html}");
-    assert!(html.contains("Rick Astley"), "{html}");
-    assert!(html.contains("YouTube"), "{html}");
+    assert!(
+        html.contains(
+            r#"<span class="peitho-generic-embed-card__caption"><span class="peitho-generic-embed-card__title">Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)</span><span class="peitho-generic-embed-card__meta"><span class="peitho-generic-embed-card__author">Rick Astley</span><span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span><span class="peitho-generic-embed-card__provider">YouTube</span></span></span>"#
+        ),
+        "{html}"
+    );
     assert!(html.contains(YOUTUBE_PAGE_URL), "{html}");
     assert!(html.contains(r#"src="assets/"#), "{html}");
     assert!(!html.contains(YOUTUBE_THUMBNAIL_URL), "{html}");
@@ -293,8 +296,12 @@ fn build_cached_mastodon_text_card_offline_without_image_asset() {
 
     let html = emitted_html(&out);
     assert!(html.contains("peitho-generic-embed-card"), "{html}");
-    assert!(html.contains("Mastodon"), "{html}");
-    assert!(html.contains("mastodon.social"), "{html}");
+    assert!(
+        html.contains(
+            r#"<span class="peitho-generic-embed-card__caption"><span class="peitho-generic-embed-card__meta"><span class="peitho-generic-embed-card__author">Mastodon</span><span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span><span class="peitho-generic-embed-card__provider">mastodon.social</span></span></span>"#
+        ),
+        "{html}"
+    );
     assert!(html.contains(MASTODON_PAGE_URL), "{html}");
     assert!(
         !html.contains("peitho-generic-embed-card__thumbnail"),
