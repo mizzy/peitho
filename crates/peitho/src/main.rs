@@ -27,6 +27,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 mod asset_resolution;
+mod cdp;
 mod doctor;
 mod lint;
 mod new_cmd;
@@ -2339,7 +2340,12 @@ fn render_embed_with_chrome(
 }
 
 const CHROME_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(60);
-const PEITHO_PDF_FLATTEN_DONE: &str = "PEITHO_PDF_FLATTEN_DONE";
+
+/// Give Chrome a brief chance to shut down cleanly after the complete PDF has
+/// been written. Chrome 149 on macOS can linger after waking GoogleUpdater, so
+/// post-print cleanup gets its own bounded courtesy window and cannot turn a
+/// valid export into a failure.
+const POST_PRINT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// How long to keep draining a child's pipes after it exits, waiting for a
 /// completion signal that was written but may not have been delivered yet.
@@ -2352,7 +2358,6 @@ const PEITHO_PDF_FLATTEN_DONE: &str = "PEITHO_PDF_FLATTEN_DONE";
 const POST_EXIT_DRAIN_WINDOW: Duration = Duration::from_secs(5);
 
 enum ChromeCompletion {
-    PdfWritten { output_path: PathBuf },
     LintResultLogged,
     EmbedMeasured,
     PngWritten,
@@ -2367,7 +2372,6 @@ struct ChromeCompletionState {
 impl ChromeCompletion {
     fn description(&self) -> &'static str {
         match self {
-            Self::PdfWritten { .. } => "PDF flattening completion signal",
             Self::LintResultLogged => "lint measurement payload",
             Self::EmbedMeasured => "official X embed rendered height",
             Self::PngWritten => "tweet embed PNG output",
@@ -2376,9 +2380,6 @@ impl ChromeCompletion {
 
     fn retry_help(&self) -> &'static str {
         match self {
-            Self::PdfWritten { .. } => {
-                "if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
-            }
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
@@ -2390,9 +2391,6 @@ impl ChromeCompletion {
 
     fn timeout_help(&self) -> &'static str {
         match self {
-            Self::PdfWritten { .. } => {
-                "if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
-            }
             Self::LintResultLogged => {
                 "retry lint; if a lint workspace was kept, inspect lint.html there"
             }
@@ -2411,16 +2409,6 @@ impl ChromeCompletion {
 
     fn is_ready(&self, stdout: &[u8], stderr: &[u8], state: &mut ChromeCompletionState) -> bool {
         match self {
-            Self::PdfWritten { output_path } => {
-                if !state.signal_seen {
-                    state.signal_seen = scan_for_needle(
-                        stderr,
-                        &mut state.stderr_scanned,
-                        PEITHO_PDF_FLATTEN_DONE.as_bytes(),
-                    );
-                }
-                output_file_is_nonempty(output_path) && state.signal_seen
-            }
             Self::LintResultLogged => {
                 if !state.signal_seen {
                     state.signal_seen = scan_for_needle(
@@ -2452,7 +2440,6 @@ impl ChromeCompletion {
         state: &mut ChromeCompletionState,
     ) -> bool {
         match self {
-            Self::PdfWritten { .. } => self.is_ready(stdout, stderr, state),
             Self::LintResultLogged => self.is_ready(stdout, stderr, state),
             Self::EmbedMeasured => embed_dump_has_complete_title(stdout),
             Self::PngWritten => self.is_ready(stdout, stderr, state),
@@ -2831,10 +2818,6 @@ fn chrome_process_error(
     }
 }
 
-fn output_file_is_nonempty(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-}
-
 fn run_code_image_command(
     command: &peitho_core::domain::CodeImageCommand,
     stdin: &str,
@@ -2957,34 +2940,234 @@ fn chrome_print_args(profile: &Path, out: &Path, url: &str) -> Vec<OsString> {
     ]
 }
 
+fn chrome_export_args(profile: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--no-sandbox"),
+        OsString::from("--remote-debugging-port=0"),
+        OsString::from("--enable-logging=stderr"),
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from("about:blank"),
+    ]
+}
+
 fn run_chrome_print(chrome: &Path, workspace: &Path, out: &Path) -> miette::Result<()> {
+    run_chrome_print_with_timeout(chrome, workspace, out, CHROME_ONE_SHOT_TIMEOUT)
+}
+
+fn run_chrome_print_with_timeout(
+    chrome: &Path,
+    workspace: &Path,
+    out: &Path,
+    timeout: Duration,
+) -> miette::Result<()> {
     let abs_out = absolute_path_for_output(out)?;
     let profile = workspace.join("chrome-profile");
     fs::create_dir_all(&profile).into_diagnostic()?;
     let pdf_html = workspace.join("pdf.html");
     let url = file_url(&pdf_html)?;
-    let args = chrome_print_args(&profile, &abs_out, &url);
-    run_one_shot_chrome(
-        chrome,
-        &args,
-        ChromeCompletion::PdfWritten {
-            output_path: abs_out.clone(),
-        },
-        CHROME_ONE_SHOT_TIMEOUT,
-    )?;
-    let metadata = fs::metadata(&abs_out).map_err(|err| {
-        miette::miette!(
-            "Chrome did not create PDF output at {}\nhelp: check output path permissions\ncaused by: {err}",
-            abs_out.display()
-        )
-    })?;
-    if metadata.len() == 0 {
-        return Err(miette::miette!(
-            "Chrome created an empty PDF at {}\nhelp: rerun export and check Chrome stderr",
-            abs_out.display()
-        ));
+    let args = chrome_export_args(&profile);
+    let deadline = Instant::now() + timeout;
+    let mut process = CdpChromeProcess::spawn(chrome, &args)?;
+
+    let result = (|| {
+        let port = cdp::wait_for_devtools_port(&profile, deadline, || {
+            process.ensure_running_before_devtools_port()
+        })?;
+        let discovered_url = cdp::fetch_page_websocket_url(port, deadline)?;
+        let mut client = cdp::CdpClient::connect(port, &discovered_url, deadline)?;
+        client.page_enable(deadline)?;
+        client.page_navigate(&url, deadline)?;
+        cdp::wait_for_pdf_flattening(&mut client, deadline)?;
+
+        let pdf = client.page_print_to_pdf(deadline)?;
+        if pdf.is_empty() {
+            return Err(miette::miette!(
+                "Chrome Page.printToPDF returned an empty PDF"
+            ));
+        }
+        fs::write(&abs_out, pdf).map_err(|err| {
+            miette::miette!(
+                "failed to write Chrome PDF output at {}: {err}",
+                abs_out.display()
+            )
+        })?;
+
+        best_effort_cdp_shutdown(
+            &mut process,
+            POST_PRINT_SHUTDOWN_GRACE,
+            |shutdown_deadline| client.browser_close(shutdown_deadline),
+        );
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => Err(cdp_export_error(&mut process, err)),
     }
-    Ok(())
+}
+
+fn best_effort_cdp_shutdown(
+    process: &mut CdpChromeProcess,
+    grace: Duration,
+    close_browser: impl FnOnce(Instant) -> miette::Result<()>,
+) {
+    let deadline = Instant::now() + grace;
+    if close_browser(deadline).is_err() || process.wait_for_exit(deadline).is_err() {
+        let _ = process.kill_and_reap();
+    }
+}
+
+struct CdpChromeProcess {
+    child: Child,
+    stderr_rx: mpsc::Receiver<ProcessPipeEvent>,
+    stderr: Vec<u8>,
+    reaped: bool,
+}
+
+impl CdpChromeProcess {
+    fn spawn(chrome: &Path, args: &[OsString]) -> miette::Result<Self> {
+        let mut child = std::process::Command::new(chrome)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                miette::miette!(
+                    "failed to run Chrome at {} for ordered PDF printing\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+                    chrome.display()
+                )
+            })?;
+        let Some(stderr_pipe) = child.stderr.take() else {
+            let _ = kill_and_reap_process_child(&mut child);
+            return Err(miette::miette!(
+                "failed to capture Chrome stderr for ordered PDF printing"
+            ));
+        };
+        let (stderr_tx, stderr_rx) = mpsc::channel();
+        let _stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, stderr_tx);
+        Ok(Self {
+            child,
+            stderr_rx,
+            stderr: Vec::new(),
+            reaped: false,
+        })
+    }
+
+    fn ensure_running_before_devtools_port(&mut self) -> miette::Result<()> {
+        self.drain_stderr();
+        match self.child.try_wait() {
+            Ok(None) => Ok(()),
+            Ok(Some(status)) => {
+                self.reaped = true;
+                self.drain_stderr();
+                Err(miette::miette!(
+                    "Chrome exited with status {status} before publishing DevToolsActivePort"
+                ))
+            }
+            Err(err) => Err(miette::miette!(
+                "failed to inspect Chrome while waiting for DevToolsActivePort: {err}"
+            )),
+        }
+    }
+
+    fn wait_for_exit(&mut self, deadline: Instant) -> miette::Result<ExitStatus> {
+        loop {
+            self.drain_stderr();
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.reaped = true;
+                    self.drain_stderr();
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(miette::miette!(
+                        "failed to wait for Chrome after Browser.close: {err}"
+                    ));
+                }
+            }
+
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| {
+                    miette::miette!("timed out waiting for Chrome to exit after Browser.close")
+                })?;
+            thread::sleep(Duration::from_millis(25).min(remaining));
+        }
+    }
+
+    fn kill_and_reap(&mut self) -> io::Result<()> {
+        if self.reaped {
+            self.drain_stderr_tail();
+            return Ok(());
+        }
+        kill_and_reap_process_child(&mut self.child)?;
+        self.reaped = true;
+        self.drain_stderr_tail();
+        Ok(())
+    }
+
+    fn drain_stderr(&mut self) {
+        let mut ignored_stdout = Vec::new();
+        drain_process_events(&self.stderr_rx, &mut ignored_stdout, &mut self.stderr);
+    }
+
+    fn drain_stderr_tail(&mut self) {
+        // The pipe reader runs on another thread. After kill+wait, give it a
+        // bounded window to deliver bytes that were already written before
+        // the child died; Chrome grandchildren may keep the pipe open, so
+        // waiting for EOF is not safe.
+        let tail_deadline = Instant::now() + Duration::from_millis(500);
+        let mut ignored_stdout = Vec::new();
+        loop {
+            self.drain_stderr();
+            let now = Instant::now();
+            if now >= tail_deadline {
+                break;
+            }
+            let poll = Duration::from_millis(10).min(tail_deadline - now);
+            if matches!(
+                receive_process_event_until(
+                    &self.stderr_rx,
+                    &mut ignored_stdout,
+                    &mut self.stderr,
+                    poll,
+                ),
+                ProcessReceive::Disconnected
+            ) {
+                self.drain_stderr();
+                break;
+            }
+        }
+    }
+}
+
+impl Drop for CdpChromeProcess {
+    fn drop(&mut self) {
+        let _ = self.kill_and_reap();
+    }
+}
+
+fn cdp_export_error(process: &mut CdpChromeProcess, err: miette::Error) -> miette::Error {
+    let cleanup_error = process.kill_and_reap().err();
+    let stderr = String::from_utf8_lossy(&process.stderr);
+    let stderr = if stderr.trim().is_empty() {
+        "(empty)"
+    } else {
+        stderr.trim()
+    };
+    let cleanup = cleanup_error
+        .map(|cleanup_err| {
+            format!("\ncleanup error: failed to kill and reap Chrome: {cleanup_err}")
+        })
+        .unwrap_or_default();
+    miette::miette!(
+        "Chrome PDF export failed\ncaused by: {err}\nhelp: if an export workspace was kept, inspect its pdf.html and the Chrome stderr below\nstderr: {stderr}{cleanup}"
+    )
 }
 
 fn absolute_path_for_output(out: &Path) -> miette::Result<PathBuf> {
@@ -4479,9 +4662,6 @@ contexts:
                     Vec::new(),
                     b"bytes written to file".to_vec(),
                 ))
-            }
-            ChromeCompletion::PdfWritten { .. } => {
-                panic!("embed orchestration must not request PDF completion")
             }
             ChromeCompletion::LintResultLogged => {
                 panic!("embed orchestration must not request lint completion")
@@ -7279,6 +7459,36 @@ contexts:
     }
 
     #[test]
+    fn chrome_export_args_start_blank_cdp_session_without_virtual_time_or_print_flag() {
+        let profile = Path::new("/tmp/peitho-export/chrome-profile");
+
+        let args = chrome_export_args(profile);
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--headless=new"),
+                OsString::from("--disable-gpu"),
+                OsString::from("--no-sandbox"),
+                OsString::from("--remote-debugging-port=0"),
+                OsString::from("--enable-logging=stderr"),
+                OsString::from("--user-data-dir=/tmp/peitho-export/chrome-profile"),
+                OsString::from("about:blank"),
+            ]
+        );
+        assert!(!has_arg_prefix(&args, "--print-to-pdf="));
+        assert!(!has_arg_prefix(&args, "--virtual-time-budget="));
+    }
+
+    #[test]
+    fn chrome_one_shot_timeout_matches_pdf_flatten_readiness_budget_contract() {
+        // Together with
+        // render::tests::pdf_flatten_readiness_timeouts_fit_inside_chrome_deadline
+        // in peitho-core, this fixes the cross-crate readiness/print budget.
+        assert_eq!(CHROME_ONE_SHOT_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
     fn emit_pdf_workspace_writes_static_pdf_entry_without_notes_or_manifest() {
         let fixture = WatchFixture::new(
             "---\nresolution: 1920x1080\n---\n# Export\n\n<!-- private note -->\n",
@@ -7428,34 +7638,6 @@ contexts:
     }
 
     #[test]
-    fn chrome_process_wait_error_does_not_use_install_hint() {
-        let err = chrome_process_error(
-            Path::new("/tmp/chrome"),
-            ProcessRunError::Wait(std::io::Error::other("wait failed")),
-            &ChromeCompletion::PdfWritten {
-                output_path: PathBuf::from("out.pdf"),
-            },
-        );
-        let message = err.to_string();
-
-        assert!(
-            message.contains("failed to wait on Chrome: wait failed"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains(
-                "help: if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
-            ),
-            "actual error: {message}"
-        );
-        assert!(!message.contains("retry export"), "actual error: {message}");
-        assert!(
-            !message.contains("install Google Chrome"),
-            "actual error: {message}"
-        );
-    }
-
-    #[test]
     fn chrome_process_wait_error_uses_lint_retry_for_lint_completion() {
         let err = chrome_process_error(
             Path::new("/tmp/chrome"),
@@ -7489,9 +7671,7 @@ contexts:
         let err = chrome_process_error(
             Path::new("/tmp/chrome"),
             ProcessRunError::Kill(std::io::Error::other("kill failed")),
-            &ChromeCompletion::PdfWritten {
-                output_path: PathBuf::from("out.pdf"),
-            },
+            &ChromeCompletion::LintResultLogged,
         );
         let message = err.to_string();
 
@@ -8032,9 +8212,8 @@ contexts:
     #[cfg(unix)]
     #[test]
     fn process_runner_exit_drain_does_not_wait_out_the_whole_timeout() {
-        // A caller whose predicate never fires (PDF export re-checks the output
-        // file after exit instead) must not be made to sit through the full
-        // timeout just because a grandchild holds the pipes open.
+        // A caller whose predicate never fires must not be made to sit through
+        // the full timeout just because a grandchild holds the pipes open.
         let args = [
             OsString::from("-c"),
             OsString::from("sleep 30 & printf 'done\\n' >&2; exit 0"),
@@ -8078,115 +8257,6 @@ contexts:
         let stdout = peitho_core::code_images::SvgRunner::run(&runner, &command, "").unwrap();
 
         assert_eq!(stdout, br#"<svg viewBox="0 0 10 10"></svg>"#);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn one_shot_chrome_runner_returns_after_pdf_flatten_signal_and_kills_child() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_chrome = dir.path().join("fake-chrome");
-        let out = dir.path().join("out.pdf");
-        write_script(
-            &fake_chrome,
-            r#"#!/bin/sh
-out="$1"
-printf 'PEITHO_PDF_FLATTEN_DONE\n' >&2
-printf '%s' '%PDF-test' > "$out"
-printf '9 bytes written to file %s\n' "$out" >&2
-exec sleep 30
-"#,
-        );
-
-        let started = std::time::Instant::now();
-        let output = run_one_shot_chrome(
-            Path::new("/bin/sh"),
-            &[
-                fake_chrome.clone().into_os_string(),
-                out.clone().into_os_string(),
-            ],
-            ChromeCompletion::PdfWritten {
-                output_path: out.clone(),
-            },
-            CHROME_ONE_SHOT_TIMEOUT,
-        )
-        .unwrap();
-
-        // Well below the child's `sleep 30`: proves the completion signal
-        // triggered the early return, with headroom for loaded CI runners.
-        assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(out.is_file());
-        assert!(output.stdout.is_empty());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("PEITHO_PDF_FLATTEN_DONE"),
-            "actual stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn one_shot_chrome_runner_rejects_successful_pdf_exit_without_flatten_signal() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_chrome = dir.path().join("fake-chrome");
-        let out = dir.path().join("out.pdf");
-        write_script(
-            &fake_chrome,
-            r#"#!/bin/sh
-out="$1"
-printf '%s' '%PDF-test' > "$out"
-printf '9 bytes written to file %s\n' "$out" >&2
-"#,
-        );
-
-        let err = run_one_shot_chrome(
-            Path::new("/bin/sh"),
-            &[
-                fake_chrome.clone().into_os_string(),
-                out.clone().into_os_string(),
-            ],
-            ChromeCompletion::PdfWritten {
-                output_path: out.clone(),
-            },
-            CHROME_ONE_SHOT_TIMEOUT,
-        )
-        .unwrap_err();
-
-        assert!(out.is_file());
-        let message = err.to_string();
-        assert!(
-            message.contains("completed before one-shot output was ready"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains("expected PDF flattening completion signal before Chrome exited"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains("bytes written to file"),
-            "actual error: {message}"
-        );
-    }
-
-    #[test]
-    fn pdf_completion_scan_detects_flatten_signal_across_buffer_boundaries() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.pdf");
-        fs::write(&out, "%PDF-test").unwrap();
-        let mut state = ChromeCompletionState::default();
-        let mut stderr = b"PEITHO_PDF_FLATTEN_DO".to_vec();
-
-        assert!(!ChromeCompletion::PdfWritten {
-            output_path: out.clone()
-        }
-        .is_ready(&[], &stderr, &mut state));
-
-        stderr.extend_from_slice(b"NE\n");
-
-        assert!(ChromeCompletion::PdfWritten { output_path: out }.is_ready(
-            &[],
-            &stderr,
-            &mut state
-        ));
     }
 
     #[test]
@@ -8243,46 +8313,6 @@ printf 'JavaScript exploded before lint payload\n' >&2
 
     #[cfg(unix)]
     #[test]
-    fn one_shot_chrome_runner_times_out_and_reaps_child_without_completion() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_chrome = dir.path().join("fake-chrome");
-        write_script(
-            &fake_chrome,
-            r#"#!/bin/sh
-exec sleep 30
-"#,
-        );
-
-        let started = std::time::Instant::now();
-        let out = dir.path().join("out.pdf");
-        let err = run_one_shot_chrome(
-            Path::new("/bin/sh"),
-            &[fake_chrome.clone().into_os_string()],
-            ChromeCompletion::PdfWritten { output_path: out },
-            Duration::from_millis(100),
-        )
-        .unwrap_err();
-
-        // Well below the child's `sleep 30`: proves the deadline killed the
-        // child instead of waiting it out, with headroom for loaded CI runners.
-        assert!(started.elapsed() < Duration::from_secs(10));
-        let message = err.to_string();
-        assert!(message.contains("timed out"), "actual error: {message}");
-        assert!(
-            message.contains("waiting for PDF flattening completion signal"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains(
-                "help: if an export workspace was kept, inspect pdf.html there for PDF flattening errors"
-            ),
-            "actual error: {message}"
-        );
-        assert!(!message.contains("retry export"), "actual error: {message}");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn one_shot_chrome_runner_lint_timeout_uses_lint_help() {
         let dir = tempfile::tempdir().unwrap();
         let fake_chrome = dir.path().join("fake-chrome");
@@ -8320,6 +8350,144 @@ exec sleep 30
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cdp_export_port_timeout_reports_stderr_and_reaps_chrome() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("pdf.html"), "<!doctype html>").unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let pid_file = dir.path().join("fake-chrome.pid");
+        write_script(
+            &fake_chrome,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nprintf 'fake chrome never published DevToolsActivePort\\n' >&2\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        );
+        fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = Instant::now();
+        let err = run_chrome_print_with_timeout(
+            &fake_chrome,
+            &workspace,
+            &dir.path().join("out.pdf"),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let message = err.to_string();
+        assert!(
+            message.contains("Chrome PDF export failed"),
+            "actual error: {message}"
+        );
+        assert!(message.contains("pdf.html"), "actual error: {message}");
+        assert!(
+            !message.contains("before ordered printing completed"),
+            "actual error: {message}"
+        );
+        assert!(
+            !message.contains("PDF flattening readiness must appear"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("fake chrome never published DevToolsActivePort"),
+            "actual error: {message}"
+        );
+
+        let pid = fs::read_to_string(pid_file).unwrap();
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "fake Chrome process {} still exists",
+            pid.trim()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cdp_export_exited_before_port_reports_immediately_and_reaps_chrome() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("pdf.html"), "<!doctype html>").unwrap();
+        let fake_chrome = dir.path().join("fake-chrome");
+        let pid_file = dir.path().join("fake-chrome.pid");
+        write_script(
+            &fake_chrome,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nprintf 'fake chrome exited before DevToolsActivePort\\n' >&2\nexit 23\n",
+                pid_file.display()
+            ),
+        );
+        fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = Instant::now();
+        let err = run_chrome_print_with_timeout(
+            &fake_chrome,
+            &workspace,
+            &dir.path().join("out.pdf"),
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "dead Chrome was not detected promptly"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("before publishing DevToolsActivePort"),
+            "actual error: {message}"
+        );
+        assert!(
+            message.contains("fake chrome exited before DevToolsActivePort"),
+            "actual error: {message}"
+        );
+
+        let pid = fs::read_to_string(pid_file).unwrap();
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "fake Chrome process {} still exists",
+            pid.trim()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cdp_post_print_shutdown_grace_reaps_lingering_chrome_without_failing() {
+        let args = [OsString::from("-c"), OsString::from("exec sleep 30")];
+        let mut process = CdpChromeProcess::spawn(Path::new("/bin/sh"), &args).unwrap();
+        let pid = process.child.id();
+
+        let started = Instant::now();
+        best_effort_cdp_shutdown(&mut process, Duration::from_millis(100), |_| Ok(()));
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(process.reaped, "lingering Chrome child was not reaped");
+        let status = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "fake Chrome process {pid} still exists");
+    }
+
     #[test]
     fn png_completion_accepts_zero_byte_write_signal() {
         let dir = tempfile::tempdir().unwrap();
@@ -8333,40 +8501,6 @@ exec sleep 30
 
         let mut exited_state = ChromeCompletionState::default();
         assert!(completion.is_ready_after_successful_exit(&[], stderr, &mut exited_state));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pdf_completion_requires_nonempty_output_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_chrome = dir.path().join("fake-chrome");
-        let out = dir.path().join("out.pdf");
-        write_script(
-            &fake_chrome,
-            r#"#!/bin/sh
-out="$1"
-: > "$out"
-printf 'PEITHO_PDF_FLATTEN_DONE\n' >&2
-printf '0 bytes written to file %s\n' "$out" >&2
-"#,
-        );
-
-        let err = run_one_shot_chrome(
-            Path::new("/bin/sh"),
-            &[
-                fake_chrome.clone().into_os_string(),
-                out.clone().into_os_string(),
-            ],
-            ChromeCompletion::PdfWritten { output_path: out },
-            CHROME_ONE_SHOT_TIMEOUT,
-        )
-        .unwrap_err();
-
-        let message = err.to_string();
-        assert!(
-            message.contains("completed before one-shot output was ready"),
-            "actual error: {message}"
-        );
     }
 
     #[test]

@@ -1955,6 +1955,18 @@ mod tests {
         parse_markdown_impl(source, frontmatter, highlighter)
     }
 
+    fn javascript_timeout_ms(source: &str, name: &str) -> u64 {
+        let prefix = format!("var {name} = ");
+        source
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.strip_suffix(';'))
+            .unwrap_or_else(|| panic!("missing JavaScript timeout constant {name}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid JavaScript timeout constant {name}"))
+    }
+
     struct UnusedSvgRunner;
 
     impl crate::code_images::SvgRunner for UnusedSvgRunner {
@@ -4274,7 +4286,10 @@ Paragraph after heading.
         assert!(wait_for_window_load.contains("WINDOW_LOAD_TIMEOUT_MS"));
         assert!(wait_for_window_load.contains("setTimeout"));
         assert!(wait_for_window_load.contains("Promise.race"));
-        assert!(PDF_FLATTEN_JS.contains("WINDOW_LOAD_TIMEOUT_MS = 2000"));
+        assert_eq!(
+            javascript_timeout_ms(PDF_FLATTEN_JS, "WINDOW_LOAD_TIMEOUT_MS"),
+            20_000
+        );
     }
 
     #[test]
@@ -4283,7 +4298,28 @@ Paragraph after heading.
         assert!(PDF_FLATTEN_JS.contains("document.fonts.ready"));
         assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS"));
         assert!(PDF_FLATTEN_JS.contains("Promise.race"));
-        assert!(PDF_FLATTEN_JS.contains("FONT_READY_TIMEOUT_MS = 2000"));
+        assert_eq!(
+            javascript_timeout_ms(PDF_FLATTEN_JS, "FONT_READY_TIMEOUT_MS"),
+            20_000
+        );
+    }
+
+    #[test]
+    fn pdf_flatten_readiness_timeouts_fit_inside_chrome_deadline() {
+        const CHROME_ONE_SHOT_TIMEOUT_MS: u64 = 60_000;
+        // After the two serial readiness fallbacks, flattening large visual
+        // effects and transferring/decoding/writing the PDF still need a
+        // meaningful share of the outer deadline.
+        const MINIMUM_FLATTEN_AND_PRINT_BUDGET_MS: u64 = 15_000;
+
+        let window_load_ms = javascript_timeout_ms(PDF_FLATTEN_JS, "WINDOW_LOAD_TIMEOUT_MS");
+        let font_ready_ms = javascript_timeout_ms(PDF_FLATTEN_JS, "FONT_READY_TIMEOUT_MS");
+
+        assert!(
+            window_load_ms + font_ready_ms + MINIMUM_FLATTEN_AND_PRINT_BUDGET_MS
+                <= CHROME_ONE_SHOT_TIMEOUT_MS,
+            "serial PDF readiness waits must preserve the flatten-and-print budget inside CHROME_ONE_SHOT_TIMEOUT"
+        );
     }
 
     #[test]
