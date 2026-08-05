@@ -1124,6 +1124,18 @@ mod tests {
         fn fetch(&self, _normalized_url: &str) -> crate::Result<String> {
             panic!("math manifest test must not invoke oEmbed fetcher");
         }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> crate::Result<Vec<u8>> {
+            panic!("math manifest test must not invoke generic page fetcher");
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> crate::Result<Vec<u8>> {
+            panic!("math manifest test must not invoke generic endpoint fetcher");
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> crate::Result<Vec<u8>> {
+            panic!("math manifest test must not invoke generic thumbnail fetcher");
+        }
     }
 
     fn title_body_layout() -> Layout {

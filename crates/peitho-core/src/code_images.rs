@@ -12,22 +12,28 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::{
     domain::{
-        CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedMode, FragmentKind,
-        RawImagePath, SourceFragment,
+        CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedImageFormat, EmbedMode,
+        EmbedOptions, FragmentKind, RawImagePath, SourceFragment,
     },
     embed_card::{
         build_embed_card_html, builtin_embed_card_cache_key, hex_encode, parse_oembed_document,
         OEmbedDocument,
     },
     error::{BuildError, ErrorKind, Result},
+    generic_oembed::{
+        build_generic_embed_card, detect_thumbnail_format, discover_oembed_endpoint,
+        generic_oembed_json_cache_key, generic_oembed_thumbnail_cache_key, parse_generic_oembed,
+        GenericEmbedCardParts, GenericOEmbedData,
+    },
     highlight::Highlighter,
     math::{KatexRenderer, MathOutput, MathRenderer},
     parser::{embed_fence_options_help, parse_markdown, ParsedFrontmatter},
     phase::{Deck, Parsed},
-    MAX_OEMBED_RESPONSE_BYTES,
+    MAX_OEMBED_DISCOVERY_PAGE_BYTES, MAX_OEMBED_RESPONSE_BYTES, MAX_OEMBED_THUMBNAIL_BYTES,
 };
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -45,6 +51,9 @@ pub trait EmbedRenderer {
 
 pub trait OEmbedFetcher {
     fn fetch(&self, normalized_url: &str) -> crate::Result<String>;
+    fn fetch_discovery_page(&self, page_url: &str) -> crate::Result<Vec<u8>>;
+    fn fetch_discovered_oembed(&self, endpoint_url: &str) -> crate::Result<Vec<u8>>;
+    fn fetch_thumbnail(&self, image_url: &str) -> crate::Result<Vec<u8>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,19 +94,22 @@ pub const BUILTIN_EMBED_PARAMS: EmbedRenderParams =
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmbedTarget {
     X(TweetStatusUrl),
+    Generic(GenericPageUrl),
 }
 
-impl EmbedTarget {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenericPageUrl {
+    parsed: Url,
+    normalized_url: String,
+}
+
+impl GenericPageUrl {
     fn normalized_url(&self) -> &str {
-        match self {
-            Self::X(status) => status.normalized_url(),
-        }
+        &self.normalized_url
     }
 
-    fn user(&self) -> &str {
-        match self {
-            Self::X(status) => &status.user,
-        }
+    fn parsed(&self) -> &Url {
+        &self.parsed
     }
 }
 
@@ -126,7 +138,7 @@ fn parse_embed_block(line: usize, body: &str) -> Result<EmbedTarget> {
             "embed",
             "embed block is empty",
             format!(
-                "put the X status URL first (exactly one non-blank body line); {}; {}",
+                "put exactly one URL line in the block (an X status URL or any HTTP(S) page URL); {}; {}",
                 embed_fence_options_help(),
                 embed_url_help()
             ),
@@ -155,7 +167,31 @@ fn parse_embed_url(line: usize, url: &str) -> Result<EmbedTarget> {
             return parse_x_status_url(line, &url[prefix.len()..]);
         }
     }
-    Err(unsupported_embed_url_error(line))
+
+    let mut parsed = Url::parse(url).map_err(|_| unsupported_generic_embed_url_error(line))?;
+    if parsed.host_str().is_some_and(is_x_domain) {
+        return Err(unsupported_embed_url_error(line));
+    }
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(unsupported_generic_embed_url_error(line));
+    }
+    parsed.set_fragment(None);
+    let normalized_url = parsed.to_string();
+    Ok(EmbedTarget::Generic(GenericPageUrl {
+        parsed,
+        normalized_url,
+    }))
+}
+
+fn is_x_domain(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    ["x.com", "twitter.com"].into_iter().any(|domain| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 fn parse_x_status_url(line: usize, path: &str) -> Result<EmbedTarget> {
@@ -198,8 +234,47 @@ fn unsupported_embed_url_error(line: usize) -> BuildError {
     )
 }
 
+fn unsupported_generic_embed_url_error(line: usize) -> BuildError {
+    code_image_error(
+        line,
+        "embed",
+        "embed block must contain a supported X status URL or generic HTTP(S) page URL",
+        "use https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; for generic oEmbed, use one absolute http:// or https:// page URL",
+    )
+}
+
 fn embed_url_help() -> &'static str {
-    "use https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; other providers belong to the generic-oEmbed follow-up"
+    "X URLs must use the status-URL form https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; any other HTTP(S) page URL is embedded via generic oEmbed discovery"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbedDispatch<'a> {
+    X(EmbedMode, &'a TweetStatusUrl),
+    Generic(&'a GenericPageUrl),
+}
+
+fn dispatch_embed_target<'a>(
+    line: usize,
+    target: &'a EmbedTarget,
+    options: EmbedOptions,
+) -> Result<EmbedDispatch<'a>> {
+    match target {
+        EmbedTarget::X(status) => Ok(EmbedDispatch::X(
+            options.mode.unwrap_or(EmbedMode::Screenshot),
+            status,
+        )),
+        EmbedTarget::Generic(page) => {
+            if options.mode.is_some() {
+                return Err(code_image_error(
+                    line,
+                    "embed",
+                    "mode= is only supported for X status URLs",
+                    "remove mode= from this generic HTTP(S) URL; generic oEmbed providers always render as a static card",
+                ));
+            }
+            Ok(EmbedDispatch::Generic(page))
+        }
+    }
 }
 
 /// Typed narrowing that keeps the SVG tail unable to see BuiltinMath or
@@ -306,30 +381,30 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                             );
                         }
                         CodeImageRenderer::BuiltinEmbed => {
-                            let mode = fragment
-                                .embed_mode()
-                                .expect("built-in embed mode is attached by the parser");
-                            let status = parse_embed_block(fragment.line(), fragment.code_text())?;
-                            return match mode {
-                                EmbedMode::Screenshot => {
+                            let options = fragment
+                                .embed_options()
+                                .expect("built-in embed options are attached by the parser");
+                            let target = parse_embed_block(fragment.line(), fragment.code_text())?;
+                            return match dispatch_embed_target(fragment.line(), &target, options)? {
+                                EmbedDispatch::X(EmbedMode::Screenshot, status) => {
                                     let key = cache_or_render_embed(
                                         fragment.line(),
-                                        &status,
+                                        status,
                                         BUILTIN_EMBED_PARAMS,
                                         embed_renderer,
                                         embeds_cache_dir,
                                     )?;
                                     Ok(SourceFragment::image(
                                         fragment.line(),
-                                        format!("X post by @{}", status.user()),
+                                        format!("X post by @{}", status.user),
                                         RawImagePath::from_embeds_cache(&key),
                                     ))
                                 }
-                                EmbedMode::Card => {
-                                    let cache_path = oembed_cache_path(embeds_cache_dir, &status);
+                                EmbedDispatch::X(EmbedMode::Card, status) => {
+                                    let cache_path = oembed_cache_path(embeds_cache_dir, status);
                                     let document = cache_or_fetch_oembed(
                                         fragment.line(),
-                                        &status,
+                                        status,
                                         oembed_fetcher,
                                         embeds_cache_dir,
                                     )?;
@@ -345,6 +420,39 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                                         fragment.line(),
                                         markup.html,
                                         markup.plain_text,
+                                    ))
+                                }
+                                EmbedDispatch::Generic(page) => {
+                                    let data = cache_or_fetch_generic_oembed(
+                                        fragment.line(),
+                                        page,
+                                        oembed_fetcher,
+                                        embeds_cache_dir,
+                                    )?;
+                                    let image = cache_or_fetch_generic_thumbnail(
+                                        fragment.line(),
+                                        page,
+                                        &data,
+                                        oembed_fetcher,
+                                        embeds_cache_dir,
+                                    )?;
+                                    let GenericEmbedCardParts {
+                                        image_alt_attr,
+                                        title_html,
+                                        author_html,
+                                        provider_html,
+                                        permalink_attr,
+                                        plain_text,
+                                    } = build_generic_embed_card(page.parsed(), &data);
+                                    Ok(SourceFragment::generic_embed_card(
+                                        fragment.line(),
+                                        image,
+                                        image_alt_attr,
+                                        title_html,
+                                        author_html,
+                                        provider_html,
+                                        permalink_attr,
+                                        plain_text,
                                     ))
                                 }
                             };
@@ -452,6 +560,7 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
             | FragmentKind::Code
             | FragmentKind::Math { .. }
             | FragmentKind::EmbedCard { .. }
+            | FragmentKind::GenericEmbedCard { .. }
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List => Ok(fragment),
@@ -578,38 +687,388 @@ fn builtin_mermaid_cache_key(code_text: &str) -> String {
     hex_encode(&hasher.finalize())
 }
 
-fn builtin_embed_cache_key(target: &EmbedTarget, params: EmbedRenderParams) -> String {
+fn builtin_embed_cache_key(status: &TweetStatusUrl, params: EmbedRenderParams) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"\0peitho-builtin-embed\0");
-    hasher.update(target.normalized_url().as_bytes());
+    hasher.update(status.normalized_url().as_bytes());
     hasher.update(format!("\0width={}", params.width_css_px).as_bytes());
     hasher.update(format!("\0scale={}", params.scale_factor).as_bytes());
     hasher.update(format!("\0theme={}", params.theme.as_str()).as_bytes());
     hex_encode(&hasher.finalize())
 }
 
+fn generic_oembed_json_cache_path(cache_dir: &Path, page: &GenericPageUrl) -> PathBuf {
+    let key = generic_oembed_json_cache_key(page.normalized_url());
+    cache_dir.join(format!("{key}.json"))
+}
+
+fn valid_cached_generic_oembed_json(
+    line: usize,
+    page: &GenericPageUrl,
+    cache_path: &Path,
+) -> Option<GenericOEmbedData> {
+    let metadata = fs::symlink_metadata(cache_path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_OEMBED_RESPONSE_BYTES as u64 {
+        return None;
+    }
+    let raw = fs::read(cache_path).ok()?;
+    parse_generic_oembed(line, page.parsed(), &raw).ok()
+}
+
+fn cache_or_fetch_generic_oembed<F: OEmbedFetcher>(
+    line: usize,
+    page: &GenericPageUrl,
+    fetcher: &F,
+    cache_dir: &Path,
+) -> Result<GenericOEmbedData> {
+    let cache_path = generic_oembed_json_cache_path(cache_dir, page);
+    fs::create_dir_all(cache_dir).map_err(|err| {
+        generic_json_cache_error(
+            line,
+            page,
+            &cache_path,
+            format!("failed to create generic oEmbed cache directory: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+
+    if let Some(data) = valid_cached_generic_oembed_json(line, page, &cache_path) {
+        return Ok(data);
+    }
+
+    let discovery_html = fetcher
+        .fetch_discovery_page(page.normalized_url())
+        .map_err(|err| {
+            generic_json_cache_error(
+                line,
+                page,
+                &cache_path,
+                format!(
+                    "failed to fetch generic oEmbed discovery page: {}",
+                    err.message
+                ),
+                &err.help,
+            )
+        })?;
+    if discovery_html.len() > MAX_OEMBED_DISCOVERY_PAGE_BYTES {
+        return Err(generic_json_cache_error(
+            line,
+            page,
+            &cache_path,
+            format!(
+                "generic oEmbed discovery page size {} bytes exceeds the maximum of {MAX_OEMBED_DISCOVERY_PAGE_BYTES} bytes",
+                discovery_html.len()
+            ),
+            "use a provider whose author page stays within the discovery size limit",
+        ));
+    }
+
+    let endpoint = discover_oembed_endpoint(line, page.parsed(), &discovery_html)
+        .map_err(|error| with_generic_json_cache_refresh_help(error, &cache_path))?;
+    let raw = fetcher
+        .fetch_discovered_oembed(endpoint.as_str())
+        .map_err(|err| {
+            generic_json_cache_error(
+                line,
+                page,
+                &cache_path,
+                format!(
+                    "failed to fetch discovered generic oEmbed endpoint {endpoint}: {}",
+                    err.message
+                ),
+                &err.help,
+            )
+        })?;
+    if raw.len() > MAX_OEMBED_RESPONSE_BYTES {
+        return Err(generic_json_cache_error(
+            line,
+            page,
+            &cache_path,
+            format!(
+                "generic oEmbed response size {} bytes exceeds the maximum of {MAX_OEMBED_RESPONSE_BYTES} bytes",
+                raw.len()
+            ),
+            "retry the discovered endpoint; providers must return a bounded JSON response",
+        ));
+    }
+
+    let data = parse_generic_oembed(line, page.parsed(), &raw)
+        .map_err(|error| with_generic_json_cache_refresh_help(error, &cache_path))?;
+    write_cache_file_atomic(&cache_path, &raw).map_err(|err| {
+        generic_json_cache_error(
+            line,
+            page,
+            &cache_path,
+            format!("failed to write generic oEmbed JSON cache file: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+    Ok(data)
+}
+
+fn generic_json_cache_error(
+    line: usize,
+    page: &GenericPageUrl,
+    cache_path: &Path,
+    message: impl Into<String>,
+    extra_help: &str,
+) -> BuildError {
+    let cache_help = generic_json_cache_refresh_help(cache_path);
+    let help = if extra_help.is_empty() {
+        cache_help
+    } else {
+        format!("{cache_help}; {extra_help}")
+    };
+    code_image_error(
+        line,
+        "embed",
+        format!("{} ({})", message.into(), page.normalized_url()),
+        help,
+    )
+}
+
+fn generic_json_cache_refresh_help(cache_path: &Path) -> String {
+    format!(
+        "a valid generic oEmbed JSON cache hit works offline without curl or network; JSON cache file: {}; delete this file to refresh provider metadata",
+        cache_path.display()
+    )
+}
+
+fn with_generic_json_cache_refresh_help(mut error: BuildError, cache_path: &Path) -> BuildError {
+    error.help = format!(
+        "{}; {}",
+        generic_json_cache_refresh_help(cache_path),
+        error.help
+    );
+    error
+}
+
+fn generic_thumbnail_cache_path(cache_dir: &Path, key: &str, format: EmbedImageFormat) -> PathBuf {
+    cache_dir.join(format!("{key}.{}", format.extension()))
+}
+
+fn cache_or_fetch_generic_thumbnail<F: OEmbedFetcher>(
+    line: usize,
+    page: &GenericPageUrl,
+    data: &GenericOEmbedData,
+    fetcher: &F,
+    cache_dir: &Path,
+) -> Result<Option<RawImagePath>> {
+    let Some(image_url) = data.image_url.as_ref() else {
+        return Ok(None);
+    };
+    let key = generic_oembed_thumbnail_cache_key(page.normalized_url());
+    fs::create_dir_all(cache_dir).map_err(|err| {
+        generic_thumbnail_cache_error(
+            line,
+            page,
+            cache_dir,
+            &key,
+            format!("failed to create generic thumbnail cache directory: {err}"),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+
+    let mut existing_count = 0;
+    let mut valid_existing_format = None;
+    for format in EmbedImageFormat::ALL {
+        let path = generic_thumbnail_cache_path(cache_dir, &key, format);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(generic_thumbnail_cache_error(
+                    line,
+                    page,
+                    cache_dir,
+                    &key,
+                    format!(
+                        "failed to inspect thumbnail cache file {}: {err}",
+                        path.display()
+                    ),
+                    "make the deck's .peitho directory readable and rebuild",
+                ));
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(generic_thumbnail_cache_error(
+                line,
+                page,
+                cache_dir,
+                &key,
+                format!(
+                    "thumbnail cache path is not a regular file: {}",
+                    path.display()
+                ),
+                "remove the non-file cache entry and rebuild",
+            ));
+        }
+        existing_count += 1;
+        if metadata.len() == 0 || metadata.len() > MAX_OEMBED_THUMBNAIL_BYTES as u64 {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|err| {
+            generic_thumbnail_cache_error(
+                line,
+                page,
+                cache_dir,
+                &key,
+                format!(
+                    "failed to read thumbnail cache file {}: {err}",
+                    path.display()
+                ),
+                "make the cache file readable or delete it and rebuild",
+            )
+        })?;
+        if detect_thumbnail_format(&bytes) == Some(format) {
+            valid_existing_format = Some(format);
+        }
+    }
+
+    if let (1, Some(format)) = (existing_count, valid_existing_format) {
+        return Ok(Some(RawImagePath::from_embeds_cache_image(&key, format)));
+    }
+
+    let bytes = fetcher.fetch_thumbnail(image_url.as_str()).map_err(|err| {
+        generic_thumbnail_cache_error(
+            line,
+            page,
+            cache_dir,
+            &key,
+            format!(
+                "failed to fetch generic oEmbed thumbnail {image_url}: {}",
+                err.message
+            ),
+            &err.help,
+        )
+    })?;
+    if bytes.len() > MAX_OEMBED_THUMBNAIL_BYTES {
+        return Err(generic_thumbnail_cache_error(
+            line,
+            page,
+            cache_dir,
+            &key,
+            format!(
+                "generic oEmbed thumbnail size {} bytes exceeds the maximum of {MAX_OEMBED_THUMBNAIL_BYTES} bytes",
+                bytes.len()
+            ),
+            "use a provider thumbnail within the image size limit",
+        ));
+    }
+    let Some(format) = detect_thumbnail_format(&bytes) else {
+        return Err(generic_thumbnail_cache_error(
+            line,
+            page,
+            cache_dir,
+            &key,
+            "generic oEmbed thumbnail has unsupported image magic; expected JPEG, PNG, WebP, or GIF",
+            "the provider must return a supported image body, not HTML or another format",
+        ));
+    };
+    let cache_path = generic_thumbnail_cache_path(cache_dir, &key, format);
+    write_cache_file_atomic(&cache_path, &bytes).map_err(|err| {
+        generic_thumbnail_cache_error(
+            line,
+            page,
+            cache_dir,
+            &key,
+            format!(
+                "failed to write thumbnail cache file {}: {err}",
+                cache_path.display()
+            ),
+            "make the deck's .peitho directory writable and rebuild",
+        )
+    })?;
+
+    for sibling_format in EmbedImageFormat::ALL {
+        if sibling_format == format {
+            continue;
+        }
+        let sibling = generic_thumbnail_cache_path(cache_dir, &key, sibling_format);
+        match fs::remove_file(&sibling) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(generic_thumbnail_cache_error(
+                    line,
+                    page,
+                    cache_dir,
+                    &key,
+                    format!(
+                        "failed to remove stale thumbnail cache file {}: {err}",
+                        sibling.display()
+                    ),
+                    "make the deck's .peitho directory writable, remove stale cache siblings, and rebuild",
+                ));
+            }
+        }
+    }
+
+    Ok(Some(RawImagePath::from_embeds_cache_image(&key, format)))
+}
+
+fn generic_thumbnail_cache_error(
+    line: usize,
+    page: &GenericPageUrl,
+    cache_dir: &Path,
+    thumbnail_key: &str,
+    message: impl Into<String>,
+    extra_help: &str,
+) -> BuildError {
+    let cache_help = generic_thumbnail_cache_refresh_help(cache_dir, page, thumbnail_key);
+    let help = if extra_help.is_empty() {
+        cache_help
+    } else {
+        format!("{cache_help}; {extra_help}")
+    };
+    code_image_error(
+        line,
+        "embed",
+        format!("{} ({})", message.into(), page.normalized_url()),
+        help,
+    )
+}
+
+fn generic_thumbnail_cache_refresh_help(
+    cache_dir: &Path,
+    page: &GenericPageUrl,
+    thumbnail_key: &str,
+) -> String {
+    let json_path = generic_oembed_json_cache_path(cache_dir, page);
+    let candidates = EmbedImageFormat::ALL
+        .into_iter()
+        .map(|format| generic_thumbnail_cache_path(cache_dir, thumbnail_key, format))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "valid JSON plus thumbnail cache hits work offline without curl or network; JSON cache file: {}; thumbnail cache files: {candidates}; delete the JSON file for metadata refresh, or delete it and all four thumbnail files for a complete refresh",
+        json_path.display()
+    )
+}
+
 fn valid_cached_oembed_json(path: &Path) -> bool {
-    fs::metadata(path)
+    fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file() && metadata.len() <= MAX_OEMBED_RESPONSE_BYTES as u64)
         .unwrap_or(false)
 }
 
-fn oembed_cache_path(cache_dir: &Path, target: &EmbedTarget) -> PathBuf {
-    let key = builtin_embed_card_cache_key(target.normalized_url());
+fn oembed_cache_path(cache_dir: &Path, status: &TweetStatusUrl) -> PathBuf {
+    let key = builtin_embed_card_cache_key(status.normalized_url());
     cache_dir.join(format!("{key}.json"))
 }
 
 fn cache_or_fetch_oembed<F: OEmbedFetcher>(
     line: usize,
-    target: &EmbedTarget,
+    status: &TweetStatusUrl,
     fetcher: &F,
     cache_dir: &Path,
 ) -> Result<OEmbedDocument> {
-    let cache_path = oembed_cache_path(cache_dir, target);
+    let cache_path = oembed_cache_path(cache_dir, status);
     fs::create_dir_all(cache_dir).map_err(|err| {
         oembed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("failed to create embed cache directory: {err}"),
             "make the deck's .peitho directory writable and rebuild",
@@ -624,10 +1083,10 @@ fn cache_or_fetch_oembed<F: OEmbedFetcher>(
         }
     }
 
-    let raw = fetcher.fetch(target.normalized_url()).map_err(|err| {
+    let raw = fetcher.fetch(status.normalized_url()).map_err(|err| {
         oembed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("failed to fetch oEmbed data: {}", err.message),
             &err.help,
@@ -636,7 +1095,7 @@ fn cache_or_fetch_oembed<F: OEmbedFetcher>(
     if raw.len() > MAX_OEMBED_RESPONSE_BYTES {
         return Err(oembed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!(
                 "oEmbed response size {} bytes exceeds the maximum of {MAX_OEMBED_RESPONSE_BYTES} bytes",
@@ -648,7 +1107,7 @@ fn cache_or_fetch_oembed<F: OEmbedFetcher>(
     let document = parse_oembed_document(&raw).map_err(|err| {
         oembed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("oEmbed response was not valid data: {err}"),
             "retry with network access to X",
@@ -657,7 +1116,7 @@ fn cache_or_fetch_oembed<F: OEmbedFetcher>(
     write_cache_file_atomic(&cache_path, raw.as_bytes()).map_err(|err| {
         oembed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("failed to write oEmbed cache file: {err}"),
             "make the deck's .peitho directory writable and rebuild",
@@ -668,7 +1127,7 @@ fn cache_or_fetch_oembed<F: OEmbedFetcher>(
 
 fn oembed_cache_error(
     line: usize,
-    target: &EmbedTarget,
+    status: &TweetStatusUrl,
     cache_path: &Path,
     message: impl Into<String>,
     extra_help: &str,
@@ -685,7 +1144,7 @@ fn oembed_cache_error(
     code_image_error(
         line,
         "embed",
-        format!("{} ({})", message.into(), target.normalized_url()),
+        format!("{} ({})", message.into(), status.normalized_url()),
         help,
     )
 }
@@ -704,17 +1163,17 @@ fn with_oembed_cache_refresh_help(mut error: BuildError, cache_path: &Path) -> B
 
 fn cache_or_render_embed<R: EmbedRenderer>(
     line: usize,
-    target: &EmbedTarget,
+    status: &TweetStatusUrl,
     params: EmbedRenderParams,
     renderer: &R,
     cache_dir: &Path,
 ) -> Result<String> {
-    let key = builtin_embed_cache_key(target, params);
+    let key = builtin_embed_cache_key(status, params);
     let cache_path = cache_dir.join(format!("{key}.png"));
     fs::create_dir_all(cache_dir).map_err(|err| {
         embed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("failed to create embed cache directory: {err}"),
             "make the deck's .peitho directory writable and rebuild",
@@ -725,15 +1184,15 @@ fn cache_or_render_embed<R: EmbedRenderer>(
     }
 
     let bytes = renderer
-        .render(target.normalized_url(), params)
+        .render(status.normalized_url(), params)
         .map_err(|err| {
             embed_cache_error(
                 line,
-                target,
+                status,
                 &cache_path,
                 format!(
                     "failed to render {}: {}",
-                    target.normalized_url(),
+                    status.normalized_url(),
                     err.message
                 ),
                 &err.help,
@@ -742,11 +1201,11 @@ fn cache_or_render_embed<R: EmbedRenderer>(
     if bytes.is_empty() {
         return Err(embed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!(
                 "renderer returned empty PNG output for {}",
-                target.normalized_url()
+                status.normalized_url()
             ),
             "retry with Chrome and network access to X",
         ));
@@ -754,11 +1213,11 @@ fn cache_or_render_embed<R: EmbedRenderer>(
     if !bytes.starts_with(PNG_MAGIC) {
         return Err(embed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!(
                 "renderer returned not PNG output for {}",
-                target.normalized_url()
+                status.normalized_url()
             ),
             "retry with Chrome and network access to X",
         ));
@@ -766,7 +1225,7 @@ fn cache_or_render_embed<R: EmbedRenderer>(
     write_cache_file_atomic(&cache_path, &bytes).map_err(|err| {
         embed_cache_error(
             line,
-            target,
+            status,
             &cache_path,
             format!("failed to write embed cache file: {err}"),
             "make the deck's .peitho directory writable and rebuild",
@@ -777,7 +1236,7 @@ fn cache_or_render_embed<R: EmbedRenderer>(
 
 fn embed_cache_error(
     line: usize,
-    target: &EmbedTarget,
+    status: &TweetStatusUrl,
     cache_path: &Path,
     message: impl Into<String>,
     extra_help: &str,
@@ -794,7 +1253,7 @@ fn embed_cache_error(
     code_image_error(
         line,
         "embed",
-        format!("{} ({})", message.into(), target.normalized_url()),
+        format!("{} ({})", message.into(), status.normalized_url()),
         help,
     )
 }
@@ -1475,22 +1934,30 @@ fn code_image_error(
 mod tests {
     use super::{
         builtin_embed_cache_key, builtin_math_override_help, builtin_mermaid_cache_key,
-        builtin_mermaid_override_help, cache_or_fetch_oembed, cache_or_render_embed,
-        code_image_cache_key, hex_encode, is_svg_output, parse_deck_and_transform,
-        parse_embed_block, render_builtin_math_with, render_builtin_mermaid_with,
-        svg_empty_output_error, svg_has_usable_intrinsic_size, svg_intrinsic_size_error,
-        svg_not_document_error, svg_root_not_found_error, transform_code_images,
-        valid_cached_oembed_json, valid_cached_png, CodeImageOutputContext, EmbedMode,
-        EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme, OEmbedFetcher, SvgRunner,
-        BUILTIN_EMBED_PARAMS,
+        builtin_mermaid_override_help, cache_or_fetch_generic_oembed,
+        cache_or_fetch_generic_thumbnail, cache_or_fetch_oembed, cache_or_render_embed,
+        code_image_cache_key, dispatch_embed_target, hex_encode, is_svg_output,
+        parse_deck_and_transform, parse_embed_block, render_builtin_math_with,
+        render_builtin_mermaid_with, svg_empty_output_error, svg_has_usable_intrinsic_size,
+        svg_intrinsic_size_error, svg_not_document_error, svg_root_not_found_error,
+        transform_code_images, valid_cached_oembed_json, valid_cached_png, CodeImageOutputContext,
+        EmbedDispatch, EmbedMode, EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme,
+        GenericPageUrl, OEmbedFetcher, SvgRunner, TweetStatusUrl, BUILTIN_EMBED_PARAMS,
     };
-    use crate::embed_card::builtin_embed_card_cache_key;
+    use crate::embed_card::{
+        build_embed_card_html, builtin_embed_card_cache_key, parse_oembed_document,
+    };
     use crate::error::ErrorKind;
+    use crate::generic_oembed::{
+        detect_thumbnail_format, generic_oembed_json_cache_key, generic_oembed_thumbnail_cache_key,
+        parse_generic_oembed,
+    };
     use crate::{
         check::check_deck,
         domain::{
-            AspectRatio, CodeImageCommand, CodeImagesConfig, FragmentKind, RawImagePath,
-            ResolvedImageAsset, ResolvedImagePath, RevealSpan, SlotName, SourceFragment,
+            AspectRatio, CodeImageCommand, CodeImagesConfig, EmbedImageFormat, EmbedOptions,
+            FragmentKind, RawImagePath, ResolvedImageAsset, ResolvedImagePath, RevealSpan,
+            SlotName, SourceFragment,
         },
         layout::{parse_layout, Layouts},
         mapping::{dispatch_by_convention, map_by_convention},
@@ -1501,6 +1968,8 @@ mod tests {
         BuildError, Result,
     };
     use sha2::{Digest, Sha256};
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::{
         cell::{Cell, RefCell},
         collections::BTreeMap,
@@ -1517,10 +1986,34 @@ mod tests {
         ));
     }
 
+    mod generic_oembed_cache_key_test_vector {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/generic_oembed_cache_key.rs"
+        ));
+    }
+
+    fn x_status(body: &str) -> TweetStatusUrl {
+        match parse_embed_block(7, body).unwrap() {
+            EmbedTarget::X(status) => status,
+            EmbedTarget::Generic(page) => {
+                panic!("expected X status URL, got {}", page.normalized_url())
+            }
+        }
+    }
+
+    fn generic_page_url(body: &str) -> GenericPageUrl {
+        match parse_embed_block(7, body).unwrap() {
+            EmbedTarget::X(status) => {
+                panic!("expected generic page URL, got {}", status.normalized_url())
+            }
+            EmbedTarget::Generic(page) => page,
+        }
+    }
+
     #[test]
     fn embed_cache_key_covers_url_width_scale_and_theme_without_crate_version() {
-        let status =
-            parse_embed_block(7, "https://x.com/gosukenator/status/2083825695709597710").unwrap();
+        let status = x_status("https://x.com/gosukenator/status/2083825695709597710");
         let base = EmbedRenderParams::new(550, 2, EmbedTheme::Light);
         assert_eq!(
             builtin_embed_cache_key(&status, base),
@@ -1548,21 +2041,145 @@ mod tests {
 
     #[test]
     fn embed_block_accepts_x_and_twitter_status_urls() {
-        let x = parse_embed_block(
-            7,
-            "\n  https://x.com/Gosukenator/status/2083825695709597710  \n",
-        )
-        .unwrap();
-        let twitter = parse_embed_block(
-            7,
-            "https://twitter.com/gosukenator/status/2083825695709597710\n",
-        )
-        .unwrap();
+        let x = x_status("\n  https://x.com/Gosukenator/status/2083825695709597710  \n");
+        let twitter = x_status("https://twitter.com/gosukenator/status/2083825695709597710\n");
         assert_eq!(
             x.normalized_url(),
             "https://x.com/gosukenator/status/2083825695709597710"
         );
         assert_eq!(x, twitter);
+    }
+
+    #[test]
+    fn embed_block_dispatches_non_x_http_and_https_urls_to_generic() {
+        for (source, expected) in [
+            (
+                "https://example.com/watch?v=1",
+                "https://example.com/watch?v=1",
+            ),
+            ("http://example.com/post", "http://example.com/post"),
+        ] {
+            assert_eq!(generic_page_url(source).normalized_url(), expected);
+        }
+    }
+
+    #[test]
+    fn embed_block_dispatches_non_x_trailing_dot_host_to_generic() {
+        let page = generic_page_url("https://example.com./page");
+
+        assert_eq!(page.normalized_url(), "https://example.com./page");
+    }
+
+    #[test]
+    fn generic_page_url_normalizes_host_path_query_and_removes_fragment() {
+        let page = generic_page_url("HTTPS://EXAMPLE.COM/a/../watch?v=dQw4w9WgXcQ#player");
+
+        assert_eq!(
+            page.normalized_url(),
+            "https://example.com/watch?v=dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn embed_block_keeps_x_and_twitter_status_targets_unchanged() {
+        let x = x_status("https://x.com/A/status/1");
+        let twitter = x_status("https://twitter.com/a/status/1");
+
+        assert_eq!(x, twitter);
+        assert_eq!(x.normalized_url(), "https://x.com/a/status/1");
+    }
+
+    #[test]
+    fn embed_block_rejects_non_status_x_before_generic_discovery() {
+        for source in ["https://x.com/explore", "http://twitter.com/home"] {
+            let err = parse_embed_block(7, source).unwrap_err();
+            assert_eq!(err.line, Some(7));
+            assert_eq!(
+                err.message,
+                "code_images 'embed' failed: embed block must contain a supported X status URL"
+            );
+            assert_eq!(
+                err.help,
+                "X URLs must use the status-URL form https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; any other HTTP(S) page URL is embedded via generic oEmbed discovery"
+            );
+        }
+    }
+
+    #[test]
+    fn embed_block_rejects_x_and_twitter_subdomains_before_generic_discovery() {
+        for source in [
+            "https://www.x.com/explore",
+            "https://mobile.twitter.com/a/status/1",
+            "https://API.X.COM/anything",
+            "http://sub.mobile.twitter.com/home",
+        ] {
+            let err = parse_embed_block(7, source).unwrap_err();
+            assert_eq!(err.line, Some(7), "source: {source}");
+            assert_eq!(
+                err.message,
+                "code_images 'embed' failed: embed block must contain a supported X status URL",
+                "source: {source}"
+            );
+            assert!(
+                err.help.contains("https://twitter.com/<user>/status/<id>"),
+                "source: {source}; help: {}",
+                err.help
+            );
+        }
+    }
+
+    #[test]
+    fn embed_block_rejects_trailing_dot_x_domains_before_generic_discovery() {
+        for source in [
+            "https://x.com./a/status/1",
+            "https://www.x.com./a/status/1",
+            "https://twitter.com./a/status/1",
+        ] {
+            let err = parse_embed_block(7, source).unwrap_err();
+            assert_eq!(err.line, Some(7), "source: {source}");
+            assert_eq!(
+                err.message,
+                "code_images 'embed' failed: embed block must contain a supported X status URL",
+                "source: {source}"
+            );
+            assert_eq!(
+                err.help,
+                "X URLs must use the status-URL form https://x.com/<user>/status/<id> or https://twitter.com/<user>/status/<id>; any other HTTP(S) page URL is embedded via generic oEmbed discovery",
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn embed_block_rejects_non_http_generic_urls() {
+        for source in ["ftp://example.com/post", "file:///tmp/post", "not a URL"] {
+            let err = parse_embed_block(7, source).unwrap_err();
+            assert_eq!(err.line, Some(7), "source: {source}");
+            assert!(err.message.contains("HTTP(S) page URL"), "{}", err.message);
+            assert!(err.help.contains("generic oEmbed"), "{}", err.help);
+        }
+    }
+
+    #[test]
+    fn generic_embed_rejects_mode_card_and_mode_screenshot_at_fence_line() {
+        let target = parse_embed_block(7, "https://example.com/post").unwrap();
+        for mode in [EmbedMode::Card, EmbedMode::Screenshot] {
+            let err =
+                dispatch_embed_target(3, &target, EmbedOptions { mode: Some(mode) }).unwrap_err();
+            assert_eq!(err.line, Some(3));
+            assert!(err.message.contains("only supported for X status URLs"));
+            assert!(err.help.contains("remove mode="));
+        }
+    }
+
+    #[test]
+    fn bare_generic_embed_retains_absent_mode_for_static_card_dispatch() {
+        let target = parse_embed_block(7, "https://example.com/post").unwrap();
+
+        assert!(matches!(
+            dispatch_embed_target(3, &target, EmbedOptions { mode: None }).unwrap(),
+            EmbedDispatch::Generic(_)
+        ));
     }
 
     #[test]
@@ -1583,7 +2200,7 @@ mod tests {
 
     #[test]
     fn embed_block_accepts_exactly_one_non_blank_url_line() {
-        let parsed = parse_embed_block(7, "\n  https://x.com/a/status/1  \n\n").unwrap();
+        let parsed = x_status("\n  https://x.com/a/status/1  \n\n");
 
         assert_eq!(parsed.normalized_url(), "https://x.com/a/status/1");
     }
@@ -1637,9 +2254,25 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::Asset);
         assert_eq!(err.line, Some(7));
         assert!(err.message.contains("empty"), "{}", err.message);
+        assert!(
+            err.help.starts_with(
+                "put exactly one URL line in the block (an X status URL or any HTTP(S) page URL);"
+            ),
+            "{}",
+            err.help
+        );
         assert!(err.help.contains("https://x.com/<user>/status/<id>"));
         assert!(err.help.contains("https://twitter.com/<user>/status/<id>"));
-        assert!(err.help.contains("URL first"), "{}", err.help);
+        assert!(
+            err.help.contains("generic oEmbed discovery"),
+            "{}",
+            err.help
+        );
+        assert!(
+            !err.help.contains("generic-oEmbed follow-up"),
+            "{}",
+            err.help
+        );
         assert!(err.help.contains("mode=card"), "{}", err.help);
         assert!(err.help.contains("mode=screenshot"), "{}", err.help);
     }
@@ -1669,8 +2302,10 @@ mod tests {
     }
 
     #[test]
-    fn embed_block_rejects_non_x_provider() {
-        assert_embed_error("https://example.com/a/status/1", "supported X status URL");
+    fn embed_block_accepts_non_x_provider_as_generic() {
+        let target = parse_embed_block(7, "https://example.com/a/status/1").unwrap();
+
+        assert!(matches!(target, EmbedTarget::Generic(_)));
     }
 
     #[test]
@@ -1821,6 +2456,18 @@ mod tests {
             self.urls.borrow_mut().push(normalized_url.to_owned());
             self.result.clone()
         }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> Result<Vec<u8>> {
+            panic!("X oEmbed fixture must not fetch generic discovery HTML");
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> Result<Vec<u8>> {
+            panic!("X oEmbed fixture must not fetch a generic endpoint");
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> Result<Vec<u8>> {
+            panic!("X oEmbed fixture must not fetch a generic thumbnail");
+        }
     }
 
     struct PanicOEmbedFetcher;
@@ -1829,13 +2476,633 @@ mod tests {
         fn fetch(&self, _normalized_url: &str) -> Result<String> {
             panic!("a valid oEmbed cache hit must not invoke the fetcher");
         }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> Result<Vec<u8>> {
+            panic!("X cache test must not fetch generic discovery HTML");
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> Result<Vec<u8>> {
+            panic!("X cache test must not fetch a generic endpoint");
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> Result<Vec<u8>> {
+            panic!("X cache test must not fetch a generic thumbnail");
+        }
+    }
+
+    const GENERIC_PAGE_URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    const GENERIC_DISCOVERY_HTML: &[u8] = br#"<html><head><link rel="alternate" type="application/json+oembed" href="/oembed?url=watch&amp;format=json"></head></html>"#;
+    const GENERIC_ENDPOINT_URL: &str = "https://www.youtube.com/oembed?url=watch&format=json";
+    const GENERIC_JSON: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/youtube-oembed-response.json"
+    ));
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum GenericFetchCall {
+        DiscoveryPage(String),
+        Endpoint(String),
+        Thumbnail(String),
+    }
+
+    struct FixtureGenericOEmbedFetcher {
+        calls: RefCell<Vec<GenericFetchCall>>,
+        page: Result<Vec<u8>>,
+        endpoint: Result<Vec<u8>>,
+        thumbnail: Result<Vec<u8>>,
+    }
+
+    impl FixtureGenericOEmbedFetcher {
+        fn new(page: &[u8], endpoint: &[u8]) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                page: Ok(page.to_vec()),
+                endpoint: Ok(endpoint.to_vec()),
+                thumbnail: Err(BuildError::new(
+                    ErrorKind::Asset,
+                    None,
+                    "unexpected thumbnail fetch",
+                    "fixture has no thumbnail response",
+                )),
+            }
+        }
+
+        fn error(page: Result<Vec<u8>>, endpoint: Result<Vec<u8>>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                page,
+                endpoint,
+                thumbnail: Err(BuildError::new(
+                    ErrorKind::Asset,
+                    None,
+                    "unexpected thumbnail fetch",
+                    "fixture has no thumbnail response",
+                )),
+            }
+        }
+
+        fn with_thumbnail(mut self, thumbnail: &[u8]) -> Self {
+            self.thumbnail = Ok(thumbnail.to_vec());
+            self
+        }
+    }
+
+    impl OEmbedFetcher for FixtureGenericOEmbedFetcher {
+        fn fetch(&self, _normalized_url: &str) -> Result<String> {
+            panic!("generic oEmbed must not call the X fetch operation");
+        }
+
+        fn fetch_discovery_page(&self, page_url: &str) -> Result<Vec<u8>> {
+            self.calls
+                .borrow_mut()
+                .push(GenericFetchCall::DiscoveryPage(page_url.to_owned()));
+            self.page.clone()
+        }
+
+        fn fetch_discovered_oembed(&self, endpoint_url: &str) -> Result<Vec<u8>> {
+            self.calls
+                .borrow_mut()
+                .push(GenericFetchCall::Endpoint(endpoint_url.to_owned()));
+            self.endpoint.clone()
+        }
+
+        fn fetch_thumbnail(&self, image_url: &str) -> Result<Vec<u8>> {
+            self.calls
+                .borrow_mut()
+                .push(GenericFetchCall::Thumbnail(image_url.to_owned()));
+            self.thumbnail.clone()
+        }
+    }
+
+    struct PanicGenericOEmbedFetcher;
+
+    impl OEmbedFetcher for PanicGenericOEmbedFetcher {
+        fn fetch(&self, _normalized_url: &str) -> Result<String> {
+            panic!("generic cache hit must not call the X fetch operation");
+        }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> Result<Vec<u8>> {
+            panic!("generic JSON cache hit must not fetch discovery HTML");
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> Result<Vec<u8>> {
+            panic!("generic JSON cache hit must not fetch the endpoint");
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> Result<Vec<u8>> {
+            panic!("Task 4 JSON cache tests must not fetch a thumbnail");
+        }
+    }
+
+    fn generic_target() -> GenericPageUrl {
+        generic_page_url(GENERIC_PAGE_URL)
+    }
+
+    fn generic_cache_error(message: &str) -> BuildError {
+        BuildError::new(
+            ErrorKind::Asset,
+            None,
+            message,
+            "check curl and network access",
+        )
+    }
+
+    #[test]
+    fn generic_json_and_thumbnail_keys_use_distinct_pinned_domains() {
+        let json_key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+        let thumbnail_key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+
+        assert_eq!(
+            json_key,
+            generic_oembed_cache_key_test_vector::PINNED_GENERIC_OEMBED_JSON_CACHE_KEY
+        );
+        assert_eq!(
+            thumbnail_key,
+            generic_oembed_cache_key_test_vector::PINNED_GENERIC_OEMBED_THUMBNAIL_CACHE_KEY
+        );
+        assert_ne!(json_key, thumbnail_key);
+    }
+
+    #[test]
+    fn generic_json_cache_miss_fetches_page_then_endpoint_once_and_writes_raw_bytes_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON);
+
+        let data = cache_or_fetch_generic_oembed(31, &target, &fetcher, &cache_dir).unwrap();
+
+        assert_eq!(
+            data.title.as_deref(),
+            Some("Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)")
+        );
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [
+                GenericFetchCall::DiscoveryPage(GENERIC_PAGE_URL.to_owned()),
+                GenericFetchCall::Endpoint(GENERIC_ENDPOINT_URL.to_owned()),
+            ]
+        );
+        let key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.json"))).unwrap(),
+            GENERIC_JSON
+        );
+        let entries = fs::read_dir(&cache_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, [format!("{key}.json")]);
+    }
+
+    #[test]
+    fn generic_json_cache_hit_skips_discovery_and_endpoint_fetch() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join(format!("{key}.json")), GENERIC_JSON).unwrap();
+
+        let data =
+            cache_or_fetch_generic_oembed(31, &target, &PanicGenericOEmbedFetcher, &cache_dir)
+                .unwrap();
+
+        assert!(data.image_url.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_json_symlink_cache_entry_is_a_miss_and_fetches() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+        let cache_path = cache_dir.join(format!("{key}.json"));
+        let victim_path = temp.path().join("victim.json");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&victim_path, MASTODON_JSON).unwrap();
+        symlink(&victim_path, &cache_path).unwrap();
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON);
+
+        let data = cache_or_fetch_generic_oembed(31, &target, &fetcher, &cache_dir).unwrap();
+
+        assert!(data.image_url.is_some());
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [
+                GenericFetchCall::DiscoveryPage(GENERIC_PAGE_URL.to_owned()),
+                GenericFetchCall::Endpoint(GENERIC_ENDPOINT_URL.to_owned()),
+            ]
+        );
+        assert!(!fs::symlink_metadata(&cache_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&cache_path).unwrap(), GENERIC_JSON);
+        assert_eq!(fs::read(&victim_path).unwrap(), MASTODON_JSON);
+    }
+
+    #[test]
+    fn generic_json_cache_invalid_or_oversized_entry_self_heals() {
+        for invalid in [
+            b"{".to_vec(),
+            br#"{"type":"rich","provider_name":"Only provider"}"#.to_vec(),
+            vec![b'x'; crate::MAX_OEMBED_RESPONSE_BYTES + 1],
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let target = generic_target();
+            let key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+            let cache_path = cache_dir.join(format!("{key}.json"));
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(&cache_path, &invalid).unwrap();
+            let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON);
+
+            cache_or_fetch_generic_oembed(31, &target, &fetcher, &cache_dir).unwrap();
+
+            assert_eq!(fs::read(&cache_path).unwrap(), GENERIC_JSON);
+            assert_eq!(fetcher.calls.borrow().len(), 2);
+            assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn generic_json_fresh_validation_help_has_one_cache_refresh_story() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, b"{");
+
+        let err =
+            cache_or_fetch_generic_oembed(31, &generic_target(), &fetcher, &cache_dir).unwrap_err();
+
+        assert!(err.help.contains("provider returned invalid oEmbed data"));
+        assert_eq!(err.help.matches("delete").count(), 1, "{}", err.help);
+        assert!(!err.help.contains("delete the cached oEmbed JSON"));
+    }
+
+    #[test]
+    fn generic_json_fetch_over_limit_is_not_cached() {
+        let oversized_page = vec![b'x'; crate::MAX_OEMBED_DISCOVERY_PAGE_BYTES + 1];
+        let oversized_json = vec![b'x'; crate::MAX_OEMBED_RESPONSE_BYTES + 1];
+
+        for (fetcher, expected_limit) in [
+            (
+                FixtureGenericOEmbedFetcher::new(&oversized_page, GENERIC_JSON),
+                crate::MAX_OEMBED_DISCOVERY_PAGE_BYTES,
+            ),
+            (
+                FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, &oversized_json),
+                crate::MAX_OEMBED_RESPONSE_BYTES,
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let err = cache_or_fetch_generic_oembed(31, &generic_target(), &fetcher, &cache_dir)
+                .unwrap_err();
+
+            assert_eq!(err.line, Some(31));
+            assert!(err.message.contains("exceeds"), "{}", err.message);
+            assert!(
+                err.message.contains(&expected_limit.to_string()),
+                "{}",
+                err.message
+            );
+            assert!(!cache_dir
+                .join(format!(
+                    "{}.json",
+                    generic_oembed_json_cache_key(GENERIC_PAGE_URL)
+                ))
+                .exists());
+        }
+    }
+
+    #[test]
+    fn generic_json_fetch_failure_names_line_url_path_and_refresh() {
+        for (fetcher, operation) in [
+            (
+                FixtureGenericOEmbedFetcher::error(
+                    Err(generic_cache_error("curl page failure")),
+                    Ok(GENERIC_JSON.to_vec()),
+                ),
+                "discovery page",
+            ),
+            (
+                FixtureGenericOEmbedFetcher::error(
+                    Ok(GENERIC_DISCOVERY_HTML.to_vec()),
+                    Err(generic_cache_error("curl endpoint failure")),
+                ),
+                "oEmbed endpoint",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let err = cache_or_fetch_generic_oembed(73, &generic_target(), &fetcher, &cache_dir)
+                .unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Asset);
+            assert_eq!(err.line, Some(73));
+            assert!(err.message.contains(operation), "{}", err.message);
+            assert!(err.message.contains(GENERIC_PAGE_URL), "{}", err.message);
+            assert!(err.help.contains(".json"), "{}", err.help);
+            assert!(err.help.contains("delete"), "{}", err.help);
+            assert!(err.help.contains("offline"), "{}", err.help);
+        }
+    }
+
+    const YOUTUBE_THUMBNAIL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/youtube-thumbnail.jpg"
+    ));
+    const MASTODON_JSON: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mastodon-oembed-response.json"
+    ));
+
+    fn parsed_generic_data(raw: &[u8]) -> crate::generic_oembed::GenericOEmbedData {
+        parse_generic_oembed(31, generic_target().parsed(), raw).unwrap()
+    }
+
+    #[test]
+    fn thumbnail_cache_miss_fetches_once_and_writes_magic_derived_extension_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let data = parsed_generic_data(GENERIC_JSON);
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+        let image = cache_or_fetch_generic_thumbnail(31, &target, &data, &fetcher, &cache_dir)
+            .unwrap()
+            .unwrap();
+
+        let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+        assert_eq!(
+            image.as_str(),
+            format!("{}/{key}.jpg", crate::EMBEDS_CACHE_DIR)
+        );
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.jpg"))).unwrap(),
+            YOUTUBE_THUMBNAIL
+        );
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [GenericFetchCall::Thumbnail(
+                data.image_url.as_ref().unwrap().to_string()
+            )]
+        );
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn thumbnail_cache_hit_skips_thumbnail_fetch() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let data = parsed_generic_data(GENERIC_JSON);
+        let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join(format!("{key}.jpg")), YOUTUBE_THUMBNAIL).unwrap();
+
+        let image = cache_or_fetch_generic_thumbnail(
+            31,
+            &target,
+            &data,
+            &PanicGenericOEmbedFetcher,
+            &cache_dir,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(image.as_str().ends_with(&format!("{key}.jpg")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_cache_non_regular_candidate_is_rejected_before_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+        let cache_path = cache_dir.join(format!("{key}.jpg"));
+        fs::create_dir_all(&cache_path).unwrap();
+        let data = parsed_generic_data(GENERIC_JSON);
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+        let err =
+            cache_or_fetch_generic_thumbnail(31, &generic_target(), &data, &fetcher, &cache_dir)
+                .unwrap_err();
+
+        assert_eq!(err.line, Some(31));
+        assert!(
+            err.message.contains("not a regular file"),
+            "{}",
+            err.message
+        );
+        assert!(fetcher.calls.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_cache_oversized_unreadable_candidate_self_heals_without_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+        let cache_path = cache_dir.join(format!("{key}.jpg"));
+        fs::create_dir_all(&cache_dir).unwrap();
+        let file = fs::File::create(&cache_path).unwrap();
+        file.set_len((crate::MAX_OEMBED_THUMBNAIL_BYTES + 1) as u64)
+            .unwrap();
+        drop(file);
+        fs::set_permissions(&cache_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let data = parsed_generic_data(GENERIC_JSON);
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+        let image =
+            cache_or_fetch_generic_thumbnail(31, &generic_target(), &data, &fetcher, &cache_dir)
+                .unwrap()
+                .unwrap();
+
+        assert!(image.as_str().ends_with(&format!("{key}.jpg")));
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [GenericFetchCall::Thumbnail(
+                data.image_url.as_ref().unwrap().to_string()
+            )]
+        );
+        assert_eq!(fs::read(&cache_path).unwrap(), YOUTUBE_THUMBNAIL);
+    }
+
+    #[test]
+    fn json_hit_with_thumbnail_miss_fetches_only_thumbnail() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = generic_target();
+        let json_key = generic_oembed_json_cache_key(GENERIC_PAGE_URL);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join(format!("{json_key}.json")), GENERIC_JSON).unwrap();
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+        let data = cache_or_fetch_generic_oembed(31, &target, &fetcher, &cache_dir).unwrap();
+        cache_or_fetch_generic_thumbnail(31, &target, &data, &fetcher, &cache_dir).unwrap();
+
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [GenericFetchCall::Thumbnail(
+                data.image_url.as_ref().unwrap().to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn text_card_never_fetches_or_maps_thumbnail() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let data = parsed_generic_data(MASTODON_JSON);
+
+        let image = cache_or_fetch_generic_thumbnail(
+            31,
+            &generic_target(),
+            &data,
+            &PanicGenericOEmbedFetcher,
+            &cache_dir,
+        )
+        .unwrap();
+
+        assert_eq!(image, None);
+        assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn thumbnail_cache_invalid_magic_or_extension_self_heals() {
+        for (extension, invalid) in [
+            ("jpg", b"not an image".as_slice()),
+            ("png", YOUTUBE_THUMBNAIL),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+            fs::create_dir_all(&cache_dir).unwrap();
+            fs::write(cache_dir.join(format!("{key}.{extension}")), invalid).unwrap();
+            let data = parsed_generic_data(GENERIC_JSON);
+            let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+                .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+            let image = cache_or_fetch_generic_thumbnail(
+                31,
+                &generic_target(),
+                &data,
+                &fetcher,
+                &cache_dir,
+            )
+            .unwrap()
+            .unwrap();
+
+            assert!(image.as_str().ends_with(&format!("{key}.jpg")));
+            assert_eq!(
+                fs::read(cache_dir.join(format!("{key}.jpg"))).unwrap(),
+                YOUTUBE_THUMBNAIL
+            );
+            assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn thumbnail_magic_accepts_jpeg_png_webp_and_gif() {
+        assert_eq!(
+            detect_thumbnail_format(b"\xff\xd8\xffrest"),
+            Some(EmbedImageFormat::Jpeg)
+        );
+        assert_eq!(
+            detect_thumbnail_format(b"\x89PNG\r\n\x1a\nrest"),
+            Some(EmbedImageFormat::Png)
+        );
+        assert_eq!(
+            detect_thumbnail_format(b"RIFF\x00\x00\x00\x00WEBPrest"),
+            Some(EmbedImageFormat::WebP)
+        );
+        assert_eq!(
+            detect_thumbnail_format(b"GIF87arest"),
+            Some(EmbedImageFormat::Gif)
+        );
+        assert_eq!(
+            detect_thumbnail_format(b"GIF89arest"),
+            Some(EmbedImageFormat::Gif)
+        );
+    }
+
+    #[test]
+    fn thumbnail_fetch_rejects_oversize_or_unknown_magic_without_cache_write() {
+        for invalid in [
+            vec![b'x'; crate::MAX_OEMBED_THUMBNAIL_BYTES + 1],
+            b"unknown image body".to_vec(),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+            let data = parsed_generic_data(GENERIC_JSON);
+            let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+                .with_thumbnail(&invalid);
+
+            let err = cache_or_fetch_generic_thumbnail(
+                31,
+                &generic_target(),
+                &data,
+                &fetcher,
+                &cache_dir,
+            )
+            .unwrap_err();
+
+            assert_eq!(err.line, Some(31));
+            assert!(err.help.contains(".jpg"), "{}", err.help);
+            assert!(err.help.contains(".png"), "{}", err.help);
+            assert!(err.help.contains(".webp"), "{}", err.help);
+            assert!(err.help.contains(".gif"), "{}", err.help);
+            assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn thumbnail_refresh_removes_stale_extension_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let key = generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL);
+        fs::create_dir_all(&cache_dir).unwrap();
+        for extension in ["jpg", "png", "webp", "gif"] {
+            fs::write(cache_dir.join(format!("{key}.{extension}")), b"stale").unwrap();
+        }
+        let data = parsed_generic_data(GENERIC_JSON);
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+
+        cache_or_fetch_generic_thumbnail(31, &generic_target(), &data, &fetcher, &cache_dir)
+            .unwrap();
+
+        assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{key}.jpg"))).unwrap(),
+            YOUTUBE_THUMBNAIL
+        );
+    }
+
+    #[test]
+    fn embeds_cache_image_path_accepts_only_key_and_typed_format() {
+        assert_eq!(
+            RawImagePath::from_embeds_cache_image("abc123", EmbedImageFormat::Jpeg).as_str(),
+            ".peitho/embeds-cache/abc123.jpg"
+        );
+        assert_eq!(
+            RawImagePath::from_embeds_cache_image("abc123", EmbedImageFormat::WebP).as_str(),
+            ".peitho/embeds-cache/abc123.webp"
+        );
     }
 
     #[test]
     fn oembed_cache_miss_fetches_once_and_writes_raw_json_atomically() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
 
         let document = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
@@ -1855,7 +3122,7 @@ mod tests {
     fn oembed_valid_cache_hit_skips_fetcher() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_card_cache_key(target.normalized_url());
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(cache_dir.join(format!("{key}.json")), OEMBED_JSON).unwrap();
@@ -1866,11 +3133,39 @@ mod tests {
         assert_eq!(document.url, "https://x.com/a/status/1");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn oembed_symlink_cache_entry_is_a_miss_and_fetches() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        let target = x_status("https://x.com/a/status/1");
+        let key = builtin_embed_card_cache_key(target.normalized_url());
+        let cache_path = cache_dir.join(format!("{key}.json"));
+        let victim_path = temp.path().join("victim.json");
+        let victim_json =
+            OEMBED_JSON.replace("\"author_name\":\"A\"", "\"author_name\":\"Victim\"");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&victim_path, &victim_json).unwrap();
+        symlink(&victim_path, &cache_path).unwrap();
+        let fetcher = FixtureOEmbedFetcher::json(OEMBED_JSON);
+
+        let document = cache_or_fetch_oembed(7, &target, &fetcher, &cache_dir).unwrap();
+
+        assert_eq!(fetcher.calls.get(), 1);
+        assert_eq!(document.author_name, "A");
+        assert!(!fs::symlink_metadata(&cache_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&cache_path).unwrap(), OEMBED_JSON.as_bytes());
+        assert_eq!(fs::read(&victim_path).unwrap(), victim_json.as_bytes());
+    }
+
     #[test]
     fn oembed_non_regular_cache_path_is_a_miss_and_fetches() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         fs::create_dir_all(&cache_path).unwrap();
@@ -1891,7 +3186,7 @@ mod tests {
     fn oembed_oversized_cache_is_a_miss_and_self_heals() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -1909,7 +3204,7 @@ mod tests {
     fn oembed_oversized_fetch_is_line_numbered_error_and_not_cached() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(41, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_card_cache_key(target.normalized_url());
         let cache_path = cache_dir.join(format!("{key}.json"));
         let oversized = oversized_oembed_json();
@@ -1941,7 +3236,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-            let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+            let target = x_status("https://x.com/a/status/1");
             let key = builtin_embed_card_cache_key(target.normalized_url());
             let cache_path = cache_dir.join(format!("{key}.json"));
             fs::create_dir_all(&cache_dir).unwrap();
@@ -1960,7 +3255,7 @@ mod tests {
     fn oembed_fetch_failure_names_line_url_cache_and_refresh() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(41, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
 
         let err = cache_or_fetch_oembed(
             41,
@@ -1994,7 +3289,7 @@ mod tests {
     struct SeededEmbedCache {
         _temp: tempfile::TempDir,
         cache_dir: PathBuf,
-        target: EmbedTarget,
+        target: TweetStatusUrl,
     }
 
     thread_local! {
@@ -2004,7 +3299,7 @@ mod tests {
     fn seed_embed_cache(bytes: &[u8]) -> String {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -2037,7 +3332,7 @@ mod tests {
     fn assert_embed_cache_self_heals(old_bytes: &[u8]) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let key = builtin_embed_cache_key(&target, BUILTIN_EMBED_PARAMS);
         let cache_path = cache_dir.join(format!("{key}.png"));
         fs::create_dir_all(&cache_dir).unwrap();
@@ -2059,7 +3354,7 @@ mod tests {
     fn cache_embed_with_renderer_error(message: &str) -> Result<String> {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         cache_or_render_embed(
             7,
             &target,
@@ -2072,7 +3367,7 @@ mod tests {
     fn assert_invalid_embed_png(bytes: &[u8], message: &str) {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let target = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
         let err = cache_or_render_embed(
             7,
             &target,
@@ -2092,7 +3387,7 @@ mod tests {
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         fs::create_dir_all(cache_dir.parent().unwrap()).unwrap();
         fs::write(&cache_dir, b"regular file blocks cache directory").unwrap();
-        let target = parse_embed_block(line, "https://x.com/a/status/1").unwrap();
+        let target = x_status("https://x.com/a/status/1");
 
         let err = cache_or_render_embed(
             line,
@@ -2309,6 +3604,244 @@ mod tests {
     }
 
     #[test]
+    fn bare_generic_thumbnail_embed_uses_only_generic_fetch_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, GENERIC_JSON)
+            .with_thumbnail(YOUTUBE_THUMBNAIL);
+        let span = RevealSpan { start: 2, len: 1 };
+
+        let transformed = transform_code_images(
+            deck_with_embed_options(GENERIC_PAGE_URL, None, span),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &fetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fetcher.calls.borrow().as_slice(),
+            [
+                GenericFetchCall::DiscoveryPage(GENERIC_PAGE_URL.to_owned()),
+                GenericFetchCall::Endpoint(GENERIC_ENDPOINT_URL.to_owned()),
+                GenericFetchCall::Thumbnail(
+                    parsed_generic_data(GENERIC_JSON)
+                        .image_url
+                        .unwrap()
+                        .to_string()
+                ),
+            ]
+        );
+        let fragment = &transformed.parsed_slides()[0].fragments[0];
+        assert_eq!(fragment.reveal_span(), Some(span));
+        match fragment.kind() {
+            FragmentKind::GenericEmbedCard { image, .. } => {
+                assert!(image.as_ref().unwrap().as_str().ends_with(".jpg"));
+            }
+            other => panic!("expected generic embed card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_generic_text_embed_never_calls_thumbnail_or_x_backends() {
+        let temp = tempfile::tempdir().unwrap();
+        let page_url = "https://mastodon.social/@Gargron/114000000000000000";
+        let fetcher = FixtureGenericOEmbedFetcher::new(GENERIC_DISCOVERY_HTML, MASTODON_JSON);
+
+        let transformed = transform_code_images(
+            deck_with_embed_options(page_url, None, RevealSpan { start: 1, len: 1 }),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &fetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(fetcher.calls.borrow().len(), 2);
+        assert!(matches!(
+            fetcher.calls.borrow()[0],
+            GenericFetchCall::DiscoveryPage(_)
+        ));
+        assert!(matches!(
+            fetcher.calls.borrow()[1],
+            GenericFetchCall::Endpoint(_)
+        ));
+        match transformed.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::GenericEmbedCard { image, .. } => assert_eq!(image, &None),
+            other => panic!("expected generic text card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_cache_hits_call_no_fetch_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(
+            cache_dir.join(format!(
+                "{}.json",
+                generic_oembed_json_cache_key(GENERIC_PAGE_URL)
+            )),
+            GENERIC_JSON,
+        )
+        .unwrap();
+        fs::write(
+            cache_dir.join(format!(
+                "{}.jpg",
+                generic_oembed_thumbnail_cache_key(GENERIC_PAGE_URL)
+            )),
+            YOUTUBE_THUMBNAIL,
+        )
+        .unwrap();
+
+        let transformed = transform_code_images(
+            deck_with_embed_options(GENERIC_PAGE_URL, None, RevealSpan { start: 1, len: 1 }),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &PanicGenericOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &cache_dir,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            transformed.parsed_slides()[0].fragments[0].kind(),
+            FragmentKind::GenericEmbedCard { image: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn generic_mode_error_calls_no_backend() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let err = transform_code_images(
+            deck_with_embed_options(
+                GENERIC_PAGE_URL,
+                Some(EmbedMode::Card),
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &PanicGenericOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(7));
+        assert!(
+            err.message.contains("only supported for X"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn x_screenshot_paths_never_call_any_oembed_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
+
+        transform_code_images(
+            deck_with_embed_options(
+                "https://x.com/a/status/1",
+                Some(EmbedMode::Screenshot),
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &NoSvgRunner,
+            &renderer,
+            &PanicOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(renderer.calls(), 1);
+    }
+
+    #[test]
+    fn x_card_paths_never_call_generic_fetch_operations_or_chrome() {
+        let temp = tempfile::tempdir().unwrap();
+        let fetcher = FixtureOEmbedFetcher::json(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/x-oembed-response.json"
+        )));
+
+        transform_code_images(
+            deck_with_embed_options(
+                "https://x.com/gosukenator/status/2074821309259973046",
+                Some(EmbedMode::Card),
+                RevealSpan { start: 1, len: 1 },
+            ),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &fetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(fetcher.calls.get(), 1);
+    }
+
+    #[test]
+    fn legacy_x_screenshot_and_card_fragments_match_issue_398_bytes() {
+        let span = RevealSpan { start: 1, len: 1 };
+
+        let screenshot_temp = tempfile::tempdir().unwrap();
+        let screenshot_target = x_status("https://x.com/a/status/1");
+        let screenshot = transform_code_images(
+            deck_with_embed_options(
+                "https://x.com/a/status/1",
+                Some(EmbedMode::Screenshot),
+                span,
+            ),
+            &NoSvgRunner,
+            &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\npinned".to_vec()),
+            &PanicOEmbedFetcher,
+            &screenshot_temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &screenshot_temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+        assert_eq!(
+            screenshot.parsed_slides()[0].fragments[0],
+            SourceFragment::image(
+                7,
+                "X post by @a",
+                RawImagePath::from_embeds_cache(&builtin_embed_cache_key(
+                    &screenshot_target,
+                    BUILTIN_EMBED_PARAMS,
+                )),
+            )
+            .with_reveal_span(span)
+        );
+
+        let card_temp = tempfile::tempdir().unwrap();
+        let x_json = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/x-oembed-response.json"
+        ));
+        let normalized = "https://x.com/gosukenator/status/2074821309259973046";
+        let expected =
+            build_embed_card_html(7, normalized, &parse_oembed_document(x_json).unwrap()).unwrap();
+        let card = transform_code_images(
+            deck_with_embed_options(normalized, Some(EmbedMode::Card), span),
+            &NoSvgRunner,
+            &PanicEmbedRenderer,
+            &FixtureOEmbedFetcher::json(x_json),
+            &card_temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &card_temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+        assert_eq!(
+            card.parsed_slides()[0].fragments[0],
+            SourceFragment::embed_card(7, expected.html, expected.plain_text)
+                .with_reveal_span(span)
+        );
+    }
+
+    #[test]
     fn bare_embed_matches_explicit_screenshot_bytes() {
         fn transform(info: &str) -> (SourceFragment, Vec<u8>) {
             let temp = tempfile::tempdir().unwrap();
@@ -2453,7 +3986,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
         let renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec());
-        let status = parse_embed_block(7, "https://x.com/a/status/1").unwrap();
+        let status = x_status("https://x.com/a/status/1");
         let key =
             cache_or_render_embed(7, &status, BUILTIN_EMBED_PARAMS, &renderer, &cache_dir).unwrap();
 
@@ -2586,6 +4119,19 @@ mod tests {
         deck_with_spanned_fragment(
             SourceFragment::code(7, Some("embed".to_owned()), body.to_owned())
                 .with_embed_mode(mode),
+            span,
+            CodeImagesConfig::default(),
+        )
+    }
+
+    fn deck_with_embed_options(
+        body: &str,
+        mode: Option<EmbedMode>,
+        span: RevealSpan,
+    ) -> Deck<Parsed> {
+        deck_with_spanned_fragment(
+            SourceFragment::code(7, Some("embed".to_owned()), body.to_owned())
+                .with_embed_options(EmbedOptions { mode }),
             span,
             CodeImagesConfig::default(),
         )

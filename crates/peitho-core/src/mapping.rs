@@ -313,6 +313,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             | FragmentKind::Paragraph
             | FragmentKind::Math { .. }
             | FragmentKind::EmbedCard { .. }
+            | FragmentKind::GenericEmbedCard { .. }
             | FragmentKind::List
             | FragmentKind::Text => {
                 SlotName::new("body").expect("conventional slot names are valid")
@@ -405,6 +406,7 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
             | FragmentKind::Code
             | FragmentKind::Math { .. }
             | FragmentKind::EmbedCard { .. }
+            | FragmentKind::GenericEmbedCard { .. }
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List
@@ -419,7 +421,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{FootnoteEntry, RevealSpan, SlideKey, SlotName, SourceFragment},
+        domain::{FootnoteEntry, RawImagePath, RevealSpan, SlideKey, SlotName, SourceFragment},
         layout::parse_layout,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{DeckSettings, KeySource, ParsedSlide},
@@ -513,6 +515,57 @@ mod tests {
             slide.slots[&code].fragments()[0].reveal_span(),
             Some(RevealSpan { start: 2, len: 1 })
         );
+    }
+
+    #[test]
+    fn maps_generic_card_to_blocks_slot_beside_math_and_x_card() {
+        let layout = parse_layout(
+            "cards",
+            r#"<section><slot name="body" accepts="blocks" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        let deck = crate::phase::Deck::parsed(
+            DeckSettings::default(),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                key: crate::domain::SlideKey::new("cards").unwrap(),
+                key_source: KeySource::Explicit { line: 1 },
+                layout_request: None,
+                fragments: vec![
+                    SourceFragment::math(3, "<span>math</span>", "x"),
+                    SourceFragment::embed_card(5, "<article>X</article>", "X post"),
+                    SourceFragment::generic_embed_card(
+                        7,
+                        None::<RawImagePath>,
+                        "Generic",
+                        Some("Generic".to_owned()),
+                        Some("Author".to_owned()),
+                        Some("Provider".to_owned()),
+                        "https://example.com/post",
+                        "Generic\nAuthor",
+                    ),
+                ],
+                skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        );
+
+        let mapped = map_by_convention(deck, &layout).unwrap();
+        let body = SlotName::new("body").unwrap();
+        let fragments = mapped.mapped_slides()[0].slots[&body].fragments();
+
+        assert!(matches!(fragments[0].kind(), FragmentKind::Math { .. }));
+        assert!(matches!(
+            fragments[1].kind(),
+            FragmentKind::EmbedCard { .. }
+        ));
+        assert!(matches!(
+            fragments[2].kind(),
+            FragmentKind::GenericEmbedCard { .. }
+        ));
     }
 
     #[test]

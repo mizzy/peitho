@@ -129,11 +129,52 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
 const OEMBED_CURL_MAX_TIME_SECS: u64 = 30;
 const OEMBED_CURL_RUNNER_MARGIN_SECS: u64 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenericOEmbedFetchOperation {
+    DiscoveryPage,
+    DiscoveredEndpoint,
+    Thumbnail,
+}
+
+impl GenericOEmbedFetchOperation {
+    const fn max_bytes(self) -> usize {
+        match self {
+            Self::DiscoveryPage => peitho_core::MAX_OEMBED_DISCOVERY_PAGE_BYTES,
+            Self::DiscoveredEndpoint => peitho_core::MAX_OEMBED_RESPONSE_BYTES,
+            Self::Thumbnail => peitho_core::MAX_OEMBED_THUMBNAIL_BYTES,
+        }
+    }
+}
+
 struct CliOEmbedFetcher;
 
 impl peitho_core::code_images::OEmbedFetcher for CliOEmbedFetcher {
     fn fetch(&self, normalized_url: &str) -> peitho_core::Result<String> {
         fetch_oembed_with_invoker(normalized_url, &SystemOEmbedCurlInvoker)
+    }
+
+    fn fetch_discovery_page(&self, page_url: &str) -> peitho_core::Result<Vec<u8>> {
+        fetch_generic_oembed_with_invoker(
+            page_url,
+            GenericOEmbedFetchOperation::DiscoveryPage,
+            &SystemOEmbedCurlInvoker,
+        )
+    }
+
+    fn fetch_discovered_oembed(&self, endpoint_url: &str) -> peitho_core::Result<Vec<u8>> {
+        fetch_generic_oembed_with_invoker(
+            endpoint_url,
+            GenericOEmbedFetchOperation::DiscoveredEndpoint,
+            &SystemOEmbedCurlInvoker,
+        )
+    }
+
+    fn fetch_thumbnail(&self, image_url: &str) -> peitho_core::Result<Vec<u8>> {
+        fetch_generic_oembed_with_invoker(
+            image_url,
+            GenericOEmbedFetchOperation::Thumbnail,
+            &SystemOEmbedCurlInvoker,
+        )
     }
 }
 
@@ -248,6 +289,60 @@ fn fetch_oembed_with_invoker<I: OEmbedCurlInvoker>(
                 stderr_excerpt(&stderr)
             ),
             "retry with network access to publish.x.com",
+        )),
+    }
+}
+
+fn fetch_generic_oembed_with_invoker<I: OEmbedCurlInvoker>(
+    url: &str,
+    operation: GenericOEmbedFetchOperation,
+    invoker: &I,
+) -> peitho_core::Result<Vec<u8>> {
+    let args = [
+        OsString::from("-fsS"),
+        OsString::from("-L"),
+        OsString::from("--max-redirs"),
+        OsString::from("5"),
+        OsString::from("--proto"),
+        OsString::from("=http,https"),
+        OsString::from("--proto-redir"),
+        OsString::from("=http,https"),
+        OsString::from("--max-time"),
+        OsString::from(OEMBED_CURL_MAX_TIME_SECS.to_string()),
+        OsString::from("--max-filesize"),
+        OsString::from(operation.max_bytes().to_string()),
+        OsString::from(url),
+    ];
+    let timeout = Duration::from_secs(OEMBED_CURL_MAX_TIME_SECS + OEMBED_CURL_RUNNER_MARGIN_SECS);
+    let outcome = invoker
+        .invoke(OsStr::new("curl"), &args, None, timeout)
+        .map_err(oembed_curl_process_error)?;
+
+    match outcome {
+        OEmbedCurlOutcome::Exited {
+            success: true,
+            stdout,
+            ..
+        } => Ok(stdout),
+        OEmbedCurlOutcome::Exited {
+            success: false,
+            status,
+            stderr,
+            ..
+        } => Err(cli_oembed_fetcher_error(
+            format!(
+                "generic oEmbed curl exited with {status}; stderr: {}",
+                stderr_excerpt(&stderr)
+            ),
+            "check HTTP(S) network access, provider redirects, and the URL, then retry with curl installed",
+        )),
+        OEmbedCurlOutcome::TimedOut { stderr } => Err(cli_oembed_fetcher_error(
+            format!(
+                "generic oEmbed curl timed out after {}s; stderr: {}",
+                timeout.as_secs(),
+                stderr_excerpt(&stderr)
+            ),
+            "check HTTP(S) network access and retry; the provider must respond within the bounded timeout",
         )),
     }
 }
@@ -7468,7 +7563,7 @@ contexts:
     }
 
     #[test]
-    fn oembed_curl_runner_uses_fixed_flags_encoded_endpoint_and_no_stdin() {
+    fn x_oembed_curl_argv_remains_byte_identical_without_redirects() {
         let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(b"{}"));
 
         fetch_oembed_with_invoker("https://x.com/A/status/1", &invoker).unwrap();
@@ -7491,6 +7586,156 @@ contexts:
         );
         assert!(!calls[0].2, "curl must receive no stdin pipe");
         assert_eq!(calls[0].3, Duration::from_secs(35));
+    }
+
+    fn assert_generic_curl_argv(
+        operation: GenericOEmbedFetchOperation,
+        url: &str,
+        expected_cap: usize,
+    ) {
+        let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(b"body"));
+
+        fetch_generic_oembed_with_invoker(url, operation, &invoker).unwrap();
+
+        let calls = invoker.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, OsStr::new("curl"));
+        assert_eq!(
+            calls[0].1,
+            [
+                OsString::from("-fsS"),
+                OsString::from("-L"),
+                OsString::from("--max-redirs"),
+                OsString::from("5"),
+                OsString::from("--proto"),
+                OsString::from("=http,https"),
+                OsString::from("--proto-redir"),
+                OsString::from("=http,https"),
+                OsString::from("--max-time"),
+                OsString::from("30"),
+                OsString::from("--max-filesize"),
+                OsString::from(expected_cap.to_string()),
+                OsString::from(url),
+            ]
+        );
+        assert!(!calls[0].2, "generic curl must receive no stdin pipe");
+        assert_eq!(calls[0].3, Duration::from_secs(35));
+    }
+
+    #[test]
+    fn generic_page_curl_uses_redirect_limit_protocol_guard_and_8_mib_cap() {
+        assert_generic_curl_argv(
+            GenericOEmbedFetchOperation::DiscoveryPage,
+            "https://example.com/post",
+            peitho_core::MAX_OEMBED_DISCOVERY_PAGE_BYTES,
+        );
+    }
+
+    #[test]
+    fn generic_endpoint_curl_uses_redirect_limit_and_1_mib_cap() {
+        assert_generic_curl_argv(
+            GenericOEmbedFetchOperation::DiscoveredEndpoint,
+            "https://example.com/oembed?url=post",
+            peitho_core::MAX_OEMBED_RESPONSE_BYTES,
+        );
+    }
+
+    #[test]
+    fn generic_thumbnail_curl_uses_redirect_limit_and_8_mib_cap() {
+        assert_generic_curl_argv(
+            GenericOEmbedFetchOperation::Thumbnail,
+            "https://cdn.example.com/thumb.jpg",
+            peitho_core::MAX_OEMBED_THUMBNAIL_BYTES,
+        );
+    }
+
+    #[test]
+    fn generic_curl_sends_no_stdin_and_returns_complete_bytes() {
+        let response = b"\x00\xffcomplete generic bytes\n";
+        let invoker = FixtureOEmbedCurlInvoker::outcome(successful_oembed_outcome(response));
+
+        let bytes = fetch_generic_oembed_with_invoker(
+            "https://example.com/post",
+            GenericOEmbedFetchOperation::DiscoveryPage,
+            &invoker,
+        )
+        .unwrap();
+
+        assert_eq!(bytes, response);
+        assert!(!invoker.calls.borrow()[0].2);
+    }
+
+    #[test]
+    fn generic_curl_reports_redirect_http_exit_timeout_and_stderr() {
+        for (code, stderr) in [
+            (47, "curl: (47) Maximum (5) redirects followed"),
+            (22, "curl: (22) HTTP 404"),
+            (7, "curl: (7) Failed to connect"),
+        ] {
+            let invoker = FixtureOEmbedCurlInvoker::outcome(OEmbedCurlOutcome::Exited {
+                success: false,
+                code: Some(code),
+                status: format!("exit status: {code}"),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            });
+
+            let err = fetch_generic_oembed_with_invoker(
+                "https://example.com/post",
+                GenericOEmbedFetchOperation::DiscoveryPage,
+                &invoker,
+            )
+            .unwrap_err();
+
+            assert_eq!(err.line, None);
+            assert!(err.message.contains(&format!("exit status: {code}")));
+            assert!(err.message.contains(stderr));
+            assert!(err.help.contains("HTTP(S)"), "{}", err.help);
+        }
+
+        let invoker = FixtureOEmbedCurlInvoker::outcome(OEmbedCurlOutcome::TimedOut {
+            stderr: b"provider timed out".to_vec(),
+        });
+        let err = fetch_generic_oembed_with_invoker(
+            "https://example.com/post",
+            GenericOEmbedFetchOperation::DiscoveryPage,
+            &invoker,
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("timed out after 35s"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("provider timed out"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn generic_curl_reports_missing_curl() {
+        let invoker = FixtureOEmbedCurlInvoker::error(ProcessRunError::Spawn(io::Error::new(
+            io::ErrorKind::NotFound,
+            "curl not found",
+        )));
+
+        let err = fetch_generic_oembed_with_invoker(
+            "https://example.com/post",
+            GenericOEmbedFetchOperation::DiscoveryPage,
+            &invoker,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, None);
+        assert!(
+            err.message.contains("failed to start curl"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("curl not found"), "{}", err.message);
+        assert!(err.help.contains("install curl"), "{}", err.help);
     }
 
     #[test]

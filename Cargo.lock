@@ -1872,6 +1872,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "ts-rs",
+ "url",
 ]
 
 [[package]]

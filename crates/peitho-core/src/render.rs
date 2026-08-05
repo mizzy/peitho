@@ -11,7 +11,7 @@ use crate::{
         Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
         RevealSpan, SlideKey, SlotName, SourceFragment,
     },
-    embed_card::EmbedCardAssets,
+    embed_card::{generic_embed_card_css, EmbedCardAssets},
     emphasis::LineEmphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
@@ -74,9 +74,11 @@ pub fn render_deck(
     let mut slides = Vec::new();
     let mut uses_math = false;
     let mut uses_embed_card = false;
+    let mut uses_generic_embed_card = false;
     for slide in checked_slides {
         uses_math |= slide_uses_math(slide.slots());
         uses_embed_card |= slide_uses_embed_card(slide.slots());
+        uses_generic_embed_card |= slide_uses_generic_embed_card(slide.slots());
         let (page_number, page_total) = match (slide.page_number_hidden(), page_numbers) {
             (true, _) | (false, None) => (None, None),
             (false, Some(PageNumberFormat::Current)) => (Some(slide.index() + 1), None),
@@ -105,13 +107,20 @@ pub fn render_deck(
         ));
     }
     let math_assets = uses_math.then_some(MathAssets::katex());
-    let embed_card_assets = uses_embed_card.then_some(EmbedCardAssets::builtin());
-    let css = match (math_assets, embed_card_assets) {
-        (None, None) => theme_css,
-        (Some(math), None) => format!("{}\n{theme_css}", math.css()),
-        (None, Some(card)) => format!("{}\n{theme_css}", card.css()),
-        (Some(math), Some(card)) => format!("{}\n{}\n{theme_css}", math.css(), card.css()),
-    };
+    let embed_card_assets =
+        (uses_embed_card || uses_generic_embed_card).then_some(EmbedCardAssets::builtin());
+    let mut css_parts = Vec::new();
+    if let Some(math) = math_assets.as_ref() {
+        css_parts.push(math.css());
+    }
+    if let Some(card) = embed_card_assets.as_ref() {
+        css_parts.push(card.css());
+    }
+    if uses_generic_embed_card {
+        css_parts.push(generic_embed_card_css());
+    }
+    css_parts.push(&theme_css);
+    let css = css_parts.join("\n");
     Ok(Deck::rendered(settings, slides, css, math_assets))
 }
 
@@ -128,6 +137,16 @@ fn slide_uses_embed_card(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePat
         slot.fragments()
             .iter()
             .any(|fragment| matches!(fragment.kind(), FragmentKind::EmbedCard { .. }))
+    })
+}
+
+fn slide_uses_generic_embed_card(
+    slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
+) -> bool {
+    slots.values().any(|slot| {
+        slot.fragments()
+            .iter()
+            .any(|fragment| matches!(fragment.kind(), FragmentKind::GenericEmbedCard { .. }))
     })
 }
 
@@ -440,6 +459,27 @@ fn render_block_slot(
                 body.push_str(html);
                 body.push_str("</div>");
             }
+            FragmentKind::GenericEmbedCard {
+                image,
+                image_alt_attr,
+                title_html,
+                author_html,
+                provider_html,
+                permalink_attr,
+            } => {
+                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                markdown_run.clear();
+                body.push_str(r#"<div class="peitho-embed-card">"#);
+                body.push_str(&render_generic_embed_card_content(
+                    image.as_ref(),
+                    image_alt_attr,
+                    title_html.as_deref(),
+                    author_html.as_deref(),
+                    provider_html.as_deref(),
+                    permalink_attr,
+                ));
+                body.push_str("</div>");
+            }
             FragmentKind::Footnotes { entries } => {
                 render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
                 markdown_run.clear();
@@ -456,6 +496,55 @@ fn render_block_slot(
     }
     render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
+}
+
+fn render_generic_embed_card_content(
+    image: Option<&ResolvedImagePath>,
+    image_alt_attr: &str,
+    title_html: Option<&str>,
+    author_html: Option<&str>,
+    provider_html: Option<&str>,
+    permalink_attr: &str,
+) -> String {
+    let mut html =
+        String::from(r#"<article class="peitho-embed-card__content peitho-generic-embed-card">"#);
+    html.push_str(r#"<a class="peitho-embed-card__permalink" href=""#);
+    html.push_str(permalink_attr);
+    html.push_str(r#"" rel="noopener noreferrer">"#);
+    if let Some(image) = image {
+        html.push_str(r#"<img class="peitho-generic-embed-card__thumbnail" src=""#);
+        html.push_str(&encode_double_quoted_attribute(image.as_str()));
+        html.push_str(r#"" alt=""#);
+        html.push_str(image_alt_attr);
+        html.push_str(r#"">"#);
+    }
+
+    let fields = [
+        ("peitho-generic-embed-card__title", title_html),
+        ("peitho-generic-embed-card__author", author_html),
+        ("peitho-generic-embed-card__provider", provider_html),
+    ]
+    .into_iter()
+    .filter_map(|(class, value)| value.map(|value| (class, value)))
+    .collect::<Vec<_>>();
+    if !fields.is_empty() {
+        html.push_str(r#"<span class="peitho-generic-embed-card__caption">"#);
+        for (index, (class, value)) in fields.into_iter().enumerate() {
+            if index > 0 {
+                html.push_str(
+                    r#"<span class="peitho-generic-embed-card__separator" aria-hidden="true"> · </span>"#,
+                );
+            }
+            html.push_str(r#"<span class=""#);
+            html.push_str(class);
+            html.push_str(r#"">"#);
+            html.push_str(value);
+            html.push_str("</span>");
+        }
+        html.push_str("</span>");
+    }
+    html.push_str("</a></article>");
+    html
 }
 
 fn render_revealed_fragment(
@@ -521,6 +610,29 @@ fn render_revealed_fragment(
                 span.start
             ));
             body.push_str(html);
+            body.push_str("</div>");
+            Ok(())
+        }
+        FragmentKind::GenericEmbedCard {
+            image,
+            image_alt_attr,
+            title_html,
+            author_html,
+            provider_html,
+            permalink_attr,
+        } => {
+            body.push_str(&format!(
+                r#"<div class="peitho-embed-card" data-reveal-step="{}">"#,
+                span.start
+            ));
+            body.push_str(&render_generic_embed_card_content(
+                image.as_ref(),
+                image_alt_attr,
+                title_html.as_deref(),
+                author_html.as_deref(),
+                provider_html.as_deref(),
+                permalink_attr,
+            ));
             body.push_str("</div>");
             Ok(())
         }
@@ -824,6 +936,7 @@ fn render_image_fragment_inner(
         | FragmentKind::Code
         | FragmentKind::Math { .. }
         | FragmentKind::EmbedCard { .. }
+        | FragmentKind::GenericEmbedCard { .. }
         | FragmentKind::Footnotes { .. }
         | FragmentKind::List
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
@@ -866,6 +979,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
+            | (Accepts::Blocks, FragmentKind::GenericEmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
@@ -1859,6 +1973,18 @@ mod tests {
         fn fetch(&self, _normalized_url: &str) -> crate::error::Result<String> {
             panic!("unexpected oEmbed fetcher call")
         }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> crate::error::Result<Vec<u8>> {
+            panic!("unexpected generic discovery fetcher call")
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> crate::error::Result<Vec<u8>> {
+            panic!("unexpected generic endpoint fetcher call")
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> crate::error::Result<Vec<u8>> {
+            panic!("unexpected generic thumbnail fetcher call")
+        }
     }
 
     fn render_image_slot_html(
@@ -2813,6 +2939,217 @@ mod tests {
         assert!(!card_css.contains("url("));
         assert!(!card_css.contains("@font-face"));
         assert!(!card_css.contains("background-image"));
+    }
+
+    #[test]
+    fn x_card_only_render_keeps_issue_398_html_and_css_bytes() {
+        let theme_css = ".theme { color: red; }\n";
+        let rendered = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+
+        assert_eq!(
+            rendered.slides()[0].html(),
+            r#"<section data-slide-key="intro" class="peitho-slide"><h1><span class="slot-title">Intro</span></h1><div class="slot-body"><div class="peitho-embed-card"><article>card html</article></div></div></section>"#
+        );
+        assert_eq!(
+            rendered.css(),
+            format!("{}\n{theme_css}", EmbedCardAssets::builtin().css())
+        );
+    }
+
+    #[test]
+    fn render_generic_thumbnail_card_uses_only_resolved_src_and_author_permalink() {
+        let fragment = resolved_generic_card(Some("assets/hashed-thumbnail.jpg"));
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &[fragment],
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(
+            html.contains(r#"href="https://example.com/post?a=1&amp;b=2""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"rel="noopener noreferrer""#), "{html}");
+        assert!(
+            html.contains(r#"src="assets/hashed-thumbnail.jpg""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"alt="Title &amp; alt""#), "{html}");
+        assert!(html.contains("Title &lt;safe&gt;"), "{html}");
+        assert!(html.contains("Author &amp; Co"), "{html}");
+        assert!(html.contains("Provider"), "{html}");
+        assert!(!html.contains("cdn.example.com"), "{html}");
+        assert!(!html.contains(".peitho/embeds-cache"), "{html}");
+        assert!(!html.contains("<iframe"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
+    fn render_generic_text_card_omits_img_but_keeps_caption_and_link() {
+        let fragment = resolved_generic_card(None);
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &[fragment],
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains("Title &lt;safe&gt;"), "{html}");
+        assert!(html.contains("Author &amp; Co"), "{html}");
+        assert!(html.contains("Provider"), "{html}");
+        assert!(
+            html.contains(r#"href="https://example.com/post?a=1&amp;b=2""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn render_generic_card_splices_between_markdown_runs() {
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "Before."),
+            SourceFragment::generic_embed_card(
+                5,
+                None::<RawImagePath>,
+                "Title",
+                Some("Title".to_owned()),
+                Some("Author".to_owned()),
+                None,
+                "https://example.com/post",
+                "Title\nAuthor",
+            ),
+            SourceFragment::paragraph(7, "After."),
+        ]);
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let before = html.find("<p>Before.</p>").unwrap();
+        let card = html.find("peitho-generic-embed-card").unwrap();
+        let after = html.find("<p>After.</p>").unwrap();
+        assert!(before < card && card < after, "{html}");
+    }
+
+    #[test]
+    fn render_revealed_generic_card_stamps_outer_wrapper() {
+        let raw = SourceFragment::generic_embed_card(
+            5,
+            None::<RawImagePath>,
+            "Title",
+            Some("Title".to_owned()),
+            Some("Author".to_owned()),
+            None,
+            "https://example.com/post",
+            "Title\nAuthor",
+        )
+        .with_reveal_span(RevealSpan { start: 3, len: 1 });
+        let fragment = raw
+            .try_map_image_src(|raw| -> Result<ResolvedImagePath> {
+                Ok(ResolvedImagePath::from_string(raw.as_str().to_owned()))
+            })
+            .unwrap();
+
+        let html = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &[fragment],
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert!(
+            html.contains(r#"<div class="peitho-embed-card" data-reveal-step="3">"#),
+            "{html}"
+        );
+        assert!(html.contains("peitho-generic-embed-card"), "{html}");
+    }
+
+    #[test]
+    fn generic_card_css_is_conditional_and_follows_base_card_css() {
+        let theme_css = ".theme { color: red; }\n";
+        let generic =
+            render_checked_with_css(checked_deck_with_generic_card_body(false, false), theme_css);
+        let plain = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+        let base = EmbedCardAssets::builtin().css();
+        let supplement = crate::embed_card::generic_embed_card_css();
+
+        assert_eq!(generic.css(), format!("{base}\n{supplement}\n{theme_css}"));
+        assert_eq!(generic.css().matches(base).count(), 1);
+        assert_eq!(generic.css().matches(supplement).count(), 1);
+        assert_eq!(plain.css(), theme_css);
+        for variable in [
+            "--peitho-embed-card-color",
+            "--peitho-embed-card-background",
+            "--peitho-embed-card-border-color",
+            "--peitho-embed-card-link-color",
+            "--peitho-embed-card-muted-color",
+            "--peitho-embed-card-font-family",
+        ] {
+            assert!(supplement.contains(variable), "missing {variable}");
+        }
+        assert!(!supplement.contains("url("));
+        assert!(!supplement.contains("@font-face"));
+    }
+
+    #[test]
+    fn math_x_and_generic_css_order_keeps_theme_last() {
+        let theme_css = ".theme { color: rebeccapurple; }\n";
+        let rendered =
+            render_checked_with_css(checked_deck_with_generic_card_body(true, true), theme_css);
+
+        assert_eq!(
+            rendered.css(),
+            format!(
+                "{}\n{}\n{}\n{theme_css}",
+                MathAssets::katex().css(),
+                EmbedCardAssets::builtin().css(),
+                crate::embed_card::generic_embed_card_css(),
+            )
+        );
+    }
+
+    #[test]
+    fn decks_without_generic_cards_keep_existing_css_bytes() {
+        let theme_css = ".theme { color: red; }\n";
+        let x = render_checked_with_css(checked_deck_with_card_body(false), theme_css);
+        let math = render_checked_with_css(checked_deck_with_math_body(), theme_css);
+        let plain = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+
+        assert_eq!(
+            x.css(),
+            format!("{}\n{theme_css}", EmbedCardAssets::builtin().css())
+        );
+        assert_eq!(
+            math.css(),
+            format!("{}\n{theme_css}", MathAssets::katex().css())
+        );
+        assert_eq!(plain.css(), theme_css);
     }
 
     #[test]
@@ -4243,6 +4580,79 @@ Paragraph after heading.
                 ),
             );
         }
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            title,
+            CheckedSlot::new(
+                layout.slot("title").unwrap().clone(),
+                vec![SourceFragment::heading(1, 1, "# Intro", "Intro")],
+            ),
+        );
+        slots.insert(
+            body,
+            CheckedSlot::new(layout.slot("body").unwrap().clone(), fragments),
+        );
+        Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                false,
+                0,
+                false,
+                None,
+            )],
+        )
+    }
+
+    fn resolved_generic_card(image: Option<&str>) -> SourceFragment<ResolvedImagePath> {
+        SourceFragment::generic_embed_card(
+            5,
+            image.map(|src| ResolvedImagePath::from_string(src.to_owned())),
+            "Title &amp; alt",
+            Some("Title &lt;safe&gt;".to_owned()),
+            Some("Author &amp; Co".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post?a=1&amp;b=2",
+            "Title <safe>\nAuthor & Co",
+        )
+    }
+
+    fn checked_deck_with_generic_card_body(
+        include_math: bool,
+        include_x_card: bool,
+    ) -> Deck<Checked> {
+        let layout = title_body_layout();
+        let title = SlotName::new("title").unwrap();
+        let body = SlotName::new("body").unwrap();
+        let mut fragments = Vec::new();
+        if include_math {
+            fragments.push(SourceFragment::math(
+                2,
+                r#"<span class="katex-display">math html</span>"#,
+                r#"\frac{1}{2}"#,
+            ));
+        }
+        if include_x_card {
+            fragments.push(SourceFragment::embed_card(
+                3,
+                "<article>X card</article>",
+                "X post",
+            ));
+        }
+        fragments.push(SourceFragment::generic_embed_card(
+            5,
+            None::<RawImagePath>,
+            "Title",
+            Some("Title".to_owned()),
+            Some("Author".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post",
+            "Title\nAuthor",
+        ));
         let mut slots = BTreeMap::new();
         slots.insert(
             title,

@@ -175,10 +175,11 @@ Fenced `math` blocks render to KaTeX HTML+MathML at build time. The result is bo
 ```
 ````
 
-### X post embeds
+### Built-in embeds
 
-An `embed` fence defaults to the existing official-widget PNG screenshot. Add
-`mode=card` to the opening fence for selectable, themeable HTML instead:
+An `embed` fence containing an X status URL defaults to the existing
+official-widget PNG screenshot. Add `mode=card` to the opening fence for
+selectable, themeable HTML instead:
 
 ````markdown
 ```embed mode=card
@@ -186,11 +187,41 @@ https://x.com/gosukenator/status/2074821309259973046
 ```
 ````
 
-Card mode is body content and needs an `accepts="blocks"` slot; screenshot mode
-is an image and needs an `accepts="image"` slot. On a cache miss, cards use
-system `curl` to fetch raw oEmbed JSON into `.peitho/embeds-cache/*.json` and
-never start Chrome. Screenshots use the existing `.png` cache and Chrome path.
-`mode=screenshot` states the default explicitly.
+`mode=screenshot` states the X default explicitly. Both `mode` values are X
+only; using `mode=` with any non-X URL is a line-numbered error. X screenshot
+mode is an image and needs an `accepts="image"` slot. X card mode is body
+content and needs an `accepts="blocks"` slot.
+
+For any other HTTP(S) URL, use a bare fence:
+
+````markdown
+```embed
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
+````
+
+Peitho follows at most five HTTP(S) redirects while fetching the page, uses its
+first JSON oEmbed discovery link, and renders a static card. A response with a
+`thumbnail_url` becomes a thumbnail card; without one it becomes a text card
+from the available title, author, and provider. Photo oEmbed responses may use
+their required `url` image when no thumbnail is present. Generic cards always
+flow into `accepts="blocks"`, including cards with thumbnails.
+
+Provider HTML is never injected and generic embeds never use screenshots or
+Chrome. Retained metadata is escaped, the link always points to the normalized
+URL written by the deck author, and remote JPEG, PNG, WebP, or GIF thumbnails
+pass through the normal image resolver before being published as hashed local
+assets.
+
+On cache misses, system `curl` fetches generic discovery pages (8 MiB cap), raw
+oEmbed JSON (1 MiB cap), and thumbnails (8 MiB cap). Discovery HTML is not
+cached. Raw JSON and validated thumbnail bytes live under
+`.peitho/embeds-cache/`; complete cache hits build offline without curl. A JSON
+hit with a missing thumbnail fetches only that thumbnail. Errors name the exact
+cache file or candidate files to delete for a metadata-only or complete
+refresh. X card misses keep their existing direct, no-redirect
+`publish.x.com` request, and X screenshot misses keep the existing PNG cache
+and Chrome path.
 
 An explicit `code_images.embed` command rejects `mode=` fence options. With a
 bare `embed` fence, Peitho sends the complete body verbatim on stdin and treats

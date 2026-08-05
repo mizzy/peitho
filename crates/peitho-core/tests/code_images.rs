@@ -50,6 +50,18 @@ impl OEmbedFetcher for PanicOEmbedFetcher {
     fn fetch(&self, _normalized_url: &str) -> Result<String> {
         panic!("integration test must not invoke oEmbed fetcher");
     }
+
+    fn fetch_discovery_page(&self, _page_url: &str) -> Result<Vec<u8>> {
+        panic!("integration test must not invoke generic page fetcher");
+    }
+
+    fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> Result<Vec<u8>> {
+        panic!("integration test must not invoke generic endpoint fetcher");
+    }
+
+    fn fetch_thumbnail(&self, _image_url: &str) -> Result<Vec<u8>> {
+        panic!("integration test must not invoke generic thumbnail fetcher");
+    }
 }
 
 #[test]

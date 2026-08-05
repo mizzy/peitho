@@ -53,8 +53,8 @@ Peitho prepends KaTeX CSS to `peitho.css` and writes fonts under
 `katex-fonts/`.
 
 Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
-then treated as images. Bare `embed` blocks accept one X status URL and default
-to a cached PNG screenshot. A fence option selects card mode:
+then treated as images. An `embed` block containing one X status URL defaults
+to a cached PNG screenshot. A fence option selects X card mode:
 
 ````markdown
 ```embed mode=card
@@ -66,6 +66,26 @@ Card mode fetches raw oEmbed JSON with system `curl` on a cache miss, regenerate
 escaped HTML on every build, and never invokes Chrome. Cards are body content
 for `accepts="blocks"` slots; default or explicit `mode=screenshot` embeds are
 images for `accepts="image"` slots.
+
+A bare non-X HTTP(S) URL instead uses generic oEmbed discovery:
+
+````markdown
+```embed
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
+````
+
+Generic embeds are always static body cards for `accepts="blocks"` slots. If
+oEmbed supplies a thumbnail, Peitho downloads and validates it at build time,
+then publishes it through the normal hashed-image pipeline; otherwise the card
+contains the available title, author, and provider text. Provider HTML is never
+injected, and `mode=` is rejected because its values are X-only.
+
+Generic discovery page, JSON endpoint, and thumbnail fetches use bounded
+system `curl` requests with HTTP(S)-only redirects. The discovery page is not
+cached. Raw JSON and validated image bytes are cached separately under
+`.peitho/embeds-cache/`, so complete hits need neither curl nor Chrome; errors
+name the exact files to delete to refresh metadata or the complete card.
 
 Use `code_images` for other diagram tags, or when a deck needs to override the
 built-in Mermaid, math, or embed renderer with an external command.
@@ -110,7 +130,7 @@ Restart preview or touch the deck after changing those command inputs.
 
 See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
 and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and
-[Tweet Embed](@/examples/tweet-embed.md) for X embeds.
+[Tweet Embed](@/examples/tweet-embed.md) for X and generic embeds.
 
 ## Asset resolution order
 

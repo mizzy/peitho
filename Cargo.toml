@@ -32,3 +32,4 @@ shlex = "1.3"
 tempfile = "3"
 tiny_http = "0.12.0"
 ts-rs = { version = "12.0.1", default-features = true }
+url = "2.5.8"
