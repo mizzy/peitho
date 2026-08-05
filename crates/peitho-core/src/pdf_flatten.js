@@ -4,11 +4,12 @@
   var SCALE = 2;
   var MAX_CANVAS_DIMENSION = 16384;
   var MAX_CANVAS_AREA = 268000000;
-  // Bound window.load because Chrome's virtual clock can outrun real font and
-  // image loading. Without a timeout the flatten chain never settles, so its
-  // completion signal is never published and PDF export fails.
-  var WINDOW_LOAD_TIMEOUT_MS = 2000;
-  var FONT_READY_TIMEOUT_MS = 2000; // Below Chrome --virtual-time-budget=10000.
+  // These bounds exist only to guarantee eventual settling if browser
+  // readiness promises stall. Ordered CDP printing waits for this script, so
+  // the real deadline is Rust's CHROME_ONE_SHOT_TIMEOUT; the two serial waits
+  // stay comfortably below its 60-second limit while allowing slow assets.
+  var WINDOW_LOAD_TIMEOUT_MS = 20000;
+  var FONT_READY_TIMEOUT_MS = 20000;
   var nextClassId = 0;
   var pseudoStyleElement = null;
   var rasterCache = new Map();
