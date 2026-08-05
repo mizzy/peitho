@@ -6,6 +6,7 @@ pub mod domain;
 mod embed_card;
 mod emphasis;
 pub mod error;
+mod generic_oembed;
 pub mod highlight;
 pub mod include;
 mod json;
@@ -25,6 +26,8 @@ pub mod theme;
 pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";
 pub const EMBEDS_CACHE_DIR: &str = ".peitho/embeds-cache";
 pub const MAX_OEMBED_RESPONSE_BYTES: usize = 1024 * 1024;
+pub const MAX_OEMBED_DISCOVERY_PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_OEMBED_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
 
 pub use check::check_deck;
 pub use code_images::parse_deck_and_transform;

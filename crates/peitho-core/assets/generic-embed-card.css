@@ -1,0 +1,37 @@
+.peitho-generic-embed-card {
+  color: var(--peitho-embed-card-color, inherit);
+  background: var(--peitho-embed-card-background, transparent);
+  font-family: var(--peitho-embed-card-font-family, inherit);
+}
+
+.peitho-embed-card__permalink {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75em;
+  color: var(--peitho-embed-card-link-color, currentColor);
+  text-decoration: none;
+}
+
+.peitho-generic-embed-card__thumbnail {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--peitho-embed-card-border-color, currentColor);
+  border-radius: 0.5em;
+}
+
+.peitho-generic-embed-card__caption {
+  color: var(--peitho-embed-card-color, inherit);
+  line-height: 1.4;
+}
+
+.peitho-generic-embed-card__title {
+  color: var(--peitho-embed-card-color, inherit);
+  font-weight: 700;
+}
+
+.peitho-generic-embed-card__author,
+.peitho-generic-embed-card__provider,
+.peitho-generic-embed-card__separator {
+  color: var(--peitho-embed-card-muted-color, currentColor);
+}

@@ -922,7 +922,10 @@ pub fn require_checked_for_render(_: &Deck<Checked<ResolvedImagePath>>) {}
 mod tests {
     use super::*;
     use crate::{
-        domain::{RawImagePath, ResolvedImageAsset, ResolvedImagePath, SlideKey, SourceFragment},
+        domain::{
+            FragmentKind, RawImagePath, ResolvedImageAsset, ResolvedImagePath, SlideKey,
+            SourceFragment,
+        },
         layout::parse_layout,
     };
     use std::{
@@ -1218,6 +1221,77 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].dist_rel.as_str(), "assets/same-a.png");
+    }
+
+    #[test]
+    fn generic_thumbnail_resolves_to_hashed_asset_and_manifest_image() {
+        let layout = parse_layout(
+            "generic-card",
+            r#"<section><slot name="body" accepts="blocks" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let body = SlotName::new("body").unwrap();
+        let contract = layout.slot("body").unwrap().clone();
+        let raw_path = ".peitho/embeds-cache/abc123.jpg";
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            body.clone(),
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::generic_embed_card(
+                    9,
+                    Some(RawImagePath::new_unchecked(raw_path.to_owned())),
+                    "Title",
+                    Some("Title".to_owned()),
+                    Some("Author".to_owned()),
+                    Some("Provider".to_owned()),
+                    "https://example.com/post",
+                    "Title\nAuthor",
+                )],
+            ),
+        );
+        let deck = Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                0,
+                SlideKey::new("generic").unwrap(),
+                layout,
+                slots,
+                false,
+                0,
+                false,
+                None,
+            )],
+        );
+        let mut calls = 0;
+
+        let (resolved, assets) = resolve_image_paths(deck, |request| {
+            calls += 1;
+            assert_eq!(request.raw.as_str(), raw_path);
+            Ok(ResolvedImageAsset {
+                source_abs: PathBuf::from("/deck/.peitho/embeds-cache/abc123.jpg"),
+                dist_rel: ResolvedImagePath::from_string(
+                    "assets/0123456789abcdef-abc123.jpg".to_owned(),
+                ),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        match resolved.checked_slides()[0].slots()[&body].fragments()[0].kind() {
+            FragmentKind::GenericEmbedCard { image, .. } => assert_eq!(
+                image.as_ref().unwrap().as_str(),
+                "assets/0123456789abcdef-abc123.jpg"
+            ),
+            other => panic!("expected generic embed card, got {other:?}"),
+        }
+        let manifest = crate::manifest::build_manifest(&resolved, &assets);
+        assert_eq!(manifest.images().len(), 1);
+        assert_eq!(
+            manifest.images()[0].src(),
+            "assets/0123456789abcdef-abc123.jpg"
+        );
     }
 
     #[test]

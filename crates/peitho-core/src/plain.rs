@@ -29,6 +29,7 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                         }
                         FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
                         FragmentKind::EmbedCard { .. } => fragment.plain_text().to_owned(),
+                        FragmentKind::GenericEmbedCard { .. } => fragment.plain_text().to_owned(),
                         FragmentKind::Footnotes { entries } => entries
                             .iter()
                             .map(|entry| body_fragment_text(entry.markdown()))
@@ -94,7 +95,7 @@ mod tests {
     use super::*;
     use crate::{
         check::check_deck,
-        domain::{SlideKey, SlotName, SourceFragment},
+        domain::{RawImagePath, SlideKey, SlotName, SourceFragment},
         highlight::Highlighter,
         layout::{parse_layout, Layout},
         mapping::map_by_convention,
@@ -257,6 +258,46 @@ mod tests {
         let text = slide_text(&slide);
 
         assert_eq!(text.body(), "selectable tweet text");
+    }
+
+    #[test]
+    fn generic_card_manifest_text_contains_title_and_author_only() {
+        let layout = all_slots_layout();
+        let body = SlotName::new("body").unwrap();
+        let contract = layout.slot("body").unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            body,
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::generic_embed_card(
+                    7,
+                    None::<RawImagePath>,
+                    "Title",
+                    Some("Title".to_owned()),
+                    Some("Author".to_owned()),
+                    Some("Provider must stay out".to_owned()),
+                    "https://example.com/post",
+                    "Title\nAuthor",
+                )],
+            ),
+        );
+        let slide = CheckedSlide::new(
+            0,
+            0,
+            SlideKey::new("generic-card").unwrap(),
+            layout,
+            slots,
+            false,
+            0,
+            false,
+            None,
+        );
+
+        let text = slide_text(&slide);
+
+        assert_eq!(text.body(), "Title\nAuthor");
+        assert!(!text.body().contains("Provider"));
     }
 
     #[test]

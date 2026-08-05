@@ -203,6 +203,11 @@ pub(crate) enum EmbedMode {
     Card,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct EmbedOptions {
+    pub(crate) mode: Option<EmbedMode>,
+}
+
 impl CodeImagesConfig {
     pub fn renderer_for(&self, tag: &str) -> Option<CodeImageRenderer<'_>> {
         if let Some(command) = self.entries.get(tag) {
@@ -446,6 +451,27 @@ pub struct ResolvedImageAsset {
 const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedImageFormat {
+    Jpeg,
+    Png,
+    WebP,
+    Gif,
+}
+
+impl EmbedImageFormat {
+    pub(crate) const ALL: [Self; 4] = [Self::Jpeg, Self::Png, Self::WebP, Self::Gif];
+
+    pub(crate) const fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::WebP => "webp",
+            Self::Gif => "gif",
+        }
+    }
+}
+
 impl RawImagePath {
     /// Image extensions accepted by Markdown parsing.
     pub const SUPPORTED_EXTENSIONS: &'static [&'static str] = SUPPORTED_IMAGE_EXTENSIONS;
@@ -540,6 +566,14 @@ impl RawImagePath {
 
     pub(crate) fn from_embeds_cache(key: &str) -> Self {
         Self(format!("{}/{key}.png", crate::EMBEDS_CACHE_DIR))
+    }
+
+    pub(crate) fn from_embeds_cache_image(key: &str, format: EmbedImageFormat) -> Self {
+        Self(format!(
+            "{}/{key}.{}",
+            crate::EMBEDS_CACHE_DIR,
+            format.extension()
+        ))
     }
 
     /// Return the original deck-relative path.
@@ -659,6 +693,14 @@ pub enum FragmentKind<S = RawImagePath> {
     EmbedCard {
         html: String,
     },
+    GenericEmbedCard {
+        image: Option<S>,
+        image_alt_attr: String,
+        title_html: Option<String>,
+        author_html: Option<String>,
+        provider_html: Option<String>,
+        permalink_attr: String,
+    },
     Footnotes {
         entries: Vec<FootnoteEntry>,
     },
@@ -695,6 +737,7 @@ impl<S> FragmentKind<S> {
             Self::Code => Accepts::Code,
             Self::Math { .. } => Accepts::Blocks,
             Self::EmbedCard { .. } => Accepts::Blocks,
+            Self::GenericEmbedCard { .. } => Accepts::Blocks,
             Self::Footnotes { .. } => Accepts::Blocks,
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
@@ -713,6 +756,7 @@ impl<S> FragmentKind<S> {
             Self::Code => "code block",
             Self::Math { .. } => "math block",
             Self::EmbedCard { .. } => "embed card",
+            Self::GenericEmbedCard { .. } => "generic embed card",
             Self::Footnotes { .. } => "footnote block",
             Self::Image { .. } => "image",
             Self::List => "list",
@@ -730,6 +774,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Code => "code",
             Self::Math { .. } => "math",
             Self::EmbedCard { .. } => "embed card",
+            Self::GenericEmbedCard { .. } => "generic embed card",
             Self::Footnotes { .. } => "footnotes",
             Self::Image { .. } => "image",
             Self::List => "list",
@@ -744,7 +789,7 @@ pub struct SourceFragment<S = RawImagePath> {
     kind: FragmentKind<S>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
-    embed_mode: Option<EmbedMode>,
+    embed_options: Option<EmbedOptions>,
     markdown: String,
     text: String,
     code: String,
@@ -763,7 +808,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Heading { level },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: markdown.into(),
             text: text.into(),
             code: String::new(),
@@ -777,7 +822,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Paragraph,
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -791,7 +836,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::List,
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
             code: String::new(),
@@ -806,7 +851,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Code,
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: code.clone(),
             text: String::new(),
             code,
@@ -825,7 +870,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Math { html: html.into() },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: latex_source.clone(),
             text: String::new(),
             code: latex_source,
@@ -843,7 +888,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::EmbedCard { html: html.into() },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: String::new(),
             text: plain_text.into(),
             code: String::new(),
@@ -857,7 +902,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Footnotes { entries },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -875,7 +920,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::SlotGroup { name, children },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: String::new(),
             text: String::new(),
             code: String::new(),
@@ -898,9 +943,16 @@ impl SourceFragment<RawImagePath> {
         self
     }
 
-    /// Attach the parser-resolved built-in embed mode to a code fragment.
+    /// Test-only shim for constructing a fragment with an explicit embed mode.
+    #[cfg(test)]
     pub(crate) fn with_embed_mode(mut self, mode: EmbedMode) -> Self {
-        self.embed_mode = Some(mode);
+        self.embed_options = Some(EmbedOptions { mode: Some(mode) });
+        self
+    }
+
+    /// Attach parser-resolved built-in embed options, retaining absent values.
+    pub(crate) fn with_embed_options(mut self, options: EmbedOptions) -> Self {
+        self.embed_options = Some(options);
         self
     }
 }
@@ -915,9 +967,40 @@ impl<S> SourceFragment<S> {
             },
             reveal_span: None,
             emphasis: None,
-            embed_mode: None,
+            embed_options: None,
             markdown: String::new(),
             text: String::new(),
+            code: String::new(),
+            language: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generic_embed_card(
+        line: usize,
+        image: Option<S>,
+        image_alt_attr: impl Into<String>,
+        title_html: Option<String>,
+        author_html: Option<String>,
+        provider_html: Option<String>,
+        permalink_attr: impl Into<String>,
+        plain_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::GenericEmbedCard {
+                image,
+                image_alt_attr: image_alt_attr.into(),
+                title_html,
+                author_html,
+                provider_html,
+                permalink_attr: permalink_attr.into(),
+            },
+            reveal_span: None,
+            emphasis: None,
+            embed_options: None,
+            markdown: String::new(),
+            text: plain_text.into(),
             code: String::new(),
             language: None,
         }
@@ -942,7 +1025,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
-            embed_mode,
+            embed_options,
             markdown,
             text,
             code,
@@ -955,6 +1038,24 @@ impl<S> SourceFragment<S> {
             FragmentKind::Code => FragmentKind::Code,
             FragmentKind::Math { html } => FragmentKind::Math { html },
             FragmentKind::EmbedCard { html } => FragmentKind::EmbedCard { html },
+            FragmentKind::GenericEmbedCard {
+                image,
+                image_alt_attr,
+                title_html,
+                author_html,
+                provider_html,
+                permalink_attr,
+            } => FragmentKind::GenericEmbedCard {
+                image: match image {
+                    Some(src) => Some(f(src)?),
+                    None => None,
+                },
+                image_alt_attr,
+                title_html,
+                author_html,
+                provider_html,
+                permalink_attr,
+            },
             FragmentKind::Footnotes { entries } => FragmentKind::Footnotes { entries },
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
@@ -974,7 +1075,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
-            embed_mode,
+            embed_options,
             markdown,
             text,
             code,
@@ -998,8 +1099,13 @@ impl<S> SourceFragment<S> {
         self.emphasis.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn embed_mode(&self) -> Option<EmbedMode> {
-        self.embed_mode
+        self.embed_options.and_then(|options| options.mode)
+    }
+
+    pub(crate) fn embed_options(&self) -> Option<EmbedOptions> {
+        self.embed_options
     }
 
     pub fn markdown(&self) -> &str {
@@ -1175,6 +1281,110 @@ mod tests {
         assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
         assert_eq!(fragment.kind().removal_noun(), "embed card");
         assert_eq!(fragment.kind().to_string(), "embed card");
+    }
+
+    #[test]
+    fn source_fragment_generic_card_preserves_escaped_parts_and_plain_text() {
+        let fragment = SourceFragment::generic_embed_card(
+            21,
+            Some(RawImagePath::new_unchecked(
+                ".peitho/embeds-cache/key.jpg".into(),
+            )),
+            "Title &amp; alt",
+            Some("Title &lt;safe&gt;".to_owned()),
+            Some("Author &amp; Co".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post?a=1&amp;b=2",
+            "Title <safe>\nAuthor & Co",
+        );
+
+        assert_eq!(fragment.line(), 21);
+        assert_eq!(fragment.markdown(), "");
+        assert_eq!(fragment.plain_text(), "Title <safe>\nAuthor & Co");
+        assert_eq!(fragment.code_text(), "");
+        assert_eq!(fragment.language(), None);
+        match fragment.kind() {
+            FragmentKind::GenericEmbedCard {
+                image,
+                image_alt_attr,
+                title_html,
+                author_html,
+                provider_html,
+                permalink_attr,
+            } => {
+                assert_eq!(
+                    image.as_ref().unwrap().as_str(),
+                    ".peitho/embeds-cache/key.jpg"
+                );
+                assert_eq!(image_alt_attr, "Title &amp; alt");
+                assert_eq!(title_html.as_deref(), Some("Title &lt;safe&gt;"));
+                assert_eq!(author_html.as_deref(), Some("Author &amp; Co"));
+                assert_eq!(provider_html.as_deref(), Some("Provider"));
+                assert_eq!(permalink_attr, "https://example.com/post?a=1&amp;b=2");
+            }
+            other => panic!("expected generic embed card, got {other:?}"),
+        }
+        assert_eq!(fragment.kind().default_accepts(), Accepts::Blocks);
+        assert_eq!(fragment.kind().removal_noun(), "generic embed card");
+        assert_eq!(fragment.kind().to_string(), "generic embed card");
+    }
+
+    #[test]
+    fn generic_card_maps_optional_image_src_exactly_once() {
+        let fragment = SourceFragment::generic_embed_card(
+            21,
+            Some(RawImagePath::new_unchecked("thumb.jpg".into())),
+            "alt",
+            Some("Title".to_owned()),
+            Some("Author".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post",
+            "Title\nAuthor",
+        );
+        let mut calls = 0;
+
+        let mapped = fragment
+            .try_map_image_src(|raw| {
+                calls += 1;
+                assert_eq!(raw.as_str(), "thumb.jpg");
+                Ok::<_, String>(ResolvedImagePath::from_string(
+                    "assets/thumb.jpg".to_owned(),
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(calls, 1);
+        match mapped.kind() {
+            FragmentKind::GenericEmbedCard { image, .. } => {
+                assert_eq!(image.as_ref().unwrap().as_str(), "assets/thumb.jpg");
+            }
+            other => panic!("expected generic embed card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_text_card_does_not_call_image_mapper() {
+        let fragment = SourceFragment::generic_embed_card(
+            21,
+            None::<RawImagePath>,
+            "Author",
+            None,
+            Some("Author".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post",
+            "Author",
+        );
+
+        let mapped = fragment
+            .try_map_image_src(|_| -> Result<ResolvedImagePath, String> {
+                panic!("text card must not call the image mapper")
+            })
+            .unwrap();
+
+        match mapped.kind() {
+            FragmentKind::GenericEmbedCard { image, .. } => assert_eq!(image, &None),
+            other => panic!("expected generic embed card, got {other:?}"),
+        }
     }
 
     #[test]

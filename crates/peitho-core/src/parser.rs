@@ -12,8 +12,8 @@ use serde::Deserialize;
 use crate::{
     domain::{
         AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedMode,
-        ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath, Resolution, RevealSpan, SlideKey,
-        SlotName, SourceFragment,
+        EmbedOptions, ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath, Resolution,
+        RevealSpan, SlideKey, SlotName, SourceFragment,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -51,12 +51,12 @@ pub(crate) fn embed_fence_options_help() -> &'static str {
     "write card mode on the opening fence as ```embed mode=card```, or use mode=screenshot"
 }
 
-fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedMode> {
+fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedOptions> {
     let Some(tail) = tail else {
-        return Ok(EmbedMode::Screenshot);
+        return Ok(EmbedOptions::default());
     };
 
-    let mut mode = EmbedMode::Screenshot;
+    let mut mode = None;
     let mut mode_seen = false;
     for token in tail.split_whitespace() {
         let Some((key, value)) = token.split_once('=') else {
@@ -87,7 +87,7 @@ fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedMod
             ));
         }
         mode_seen = true;
-        mode = match value {
+        mode = Some(match value {
             "card" => EmbedMode::Card,
             "screenshot" => EmbedMode::Screenshot,
             _ => {
@@ -96,9 +96,9 @@ fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedMod
                     format!("unknown embed mode '{value}'"),
                 ));
             }
-        };
+        });
     }
-    Ok(mode)
+    Ok(EmbedOptions { mode })
 }
 
 fn embed_fence_option_error(line: usize, message: impl Into<String>) -> BuildError {
@@ -2261,7 +2261,7 @@ fn parse_slide(
                         }
                     }
 
-                    let embed_mode = match (renderer.as_ref(), split.tail) {
+                    let embed_options = match (renderer.as_ref(), split.tail) {
                         (Some(CodeImageRenderer::BuiltinEmbed), tail) => Some(
                             parse_embed_fence_options(tail, code_line).map_err(&mut slide_err)?,
                         ),
@@ -2323,8 +2323,8 @@ fn parse_slide(
                     };
 
                     let fragment = SourceFragment::code(code_line, language, text);
-                    let fragment = match embed_mode {
-                        Some(mode) => fragment.with_embed_mode(mode),
+                    let fragment = match embed_options {
+                        Some(options) => fragment.with_embed_options(options),
                         None => fragment,
                     };
                     let fragment = match emphasis {
@@ -2678,6 +2678,7 @@ fn revealed_footnote_reference_range(
         | FragmentKind::Code
         | FragmentKind::Math { .. }
         | FragmentKind::EmbedCard { .. }
+        | FragmentKind::GenericEmbedCard { .. }
         | FragmentKind::Footnotes { .. }
         | FragmentKind::Image { .. }
         | FragmentKind::SlotGroup { .. } => None,
@@ -3180,7 +3181,7 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{
-        domain::{AspectRatio, EmbedMode, FragmentKind, RevealSpan},
+        domain::{AspectRatio, EmbedMode, EmbedOptions, FragmentKind, RevealSpan},
         error::ErrorKind,
         phase::{KeySource, PageNumberFormat},
     };
@@ -5785,7 +5786,7 @@ After list
     }
 
     #[test]
-    fn parser_attaches_embed_mode_from_the_fence_info_string() {
+    fn parser_retains_absent_and_explicit_embed_mode_presence() {
         let bare = parse_markdown(
             "# T\n\n```embed\nhttps://x.com/a/status/1\n```",
             &crate::highlight::Highlighter::defaults(),
@@ -5803,9 +5804,10 @@ After list
         .unwrap();
 
         assert_eq!(
-            code_fragment(&bare).embed_mode(),
-            Some(EmbedMode::Screenshot)
+            code_fragment(&bare).embed_options(),
+            Some(EmbedOptions::default())
         );
+        assert_eq!(code_fragment(&bare).embed_mode(), None);
         assert_eq!(code_fragment(&card).embed_mode(), Some(EmbedMode::Card));
         assert_eq!(
             code_fragment(&screenshot).embed_mode(),

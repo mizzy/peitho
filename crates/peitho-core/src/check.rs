@@ -120,6 +120,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
+            | (Accepts::Blocks, FragmentKind::GenericEmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::Footnotes { .. })
             | (Accepts::Text, FragmentKind::Text)
             | (Accepts::Code, FragmentKind::Code)
@@ -292,6 +293,49 @@ mod tests {
                 index: 0,
                 source_index: 0,
                 key: SlideKey::new("intro").unwrap(),
+                layout,
+                slots,
+                unassigned: Vec::new(),
+                skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+            }],
+        )
+    }
+
+    fn mapped_deck_with_generic_card_slot(
+        slot_name: &str,
+        accepts: &str,
+    ) -> crate::phase::Deck<crate::phase::Mapped> {
+        let layout = parse_layout(
+            "generic-card-layout",
+            &format!(
+                r#"<section><slot name="{slot_name}" accepts="{accepts}" arity="1"></slot></section>"#
+            ),
+        )
+        .unwrap();
+        let slot = SlotName::new(slot_name).unwrap();
+        let mut mapped_slot = MappedSlot::new(layout.slot(slot_name).unwrap().clone());
+        mapped_slot.push(SourceFragment::generic_embed_card(
+            11,
+            None::<RawImagePath>,
+            "Generic",
+            Some("Generic".to_owned()),
+            Some("Author".to_owned()),
+            Some("Provider".to_owned()),
+            "https://example.com/post",
+            "Generic\nAuthor",
+        ));
+        let mut slots = BTreeMap::new();
+        slots.insert(slot, mapped_slot);
+
+        Deck::mapped(
+            DeckSettings::default(),
+            vec![MappedSlide {
+                index: 0,
+                source_index: 0,
+                key: SlideKey::new("generic").unwrap(),
                 layout,
                 slots,
                 unassigned: Vec::new(),
@@ -476,6 +520,26 @@ mod tests {
             checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
             FragmentKind::EmbedCard { .. }
         ));
+    }
+
+    #[test]
+    fn accepts_generic_card_only_in_blocks_slot() {
+        let checked = check_deck(mapped_deck_with_generic_card_slot("body", "blocks")).unwrap();
+        let body = SlotName::new("body").unwrap();
+        assert!(matches!(
+            checked.checked_slides()[0].slots()[&body].fragments()[0].kind(),
+            FragmentKind::GenericEmbedCard { .. }
+        ));
+
+        let err = check_deck(mapped_deck_with_generic_card_slot("hero", "image")).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(11));
+        assert!(err.message.contains("slot 'hero' accepts image"));
+        assert!(err.message.contains("generic embed card"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
     }
 
     #[test]

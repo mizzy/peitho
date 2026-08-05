@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 use crate::error::{BuildError, ErrorKind, Result};
 
 const EMBED_CARD_CSS: &str = include_str!("../assets/embed-card.css");
+const GENERIC_EMBED_CARD_CSS: &str = include_str!("../assets/generic-embed-card.css");
+
+pub(crate) fn generic_embed_card_css() -> &'static str {
+    GENERIC_EMBED_CARD_CSS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbedCardAssets {

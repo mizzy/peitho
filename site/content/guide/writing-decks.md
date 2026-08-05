@@ -54,7 +54,7 @@ body slots. No client-side math JavaScript or `code_images:` entry is needed.
 Fenced `mermaid` source becomes an SVG image during the build with Peitho's
 built-in Mermaid renderer.
 
-An `embed` fence accepts one X status URL. It defaults to an official-widget PNG
+An `embed` fence containing one X status URL defaults to an official-widget PNG
 screenshot; `mode=card` on the fence opts into selectable, themeable HTML
 without Chrome:
 
@@ -64,10 +64,32 @@ https://x.com/gosukenator/status/2074821309259973046
 ```
 ````
 
-Cards flow into `accepts="blocks"` slots. Screenshots flow into
+X cards flow into `accepts="blocks"` slots. X screenshots flow into
 `accepts="image"` slots. Card cache misses fetch raw oEmbed JSON with system
-`curl`; screenshot cache misses use Chrome. `mode=screenshot` is the explicit
+`curl`; screenshot cache misses use Chrome. `mode=screenshot` is the explicit X
 default.
+
+A bare non-X HTTP(S) URL uses generic JSON oEmbed discovery and always becomes
+a static card:
+
+````markdown
+```embed
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
+````
+
+Generic cards flow into `accepts="blocks"` slots. They use a build-time-downloaded,
+locally published thumbnail when oEmbed supplies one and fall back to a text
+card with title, author, and provider metadata otherwise. Peitho never injects
+provider HTML and never screenshots generic URLs. The author-written page URL
+is the card permalink. `mode=` is X-only and is rejected on generic URLs.
+
+Generic cache misses use bounded system `curl` requests with at most five
+HTTP(S) redirects: 8 MiB for discovery HTML, 1 MiB for raw JSON, and 8 MiB for
+thumbnail bytes. Discovery HTML is not cached; JSON and validated JPEG, PNG,
+WebP, or GIF thumbnails are stored in `.peitho/embeds-cache/`. Complete hits
+work offline, while a JSON hit with a missing thumbnail fetches only the image.
+Failure help identifies the exact cache paths to delete for refresh.
 
 For other diagram tags, or to override Mermaid, math, or embed with an external
 SVG renderer, add `code_images:` frontmatter. Each entry uses the fence language
@@ -87,7 +109,7 @@ After external conversion, those blocks behave like normal images and need an
 `accepts="image"` slot. See [Frontmatter](@/guide/frontmatter.md#code-images),
 the [Code Images example](@/examples/code-images.md), and the
 [Math example](@/examples/math.md). See [Tweet Embed](@/examples/tweet-embed.md)
-for the built-in embed path.
+for the built-in X and generic embed paths.
 
 ## Explicit slot syntax
 
