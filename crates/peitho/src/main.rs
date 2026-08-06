@@ -1017,7 +1017,7 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
             message,
             format!("known keys: {}", known_keys.join(", ")),
         );
-        eprintln!("{err}");
+        eprintln!("{}", render_diagnostic(&miette::miette!("{err}")));
         std::process::exit(2);
     };
     let trace = peitho_core::explain_dispatch(slide, &layouts);
@@ -1360,6 +1360,23 @@ fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display)
     miette::miette!("{err}\nhelp: workspace kept at {}", kept.display())
 }
 
+/// Render a diagnostic the way miette's own reporter would for a `main`-returned
+/// error, so error paths that must swallow the `Report` (watch loops, preview)
+/// stay visually identical to the ones that propagate.
+///
+/// `Display` on a `Report` emits only the flat message, dropping colors, source
+/// snippets, and width-aware wrapping. Every terminal-facing site that consumes
+/// a diagnostic instead of returning it must go through this function; HTML
+/// sinks such as the preview error page must keep using `Display`, because this
+/// output can carry ANSI escapes.
+fn render_diagnostic(err: &miette::Report) -> String {
+    // `Report`'s `Debug` dispatches to the installed miette handler, which is the
+    // same path a `main`-returned error takes. Going through it (rather than
+    // building a handler here) keeps terminal-width detection, color support, and
+    // `NO_COLOR` handling identical to `peitho build` without duplicating them.
+    format!("{err:?}")
+}
+
 fn rebuild_once_for_watch(
     options: &BuildOptions,
     stdout: &mut dyn Write,
@@ -1378,12 +1395,12 @@ fn rebuild_once_for_watch(
                 stdout.flush().into_diagnostic()?;
             }
             Err(err) => {
-                writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+                writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
                 stderr.flush().into_diagnostic()?;
             }
         },
         Err(err) => {
-            writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
         }
     }
@@ -4163,7 +4180,7 @@ fn emit_initial_preview_root(
             Ok(root)
         }
         Err(err) => {
-            writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
             let root = emit_preview_error_page(cache, 0, &err.to_string())?;
             prune_preview_cache_generations(cache, 0)?;
@@ -4198,7 +4215,7 @@ fn rebuild_preview_once_for_watch(
             stdout.flush().into_diagnostic()?;
         }
         Err(err) => {
-            writeln!(stderr, "build failed: {err}").into_diagnostic()?;
+            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
         }
     }
@@ -9190,6 +9207,44 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             stderr.contains("slot 'code' got 2 item(s)"),
             "actual stderr: {stderr}"
         );
+    }
+
+    #[test]
+    fn render_diagnostic_formats_help_like_miettes_reporter() {
+        let build_error = peitho_core::BuildError::new(
+            peitho_core::error::ErrorKind::Parse,
+            None,
+            "deck.md:3: broken deck".to_owned(),
+            "fix the frontmatter".to_owned(),
+        );
+        let err = miette::miette!("{build_error}");
+
+        let rendered = render_diagnostic(&err);
+
+        // The graphical handler lays the diagnostic out over multiple lines with a
+        // help section; plain `Display` would collapse it into the message alone.
+        assert!(rendered.contains("broken deck"), "actual: {rendered}");
+        assert!(
+            rendered.contains("help: fix the frontmatter"),
+            "actual: {rendered}"
+        );
+        assert!(rendered.lines().count() > 1, "actual: {rendered}");
+    }
+
+    #[test]
+    fn preview_error_page_keeps_ansi_escapes_out_of_html() {
+        let fixture =
+            WatchFixture::new("# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let mut stderr = Vec::new();
+
+        emit_initial_preview_root(&fixture.options.input, &cache, &mut stderr).unwrap();
+
+        // The terminal sink renders the full diagnostic, but the HTML sink must
+        // receive the flat message so escape codes never reach the browser.
+        let html =
+            fs::read_to_string(preview_generation_dir(&cache, 0).join("index.html")).unwrap();
+        assert!(!html.contains('\u{1b}'), "actual html: {html}");
     }
 
     #[test]
