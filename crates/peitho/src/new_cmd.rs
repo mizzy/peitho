@@ -135,7 +135,8 @@ fn ensure_target_dir(target: &Path, force: bool) -> miette::Result<()> {
     if !target.exists() {
         fs::create_dir_all(target).map_err(|err| {
             miette::miette!(
-                "failed to create target directory {}\nhelp: check the path and parent directory permissions\ncaused by: {err}",
+                help = "check the path and parent directory permissions",
+                "failed to create target directory {}\ncaused by: {err}",
                 target.display()
             )
         })?;
@@ -144,20 +145,23 @@ fn ensure_target_dir(target: &Path, force: bool) -> miette::Result<()> {
 
     let metadata = fs::metadata(target).map_err(|err| {
         miette::miette!(
-            "failed to inspect target path {}\nhelp: check filesystem permissions\ncaused by: {err}",
+            help = "check filesystem permissions",
+            "failed to inspect target path {}\ncaused by: {err}",
             target.display()
         )
     })?;
     if !metadata.is_dir() {
         return Err(miette::miette!(
-            "target path exists and is not a directory: {}\nhelp: choose a directory path for `peitho new`",
+            help = "choose a directory path for `peitho new`",
+            "target path exists and is not a directory: {}",
             target.display()
         ));
     }
 
     if !force && directory_has_entries(target)? {
         return Err(miette::miette!(
-            "target directory is not empty: {}\nhelp: pass --force to overwrite scaffold files in this directory, or choose a fresh directory",
+            help = "pass --force to overwrite scaffold files in this directory, or choose a fresh directory",
+            "target directory is not empty: {}",
             target.display()
         ));
     }
@@ -168,14 +172,16 @@ fn ensure_target_dir(target: &Path, force: bool) -> miette::Result<()> {
 fn directory_has_entries(target: &Path) -> miette::Result<bool> {
     let mut entries = fs::read_dir(target).map_err(|err| {
         miette::miette!(
-            "failed to read target directory {}\nhelp: check directory permissions\ncaused by: {err}",
+            help = "check directory permissions",
+            "failed to read target directory {}\ncaused by: {err}",
             target.display()
         )
     })?;
     match entries.next() {
         Some(Ok(_entry)) => Ok(true),
         Some(Err(err)) => Err(miette::miette!(
-            "failed to read entry in target directory {}\nhelp: check directory permissions\ncaused by: {err}",
+            help = "check directory permissions",
+            "failed to read entry in target directory {}\ncaused by: {err}",
             target.display()
         )),
         None => Ok(false),
@@ -187,14 +193,16 @@ fn write_scaffold_file(target: &Path, file: &ScaffoldFile) -> miette::Result<()>
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             miette::miette!(
-                "failed to create scaffold directory {}\nhelp: check filesystem permissions\ncaused by: {err}",
+                help = "check filesystem permissions",
+                "failed to create scaffold directory {}\ncaused by: {err}",
                 parent.display()
             )
         })?;
     }
     fs::write(&path, &file.content).map_err(|err| {
         miette::miette!(
-            "failed to write scaffold file {}\nhelp: fix the cause, then re-run with --force to overwrite the partial scaffold (or remove the directory and retry)\ncaused by: {err}",
+            help = "fix the cause, then re-run with --force to overwrite the partial scaffold (or remove the directory and retry)",
+            "failed to write scaffold file {}\ncaused by: {err}",
             path.display()
         )
     })
@@ -411,9 +419,9 @@ mod tests {
         let mut stdout = Vec::new();
 
         let err = run(default_options(target), &mut stdout).unwrap_err();
-        let message = err.to_string();
+        let help = err.help().expect("help must be present").to_string();
 
-        assert!(message.contains("--force"), "actual error: {message}");
+        assert!(help.contains("--force"), "actual help: {help}");
         assert!(stdout.is_empty());
     }
 
@@ -432,7 +440,10 @@ mod tests {
             "actual error: {message}"
         );
         assert!(
-            message.contains("help: choose a directory path for `peitho new`"),
+            err.help()
+                .expect("help must be present")
+                .to_string()
+                .contains("choose a directory path for `peitho new`"),
             "actual error: {message}"
         );
         assert!(stdout.is_empty());

@@ -805,7 +805,8 @@ impl PresentServer {
 fn validate_extra_listener_host(host: IpAddr) -> miette::Result<()> {
     if host.is_unspecified() {
         return Err(miette::miette!(
-            "extra listener must be specific\nhelp: bind the wildcard as the primary listener"
+            help = "bind the wildcard as the primary listener",
+            "extra listener must be specific"
         ));
     }
     Ok(())
@@ -1360,6 +1361,8 @@ mod tests {
 
         assert!(err.to_string().contains("extra listener must be specific"));
         assert!(err
+            .help()
+            .expect("help must be present")
             .to_string()
             .contains("bind the wildcard as the primary listener"));
     }

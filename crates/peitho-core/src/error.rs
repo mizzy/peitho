@@ -61,71 +61,51 @@ impl BuildError {
         });
         self
     }
-}
 
-impl fmt::Display for BuildError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// The location-prefixed message without the help tail — what a renderer
+    /// that styles help separately should print as the error's first block.
+    pub fn headline(&self) -> String {
         match (&self.slide, self.line, &self.origin_file) {
             (Some(slide), Some(line), Some(file)) => match &slide.key {
-                Some(key) => write!(
-                    f,
-                    "{}:{}, slide {} ('{}'): {}\n  = help: {}",
+                Some(key) => format!(
+                    "{}:{}, slide {} ('{}'): {}",
                     file.display(),
                     line,
                     slide.number,
                     key,
-                    self.message,
-                    self.help
+                    self.message
                 ),
-                None => write!(
-                    f,
-                    "{}:{}, slide {}: {}\n  = help: {}",
+                None => format!(
+                    "{}:{}, slide {}: {}",
                     file.display(),
                     line,
                     slide.number,
-                    self.message,
-                    self.help
+                    self.message
                 ),
             },
             (Some(slide), Some(line), None) => match &slide.key {
-                Some(key) => write!(
-                    f,
-                    "slide {} ('{}'), line {}: {}\n  = help: {}",
-                    slide.number, key, line, self.message, self.help
+                Some(key) => format!(
+                    "slide {} ('{}'), line {}: {}",
+                    slide.number, key, line, self.message
                 ),
-                None => write!(
-                    f,
-                    "slide {}, line {}: {}\n  = help: {}",
-                    slide.number, line, self.message, self.help
-                ),
+                None => format!("slide {}, line {}: {}", slide.number, line, self.message),
             },
             (Some(slide), None, _) => match &slide.key {
-                Some(key) => write!(
-                    f,
-                    "slide {} ('{}'): {}\n  = help: {}",
-                    slide.number, key, self.message, self.help
-                ),
-                None => write!(
-                    f,
-                    "slide {}: {}\n  = help: {}",
-                    slide.number, self.message, self.help
-                ),
+                Some(key) => format!("slide {} ('{}'): {}", slide.number, key, self.message),
+                None => format!("slide {}: {}", slide.number, self.message),
             },
-            (None, Some(line), Some(file)) => write!(
-                f,
-                "{}:{}: {}\n  = help: {}",
-                file.display(),
-                line,
-                self.message,
-                self.help
-            ),
-            (None, Some(line), None) => write!(
-                f,
-                "line {}: {}\n  = help: {}",
-                line, self.message, self.help
-            ),
-            (None, None, _) => write!(f, "{}\n  = help: {}", self.message, self.help),
+            (None, Some(line), Some(file)) => {
+                format!("{}:{}: {}", file.display(), line, self.message)
+            }
+            (None, Some(line), None) => format!("line {}: {}", line, self.message),
+            (None, None, _) => self.message.clone(),
         }
+    }
+}
+
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}\n  = help: {}", self.headline(), self.help)
     }
 }
 
@@ -176,5 +156,26 @@ mod tests {
         assert!(err
             .to_string()
             .contains("help: use a layout with more code capacity or remove one code block"));
+    }
+
+    #[test]
+    fn headline_is_display_without_the_help_tail() {
+        let err = BuildError::new(
+            ErrorKind::Parse,
+            Some(3),
+            "invalid deck frontmatter: unknown field `fontss`",
+            "use only the supported deck frontmatter keys",
+        )
+        .with_origin_file("deck.md");
+
+        assert_eq!(
+            err.headline(),
+            "deck.md:3: invalid deck frontmatter: unknown field `fontss`"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("{}\n  = help: {}", err.headline(), err.help)
+        );
+        assert!(!err.headline().contains("help"));
     }
 }

@@ -417,7 +417,8 @@ fn sleep_for_pdf_flattening_poll(deadline: Instant) -> miette::Result<()> {
     )
     .map_err(|_| {
         miette::miette!(
-            "timed out waiting for PDF flattening readiness attribute data-peitho-pdf-flattened\nhelp: PDF flattening readiness must appear in data-peitho-pdf-flattened before the export deadline"
+            help = "PDF flattening readiness must appear in data-peitho-pdf-flattened before the export deadline",
+            "timed out waiting for PDF flattening readiness attribute data-peitho-pdf-flattened"
         )
     })
 }
@@ -763,11 +764,10 @@ mod tests {
             message.contains("timed out waiting for PDF flattening readiness"),
             "actual error: {message}"
         );
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains(
-                "help: PDF flattening readiness must appear in data-peitho-pdf-flattened"
-            ),
-            "actual error: {message}"
+            help.contains("PDF flattening readiness must appear in data-peitho-pdf-flattened"),
+            "actual help: {help}"
         );
     }
 }

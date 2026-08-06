@@ -147,7 +147,7 @@ pub(crate) fn deck_parent(deck: &Path) -> &Path {
 }
 
 fn core<T>(result: peitho_core::Result<T>) -> miette::Result<T> {
-    result.map_err(|err| miette::miette!("{err}"))
+    result.map_err(|err| miette::Report::new(crate::diagnostics::DeckDiagnostic::new(err)))
 }
 
 #[cfg(test)]
@@ -208,7 +208,11 @@ mod tests {
 
         assert!(message.contains("css path does not exist"));
         assert!(message.contains("line 3"));
-        assert!(message.contains("help: check the css: value"));
+        assert!(err
+            .help()
+            .expect("help must be present")
+            .to_string()
+            .contains("check the css: value"));
         assert!(!message.contains("-->"));
     }
 
@@ -223,7 +227,11 @@ mod tests {
 
         assert!(message.contains("fonts path does not exist"));
         assert!(message.contains("line 3"));
-        assert!(message.contains("help: check the fonts: value"));
+        assert!(err
+            .help()
+            .expect("help must be present")
+            .to_string()
+            .contains("check the fonts: value"));
         assert!(!message.contains("-->"));
     }
 

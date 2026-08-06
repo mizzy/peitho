@@ -139,7 +139,8 @@ fn write_chrome_stderr_log(workspace: &Path, chrome_log: &str) -> miette::Result
     let log_path = workspace.join("chrome-stderr.log");
     fs::write(&log_path, chrome_log).map_err(|err| {
         miette::miette!(
-            "failed to write Chrome stderr log to {}\nhelp: rerun lint and inspect lint.html in the kept workspace\ncaused by: {err}",
+            help = "rerun lint and inspect lint.html in the kept workspace",
+            "failed to write Chrome stderr log to {}\ncaused by: {err}",
             log_path.display()
         )
     })
@@ -149,11 +150,27 @@ fn append_chrome_stderr_log_write_failure(
     parse_error: miette::Report,
     write_error: miette::Report,
 ) -> miette::Report {
-    miette::miette!(
+    let mut help_parts: Vec<String> = Vec::new();
+    for help in [
+        crate::diagnostics::report_help(&parse_error),
+        crate::diagnostics::report_help(&write_error),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !help_parts.contains(&help) {
+            help_parts.push(help);
+        }
+    }
+    let message = format!(
         "{}\nnote: failed to write chrome-stderr.log: {}",
-        parse_error,
-        write_error
-    )
+        parse_error, write_error
+    );
+    if help_parts.is_empty() {
+        miette::miette!("{message}")
+    } else {
+        miette::miette!(help = help_parts.join("\n"), "{message}")
+    }
 }
 
 fn emit_lint_workspace(workspace: &Path, artifacts: &crate::BuildArtifacts) -> miette::Result<()> {
@@ -186,17 +203,20 @@ fn parse_lint_measurements(
     let payload = extract_lint_payload(chrome_log)?;
     let json = STANDARD.decode(payload).map_err(|err| {
         miette::miette!(
-            "lint measurement payload is not valid base64\nhelp: {LINT_PARSE_HELP}\ncaused by: {err}"
+            help = LINT_PARSE_HELP,
+            "lint measurement payload is not valid base64\ncaused by: {err}"
         )
     })?;
     let measurements: Vec<SlideMeasurement> = serde_json::from_slice(&json).map_err(|err| {
         miette::miette!(
-            "lint measurement payload is not valid JSON\nhelp: {LINT_PARSE_HELP}\ncaused by: {err}"
+            help = LINT_PARSE_HELP,
+            "lint measurement payload is not valid JSON\ncaused by: {err}"
         )
     })?;
     if measurements.len() != expected_slide_count {
         return Err(miette::miette!(
-            "lint measurement slide count mismatch: expected {expected_slide_count}, got {}\nhelp: no lint result was accepted; {LINT_PARSE_HELP}",
+            help = format!("no lint result was accepted; {LINT_PARSE_HELP}"),
+            "lint measurement slide count mismatch: expected {expected_slide_count}, got {}",
             measurements.len()
         ));
     }
@@ -368,7 +388,7 @@ fn line_number_at(input: &str, byte_index: usize) -> usize {
 }
 
 fn lint_parse_error(message: String) -> miette::Report {
-    miette::miette!("{message}\nhelp: {LINT_PARSE_HELP}")
+    miette::miette!(help = LINT_PARSE_HELP, "{message}")
 }
 
 fn collect_overflow_warnings(measurements: &[SlideMeasurement]) -> Vec<OverflowWarning> {
@@ -610,11 +630,8 @@ mod tests {
             message.contains(needle),
             "expected {needle:?} in {message:?}"
         );
-        assert!(message.contains("help:"), "actual error: {message}");
-        assert!(
-            message.contains("chrome-stderr.log"),
-            "actual error: {message}"
-        );
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("chrome-stderr.log"), "actual help: {help}");
         message
     }
 

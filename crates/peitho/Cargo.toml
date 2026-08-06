@@ -23,6 +23,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
 tempfile.workspace = true
+terminal_size.workspace = true
+textwrap.workspace = true
 tiny_http.workspace = true
 tungstenite.workspace = true
 
