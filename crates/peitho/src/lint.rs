@@ -491,7 +491,7 @@ fn write_lint_report(
             warning.box_px
         )
         .into_diagnostic()?;
-        writeln!(stdout, "  help: {OVERFLOW_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   help: {OVERFLOW_HELP}").into_diagnostic()?;
     }
     for warning in &slot_overflow_warnings {
         let target = match &warning.slot {
@@ -510,7 +510,7 @@ fn write_lint_report(
         let help = warning
             .overflow_value
             .map_or(OVERFLOW_HELP, OverflowValue::help);
-        writeln!(stdout, "  help: {help}").into_diagnostic()?;
+        writeln!(stdout, "   help: {help}").into_diagnostic()?;
     }
     for warning in &font_size_warnings {
         writeln!(
@@ -521,7 +521,7 @@ fn write_lint_report(
             warning.sample
         )
         .into_diagnostic()?;
-        writeln!(stdout, "  help: {FONT_SIZE_HELP}").into_diagnostic()?;
+        writeln!(stdout, "   help: {FONT_SIZE_HELP}").into_diagnostic()?;
     }
 
     let warning_count =
@@ -1041,7 +1041,7 @@ mod tests {
             output.contains("warning: slide 11 content overflows a container vertically by 14px")
         );
         assert_eq!(
-            output.matches(&format!("  help: {OVERFLOW_HELP}")).count(),
+            output.matches(&format!("   help: {OVERFLOW_HELP}")).count(),
             2
         );
         assert!(output.contains("checked 2 slide(s): 2 warning(s)"));
@@ -1074,12 +1074,31 @@ mod tests {
         let output = String::from_utf8(stdout).unwrap();
         assert_eq!(
             output
-                .matches(&format!("  help: {SCROLLABLE_OVERFLOW_HELP}"))
+                .matches(&format!("   help: {SCROLLABLE_OVERFLOW_HELP}"))
                 .count(),
             2
         );
-        assert!(!output.contains(&format!("  help: {OVERFLOW_HELP}")));
+        assert!(!output.contains(&format!("   help: {OVERFLOW_HELP}")));
         assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
+    }
+
+    #[test]
+    fn lint_report_output_snapshot() {
+        let measurements = vec![SlideMeasurement {
+            slide: 3,
+            content_width: 900.0,
+            content_height: 642.4,
+            box_width: 900.0,
+            box_height: 600.2,
+            min_font_size_px: Some(24.0),
+            min_font_sample: Some("excerpt…".to_owned()),
+            slot_overflows: Vec::new(),
+        }];
+        let mut stdout = Vec::new();
+
+        write_lint_report(&measurements, &mut stdout).unwrap();
+
+        insta::assert_snapshot!(String::from_utf8(stdout).unwrap());
     }
 
     #[test]
@@ -1104,13 +1123,13 @@ mod tests {
             "warning: slide 3 content overflows the slide box vertically by 42px (content 642px, box 600px)"
         ));
         assert!(
-            output.contains("  help: shrink or split the slide content, or adjust the layout CSS")
+            output.contains("   help: shrink or split the slide content, or adjust the layout CSS")
         );
         assert!(output.contains(
             "warning: slide 3 has text at 18pt, below the recommended 24pt: \"excerpt…\""
         ));
         assert!(output.contains(
-            "  help: raise the font size in the layout CSS, or move content to another slide instead of shrinking it"
+            "   help: raise the font size in the layout CSS, or move content to another slide instead of shrinking it"
         ));
         assert!(output.contains("checked 1 slide(s): 2 warning(s)"));
         assert_eq!(format_rounded_font_size_pt(17.3), "17.3pt");

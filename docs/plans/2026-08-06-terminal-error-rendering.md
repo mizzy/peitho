@@ -133,6 +133,19 @@ that grep stderr for full cache filenames and hyphenated selectors.)
    screenshotted with headless Chrome at 2x, byte-matching the real output
    text and prefix styling).
 
+## Amendment (2026-08-06, post-v1.22.0)
+
+Author feedback after using v1.22.0: `error:` at column 0 with `  help: `
+indented two spaces left the two labels visibly misaligned. The `help:` label
+is now right-aligned under `error:` (` help: `, one leading space) so the
+colons line up and both bodies plus all continuation lines share the same
+7-column start. `peitho lint` gets the matching treatment (`warning: ` /
+`   help: `, both bodies at column 9) — same visual class. Doctor's
+`      help:` lines are untouched: they hang under a glyph-prefixed check list,
+a different structure. Rendering output is pinned with insta snapshots
+(`crates/peitho/src/snapshots/`, `cargo insta review` to accept intentional
+format changes), and the guide's build-error.png was regenerated again.
+
 ## Tests
 
 - Renderer unit tests (no-color, fixed width): headline wrapping with hanging

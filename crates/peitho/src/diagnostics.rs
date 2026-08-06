@@ -6,20 +6,24 @@
 //! preview error page must use [`plain_diagnostic_text`] instead, because the
 //! terminal renderer can emit ANSI escapes.
 //!
-//! The output is cargo/rustc-shaped, matching lint's existing
-//! `warning:` / `  help:` house style: a red `error:` prefix, the message
-//! wrapped to the terminal width with a hanging indent, and a yellow `help:`
-//! block. There is deliberately no wrap gutter — miette's graphical handler
-//! hardcodes the severity color onto both the `×` marker and the gutter, which
-//! is the red-vertical-bar noise this renderer replaces (issue #414).
+//! The output is cargo/rustc-shaped, in the same family as lint's
+//! `warning:` / `help:` output: a red `error:` prefix, the message wrapped to
+//! the terminal width with a hanging indent, and a right-aligned yellow
+//! `help:` block whose body shares the message's start column. There is
+//! deliberately no wrap gutter — miette's graphical handler hardcodes the
+//! severity color onto both the `×` marker and the gutter, which is the
+//! red-vertical-bar noise this renderer replaces (issue #414).
 
 use std::fmt;
 use std::io::IsTerminal;
 
+// The `help:` label is right-aligned under `error:` so the colons line up and
+// both bodies start in the same column (author feedback 2026-08-06); the
+// shared 7-column indent also keeps continuation lines of both blocks aligned.
 const ERROR_PREFIX: &str = "error: ";
-const HELP_PREFIX: &str = "  help: ";
+const HELP_PREFIX: &str = " help: ";
 const ERROR_PREFIX_STYLED: &str = "\x1b[1;31merror:\x1b[0m ";
-const HELP_PREFIX_STYLED: &str = "  \x1b[1;33mhelp:\x1b[0m ";
+const HELP_PREFIX_STYLED: &str = " \x1b[1;33mhelp:\x1b[0m ";
 const FALLBACK_WIDTH: usize = 80;
 const MIN_WIDTH: usize = 40;
 
@@ -208,74 +212,86 @@ mod tests {
         assert!(deck_report(err).help().is_none());
     }
 
+    // Rendering output is pinned with insta snapshots (`cargo insta review` to
+    // accept intentional format changes); non-visual behavior stays in plain
+    // asserts below.
+
     #[test]
     fn renders_error_prefix_and_help_block() {
+        insta::assert_snapshot!(render_diagnostic_parts(
+            "deck.md:3: broken deck",
+            Some("fix the frontmatter"),
+            TerminalStyle::plain(80),
+        ));
+    }
+
+    #[test]
+    fn help_label_aligns_with_error_label() {
         let rendered = render_diagnostic_parts(
             "deck.md:3: broken deck",
             Some("fix the frontmatter"),
             TerminalStyle::plain(80),
         );
 
-        assert_eq!(
-            rendered,
-            "error: deck.md:3: broken deck\n  help: fix the frontmatter"
-        );
+        let text_columns: Vec<usize> = rendered
+            .lines()
+            .map(|line| line.find(": ").expect("label line") + 2)
+            .collect();
+        assert_eq!(text_columns, vec![7, 7], "actual: {rendered}");
     }
 
     #[test]
     fn wraps_with_hanging_indent_under_each_prefix() {
-        let rendered = render_diagnostic_parts(
+        insta::assert_snapshot!(render_diagnostic_parts(
             "deck.md:3: invalid deck frontmatter: unknown field `fontss`, expected one of `time`, `aspect_ratio`",
             Some("use only the supported deck frontmatter keys: time, aspect_ratio, resolution"),
             TerminalStyle::plain(60),
-        );
-
-        assert_eq!(
-            rendered,
-            "error: deck.md:3: invalid deck frontmatter: unknown field\n       \
-             `fontss`, expected one of `time`, `aspect_ratio`\n  \
-             help: use only the supported deck frontmatter keys: time,\n        \
-             aspect_ratio, resolution"
-        );
+        ));
     }
 
     #[test]
     fn preserves_embedded_newlines_aligned_under_the_message() {
-        let rendered = render_diagnostic_parts(
-            "slide 2 ('whoami'), line 16: no layout matches this slide\nbooks: unassigned content remains\ncode: no slot accepts image",
-            Some("adjust the slide content"),
+        insta::assert_snapshot!(render_diagnostic_parts(
+            "slide 2 ('whoami'), line 16: no layout matches this slide\nbooks: unassigned content remains for missing 'body' slot\ncode: no slot accepts image in layout 'code'\nprofile: slot 'photo' got 2 item(s), but layout 'profile' allows 1",
+            Some("adjust the slide content or pick a layout explicitly with <!-- {\"layout\":\"…\"} -->"),
             TerminalStyle::plain(80),
-        );
-
-        assert_eq!(
-            rendered,
-            "error: slide 2 ('whoami'), line 16: no layout matches this slide\n       \
-             books: unassigned content remains\n       \
-             code: no slot accepts image\n  \
-             help: adjust the slide content"
-        );
+        ));
     }
 
     #[test]
     fn renders_without_help_when_absent() {
-        let rendered = render_diagnostic_parts("broken", None, TerminalStyle::plain(80));
-
-        assert_eq!(rendered, "error: broken");
+        insta::assert_snapshot!(render_diagnostic_parts(
+            "broken",
+            None,
+            TerminalStyle::plain(80)
+        ));
     }
 
     #[test]
     fn colors_only_the_prefix_labels() {
-        let rendered = render_diagnostic_parts(
+        insta::assert_snapshot!(render_diagnostic_parts(
             "deck.md:3: broken deck",
             Some("fix the frontmatter"),
             TerminalStyle::colored(80),
-        );
+        ));
+    }
 
-        assert_eq!(
-            rendered,
-            "\x1b[1;31merror:\x1b[0m deck.md:3: broken deck\n  \
-             \x1b[1;33mhelp:\x1b[0m fix the frontmatter"
-        );
+    #[test]
+    fn non_tty_width_keeps_logical_lines_whole() {
+        insta::assert_snapshot!(render_diagnostic_parts(
+            "deck.md:3: invalid deck frontmatter: unknown field `fontss`, expected one of `time`, `aspect_ratio`, `resolution`, `breaks`, `page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `syntaxes`, `fonts`, `code_images`",
+            Some("use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"),
+            TerminalStyle::plain(usize::MAX),
+        ));
+    }
+
+    #[test]
+    fn long_tokens_overflow_instead_of_breaking() {
+        insta::assert_snapshot!(render_diagnostic_parts(
+            "line 3: code_images 'embed' failed: failed to render https://x.com/gosukenator/status/2083825695709597710: Chrome not found",
+            Some("cache file: .peitho/embeds-cache/972af547d2f8499d017734fd84d4b6ba9f65228db5313b996ff1b7f07a167f38.png; delete the cache file to refresh"),
+            TerminalStyle::plain(60),
+        ));
     }
 
     #[test]
@@ -310,7 +326,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "error: Chrome PDF export failed\n  help: workspace kept at /tmp/x"
+            "error: Chrome PDF export failed\n help: workspace kept at /tmp/x"
         );
     }
 }

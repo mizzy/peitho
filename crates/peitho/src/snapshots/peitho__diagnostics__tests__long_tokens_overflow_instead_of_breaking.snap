@@ -1,0 +1,10 @@
+---
+source: crates/peitho/src/diagnostics.rs
+expression: "render_diagnostic_parts(\"line 3: code_images 'embed' failed: failed to render https://x.com/gosukenator/status/2083825695709597710: Chrome not found\",\nSome(\"cache file: .peitho/embeds-cache/972af547d2f8499d017734fd84d4b6ba9f65228db5313b996ff1b7f07a167f38.png; delete the cache file to refresh\"),\nTerminalStyle::plain(60),)"
+---
+error: line 3: code_images 'embed' failed: failed to render
+       https://x.com/gosukenator/status/2083825695709597710:
+       Chrome not found
+ help: cache file:
+       .peitho/embeds-cache/972af547d2f8499d017734fd84d4b6ba9f65228db5313b996ff1b7f07a167f38.png;
+       delete the cache file to refresh
