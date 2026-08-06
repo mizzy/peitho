@@ -15,8 +15,13 @@ use tungstenite::{protocol::WebSocketConfig, Message, WebSocket};
 const DEVTOOLS_PORT_FILE: &str = "DevToolsActivePort";
 const HTTP_RESPONSE_LIMIT: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+// Total expression: it must never throw. The poll can land in a freshly
+// created document before `<html>` is inserted, where `documentElement` is
+// null (measured on CI, issue #418) — that window is "not ready", not an
+// error. The `?? null` keeps the result null-or-string, so the strict
+// RemoteObject decoding below stays exhaustive.
 const PDF_FLATTENED_EXPRESSION: &str =
-    "document.documentElement.getAttribute('data-peitho-pdf-flattened')";
+    "document.documentElement?.getAttribute('data-peitho-pdf-flattened') ?? null";
 
 pub(crate) fn wait_for_devtools_port(
     profile: &Path,

@@ -54,12 +54,19 @@ in `pdf.html`; `displayHeaderFooter: false` replaces `--no-pdf-header-footer`;
 4. WebSocket via `tungstenite` (ws:// on loopback only — no TLS features).
    `Page.enable`, `Page.navigate` to the `pdf.html` file URL.
 5. Poll `Runtime.evaluate` on
-   `document.documentElement.getAttribute('data-peitho-pdf-flattened')` until
-   non-null. The attribute is set on both the success path and the top-level
-   catch of `flattenPdfArtifacts`, so it always appears when the script parses;
-   a parse failure or never-settling chain hits the deadline → loud error
-   naming flattening readiness. **The attribute written since the flatten
-   feature landed finally has its reader.**
+   `document.documentElement?.getAttribute('data-peitho-pdf-flattened') ?? null`
+   until non-null. The attribute is set on both the success path and the
+   top-level catch of `flattenPdfArtifacts`, so it always appears when the
+   script parses; a parse failure or never-settling chain hits the deadline →
+   loud error naming flattening readiness. **The attribute written since the
+   flatten feature landed finally has its reader.**
+   (Amendment 2026-08-06, issue #418: the expression must be total — the poll
+   can land in a freshly created document before `<html>` is inserted, where
+   `documentElement` is null; measured once on CI as an in-page `TypeError`
+   that failed the export hard. That window is "not ready", not an error, so
+   the expression null-guards itself and `?? null` keeps the result
+   null-or-string; the protocol-level transient retry for
+   "Execution context was destroyed" is unchanged.)
 6. Only then `Page.printToPDF { printBackground, preferCSSPageSize,
    displayHeaderFooter: false }`; decode base64, write the output file.
 7. `Browser.close`, wait bounded, kill+reap if it lingers (throwaway profile —
