@@ -28,11 +28,13 @@ use sha2::{Digest, Sha256};
 
 mod asset_resolution;
 mod cdp;
+mod diagnostics;
 mod doctor;
 mod lint;
 mod new_cmd;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
+use diagnostics::{plain_diagnostic_text, render_diagnostic, DeckDiagnostic};
 use peitho::{browser, server};
 
 struct BuildArtifacts {
@@ -111,7 +113,13 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
         normalized_url: &str,
         params: peitho_core::code_images::EmbedRenderParams,
     ) -> peitho_core::Result<Vec<u8>> {
-        let chrome = locate_chrome().map_err(|err| cli_embed_renderer_error(err, ""))?;
+        let chrome = locate_chrome().map_err(|err| {
+            // A `Report` interpolated as `{err}` prints only its message; the
+            // structured help must ride into the BuildError's own help or it
+            // would be silently dropped.
+            let help = diagnostics::report_help(&err).unwrap_or_default();
+            cli_embed_renderer_error(&err, help)
+        })?;
         let temp = tempfile::tempdir().map_err(|err| {
             cli_embed_renderer_error(
                 format!("failed to create temporary tweet embed workspace: {err}"),
@@ -119,10 +127,12 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
             )
         })?;
         render_embed_with_chrome(&chrome, temp.path(), normalized_url, params).map_err(|err| {
-            cli_embed_renderer_error(
-                err,
-                "retry with Chrome and network access to X; set PEITHO_CHROME_PATH=<absolute-path> to choose Chrome",
-            )
+            const RETRY_HELP: &str = "retry with Chrome and network access to X; set PEITHO_CHROME_PATH=<absolute-path> to choose Chrome";
+            let help = match diagnostics::report_help(&err) {
+                Some(inner) => format!("{inner}; {RETRY_HELP}"),
+                None => RETRY_HELP.to_string(),
+            };
+            cli_embed_renderer_error(&err, help)
         })
     }
 }
@@ -826,7 +836,18 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
     "remote.js",
 ];
 
-fn main() -> miette::Result<()> {
+fn main() {
+    if let Err(err) = run() {
+        // Printing through the shared renderer (instead of returning the error
+        // and letting the runtime print `Error: {report:?}`) keeps this path
+        // byte-identical to the swallowed watch/preview error paths and avoids
+        // the runtime prefix colliding with the renderer's own `error:` label.
+        eprintln!("{}", render_diagnostic(&err));
+        std::process::exit(1);
+    }
+}
+
+fn run() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::New {
@@ -1017,7 +1038,10 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
             message,
             format!("known keys: {}", known_keys.join(", ")),
         );
-        eprintln!("{}", render_diagnostic(&miette::miette!("{err}")));
+        eprintln!(
+            "{}",
+            render_diagnostic(&miette::Report::new(DeckDiagnostic::new(err)))
+        );
         std::process::exit(2);
     };
     let trace = peitho_core::explain_dispatch(slide, &layouts);
@@ -1355,26 +1379,14 @@ fn provenance_human(source: &Provenance) -> String {
     }
 }
 
-fn keep_workspace_for_error(tmp: tempfile::TempDir, err: impl std::fmt::Display) -> miette::Report {
+fn keep_workspace_for_error(tmp: tempfile::TempDir, err: miette::Report) -> miette::Report {
     let kept = tmp.keep();
-    miette::miette!("{err}\nhelp: workspace kept at {}", kept.display())
-}
-
-/// Render a diagnostic the way miette's own reporter would for a `main`-returned
-/// error, so error paths that must swallow the `Report` (watch loops, preview)
-/// stay visually identical to the ones that propagate.
-///
-/// `Display` on a `Report` emits only the flat message, dropping colors, source
-/// snippets, and width-aware wrapping. Every terminal-facing site that consumes
-/// a diagnostic instead of returning it must go through this function; HTML
-/// sinks such as the preview error page must keep using `Display`, because this
-/// output can carry ANSI escapes.
-fn render_diagnostic(err: &miette::Report) -> String {
-    // `Report`'s `Debug` dispatches to the installed miette handler, which is the
-    // same path a `main`-returned error takes. Going through it (rather than
-    // building a handler here) keeps terminal-width detection, color support, and
-    // `NO_COLOR` handling identical to `peitho build` without duplicating them.
-    format!("{err:?}")
+    let kept_note = format!("workspace kept at {}", kept.display());
+    let help = match diagnostics::report_help(&err) {
+        Some(inner) => format!("{inner}\n{kept_note}"),
+        None => kept_note,
+    };
+    miette::miette!(help = help, "{err}")
 }
 
 fn rebuild_once_for_watch(
@@ -1395,12 +1407,12 @@ fn rebuild_once_for_watch(
                 stdout.flush().into_diagnostic()?;
             }
             Err(err) => {
-                writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
+                writeln!(stderr, "build failed:\n{}", render_diagnostic(&err)).into_diagnostic()?;
                 stderr.flush().into_diagnostic()?;
             }
         },
         Err(err) => {
-            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
+            writeln!(stderr, "build failed:\n{}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
         }
     }
@@ -1491,7 +1503,8 @@ fn prepare_watch_loop(input: PathBuf) -> miette::Result<WatchRuntime> {
     let mut debouncer =
         new_debouncer_opt::<_, PollWatcher>(debounce_config, tx).map_err(|err| {
             miette::miette!(
-                "failed to start file watcher\nhelp: check file watcher permissions\ncaused by: {err}"
+                help = "check file watcher permissions",
+                "failed to start file watcher\ncaused by: {err}"
             )
         })?;
 
@@ -1626,7 +1639,9 @@ fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette
     for dir in dirs {
         watcher.watch_dir(dir).map_err(|err| {
             miette::miette!(
-                "failed to watch {}\nhelp: verify the watched directories exist and are readable before starting --watch\ncaused by: {err}",
+                help =
+                    "verify the watched directories exist and are readable before starting --watch",
+                "failed to watch {}\ncaused by: {err}",
                 dir.display()
             )
         })?;
@@ -1773,7 +1788,8 @@ fn same_watch_path(left: &Path, right: &Path) -> bool {
 fn collect_asset_files(path: &Path, ext: &str) -> miette::Result<Vec<PathBuf>> {
     let metadata = fs::metadata(path).map_err(|err| {
         miette::miette!(
-            "cannot read {}\nhelp: pass a .{ext} file or a directory containing them\ncaused by: {err}",
+            help = format!("pass a .{ext} file or a directory containing them"),
+            "cannot read {}\ncaused by: {err}",
             path.display()
         )
     })?;
@@ -1789,7 +1805,8 @@ fn collect_asset_files(path: &Path, ext: &str) -> miette::Result<Vec<PathBuf>> {
     files.sort();
     if files.is_empty() {
         return Err(miette::miette!(
-            "no *.{ext} files in {}\nhelp: add at least one .{ext} file to the directory",
+            help = format!("add at least one .{ext} file to the directory"),
+            "no *.{ext} files in {}",
             path.display()
         ));
     }
@@ -1906,7 +1923,8 @@ pub(crate) fn load_and_expand_deck_source(input: &Path) -> miette::Result<Loaded
 fn read_deck_source(input: &Path) -> miette::Result<String> {
     fs::read_to_string(input).map_err(|err| {
         miette::miette!(
-            "failed to read {}\nhelp: the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere\ncaused by: {err}",
+            help = "the deck argument defaults to deck.md in the current directory when omitted; pass the deck path explicitly if it lives elsewhere",
+            "failed to read {}\ncaused by: {err}",
             input.display()
         )
     })
@@ -1964,7 +1982,8 @@ fn write_fonts_assets(out: &Path, fonts_source: Option<&Path>) -> miette::Result
         .file_type();
     if file_type.is_symlink() {
         return Err(miette::miette!(
-            "unsupported fonts: source {} (symlink)\nhelp: point fonts: at a regular file or a directory",
+            help = "point fonts: at a regular file or a directory",
+            "unsupported fonts: source {} (symlink)",
             fonts_source.display()
         ));
     }
@@ -1984,7 +2003,8 @@ fn write_fonts_assets(out: &Path, fonts_source: Option<&Path>) -> miette::Result
         Ok(())
     } else {
         Err(miette::miette!(
-            "unsupported fonts: source {} (special file)\nhelp: point fonts: at a regular file or a directory",
+            help = "point fonts: at a regular file or a directory",
+            "unsupported fonts: source {} (special file)",
             fonts_source.display()
         ))
     }
@@ -2013,7 +2033,8 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> miette::Result<()> {
                 "special file"
             };
             return Err(miette::miette!(
-                "unsupported entry in fonts directory: {} ({entry_type})\nhelp: only regular files and subdirectories are supported inside fonts/",
+                help = "only regular files and subdirectories are supported inside fonts/",
+                "unsupported entry in fonts directory: {} ({entry_type})",
                 source_path.display()
             ));
         }
@@ -2077,7 +2098,8 @@ pub(crate) fn locate_chrome_with_env(lookup: &ChromeLookupEnv) -> miette::Result
             return Ok(path.clone());
         }
         return Err(miette::miette!(
-            "Chrome not found at PEITHO_CHROME_PATH={}\nhelp: install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
+            help = "install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
+            "Chrome not found at PEITHO_CHROME_PATH={}",
             path.display()
         ));
     }
@@ -2098,7 +2120,8 @@ pub(crate) fn locate_chrome_with_env(lookup: &ChromeLookupEnv) -> miette::Result
     }
 
     Err(miette::miette!(
-        "Chrome not found\nhelp: install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>"
+        help = "install Google Chrome or Chromium, or set PEITHO_CHROME_PATH=<absolute-path>",
+        "Chrome not found"
     ))
 }
 
@@ -2255,7 +2278,8 @@ fn parse_embed_height(dom: &[u8]) -> miette::Result<u32> {
     let dom = String::from_utf8_lossy(dom);
     let title_start = dom.find("<title>").ok_or_else(|| {
         miette::miette!(
-            "official X embed did not publish a rendered height\nhelp: check network access to X and that the post is public"
+            help = "check network access to X and that the post is public",
+            "official X embed did not publish a rendered height"
         )
     })? + "<title>".len();
     let title_end = dom[title_start..]
@@ -2263,9 +2287,10 @@ fn parse_embed_height(dom: &[u8]) -> miette::Result<u32> {
         .map(|offset| title_start + offset)
         .ok_or_else(|| {
             miette::miette!(
-                "official X embed height title was incomplete\nhelp: retry with Chrome and network access to X"
+                help = "retry with Chrome and network access to X",
+                "official X embed height title was incomplete"
             )
-    })?;
+        })?;
     let title = &dom[title_start..title_end];
     let height = title
         .strip_prefix("peitho-embed-height:")
@@ -2273,7 +2298,8 @@ fn parse_embed_height(dom: &[u8]) -> miette::Result<u32> {
         .filter(|height| *height > 0)
         .ok_or_else(|| {
             miette::miette!(
-                "official X embed did not publish a valid rendered height (title: {title})\nhelp: check network access to X and that the post is public"
+                help = "check network access to X and that the post is public",
+                "official X embed did not publish a valid rendered height (title: {title})"
             )
         })?;
     if height >= 10_000 {
@@ -2504,22 +2530,23 @@ fn run_one_shot_chrome(
             }
             if !status.success() {
                 return Err(miette::miette!(
-                    "Chrome failed during one-shot operation with status {}\nhelp: check that Chrome can run in headless mode\nstderr: {}",
+                    help = "check that Chrome can run in headless mode",
+                    "Chrome failed during one-shot operation with status {}\nstderr: {}",
                     status,
                     String::from_utf8_lossy(&stderr).trim()
                 ));
             }
             Err(miette::miette!(
-                "Chrome completed before one-shot output was ready\nhelp: expected {} before Chrome exited\nstderr: {}",
-                completion.description(),
+                help = format!("expected {} before Chrome exited", completion.description()),
+                "Chrome completed before one-shot output was ready\nstderr: {}",
                 String::from_utf8_lossy(&stderr).trim()
             ))
         }
         ProcessOutcome::TimedOut { stderr } => Err(miette::miette!(
-            "Chrome timed out after {}s waiting for {}\nhelp: {}\nstderr: {}",
+            help = completion.timeout_help(),
+            "Chrome timed out after {}s waiting for {}\nstderr: {}",
             timeout.as_secs(),
             completion.description(),
-            completion.timeout_help(),
             String::from_utf8_lossy(&stderr).trim(),
         )),
     }
@@ -2810,27 +2837,29 @@ fn chrome_process_error(
 ) -> miette::Error {
     match err {
         ProcessRunError::CaptureStdout => miette::miette!(
-            "failed to capture Chrome stdout\nhelp: {}",
-            completion.process_setup_help()
+            help = completion.process_setup_help(),
+            "failed to capture Chrome stdout"
         ),
         ProcessRunError::CaptureStderr => miette::miette!(
-            "failed to capture Chrome stderr\nhelp: {}",
-            completion.process_setup_help()
+            help = completion.process_setup_help(),
+            "failed to capture Chrome stderr"
         ),
         ProcessRunError::CaptureStdin => miette::miette!(
-            "failed to capture Chrome stdin\nhelp: {}",
-            completion.process_setup_help()
+            help = completion.process_setup_help(),
+            "failed to capture Chrome stdin"
         ),
         ProcessRunError::Spawn(err) => miette::miette!(
-            "failed to run Chrome at {}\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+            help = "install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>",
+            "failed to run Chrome at {}\ncaused by: {err}",
             chrome.display()
         ),
         ProcessRunError::Wait(err) => miette::miette!(
-            "failed to wait on Chrome: {err}\nhelp: {}",
-            completion.retry_help()
+            help = completion.retry_help(),
+            "failed to wait on Chrome: {err}"
         ),
         ProcessRunError::Kill(err) => miette::miette!(
-            "failed to terminate Chrome: {err}\nhelp: report the underlying io error"
+            help = "report the underlying io error",
+            "failed to terminate Chrome: {err}"
         ),
     }
 }
@@ -3053,7 +3082,8 @@ impl CdpChromeProcess {
             .spawn()
             .map_err(|err| {
                 miette::miette!(
-                    "failed to run Chrome at {} for ordered PDF printing\nhelp: install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>\ncaused by: {err}",
+                    help = "install Google Chrome or set PEITHO_CHROME_PATH=<absolute-path>",
+                    "failed to run Chrome at {} for ordered PDF printing\ncaused by: {err}",
                     chrome.display()
                 )
             })?;
@@ -3183,7 +3213,8 @@ fn cdp_export_error(process: &mut CdpChromeProcess, err: miette::Error) -> miett
         })
         .unwrap_or_default();
     miette::miette!(
-        "Chrome PDF export failed\ncaused by: {err}\nhelp: if an export workspace was kept, inspect its pdf.html and the Chrome stderr below\nstderr: {stderr}{cleanup}"
+        help = "if an export workspace was kept, inspect its pdf.html and the Chrome stderr above",
+        "Chrome PDF export failed\ncaused by: {err}\nstderr: {stderr}{cleanup}"
     )
 }
 
@@ -3207,7 +3238,8 @@ fn publish(dist: &Path, command: &[OsString]) -> miette::Result<i32> {
     let distribution = validate_publish_dist(dist)?;
     if command.is_empty() {
         return Err(miette::miette!(
-            "publish command is missing\nhelp: deployment is delegated to IaC or CI; example: peitho publish -- aws s3 sync dist/ s3://bucket"
+            help = "deployment is delegated to IaC or CI; example: peitho publish -- aws s3 sync dist/ s3://bucket",
+            "publish command is missing"
         ));
     }
 
@@ -3222,7 +3254,8 @@ fn run_publish_command(dist: &Path, command: &[OsString]) -> miette::Result<i32>
         .status()
         .map_err(|err| {
             miette::miette!(
-                "failed to run publish command: {}\nhelp: check that the command exists and is executable\ncaused by: {err}",
+                help = "check that the command exists and is executable",
+                "failed to run publish command: {}\ncaused by: {err}",
                 executable.to_string_lossy()
             )
         })?;
@@ -3240,7 +3273,8 @@ fn validate_publish_dist(dist: &Path) -> miette::Result<PublishDistribution> {
     read_publish_manifest(dist)?;
     let canonical = fs::canonicalize(dist).map_err(|err| {
         miette::miette!(
-            "distribution is incomplete: failed to resolve {}\nhelp: run `peitho build` first\ncaused by: {err}",
+            help = "run `peitho build` first",
+            "distribution is incomplete: failed to resolve {}\ncaused by: {err}",
             dist.display()
         )
     })?;
@@ -3252,7 +3286,8 @@ fn reject_presentation_only_files(dist: &Path) -> miette::Result<()> {
     for file in PRESENTATION_ONLY_DIST_FILES {
         if dist.join(file).exists() {
             return Err(miette::miette!(
-                "distribution contains presentation-only file: {file}\nhelp: remove presentation artifacts or run `peitho build` again"
+                help = "remove presentation artifacts or run `peitho build` again",
+                "distribution contains presentation-only file: {file}"
             ));
         }
     }
@@ -3289,7 +3324,8 @@ fn rehearsal_record_paths(dir: &Path) -> miette::Result<Vec<PathBuf>> {
 
 fn rehearsal_record_paths_entry_error(dir: &Path, err: std::io::Error) -> miette::Report {
     miette::miette!(
-        "failed to read rehearsal records in {}\nhelp: check permissions or move the rehearsals directory\ncaused by: {err}",
+        help = "check permissions or move the rehearsals directory",
+        "failed to read rehearsal records in {}\ncaused by: {err}",
         dir.display()
     )
 }
@@ -3313,20 +3349,22 @@ fn read_rehearsal_record(path: &Path) -> miette::Result<peitho_core::RehearsalRe
     let json = fs::read_to_string(path).map_err(|err| {
         let help = rehearsal_record_recovery_help(path);
         miette::miette!(
-            "failed to read rehearsal record {}\nhelp: {help}\ncaused by: {err}",
+            help = help,
+            "failed to read rehearsal record {}\ncaused by: {err}",
             path.display()
         )
     })?;
     let record: peitho_core::RehearsalRecord = serde_json::from_str(&json).map_err(|err| {
         let help = rehearsal_record_recovery_help(path);
         miette::miette!(
-            "failed to parse rehearsal record {}\nhelp: {help}\ncaused by: {err}",
+            help = help,
+            "failed to parse rehearsal record {}\ncaused by: {err}",
             path.display()
         )
     })?;
     record.validate().map_err(|err| {
         let help = rehearsal_record_recovery_help(path);
-        miette::miette!("{err} in rehearsal record {}\nhelp: {help}", path.display())
+        miette::miette!(help = help, "{err} in rehearsal record {}", path.display())
     })?;
     Ok(record)
 }
@@ -3442,7 +3480,8 @@ fn local_recorded_minute(path: &Path, recorded_at_ms: u64) -> miette::Result<Str
     let recorded_at_ms = i64::try_from(recorded_at_ms).map_err(|_| {
         let help = rehearsal_record_recovery_help(path);
         miette::miette!(
-            "rehearsal record timestamp is outside the supported range in rehearsal record {}\nhelp: {help}",
+            help = help,
+            "rehearsal record timestamp is outside the supported range in rehearsal record {}",
             path.display()
         )
     })?;
@@ -3452,7 +3491,8 @@ fn local_recorded_minute(path: &Path, recorded_at_ms: u64) -> miette::Result<Str
         .ok_or_else(|| {
             let help = rehearsal_record_recovery_help(path);
             miette::miette!(
-                "rehearsal record timestamp is outside the supported range in rehearsal record {}\nhelp: {help}",
+                help = help,
+                "rehearsal record timestamp is outside the supported range in rehearsal record {}",
                 path.display()
             )
         })?;
@@ -3492,13 +3532,15 @@ fn read_publish_manifest(dist: &Path) -> miette::Result<peitho_core::Manifest> {
     let path = dist.join("manifest.json");
     let json = fs::read_to_string(&path).map_err(|err| {
         miette::miette!(
-            "failed to read manifest.json\nhelp: run `peitho build` first\ncaused by: {err}"
+            help = "run `peitho build` first",
+            "failed to read manifest.json\ncaused by: {err}"
         )
     })?;
 
     let manifest: peitho_core::Manifest = serde_json::from_str(&json).map_err(|err| {
         miette::miette!(
-            "failed to parse manifest.json\nhelp: run `peitho build` first\ncaused by: {err}"
+            help = "run `peitho build` first",
+            "failed to parse manifest.json\ncaused by: {err}"
         )
     })?;
 
@@ -3509,13 +3551,15 @@ fn read_publish_manifest(dist: &Path) -> miette::Result<peitho_core::Manifest> {
 fn validate_manifest_refs(dist: &Path, manifest: &peitho_core::Manifest) -> miette::Result<()> {
     if manifest.slide_count() != manifest.slides().len() {
         return Err(miette::miette!(
-            "manifest slideCount does not match slides length\nhelp: run `peitho build` first"
+            help = "run `peitho build` first",
+            "manifest slideCount does not match slides length"
         ));
     }
 
     if manifest.slides().is_empty() || manifest.slide_count() == 0 {
         return Err(miette::miette!(
-            "manifest has no slides\nhelp: run `peitho build` first"
+            help = "run `peitho build` first",
+            "manifest has no slides"
         ));
     }
 
@@ -3569,15 +3613,16 @@ fn validate_manifest_dist_ref(dist: &Path, src: &str, kind: ManifestRefKind) -> 
     });
     if src.is_empty() || path.is_absolute() || invalid_component {
         return Err(miette::miette!(
-            "{}\nhelp: {}",
-            kind.invalid_message(src),
-            kind.invalid_help()
+            help = kind.invalid_help(),
+            "{}",
+            kind.invalid_message(src)
         ));
     }
 
     let canonical_dist = fs::canonicalize(dist).map_err(|err| {
         miette::miette!(
-            "distribution is incomplete: failed to resolve dist directory\nhelp: run `peitho build` first\ncaused by: {err}"
+            help = "run `peitho build` first",
+            "distribution is incomplete: failed to resolve dist directory\ncaused by: {err}"
         )
     })?;
     let target = dist.join(path);
@@ -3585,22 +3630,24 @@ fn validate_manifest_dist_ref(dist: &Path, src: &str, kind: ManifestRefKind) -> 
         Ok(path) => path,
         Err(_) => {
             return Err(miette::miette!(
-                "{}\nhelp: run `peitho build` first",
+                help = "run `peitho build` first",
+                "{}",
                 kind.missing_message(src)
             ));
         }
     };
     if !canonical_target.starts_with(&canonical_dist) {
         return Err(miette::miette!(
-            "{}\nhelp: {}",
-            kind.invalid_message(src),
-            kind.invalid_help()
+            help = kind.invalid_help(),
+            "{}",
+            kind.invalid_message(src)
         ));
     }
 
     if !canonical_target.is_file() {
         return Err(miette::miette!(
-            "{}\nhelp: run `peitho build` first",
+            help = "run `peitho build` first",
+            "{}",
             kind.missing_message(src)
         ));
     }
@@ -3615,7 +3662,8 @@ fn require_dist_file(dist: &Path, file: &str) -> miette::Result<()> {
     }
 
     Err(miette::miette!(
-        "distribution is incomplete: missing {file}\nhelp: run `peitho build` first"
+        help = "run `peitho build` first",
+        "distribution is incomplete: missing {file}"
     ))
 }
 
@@ -3623,7 +3671,8 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
     let slides = dist.join("slides");
     if !slides.is_dir() {
         return Err(miette::miette!(
-            "distribution is incomplete: missing slides/\nhelp: run `peitho build` first"
+            help = "run `peitho build` first",
+            "distribution is incomplete: missing slides/"
         ));
     }
 
@@ -3643,7 +3692,8 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
         Ok(())
     } else {
         Err(miette::miette!(
-            "distribution is incomplete: slides/ must contain at least one file\nhelp: run `peitho build` first"
+            help = "run `peitho build` first",
+            "distribution is incomplete: slides/ must contain at least one file"
         ))
     }
 }
@@ -3743,7 +3793,8 @@ fn present(options: PresentOptions) -> miette::Result<()> {
 fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
     if options.rehearsal && options.no_serve {
         return Err(miette::miette!(
-            "--rehearsal requires the present server\nhelp: remove --no-serve or omit --rehearsal"
+            help = "remove --no-serve or omit --rehearsal",
+            "--rehearsal requires the present server"
         ));
     }
     let Some(host) = options.host else {
@@ -3751,12 +3802,14 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
     };
     if options.no_serve {
         return Err(miette::miette!(
-            "--host requires the present server\nhelp: remove --no-serve or omit --host"
+            help = "remove --no-serve or omit --host",
+            "--host requires the present server"
         ));
     }
     if host.is_some_and(|host| host.is_loopback()) {
         return Err(miette::miette!(
-            "--host must be non-loopback\nhelp: use the default loopback server without --host, or pass a reachable VPN/LAN IP address"
+            help = "use the default loopback server without --host, or pass a reachable VPN/LAN IP address",
+            "--host must be non-loopback"
         ));
     }
     Ok(())
@@ -3765,7 +3818,8 @@ fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
 fn validate_rehearsal_sections(artifacts: &BuildArtifacts) -> miette::Result<()> {
     if artifacts.rendered.settings().sections().is_empty() {
         return Err(miette::miette!(
-            "--rehearsal requires agenda sections\nhelp: declare {{\"section\":...}} page comments to define the agenda"
+            help = "declare {\"section\":...} page comments to define the agenda",
+            "--rehearsal requires agenda sections"
         ));
     }
     Ok(())
@@ -3938,7 +3992,8 @@ fn auto_host_candidate_from_interfaces() -> miette::Result<AutoHostCandidate> {
         .into_diagnostic()
         .map_err(|err| {
             miette::miette!(
-                "failed to enumerate network interfaces for --host\nhelp: pass --host <IP> explicitly or check the network\ncaused by: {err}"
+                help = "pass --host <IP> explicitly or check the network",
+                "failed to enumerate network interfaces for --host\ncaused by: {err}"
             )
         })?
         .into_iter()
@@ -3956,7 +4011,8 @@ fn auto_host_candidate_from_addresses(
         .next()
         .ok_or_else(|| {
             miette::miette!(
-                "no non-loopback network address found for --host\nhelp: pass --host <IP> explicitly or check the network"
+                help = "pass --host <IP> explicitly or check the network",
+                "no non-loopback network address found for --host"
             )
         })?;
     Ok(AutoHostCandidate {
@@ -4180,9 +4236,9 @@ fn emit_initial_preview_root(
             Ok(root)
         }
         Err(err) => {
-            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
+            writeln!(stderr, "build failed:\n{}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
-            let root = emit_preview_error_page(cache, 0, &err.to_string())?;
+            let root = emit_preview_error_page(cache, 0, &plain_diagnostic_text(&err))?;
             prune_preview_cache_generations(cache, 0)?;
             Ok(root)
         }
@@ -4215,7 +4271,7 @@ fn rebuild_preview_once_for_watch(
             stdout.flush().into_diagnostic()?;
         }
         Err(err) => {
-            writeln!(stderr, "build failed: {}", render_diagnostic(&err)).into_diagnostic()?;
+            writeln!(stderr, "build failed:\n{}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
         }
     }
@@ -4230,7 +4286,8 @@ fn open_default_browser(url: &str) -> miette::Result<()> {
         "xdg-open"
     } else {
         return Err(miette::miette!(
-            "cannot open preview browser on this platform\nhelp: pass --no-open and open {url} manually"
+            help = format!("pass --no-open and open {url} manually"),
+            "cannot open preview browser on this platform"
         ));
     };
     std::process::Command::new(program)
@@ -4239,7 +4296,8 @@ fn open_default_browser(url: &str) -> miette::Result<()> {
         .map(|_| ())
         .map_err(|err| {
             miette::miette!(
-                "failed to open preview browser with {program}\nhelp: pass --no-open and open {url} manually\ncaused by: {err}"
+                help = format!("pass --no-open and open {url} manually"),
+                "failed to open preview browser with {program}\ncaused by: {err}"
             )
         })
 }
@@ -4397,7 +4455,8 @@ fn ensure_shell_bundle(shell: &Path) -> miette::Result<()> {
         return Ok(());
     }
     Err(miette::miette!(
-        "shell bundle not found: {}\nhelp: run `cd packages/peitho-present && npm run build` or pass --shell <path>",
+        help = "run `cd packages/peitho-present && npm run build` or pass --shell <path>",
+        "shell bundle not found: {}",
         shell.display()
     ))
 }
@@ -4559,7 +4618,7 @@ pub(crate) fn short_sha256_hex(bytes: &[u8], hex_chars: usize) -> String {
 }
 
 fn core<T>(result: peitho_core::Result<T>) -> miette::Result<T> {
-    result.map_err(|err| miette::miette!("{err}"))
+    result.map_err(|err| miette::Report::new(DeckDiagnostic::new(err)))
 }
 
 fn core_for_deck<T>(
@@ -4567,7 +4626,11 @@ fn core_for_deck<T>(
     deck: &Path,
     line_map: Option<&peitho_core::include::LineMap>,
 ) -> miette::Result<T> {
-    result.map_err(|err| miette::miette!("{}", translate_deck_error(err, deck, line_map)))
+    result.map_err(|err| {
+        miette::Report::new(DeckDiagnostic::new(translate_deck_error(
+            err, deck, line_map,
+        )))
+    })
 }
 
 fn translate_deck_error(
@@ -4816,8 +4879,9 @@ contexts:
         assert!(err
             .to_string()
             .contains("official X embed did not publish a valid rendered height"));
-        assert!(err.to_string().contains("check network access to X"));
-        assert!(err.to_string().contains("post is public"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("check network access to X"));
+        assert!(help.contains("post is public"));
     }
 
     #[test]
@@ -5276,9 +5340,10 @@ contexts:
             "actual error: {message}"
         );
         assert!(message.contains("linked.woff2"), "actual error: {message}");
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains("only regular files and subdirectories"),
-            "actual error: {message}"
+            help.contains("only regular files and subdirectories"),
+            "actual help: {help}"
         );
     }
 
@@ -5303,9 +5368,10 @@ contexts:
         );
         assert!(message.contains("linked.woff2"), "actual error: {message}");
         assert!(message.contains("symlink"), "actual error: {message}");
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains("point fonts: at a regular file or a directory"),
-            "actual error: {message}"
+            help.contains("point fonts: at a regular file or a directory"),
+            "actual help: {help}"
         );
     }
 
@@ -6171,11 +6237,12 @@ contexts:
             message.contains(&format!("failed to watch {}", missing.display())),
             "actual error: {message}"
         );
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains(
+            help.contains(
                 "verify the watched directories exist and are readable before starting --watch"
             ),
-            "actual error: {message}"
+            "actual help: {help}"
         );
         assert!(message.contains("caused by:"), "actual error: {message}");
     }
@@ -6945,7 +7012,8 @@ contexts:
         assert!(err
             .to_string()
             .contains("--host requires the present server"));
-        assert!(err.to_string().contains("--no-serve"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("--no-serve"));
     }
 
     #[test]
@@ -6965,7 +7033,8 @@ contexts:
         let err = validate_present_options(&options).unwrap_err();
 
         assert!(err.to_string().contains("--host must be non-loopback"));
-        assert!(err.to_string().contains("use the default loopback server"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("use the default loopback server"));
     }
 
     #[test]
@@ -6987,7 +7056,8 @@ contexts:
         assert!(err
             .to_string()
             .contains("--rehearsal requires the present server"));
-        assert!(err.to_string().contains("--no-serve"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("--no-serve"));
     }
 
     #[test]
@@ -7000,9 +7070,8 @@ contexts:
         assert!(err
             .to_string()
             .contains("--rehearsal requires agenda sections"));
-        assert!(err
-            .to_string()
-            .contains(r#"declare {"section":...} page comments"#));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains(r#"declare {"section":...} page comments"#));
     }
 
     #[test]
@@ -7128,8 +7197,9 @@ contexts:
 
         let message = err.to_string();
         assert!(message.contains("no non-loopback network address"));
-        assert!(message.contains("help: pass --host <IP>"));
-        assert!(message.contains("check the network"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("pass --host <IP>"));
+        assert!(help.contains("check the network"));
     }
 
     #[test]
@@ -7563,13 +7633,11 @@ contexts:
         let message = err.to_string();
 
         assert!(message.contains("export failed"), "actual error: {message}");
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("workspace kept at"), "actual help: {help}");
         assert!(
-            message.contains("workspace kept at"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains(&workspace.display().to_string()),
-            "actual error: {message}"
+            help.contains(&workspace.display().to_string()),
+            "actual help: {help}"
         );
         assert!(workspace.join("pdf.html").is_file());
         fs::remove_dir_all(workspace).unwrap();
@@ -7648,9 +7716,10 @@ contexts:
             message.contains("Chrome not found"),
             "actual error: {message}"
         );
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains("PEITHO_CHROME_PATH=<absolute-path>"),
-            "actual error: {message}"
+            help.contains("PEITHO_CHROME_PATH=<absolute-path>"),
+            "actual help: {help}"
         );
     }
 
@@ -7667,20 +7736,12 @@ contexts:
             message.contains("failed to wait on Chrome: wait failed"),
             "actual error: {message}"
         );
-        assert!(
-            message.contains("help: retry lint"),
-            "actual error: {message}"
-        );
-        assert!(
-            message.contains("lint workspace"),
-            "actual error: {message}"
-        );
-        assert!(message.contains("lint.html"), "actual error: {message}");
-        assert!(
-            !message.contains("chrome-stderr.log"),
-            "actual error: {message}"
-        );
-        assert!(!message.contains("retry export"), "actual error: {message}");
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("retry lint"), "actual help: {help}");
+        assert!(help.contains("lint workspace"), "actual help: {help}");
+        assert!(help.contains("lint.html"), "actual help: {help}");
+        assert!(!help.contains("chrome-stderr.log"), "actual help: {help}");
+        assert!(!help.contains("retry export"), "actual help: {help}");
     }
 
     #[test]
@@ -7696,13 +7757,14 @@ contexts:
             message.contains("failed to terminate Chrome: kill failed"),
             "actual error: {message}"
         );
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains("help: report the underlying io error"),
-            "actual error: {message}"
+            help.contains("report the underlying io error"),
+            "actual help: {help}"
         );
         assert!(
-            !message.contains("install Google Chrome"),
-            "actual error: {message}"
+            !help.contains("install Google Chrome"),
+            "actual help: {help}"
         );
     }
 
@@ -8318,9 +8380,10 @@ printf 'JavaScript exploded before lint payload\n' >&2
             message.contains("completed before one-shot output was ready"),
             "actual error: {message}"
         );
+        let help = err.help().expect("help must be present").to_string();
         assert!(
-            message.contains("lint measurement payload"),
-            "actual error: {message}"
+            help.contains("lint measurement payload"),
+            "actual help: {help}"
         );
         assert!(
             message.contains("JavaScript exploded"),
@@ -8350,21 +8413,13 @@ exec sleep 30
 
         let message = err.to_string();
         assert!(message.contains("timed out"), "actual error: {message}");
-        assert!(message.contains("retry lint"), "actual error: {message}");
-        assert!(
-            message.contains("lint workspace"),
-            "actual error: {message}"
-        );
-        assert!(message.contains("lint.html"), "actual error: {message}");
-        assert!(
-            !message.contains("chrome-stderr.log"),
-            "actual error: {message}"
-        );
-        assert!(!message.contains("retry export"), "actual error: {message}");
-        assert!(
-            !message.contains("export command"),
-            "actual error: {message}"
-        );
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("retry lint"), "actual help: {help}");
+        assert!(help.contains("lint workspace"), "actual help: {help}");
+        assert!(help.contains("lint.html"), "actual help: {help}");
+        assert!(!help.contains("chrome-stderr.log"), "actual help: {help}");
+        assert!(!help.contains("retry export"), "actual help: {help}");
+        assert!(!help.contains("export command"), "actual help: {help}");
     }
 
     #[cfg(unix)]
@@ -8402,7 +8457,8 @@ exec sleep 30
             message.contains("Chrome PDF export failed"),
             "actual error: {message}"
         );
-        assert!(message.contains("pdf.html"), "actual error: {message}");
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("pdf.html"), "actual help: {help}");
         assert!(
             !message.contains("before ordered printing completed"),
             "actual error: {message}"
@@ -8564,10 +8620,11 @@ exec sleep 30
         let dir = Path::new("deck/.peitho/rehearsals");
         let err =
             rehearsal_record_paths_entry_error(dir, std::io::Error::other("injected read error"));
-        let message = format!("{err:?}");
+        let message = err.to_string();
 
         assert!(message.contains("failed to read rehearsal records in deck/.peitho/rehearsals"));
-        assert!(message.contains("help: check permissions or move the rehearsals directory"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("check permissions or move the rehearsals directory"));
         assert!(message.contains("caused by: injected read error"));
     }
 
@@ -8721,7 +8778,8 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
 
         assert!(message.contains("failed to parse rehearsal record"));
         assert!(message.contains(&corrupt.display().to_string()));
-        assert!(message.contains("delete or move"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("delete or move"));
     }
 
     #[test]
@@ -8750,7 +8808,8 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
 
         assert!(message.contains("rehearsal record timestamp is outside the supported range"));
         assert!(message.contains(&path.display().to_string()));
-        assert!(message.contains(&format!(
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains(&format!(
             "delete or move {} and run `peitho rehearsal` again",
             path.display()
         )));
@@ -8972,7 +9031,8 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
 
         assert!(message.contains("failed to parse rehearsal record"));
         assert!(message.contains(&path.display().to_string()));
-        assert!(message.contains("delete or move"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("delete or move"));
     }
 
     #[test]
@@ -8990,7 +9050,8 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
 
         assert!(message.contains("unsupported rehearsal version"));
         assert!(message.contains(&path.display().to_string()));
-        assert!(message.contains("delete or move"));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("delete or move"));
     }
 
     #[test]
@@ -9210,20 +9271,24 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
     }
 
     #[test]
-    fn render_diagnostic_formats_help_like_miettes_reporter() {
+    fn render_diagnostic_formats_deck_errors_with_prefix_and_help_block() {
         let build_error = peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Parse,
             None,
             "deck.md:3: broken deck".to_owned(),
             "fix the frontmatter".to_owned(),
         );
-        let err = miette::miette!("{build_error}");
+        let err = miette::Report::new(DeckDiagnostic::new(build_error));
 
         let rendered = render_diagnostic(&err);
 
-        // The graphical handler lays the diagnostic out over multiple lines with a
-        // help section; plain `Display` would collapse it into the message alone.
-        assert!(rendered.contains("broken deck"), "actual: {rendered}");
+        // The renderer lays the diagnostic out as an error block plus a help
+        // block; plain `Display` on the report would collapse it into the
+        // headline alone.
+        assert!(
+            rendered.contains("error: deck.md:3: broken deck"),
+            "actual: {rendered}"
+        );
         assert!(
             rendered.contains("help: fix the frontmatter"),
             "actual: {rendered}"
@@ -9586,15 +9651,13 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             Err(err) => err,
         };
 
-        let message = format!("{err:?}");
+        let message = err.to_string();
         assert!(
             message.contains("no-such-deck.md"),
             "actual error: {message}"
         );
-        assert!(
-            message.contains("defaults to deck.md"),
-            "actual error: {message}"
-        );
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("defaults to deck.md"), "actual help: {help}");
     }
 
     #[test]
