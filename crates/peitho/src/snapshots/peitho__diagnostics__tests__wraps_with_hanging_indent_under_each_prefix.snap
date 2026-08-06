@@ -1,0 +1,8 @@
+---
+source: crates/peitho/src/diagnostics.rs
+expression: "render_diagnostic_parts(\"deck.md:3: invalid deck frontmatter: unknown field `fontss`, expected one of `time`, `aspect_ratio`\",\nSome(\"use only the supported deck frontmatter keys: time, aspect_ratio, resolution\"),\nTerminalStyle::plain(60),)"
+---
+error: deck.md:3: invalid deck frontmatter: unknown field
+       `fontss`, expected one of `time`, `aspect_ratio`
+ help: use only the supported deck frontmatter keys: time,
+       aspect_ratio, resolution

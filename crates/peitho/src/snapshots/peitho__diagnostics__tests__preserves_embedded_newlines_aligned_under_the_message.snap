@@ -1,0 +1,10 @@
+---
+source: crates/peitho/src/diagnostics.rs
+expression: "render_diagnostic_parts(\"slide 2 ('whoami'), line 16: no layout matches this slide\\nbooks: unassigned content remains for missing 'body' slot\\ncode: no slot accepts image in layout 'code'\\nprofile: slot 'photo' got 2 item(s), but layout 'profile' allows 1\",\nSome(\"adjust the slide content or pick a layout explicitly with <!-- {\\\"layout\\\":\\\"…\\\"} -->\"),\nTerminalStyle::plain(80),)"
+---
+error: slide 2 ('whoami'), line 16: no layout matches this slide
+       books: unassigned content remains for missing 'body' slot
+       code: no slot accepts image in layout 'code'
+       profile: slot 'photo' got 2 item(s), but layout 'profile' allows 1
+ help: adjust the slide content or pick a layout explicitly with <!--
+       {"layout":"…"} -->

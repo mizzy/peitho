@@ -1,0 +1,6 @@
+---
+source: crates/peitho/src/diagnostics.rs
+expression: "render_diagnostic_parts(\"deck.md:3: broken deck\", Some(\"fix the frontmatter\"),\nTerminalStyle::plain(80),)"
+---
+error: deck.md:3: broken deck
+ help: fix the frontmatter
