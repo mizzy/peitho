@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 mod asset_resolution;
 mod cdp;
 mod diagnostics;
+mod docs;
 mod doctor;
 mod lint;
 mod new_cmd;
@@ -695,6 +696,9 @@ struct PreviewOptions {
 #[command(name = "peitho")]
 #[command(version)]
 #[command(about = "Build HTML-native presentations from Markdown")]
+#[command(
+    long_about = "Build HTML-native presentations from Markdown.\n\nRun `peitho docs` for the embedded guide, available offline and suitable for agent reference."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -787,6 +791,17 @@ enum Command {
     Export {
         #[command(subcommand)]
         command: ExportCommand,
+    },
+    /// Read the embedded guide offline.
+    Docs {
+        #[arg(
+            value_name = "TOPIC",
+            conflicts_with = "all",
+            help = "Guide topic slug; run `peitho docs` to list them"
+        )]
+        topic: Option<String>,
+        #[arg(long, help = "Print every guide page in order")]
+        all: bool,
     },
     Completions {
         shell: Shell,
@@ -945,6 +960,14 @@ fn run() -> miette::Result<()> {
         Command::Export { command } => match command {
             ExportCommand::Pdf { input, out } => export_pdf(input, out),
         },
+        Command::Docs { topic, all } => {
+            let output = core(docs::render(topic.as_deref(), all))?;
+            match std::io::stdout().write_all(output.as_bytes()) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                Err(err) => Err(err).into_diagnostic(),
+            }
+        }
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
@@ -6857,6 +6880,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -6881,6 +6905,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -7327,6 +7352,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -7345,6 +7371,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -7363,6 +7390,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -7393,6 +7421,7 @@ contexts:
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected lint command");
@@ -7422,6 +7451,7 @@ contexts:
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected preview command");
@@ -7448,6 +7478,7 @@ contexts:
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected export pdf command");
@@ -7472,6 +7503,7 @@ contexts:
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected completions command");
             }
@@ -7500,6 +7532,7 @@ contexts:
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected layouts command");
@@ -9440,6 +9473,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected new command");
@@ -9467,6 +9501,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Present { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected new command");
@@ -9586,6 +9621,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected build command");
@@ -9609,6 +9645,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected present command");
@@ -9634,6 +9671,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Preview { .. }
             | Command::Present { .. }
             | Command::Publish { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected export pdf command");
@@ -9677,6 +9715,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected build command");
@@ -9702,6 +9741,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
             | Command::Preview { .. }
             | Command::Publish { .. }
             | Command::Export { .. }
+            | Command::Docs { .. }
             | Command::Completions { .. }
             | Command::Rehearsal { .. } => {
                 panic!("expected build command");
