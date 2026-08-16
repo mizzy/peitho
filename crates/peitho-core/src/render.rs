@@ -23,7 +23,8 @@ use crate::{
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 
-pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES;
+pub(crate) const BODY_MARKDOWN_OPTIONS: Options =
+    Options::ENABLE_OLD_FOOTNOTES.union(Options::ENABLE_STRIKETHROUGH);
 
 pub(crate) fn walk_body_markdown_list_items<'a>(
     markdown: &'a str,
@@ -2090,6 +2091,41 @@ mod tests {
         assert!(html.contains("main"));
     }
 
+    #[test]
+    fn renders_strikethrough_in_paragraph() {
+        let markdown = "# Title\n\nThis is ~~deleted~~ text.";
+        let layout = title_body_layout();
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let text = crate::plain::slide_text(&checked.checked_slides()[0]);
+        assert_eq!(text.body(), "This is deleted text.");
+
+        let rendered = render_checked(checked);
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains("<p>This is <del>deleted</del> text.</p>"),
+            "{html}"
+        );
+        assert!(!html.contains("~~deleted~~"), "{html}");
+    }
+
+    #[test]
+    fn renders_unclosed_strikethrough_delimiters_literally() {
+        let rendered =
+            render_checked_deck_with_layout("# Title\n\nThis is a ~~ b", title_body_layout());
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains("<p>This is a ~~ b</p>"), "{html}");
+    }
+
     /// Render a deck whose layout has a code slot, returning slide 0's HTML.
     fn render_code_html(markdown: &str) -> String {
         let layout = parse_layout(
@@ -2812,6 +2848,21 @@ mod tests {
     }
 
     #[test]
+    fn renders_strikethrough_in_footnote_definition() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\nClaim[^a].\n\n[^a]: ~~Deleted~~ note.",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains("<li><p><del>Deleted</del> note.</p>"),
+            "{html}"
+        );
+        assert!(!html.contains("~~Deleted~~"), "{html}");
+    }
+
+    #[test]
     fn deck_without_footnotes_renders_no_footnotes_block() {
         let rendered = render_checked_deck_with_layout(
             "# Title\n\nBody only.",
@@ -3378,6 +3429,20 @@ mod tests {
         assert!(html.contains("<code>Phase</code>"));
         assert!(html.contains(r#"<a href="https://example.com">docs</a>"#));
         assert!(!html.contains("<p><strong>Architecture</strong>"));
+    }
+
+    #[test]
+    fn renders_strikethrough_in_heading_and_derives_key_from_text() {
+        let rendered = render_checked_deck("# ~~Obsolete~~ Architecture");
+        let slide = &rendered.slides()[0];
+
+        assert_eq!(slide.key().as_str(), "obsolete-architecture");
+        assert!(
+            slide.html().contains("<del>Obsolete</del> Architecture"),
+            "{}",
+            slide.html()
+        );
+        assert!(!slide.html().contains("~~Obsolete~~"), "{}", slide.html());
     }
 
     #[test]

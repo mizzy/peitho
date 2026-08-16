@@ -1,6 +1,9 @@
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use crate::{domain::FragmentKind, manifest::ManifestSlideText, phase::CheckedSlide};
+use crate::{
+    domain::FragmentKind, manifest::ManifestSlideText, phase::CheckedSlide,
+    render::BODY_MARKDOWN_OPTIONS,
+};
 
 pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
     let mut title = Vec::new();
@@ -66,7 +69,7 @@ fn body_fragment_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut in_image = false;
 
-    for event in Parser::new_ext(markdown, Options::ENABLE_OLD_FOOTNOTES) {
+    for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
         match event {
             Event::Start(Tag::Image { .. }) => in_image = true,
             Event::End(TagEnd::Image) => in_image = false,
@@ -81,6 +84,7 @@ fn body_fragment_text(markdown: &str) -> String {
             {
                 text.push(' ');
             }
+            Event::Start(Tag::Strikethrough) | Event::End(TagEnd::Strikethrough) => {}
             _ => {}
         }
     }
