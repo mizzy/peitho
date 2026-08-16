@@ -6,6 +6,10 @@ Peitho is the Greek goddess who presides over the power to move people's hearts 
 
 Docs & demos: **[peitho.gosu.ke](https://peitho.gosu.ke/)** — a guide, an examples gallery, and the example decks built and served under `/demo/<name>/`. Auto-deployed on push to `main`; `envchain peitho make deploy-demo` for manual deploys.
 
+## Offline and agent reference
+
+The complete guide is embedded in the `peitho` binary. Run `peitho docs` to list topics, `peitho docs <topic>` to print one Markdown page, or `peitho docs --all` to print the full guide without network access.
+
 ## How it works
 
 Content is Markdown. Design is layout HTML plus theme CSS, versioned in git right next to the content. The two never mix — and the layout itself is the schema: each `<slot>` declares what it accepts and how many, and peitho type-checks every slide against its layout at build time. This is the built-in default layout, in its entirety:
