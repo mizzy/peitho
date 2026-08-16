@@ -3,6 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use pulldown_cmark::{Event, Parser, Tag};
 use serde_json::Value;
 
 use crate::{
@@ -39,29 +40,22 @@ impl LineMap {
         }
 
         let mut output_line = 0usize;
-        let mut previous = None;
-        for origin in &self.origins {
-            if origin.original_line == 0 {
-                if output_line + 1 == line && previous.is_none() {
-                    return (origin.file.clone(), 1);
+        for (index, origin) in self.origins.iter().enumerate() {
+            match origin.kind {
+                LineOriginKind::Source { line: source_line } => {
+                    output_line += 1;
+                    if output_line == line {
+                        return (origin.file.clone(), source_line);
+                    }
                 }
-                continue;
+                LineOriginKind::SyntheticLine => {
+                    output_line += 1;
+                    if output_line == line {
+                        return self.translate_synthetic_origin(index);
+                    }
+                }
+                LineOriginKind::SyntheticTerminator => {}
             }
-
-            output_line += 1;
-            if output_line == line {
-                return (origin.file.clone(), origin.original_line);
-            }
-            previous = Some(origin);
-        }
-
-        let index = line - 1;
-        if self
-            .origins
-            .get(index)
-            .is_some_and(|origin| origin.original_line == 0)
-        {
-            return self.translate_synthetic_origin(index);
         }
 
         (PathBuf::new(), line)
@@ -78,8 +72,10 @@ impl LineMap {
             .unwrap_or_default()
             .iter()
             .rev()
-            .find(|origin| origin.original_line != 0)
-            .map(|origin| (origin.file.clone(), origin.original_line))
+            .find_map(|origin| match origin.kind {
+                LineOriginKind::Source { line } => Some((origin.file.clone(), line)),
+                LineOriginKind::SyntheticTerminator | LineOriginKind::SyntheticLine => None,
+            })
             .unwrap_or_else(|| (synthetic.file.clone(), 1))
     }
 
@@ -88,7 +84,7 @@ impl LineMap {
             origins: (1..=line_count(source))
                 .map(|line| LineOrigin {
                     file: path.to_path_buf(),
-                    original_line: line,
+                    kind: LineOriginKind::Source { line },
                 })
                 .collect(),
         }
@@ -98,7 +94,14 @@ impl LineMap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineOrigin {
     pub file: PathBuf,
-    pub original_line: usize,
+    pub kind: LineOriginKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineOriginKind {
+    Source { line: usize },
+    SyntheticTerminator,
+    SyntheticLine,
 }
 
 pub fn expand_includes(
@@ -168,6 +171,8 @@ fn expand_includes_for_source(
         if let Some(line) = crate::parser::detect_frontmatter_present(&included_source) {
             return Err(included_frontmatter_error(line).with_origin_file(&include_path));
         }
+        validate_included_source_boundary(&included_source)
+            .map_err(|err| err.with_origin_file(&include_path))?;
         stack.push(include_key);
         let expanded =
             expand_includes_for_source(&included_source, 0, &include_path, deck_root, stack)?;
@@ -182,7 +187,7 @@ fn expand_includes_for_source(
         );
         source.push_str(&expanded.source);
         origins.extend(expanded.line_map.origins);
-        append_separator_boundary_newline_if_needed(
+        append_separator_boundary_blank_line_if_needed(
             &mut source,
             &mut origins,
             source_input,
@@ -278,37 +283,55 @@ fn append_region_leading_newline_if_needed(
         return;
     }
     if source[region_start..].starts_with('\n') {
-        output.push('\n');
-        origins.push(synthetic_boundary_origin(current_path));
+        append_synthetic_boundary_newline(output, origins, current_path);
     }
 }
 
-fn append_separator_boundary_newline_if_needed(
+fn append_separator_boundary_blank_line_if_needed(
     output: &mut String,
     origins: &mut Vec<LineOrigin>,
     source: &str,
     next: usize,
     current_path: &Path,
 ) {
-    if output.is_empty() || output.ends_with('\n') {
-        return;
-    }
     let next_line = source[next..]
         .split_inclusive('\n')
         .next()
         .unwrap_or_default()
         .trim_end_matches('\n')
         .trim_end_matches('\r');
-    if is_slide_separator(next_line) {
-        output.push('\n');
-        origins.push(synthetic_boundary_origin(current_path));
+    if !is_slide_separator(next_line) {
+        return;
+    }
+    while !ends_with_blank_line(output) {
+        append_synthetic_boundary_newline(output, origins, current_path);
     }
 }
 
-fn synthetic_boundary_origin(current_path: &Path) -> LineOrigin {
+fn append_synthetic_boundary_newline(
+    output: &mut String,
+    origins: &mut Vec<LineOrigin>,
+    current_path: &Path,
+) {
+    let kind = if output.ends_with('\n') {
+        LineOriginKind::SyntheticLine
+    } else {
+        LineOriginKind::SyntheticTerminator
+    };
+    output.push('\n');
+    origins.push(synthetic_boundary_origin(current_path, kind));
+}
+
+fn ends_with_blank_line(source: &str) -> bool {
+    source
+        .strip_suffix('\n')
+        .is_some_and(|source| source.trim_end_matches('\r').ends_with('\n'))
+}
+
+fn synthetic_boundary_origin(current_path: &Path, kind: LineOriginKind) -> LineOrigin {
     LineOrigin {
         file: current_path.to_path_buf(),
-        original_line: 0,
+        kind,
     }
 }
 
@@ -632,6 +655,63 @@ fn included_frontmatter_error(line: usize) -> BuildError {
     )
 }
 
+fn validate_included_source_boundary(source: &str) -> Result<()> {
+    const PROBE_PARAGRAPH: &str = "peitho include boundary probe";
+
+    let source_end = source.len();
+    let mut probe = String::with_capacity(source_end + PROBE_PARAGRAPH.len() + 7);
+    probe.push_str(source);
+    probe.push_str("\n\n---\n");
+    probe.push_str(PROBE_PARAGRAPH);
+
+    let mut spanning_event = None;
+    for (event, range) in
+        Parser::new_ext(&probe, crate::parser::slide_split_options()).into_offset_iter()
+    {
+        if matches!(&event, Event::Rule) && range.start >= source_end {
+            return Ok(());
+        }
+        if spanning_event.is_none() && range.start < source_end && range.end > source_end {
+            spanning_event = Some((event, range.start));
+        }
+    }
+
+    let Some((event, opening_offset)) = spanning_event else {
+        let line = crate::parser::line_for_offset(source, source_end.saturating_sub(1));
+        return Err(included_unclosed_construct_error(
+            line,
+            "parser event boundary",
+        ));
+    };
+    let line = crate::parser::line_for_offset(source, opening_offset);
+    let construct = match event {
+        Event::Start(Tag::CodeBlock(_)) => "code fence".to_owned(),
+        Event::Start(Tag::HtmlBlock) | Event::Html(_) => "HTML block".to_owned(),
+        Event::Start(tag) => format!("Markdown construct ({tag:?})"),
+        Event::End(tag) => format!("Markdown construct (End({tag:?}))"),
+        Event::Text(_) => "Markdown construct (Text)".to_owned(),
+        Event::Code(_) => "Markdown construct (Code)".to_owned(),
+        Event::InlineMath(_) => "Markdown construct (InlineMath)".to_owned(),
+        Event::DisplayMath(_) => "Markdown construct (DisplayMath)".to_owned(),
+        Event::InlineHtml(_) => "Markdown construct (InlineHtml)".to_owned(),
+        Event::FootnoteReference(_) => "Markdown construct (FootnoteReference)".to_owned(),
+        Event::SoftBreak => "Markdown construct (SoftBreak)".to_owned(),
+        Event::HardBreak => "Markdown construct (HardBreak)".to_owned(),
+        Event::Rule => "Markdown construct (Rule)".to_owned(),
+        Event::TaskListMarker(_) => "Markdown construct (TaskListMarker)".to_owned(),
+    };
+    Err(included_unclosed_construct_error(line, &construct))
+}
+
+fn included_unclosed_construct_error(line: usize, construct: &str) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        Some(line),
+        format!("included file ends inside an unclosed {construct}"),
+        "close it before the end of the included file",
+    )
+}
+
 fn append_chunk(
     output: &mut String,
     origins: &mut Vec<LineOrigin>,
@@ -648,7 +728,9 @@ fn append_chunk(
     output.push_str(chunk);
     origins.extend((0..line_count(chunk)).map(|index| LineOrigin {
         file: path.to_path_buf(),
-        original_line: first_line + index,
+        kind: LineOriginKind::Source {
+            line: first_line + index,
+        },
     }));
 }
 
@@ -991,7 +1073,7 @@ mod tests {
 
         assert_eq!(
             expanded.source,
-            "# Before\n\n---\n# Included One\n\n---\n<!-- {\"section\":\"Shared\",\"time\":\"1m\"} -->\n# Included Two\n---\n# After\n"
+            "# Before\n\n---\n# Included One\n\n---\n<!-- {\"section\":\"Shared\",\"time\":\"1m\"} -->\n# Included Two\n\n---\n# After\n"
         );
         assert_eq!(
             expanded.line_map.translate(4),
@@ -1001,7 +1083,209 @@ mod tests {
     }
 
     #[test]
-    fn include_without_trailing_newline_keeps_following_separator_on_new_line() {
+    fn include_ending_in_paragraph_keeps_following_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\nIncluded paragraph\n",
+        )
+        .unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), 3);
+        assert_eq!(parsed.parsed_slides()[2].fragments[0].markdown(), "# After");
+    }
+
+    #[test]
+    fn include_ending_in_list_keeps_following_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\n- Included item\n",
+        )
+        .unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), 3);
+        assert_eq!(parsed.parsed_slides()[2].fragments[0].markdown(), "# After");
+    }
+
+    #[test]
+    fn include_ending_in_closed_fence_keeps_following_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\n```\nincluded code\n```\n",
+        )
+        .unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), 3);
+        assert_eq!(parsed.parsed_slides()[2].fragments[0].markdown(), "# After");
+    }
+
+    #[test]
+    fn line_map_after_include_maps_following_slide_error_to_deck_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\nIncluded paragraph\n",
+        )
+        .unwrap();
+        let source = "<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n\n> unsupported\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let err = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+        let (origin_file, original_line) = expanded.line_map.translate(err.line.unwrap());
+
+        assert_eq!(origin_file, deck);
+        assert_eq!(original_line, 5);
+    }
+
+    #[test]
+    fn unclosed_fence_in_included_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        fs::write(&included, "# Included\n\n```rust\nfn included() {}\n").unwrap();
+        let source = "<!-- {\"include\":\"shared.md\"} -->\n";
+
+        let err = expand_includes(source, 0, &deck).unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.origin_file, Some(included));
+        assert_eq!(
+            err.message,
+            "included file ends inside an unclosed code fence"
+        );
+        assert_eq!(err.help, "close it before the end of the included file");
+    }
+
+    #[test]
+    fn unclosed_html_comment_in_included_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        fs::write(&included, "# Included\n\n<!-- oops\n").unwrap();
+        let source = "<!-- {\"include\":\"shared.md\"} -->\n";
+
+        let err = expand_includes(source, 0, &deck).unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.origin_file, Some(included));
+        assert_eq!(
+            err.message,
+            "included file ends inside an unclosed HTML block"
+        );
+        assert_eq!(err.help, "close it before the end of the included file");
+    }
+
+    #[test]
+    fn four_space_indented_backticks_do_not_open_a_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\n    ```\n\nIncluded paragraph\n",
+        )
+        .unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), 3);
+        assert_eq!(parsed.parsed_slides()[2].fragments[0].markdown(), "# After");
+    }
+
+    #[test]
+    fn backticks_inside_closed_html_comment_do_not_open_a_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("shared.md"),
+            "# Included\n\n<!--\n```\n-->\n\nIncluded paragraph\n",
+        )
+        .unwrap();
+        let source = "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n";
+
+        let expanded = expand_includes(source, 0, &deck).unwrap();
+        let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            &expanded.source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.parsed_slides().len(), 3);
+        assert_eq!(parsed.parsed_slides()[2].fragments[0].markdown(), "# After");
+    }
+
+    #[test]
+    fn unclosed_cdata_in_included_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        fs::write(&included, "# Included\n\n<![CDATA[\noops\n").unwrap();
+        let source = "<!-- {\"include\":\"shared.md\"} -->\n";
+
+        let err = expand_includes(source, 0, &deck).unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.origin_file, Some(included));
+        assert_eq!(
+            err.message,
+            "included file ends inside an unclosed HTML block"
+        );
+        assert_eq!(err.help, "close it before the end of the included file");
+    }
+
+    #[test]
+    fn include_without_trailing_newline_keeps_blank_line_before_following_separator() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         fs::write(dir.path().join("shared.md"), "# Included").unwrap();
@@ -1011,9 +1295,9 @@ mod tests {
 
         assert_eq!(
             expanded.source,
-            "# Before\n\n---\n# Included\n---\n# After\n"
+            "# Before\n\n---\n# Included\n\n---\n# After\n"
         );
-        assert_eq!(expanded.line_map.translate(6), (deck, 6));
+        assert_eq!(expanded.line_map.translate(7), (deck, 6));
     }
 
     #[test]
@@ -1031,11 +1315,9 @@ mod tests {
             expanded.line_map.translate(4),
             (dir.path().join("shared.md"), 1)
         );
-        assert!(expanded
-            .line_map
-            .origins
-            .iter()
-            .any(|origin| origin.file == deck && origin.original_line == 0));
+        assert!(expanded.line_map.origins.iter().any(|origin| {
+            origin.file == deck && origin.kind == LineOriginKind::SyntheticTerminator
+        }));
     }
 
     #[test]
