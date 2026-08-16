@@ -1835,6 +1835,8 @@ fn parse_slide(
                 | Event::End(TagEnd::Emphasis)
                 | Event::Start(Tag::Strong)
                 | Event::End(TagEnd::Strong)
+                | Event::Start(Tag::Strikethrough)
+                | Event::End(TagEnd::Strikethrough)
                 | Event::Start(Tag::Link { .. })
                 | Event::End(TagEnd::Link) => continue,
                 Event::Start(Tag::Image { .. })
@@ -1874,8 +1876,6 @@ fn parse_slide(
                 | Event::End(TagEnd::DefinitionListTitle)
                 | Event::Start(Tag::DefinitionListDefinition)
                 | Event::End(TagEnd::DefinitionListDefinition)
-                | Event::Start(Tag::Strikethrough)
-                | Event::End(TagEnd::Strikethrough)
                 | Event::Start(Tag::Superscript)
                 | Event::End(TagEnd::Superscript)
                 | Event::Start(Tag::Subscript)
@@ -2469,6 +2469,8 @@ fn parse_slide(
             | Event::End(TagEnd::Emphasis)
             | Event::Start(Tag::Strong)
             | Event::End(TagEnd::Strong)
+            | Event::Start(Tag::Strikethrough)
+            | Event::End(TagEnd::Strikethrough)
             | Event::Start(Tag::Link { .. })
             | Event::End(TagEnd::Link) => {
                 if matches!(
@@ -2892,6 +2894,7 @@ fn attach_slide_context(
 fn parser_options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_OLD_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
 }
 
@@ -4148,6 +4151,25 @@ enum Phase { Parsed, Mapped, Checked }
             .contains("- Markdown = source of truth"));
         assert_eq!(slide.fragments[3].kind(), &FragmentKind::Code);
         assert_eq!(slide.fragments[3].line(), 9);
+    }
+
+    #[test]
+    fn parses_strikethrough_in_paragraph() {
+        let markdown = "# Title\n\nThis is ~~deleted~~ text.";
+        let events = Parser::new_ext(markdown, parser_options()).collect::<Vec<_>>();
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Start(Tag::Strikethrough))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::End(TagEnd::Strikethrough))));
+
+        let deck = parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap();
+        let paragraph = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(paragraph.kind(), &FragmentKind::Paragraph);
+        assert_eq!(paragraph.markdown(), "This is ~~deleted~~ text.");
     }
 
     #[test]
