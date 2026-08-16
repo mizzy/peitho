@@ -123,7 +123,7 @@ A slide's page settings are one `<!-- { ... } -->` JSON comment (at most one per
   ---
   ```
 
-  Deck-relative paths only, nested up to 64 levels, cycles/absolute/`..`-escape are build errors. Included files may not carry frontmatter but may declare their own `section`/`time` markers. Watch mode rebuilds when any included file changes.
+  Deck-relative paths only, nested up to 64 levels, cycles/absolute/`..`-escape are build errors. Included files may not carry frontmatter or end inside an unclosed code fence or HTML block, which would swallow the following slide, but may declare their own `section`/`time` markers. Watch mode rebuilds when any included file changes.
 
 ### Speaker notes
 

@@ -2895,7 +2895,7 @@ fn parser_options() -> Options {
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
 }
 
-fn slide_split_options() -> Options {
+pub(crate) fn slide_split_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_OLD_FOOTNOTES
 }
 

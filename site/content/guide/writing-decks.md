@@ -324,6 +324,8 @@ frontmatter — the top-level deck is the sole source of deck-wide settings.
 Paths are resolved relative to the including file and must stay under the
 top-level deck's directory. Absolute paths, `..` escapes, missing targets,
 cycles, chains exceeding 64 nested includes, empty included files, and any
-of the above malformed shapes are all line-numbered build errors. Watch
-mode observes the entire include tree, so edits to any included file
-trigger a rebuild.
+of the above malformed shapes are all line-numbered build errors. Files that
+end inside an unclosed code fence or HTML block are also rejected because the
+unterminated block would otherwise swallow the following slide. Watch mode
+observes the entire include tree, so edits to any included file trigger a
+rebuild.
