@@ -100,7 +100,7 @@
   line-height: 1.35;
 }
 
-.footnotes:empty {
+.peitho-slide[data-empty-slots~="footnotes"] .footnotes {
   display: none;
 }
 

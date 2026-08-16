@@ -41,6 +41,19 @@ content.
 
 ![peitho build refusing a deck with two code blocks against a slot that allows 0..1](/guide-shots/build-error.png)
 
+## Styling empty slot wrappers
+
+Rendered slide roots list empty slots in `data-empty-slots`, so CSS can hide
+their wrappers without relying on whitespace-sensitive `:empty` matching:
+
+```css
+.peitho-slide[data-empty-slots~="quote"] .quote { display: none; }
+```
+
+Here, `.quote` is whatever class the layout author put on the wrapper element;
+`quote` in the attribute selector is the slot name, and Peitho does not tie the
+two together.
+
 ## Hybrid dispatch
 
 When multiple layouts are available, Peitho chooses a layout in this order:

@@ -62,6 +62,9 @@ const PEITHO_SLIDE_CLASS: &str = "peitho-slide";
 /// - a bare `.slot-*` class must exist in some provided layout
 ///   (`layout_slots`), which catches typos without breaking themes shared
 ///   across decks that use only a subset of the layouts
+/// - a slot name in `[data-empty-slots~=...]` follows the same scope as a
+///   `.slot-*` class: the addressed slide's layout when keyed, otherwise the
+///   union of provided layouts
 /// - bare root layout classes must not set `width` or `height` differently
 ///   from `.peitho-slide`, which owns the slide root's canvas sizing
 /// - everything else is unrestricted theme CSS
@@ -755,6 +758,41 @@ fn validate_override_selectors(
                 ));
             }
         }
+        for slot_selector in extract_empty_slot_values(selector, line_no)? {
+            let slot_name = &slot_selector.name;
+            let known = scope
+                .iter()
+                .filter_map(|slot| slot.strip_prefix("slot-"))
+                .any(|known_name| {
+                    if slot_selector.ascii_case_insensitive {
+                        known_name.eq_ignore_ascii_case(slot_name)
+                    } else {
+                        known_name == slot_name
+                    }
+                });
+            if !known {
+                let context = if keys.is_empty() {
+                    String::new()
+                } else {
+                    format!(" for slide '{}'", keys.join("', '"))
+                };
+                return Err(BuildError::new(
+                    ErrorKind::Theme,
+                    Some(line_no),
+                    format!(
+                        "unknown slot name '{slot_name}' in data-empty-slots selector{context}"
+                    ),
+                    format!(
+                        "use one of: {}",
+                        scope
+                            .iter()
+                            .filter_map(|slot| slot.strip_prefix("slot-"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -774,13 +812,152 @@ fn extract_slot_classes(selector: &str) -> Vec<String> {
 }
 
 fn extract_slide_key_values(selector: &str, line_no: usize) -> Result<Vec<String>> {
-    const ATTR: &str = "[data-slide-key";
+    extract_attribute_values(
+        selector,
+        "[data-slide-key",
+        line_no,
+        malformed_slide_key_selector,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EmptySlotSelectorValue {
+    name: String,
+    ascii_case_insensitive: bool,
+}
+
+fn extract_empty_slot_values(
+    selector: &str,
+    line_no: usize,
+) -> Result<Vec<EmptySlotSelectorValue>> {
+    const ATTRIBUTE: &str = "[data-empty-slots";
+
     let mut values = Vec::new();
     let mut offset = 0;
 
-    while let Some(relative_start) = selector[offset..].find(ATTR) {
+    while let Some(relative_start) = selector[offset..].find(ATTRIBUTE) {
         let attr_start = offset + relative_start;
-        let after_name_start = attr_start + ATTR.len();
+        let after_name_start = attr_start + ATTRIBUTE.len();
+        let after_name = &selector[after_name_start..];
+        let Some(close_relative) = after_name.find(']') else {
+            return Err(malformed_empty_slots_selector(line_no));
+        };
+        let close_index = after_name_start + close_relative;
+        let body = selector[after_name_start..close_index].trim_start();
+
+        if body.starts_with('-')
+            || body
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
+        {
+            offset = after_name_start;
+            continue;
+        }
+
+        if body.trim().is_empty() {
+            offset = close_index + 1;
+            continue;
+        }
+
+        let Some(value_part) = body.strip_prefix("~=") else {
+            return Err(malformed_empty_slots_selector(line_no));
+        };
+        values.push(parse_empty_slot_value(value_part, line_no)?);
+        offset = close_index + 1;
+    }
+
+    Ok(values)
+}
+
+fn parse_empty_slot_value(value_part: &str, line_no: usize) -> Result<EmptySlotSelectorValue> {
+    let value_part = value_part.trim_start();
+    if value_part.is_empty() {
+        return Err(malformed_empty_slots_selector(line_no));
+    }
+
+    let (name, trailing) = match value_part.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let rest = &value_part[quote.len_utf8()..];
+            let Some(end) = find_unescaped_quote(rest, quote) else {
+                return Err(malformed_empty_slots_selector(line_no));
+            };
+            (rest[..end].to_owned(), &rest[end + quote.len_utf8()..])
+        }
+        Some(_) => {
+            let end = value_part
+                .find(char::is_whitespace)
+                .unwrap_or(value_part.len());
+            let name = &value_part[..end];
+            if !is_unquoted_css_ident(name) {
+                return Err(malformed_empty_slots_selector(line_no));
+            }
+            (name.to_owned(), &value_part[end..])
+        }
+        None => return Err(malformed_empty_slots_selector(line_no)),
+    };
+
+    let trimmed_trailing = trailing.trim();
+    let ascii_case_insensitive = if trimmed_trailing.is_empty() {
+        false
+    } else {
+        if !trailing.chars().next().is_some_and(char::is_whitespace) {
+            return Err(malformed_empty_slots_selector(line_no));
+        }
+        match trimmed_trailing {
+            "i" | "I" => true,
+            _ => return Err(malformed_empty_slots_selector(line_no)),
+        }
+    };
+
+    Ok(EmptySlotSelectorValue {
+        name,
+        ascii_case_insensitive,
+    })
+}
+
+fn find_unescaped_quote(value: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn is_unquoted_css_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let valid_start = first.is_ascii_alphabetic()
+        || first == '_'
+        || (first == '-'
+            && chars
+                .clone()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '-'));
+
+    valid_start && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn extract_attribute_values(
+    selector: &str,
+    attribute: &str,
+    line_no: usize,
+    malformed_selector: fn(usize) -> BuildError,
+) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = selector[offset..].find(attribute) {
+        let attr_start = offset + relative_start;
+        let after_name_start = attr_start + attribute.len();
         let after_name = &selector[after_name_start..];
         let Some(close_relative) = after_name.find(']') else {
             return Err(malformed_selector(line_no));
@@ -800,14 +977,14 @@ fn extract_slide_key_values(selector: &str, line_no: usize) -> Result<Vec<String
         }
 
         let Some(value_part) = strip_attr_operator(body) else {
-            if body.trim() == "]" || body.trim().is_empty() {
+            if body.trim().is_empty() {
                 offset = close_index + 1;
                 continue;
             }
             return Err(malformed_selector(line_no));
         };
 
-        let value = parse_attr_value(value_part, line_no)?;
+        let value = parse_attr_value(value_part, line_no, malformed_selector)?;
         values.push(value);
         offset = close_index + 1;
     }
@@ -825,7 +1002,11 @@ fn strip_attr_operator(body: &str) -> Option<&str> {
     None
 }
 
-fn parse_attr_value(value_part: &str, line_no: usize) -> Result<String> {
+fn parse_attr_value(
+    value_part: &str,
+    line_no: usize,
+    malformed_selector: fn(usize) -> BuildError,
+) -> Result<String> {
     let value_part = value_part.trim_start();
     if value_part.is_empty() {
         return Err(malformed_selector(line_no));
@@ -852,12 +1033,21 @@ fn parse_attr_value(value_part: &str, line_no: usize) -> Result<String> {
     }
 }
 
-fn malformed_selector(line_no: usize) -> BuildError {
+fn malformed_slide_key_selector(line_no: usize) -> BuildError {
     BuildError::new(
         ErrorKind::Theme,
         Some(line_no),
         "malformed selector for data-slide-key",
         r#"write selectors like [data-slide-key="arch-1"] .slot-code"#,
+    )
+}
+
+fn malformed_empty_slots_selector(line_no: usize) -> BuildError {
+    BuildError::new(
+        ErrorKind::Theme,
+        Some(line_no),
+        "malformed selector for data-empty-slots",
+        r#"use '~=' (token match) because data-empty-slots holds a space-separated list; write selectors like [data-empty-slots~="quote"] .quote"#,
     )
 }
 
@@ -1086,6 +1276,146 @@ mod tests {
         assert_eq!(err.line, Some(1));
         assert!(err.to_string().contains("unknown slot class '.slot-code'"));
         assert_eq!(err.help, "use one of: .slot-title");
+    }
+
+    #[test]
+    fn rejects_unknown_slot_name_in_data_empty_slots_selector() {
+        let err = build(
+            "",
+            ".quote { display: block; }\n[data-empty-slots~=\"qoute\"] .quote { display: none; }",
+            &slots(&[("arch-1", &["slot-title", "slot-quote"])]),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert_eq!(err.line, Some(2));
+        assert!(err
+            .to_string()
+            .contains("unknown slot name 'qoute' in data-empty-slots selector"));
+        assert_eq!(err.help, "use one of: quote, title");
+    }
+
+    #[test]
+    fn accepts_known_slot_name_in_data_empty_slots_selector() {
+        let slide_slots = slots(&[("cover", &["slot-title"])]);
+        let layout_slots = ["slot-title", "slot-quote"]
+            .iter()
+            .map(|class| (*class).to_owned())
+            .collect();
+        let css = build_theme_css(
+            &[CssFile {
+                name: "base.css".to_owned(),
+                content: r#"[data-empty-slots~="quote"] .quote { display: none; }"#.to_owned(),
+            }],
+            &slide_slots,
+            &layout_slots,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(css.contains(r#"[data-empty-slots~="quote"] .quote"#));
+    }
+
+    fn assert_rejects_data_empty_slots_operator(operator: &str, value: &str) {
+        let err = build(
+            "",
+            &format!("\n[data-empty-slots{operator}=\"{value}\"] .quote {{ display: none; }}"),
+            &slots(&[("arch-1", &["slot-title", "slot-quote"])]),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Theme);
+        assert_eq!(err.line, Some(2));
+        assert!(
+            err.to_string()
+                .contains("malformed selector for data-empty-slots"),
+            "{err}"
+        );
+        assert!(err.help.contains("use '~=' (token match)"), "{err}");
+        assert!(err.help.contains("space-separated list"), "{err}");
+    }
+
+    #[test]
+    fn rejects_equals_operator_for_data_empty_slots_selector() {
+        assert_rejects_data_empty_slots_operator("", "quote");
+    }
+
+    #[test]
+    fn rejects_dash_match_operator_for_data_empty_slots_selector() {
+        assert_rejects_data_empty_slots_operator("|", "quote");
+    }
+
+    #[test]
+    fn rejects_prefix_operator_for_data_empty_slots_selector() {
+        assert_rejects_data_empty_slots_operator("^", "quote");
+    }
+
+    #[test]
+    fn rejects_suffix_operator_for_data_empty_slots_selector() {
+        assert_rejects_data_empty_slots_operator("$", "quote");
+    }
+
+    #[test]
+    fn rejects_substring_operator_for_data_empty_slots_selector() {
+        assert_rejects_data_empty_slots_operator("*", "quo");
+    }
+
+    #[test]
+    fn accepts_ascii_case_insensitive_data_empty_slots_selector() {
+        let css = build(
+            "",
+            r#"[data-empty-slots~="Quote" i] .quote { display: none; }
+[data-empty-slots~='TITLE' I] .title { display: none; }"#,
+            &slots(&[("arch-1", &["slot-title", "slot-quote"])]),
+        )
+        .unwrap();
+
+        assert!(css.contains(r#"[data-empty-slots~="Quote" i] .quote"#));
+        assert!(css.contains(r#"[data-empty-slots~='TITLE' I] .title"#));
+    }
+
+    #[test]
+    fn accepts_unquoted_ident_in_data_empty_slots_selector() {
+        let css = build(
+            "",
+            "[data-empty-slots ~= quote ] .quote { display: none; }",
+            &slots(&[("arch-1", &["slot-quote"])]),
+        )
+        .unwrap();
+
+        assert!(css.contains("[data-empty-slots ~= quote ] .quote"));
+    }
+
+    #[test]
+    fn accepts_bare_data_empty_slots_presence_selector() {
+        let css = build(
+            "",
+            "[data-empty-slots] .quote { display: none; }",
+            &slots(&[("arch-1", &["slot-quote"])]),
+        )
+        .unwrap();
+
+        assert!(css.contains("[data-empty-slots] .quote"));
+    }
+
+    #[test]
+    fn keyed_data_empty_slots_selector_uses_that_slides_layout() {
+        let deck_slots = slots(&[
+            ("walkthrough", &["slot-title", "slot-quote"]),
+            ("cover", &["slot-title"]),
+        ]);
+
+        let err = build(
+            "",
+            r#"[data-slide-key="cover"][data-empty-slots~="quote"] .quote { display: none; }"#,
+            &deck_slots,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unknown slot name 'quote' in data-empty-slots selector for slide 'cover'"));
+        assert_eq!(err.help, "use one of: title");
     }
 
     #[test]

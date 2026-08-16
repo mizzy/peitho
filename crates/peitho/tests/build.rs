@@ -1588,7 +1588,10 @@ fn base_theme_contains_footnote_rules() {
 
     assert!(css.contains(".footnotes"));
     assert!(css.contains("margin-top: auto;"));
-    assert!(rule_block(".footnotes:empty").contains("display: none;"));
+    assert!(
+        rule_block(r#".peitho-slide[data-empty-slots~="footnotes"] .footnotes"#)
+            .contains("display: none;")
+    );
     assert!(css.contains(".peitho-footnotes"));
     let footnote_ref = rule_block(".peitho-footnote-ref");
     assert!(footnote_ref.contains("font-size: 0.62em;"));
@@ -2103,7 +2106,7 @@ fn write_layout_dir(root: &Path, name: &str, class: &str) -> PathBuf {
     fs::write(
         dir.join("statement.html"),
         format!(
-            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#
+            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer></section>"#
         ),
     )
     .unwrap();

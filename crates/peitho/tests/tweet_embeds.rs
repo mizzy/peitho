@@ -60,7 +60,7 @@ fn write_tweet_deck(path: &Path) {
     fs::create_dir_all(&layouts).unwrap();
     fs::write(
         layouts.join("title-image.html"),
-        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#,
+        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><slot name="image" accepts="image" arity="1"></slot><slot name="footnotes" accepts="blocks" arity="0..1"></slot></section>"#,
     )
     .unwrap();
     fs::write(path, format!("# Tweet\n\n```embed\n{STATUS_URL}\n```\n")).unwrap();
@@ -71,7 +71,7 @@ fn write_embed_deck(path: &Path, blocks: &[(&str, Option<&str>)]) {
     fs::create_dir_all(&layouts).unwrap();
     fs::write(
         layouts.join("title-image.html"),
-        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><slot name="image" accepts="image" arity="0..*"></slot></section>"#,
+        r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><slot name="image" accepts="image" arity="0..*"></slot><slot name="footnotes" accepts="blocks" arity="0..1"></slot></section>"#,
     )
     .unwrap();
     let mut markdown = "# Tweet\n\n".to_owned();

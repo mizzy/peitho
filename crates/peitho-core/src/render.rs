@@ -172,12 +172,26 @@ fn render_slide(
     let page_number_value = attrs.page_number.map(|number| number.to_string());
     let page_total_value = attrs.page_total.map(|total| total.to_string());
     let reveal_steps_value = (attrs.reveal_steps > 0).then(|| attrs.reveal_steps.to_string());
+    let empty_slot_names = layout
+        .slots()
+        .keys()
+        .filter(|name| {
+            slots
+                .get(*name)
+                .is_none_or(|slot| slot.fragments().is_empty())
+        })
+        .map(SlotName::as_str)
+        .collect::<Vec<_>>();
+    let empty_slots_value = (!empty_slot_names.is_empty()).then(|| empty_slot_names.join(" "));
     let slot_values = slots.clone();
     let mut rewriter = HtmlRewriter::new(
         Settings {
             element_content_handlers: vec![
                 element!("section", move |el| {
                     el.set_attribute("data-slide-key", &key_value)?;
+                    if let Some(empty_slots) = &empty_slots_value {
+                        el.set_attribute("data-empty-slots", empty_slots)?;
+                    }
                     if let Some(number) = &page_number_value {
                         el.set_attribute("data-peitho-page-number", number)?;
                     }
@@ -2873,6 +2887,10 @@ mod tests {
         assert!(!html.contains("peitho-footnotes"), "{html}");
         assert!(!html.contains("peitho-footnote-ref"), "{html}");
         assert!(
+            html.contains(r#"data-empty-slots="code footnotes""#),
+            "{html}"
+        );
+        assert!(
             html.contains(r#"<footer class="footnotes"></footer>"#),
             "{html}"
         );
@@ -2901,6 +2919,7 @@ mod tests {
         assert!(!body_region.contains("peitho-footnotes"), "{html}");
         assert!(html.contains(r#"<pre class="slot-code"><code>"#), "{html}");
         assert!(html.contains(r#"<li><p>Supporting note.</p>"#), "{html}");
+        assert!(!html.contains("data-empty-slots"), "{html}");
     }
 
     #[test]
@@ -3337,6 +3356,7 @@ mod tests {
             r#"<section data-slide-key="intro" class="peitho-slide"><h1><span class="slot-title">Intro</span></h1><div class="slot-body"><p>Body</p>
 </div></section>"#
         );
+        assert!(!plain.slides()[0].html().contains("data-empty-slots"));
         assert_eq!(plain.css(), theme_css);
         assert_eq!(
             math.slides()[0].html(),
@@ -3379,6 +3399,48 @@ mod tests {
 
         assert!(html.contains(r#"<figure class="code"></figure>"#));
         assert!(!html.contains(r#"class="slot-code""#));
+    }
+
+    #[test]
+    fn renders_one_empty_slot_on_slide_root() {
+        let rendered = render_checked_deck_with_layout(
+            "<!-- {\"key\":\"empty-quote\"} -->\n# Architecture",
+            title_quote_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-empty-slots="quote""#), "{html}");
+        assert!(!html.contains(r#"data-empty-slots="title""#), "{html}");
+    }
+
+    #[test]
+    fn renders_all_empty_slots_on_slide_root() {
+        let layout = parse_layout(
+            "title-quote-aside",
+            r#"<section>
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <blockquote><slot name="quote" accepts="blocks" arity="0..1"></slot></blockquote>
+  <aside><slot name="aside" accepts="blocks" arity="0..1"></slot></aside>
+</section>"#,
+        )
+        .unwrap();
+
+        let rendered = render_checked_deck_with_layout("# Architecture", layout);
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-empty-slots="aside quote""#), "{html}");
+    }
+
+    #[test]
+    fn empty_slot_state_preserves_slide_key_and_class_stamping() {
+        let rendered = render_checked_deck_with_layout(
+            "<!-- {\"key\":\"arch-1\"} -->\n# Architecture",
+            title_quote_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-slide-key="arch-1""#), "{html}");
+        assert!(html.contains(r#"class="feature peitho-slide""#), "{html}");
     }
 
     #[test]
@@ -4699,6 +4761,17 @@ Paragraph after heading.
         parse_layout(
             "title-body",
             r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
+    fn title_quote_layout() -> Layout {
+        parse_layout(
+            "title-quote",
+            r#"<section class="feature">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <blockquote class="quote"><slot name="quote" accepts="blocks" arity="0..1"></slot></blockquote>
+</section>"#,
         )
         .unwrap()
     }
