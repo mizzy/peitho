@@ -1216,7 +1216,7 @@ fn write_layout_dir(root: &Path, name: &str, class: &str) -> PathBuf {
     fs::write(
         dir.join("statement.html"),
         format!(
-            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#
+            r#"<section class="{class}"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot><footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer></section>"#
         ),
     )
     .unwrap();

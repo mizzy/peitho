@@ -270,6 +270,14 @@ Point `layouts:` in the deck's frontmatter at an HTML file or a directory of `*.
 2. **Single layout, unconditional** — if there is only one layout, always use it (contract violations still error with line numbers, as usual)
 3. **Type-driven dispatch** — with multiple layouts, each slide is routed to the layout whose slot contract matches the shape of its content (title only / has body / has code, etc.). Exactly one match is required; **multiple matches (ambiguous) and zero matches are both build errors** rather than silently resolved, prompting an explicit choice
 
+Rendered slide roots list empty slots in `data-empty-slots`, so layout CSS can hide their wrappers without relying on whitespace-sensitive `:empty` matching:
+
+```css
+.peitho-slide[data-empty-slots~="quote"] .quote { display: none; }
+```
+
+Here, `.quote` is whatever class the layout author put on the wrapper element; `quote` in the attribute selector is the slot name, and Peitho does not tie the two together.
+
 ### Syntax highlighting
 
 Code blocks with a language tag are turned into `hl-*` class spans by [syntect](https://github.com/trishume/syntect) at build time. There is no runtime JS; colors are defined in theme CSS. An unknown language tag is a build error with a line number (no tag means plain rendering).
