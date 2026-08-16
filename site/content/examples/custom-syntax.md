@@ -14,11 +14,11 @@ github_path = "examples/custom-syntax"
 ## What it demonstrates
 
 Peitho highlights code at build time with syntect, and a language tag it cannot
-resolve is a line-numbered parse error — never silently plain text. TOML is
-genuinely absent from syntect's built-in set, so the cover slide's `toml` fence
-would fail the build on its own. The fix is the deck's only asset: a compact
-`syntaxes/toml.sublime-syntax` grammar, picked up by deck-adjacent auto-detect
-and merged into the built-in syntax set.
+resolve is a line-numbered parse error — never silently plain text. Carina's
+`.crn` language is absent from Peitho's bundled set, so the cover slide's `crn`
+fence would fail the build on its own. The fix is the deck's only asset: a compact
+`syntaxes/crn.sublime-syntax` grammar, picked up by deck-adjacent auto-detect
+and merged into the bundled syntax set.
 
 The deck building at all is the proof that the grammar loads; the second slide
 shows the exact error you would get without it.
