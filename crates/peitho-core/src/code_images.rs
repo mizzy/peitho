@@ -563,7 +563,8 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
             | FragmentKind::GenericEmbedCard { .. }
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
-            | FragmentKind::List => Ok(fragment),
+            | FragmentKind::List
+            | FragmentKind::Blockquote => Ok(fragment),
         }
     })()?;
 

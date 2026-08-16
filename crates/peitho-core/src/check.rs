@@ -118,6 +118,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment) -> bool {
             | (Accepts::Blocks, FragmentKind::Heading { .. })
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Blocks, FragmentKind::Blockquote)
             | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::GenericEmbedCard { .. })
@@ -409,6 +410,37 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::Accepts);
         assert_eq!(err.line, Some(3));
         assert!(err.to_string().contains("slot 'body' accepts inline"));
+        assert_eq!(
+            err.help,
+            "change the layout accepts to 'blocks' or move this content to a blocks slot"
+        );
+    }
+
+    #[test]
+    fn rejects_blockquote_in_explicit_inline_slot_with_named_contract_error() {
+        let layout = parse_layout(
+            "inline-body",
+            r#"<section><slot name="body" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = map_by_convention(
+            parse_markdown(
+                "::: {slot=body}\n\n> quoted\n\n:::\n",
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap(),
+            &layout,
+        )
+        .unwrap();
+
+        let err = check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Accepts);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "slot 'body' accepts inline, but got blockquote"
+        );
         assert_eq!(
             err.help,
             "change the layout accepts to 'blocks' or move this content to a blocks slot"

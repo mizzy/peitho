@@ -232,6 +232,29 @@ enum OpenBlock {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContainerKind {
+    List,
+    Blockquote,
+}
+
+impl ContainerKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Blockquote => "blockquote",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OpenContainer {
+    kind: ContainerKind,
+    start: usize,
+}
+
+type ContainerState = Vec<OpenContainer>;
+
 enum ParagraphInline {
     Empty,
     Text,
@@ -570,24 +593,34 @@ pub(crate) fn parse_markdown(
 fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SlideRange>> {
     let mut ranges = Vec::new();
     let mut start = content_start;
-    let mut list_depth = 0usize;
+    let mut block_depth = 0usize;
     let content = &source[content_start..];
 
     for (event, range) in Parser::new_ext(content, slide_split_options()).into_offset_iter() {
         let global_start = content_start + range.start;
         let global_end = content_start + range.end;
-        match event {
-            Event::Start(Tag::List(_)) => list_depth += 1,
-            Event::End(TagEnd::List(_)) => list_depth = list_depth.saturating_sub(1),
-            Event::Rule if list_depth == 0 => {
-                ranges.push(SlideRange {
-                    start,
-                    end: global_start,
-                });
-                start = global_end;
-            }
-            Event::Rule => {}
-            _ => {}
+        if let Event::Start(Tag::List(_ordered)) = &event {
+            block_depth += 1;
+            continue;
+        }
+        if let Event::Start(Tag::BlockQuote(_kind)) = &event {
+            block_depth += 1;
+            continue;
+        }
+        if let Event::End(TagEnd::List(_ordered)) = &event {
+            block_depth = block_depth.saturating_sub(1);
+            continue;
+        }
+        if let Event::End(TagEnd::BlockQuote(_kind)) = &event {
+            block_depth = block_depth.saturating_sub(1);
+            continue;
+        }
+        if matches!(event, Event::Rule) && block_depth == 0 {
+            ranges.push(SlideRange {
+                start,
+                end: global_start,
+            });
+            start = global_end;
         }
     }
 
@@ -1725,6 +1758,42 @@ fn push_checked_fragment(
     Ok(())
 }
 
+fn enter_container(container: &mut ContainerState, kind: ContainerKind, start: usize) {
+    container.push(OpenContainer { kind, start });
+}
+
+fn close_container(
+    container: &mut ContainerState,
+    closing_kind: ContainerKind,
+    source: &str,
+    event_start: usize,
+    event_end: usize,
+) -> Result<Option<(usize, SourceFragment)>> {
+    let Some(open) = container.pop() else {
+        return Err(unsupported_construct(
+            line_for_offset(source, event_start),
+            &format!(
+                "{} end without {} start",
+                closing_kind.name(),
+                closing_kind.name()
+            ),
+        ));
+    };
+
+    debug_assert_eq!(open.kind, closing_kind);
+    if !container.is_empty() {
+        return Ok(None);
+    }
+
+    let line = line_for_offset(source, open.start);
+    let markdown = source_slice(source, open.start, event_end);
+    let fragment = match open.kind {
+        ContainerKind::List => SourceFragment::list(line, markdown),
+        ContainerKind::Blockquote => SourceFragment::blockquote(line, markdown),
+    };
+    Ok(Some((open.start, fragment)))
+}
+
 fn parse_slide(
     source: &str,
     range: SlideRange,
@@ -1750,8 +1819,7 @@ fn parse_slide(
     let mut block: Option<OpenBlock> = None;
     let mut footnotes = FootnoteAccumulator::default();
     let mut footnote_capture: Option<FootnoteCapture> = None;
-    let mut list_depth = 0usize;
-    let mut list_start = None;
+    let mut container = ContainerState::new();
     let mut seen_content = false;
     // An HTML block can span multiple `Event::Html` events (one per source line
     // for a multi-line comment). We buffer them between Start(HtmlBlock)/End
@@ -1762,10 +1830,13 @@ fn parse_slide(
     for (event, local_range) in Parser::new_ext(slice, parser_options()).into_offset_iter() {
         let global_start = range.start + local_range.start;
         let global_end = range.start + local_range.end;
-        let line = line_for_offset(source, global_start);
         if let Event::Start(Tag::FootnoteDefinition(label)) = &event {
-            if list_depth > 0 {
-                let err = unsupported_construct(line, "footnote definition inside list");
+            let line = line_for_offset(source, global_start);
+            if let Some(open) = container.last() {
+                let err = unsupported_construct(
+                    line,
+                    &format!("footnote definition inside {}", open.kind.name()),
+                );
                 return Err(attach_slide_context(
                     err,
                     index,
@@ -1786,6 +1857,7 @@ fn parse_slide(
             continue;
         }
         if let Some(capture) = footnote_capture.as_mut() {
+            let line = line_for_offset(source, global_start);
             match event {
                 Event::End(TagEnd::FootnoteDefinition) => {
                     let capture = footnote_capture
@@ -1839,6 +1911,15 @@ fn parse_slide(
                 | Event::End(TagEnd::Strikethrough)
                 | Event::Start(Tag::Link { .. })
                 | Event::End(TagEnd::Link) => continue,
+                Event::Start(Tag::BlockQuote(_kind)) | Event::End(TagEnd::BlockQuote(_kind)) => {
+                    let err = unsupported_footnote_block_error(line);
+                    return Err(attach_slide_context(
+                        err,
+                        index,
+                        explicit_key.as_ref(),
+                        &fragments,
+                    ));
+                }
                 Event::Start(Tag::Image { .. })
                 | Event::End(TagEnd::Image)
                 | Event::Start(Tag::Heading { .. })
@@ -1849,8 +1930,6 @@ fn parse_slide(
                 | Event::End(TagEnd::List(_))
                 | Event::Start(Tag::Item)
                 | Event::End(TagEnd::Item)
-                | Event::Start(Tag::BlockQuote(_))
-                | Event::End(TagEnd::BlockQuote(_))
                 | Event::Start(Tag::HtmlBlock)
                 | Event::End(TagEnd::HtmlBlock)
                 | Event::Start(Tag::Table(_))
@@ -1890,25 +1969,59 @@ fn parse_slide(
                 }
             }
         }
-        match event {
-            Event::Rule => {
-                let err = unsupported_construct(line, "thematic break inside slide");
-                return Err(attach_slide_context(
-                    err,
-                    index,
-                    explicit_key.as_ref(),
-                    &fragments,
-                ));
+
+        let opening_kind = if let Event::Start(Tag::List(_ordered)) = &event {
+            Some(ContainerKind::List)
+        } else if let Event::Start(Tag::BlockQuote(_kind)) = &event {
+            Some(ContainerKind::Blockquote)
+        } else {
+            None
+        };
+        if let Some(kind) = opening_kind {
+            enter_container(&mut container, kind, global_start);
+            continue;
+        }
+
+        let closing_kind = if let Event::End(TagEnd::List(_ordered)) = &event {
+            Some(ContainerKind::List)
+        } else if let Event::End(TagEnd::BlockQuote(_kind)) = &event {
+            Some(ContainerKind::Blockquote)
+        } else {
+            None
+        };
+        if let Some(kind) = closing_kind {
+            let closed = close_container(&mut container, kind, source, global_start, global_end)
+                .map_err(|err| {
+                    attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                })?;
+            if let Some((start, fragment)) = closed {
+                push_checked_fragment(
+                    source,
+                    start,
+                    global_end,
+                    &markers,
+                    &mut fragments,
+                    &mut div_stack,
+                    fragment,
+                )
+                .map_err(|err| {
+                    attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                })?;
+                seen_content = true;
             }
-            Event::Start(Tag::List(_)) => {
-                if list_depth == 0 {
-                    list_start = Some(global_start);
-                }
-                list_depth += 1;
-            }
-            Event::End(TagEnd::List(_)) => {
-                if list_depth == 0 {
-                    let err = unsupported_construct(line, "list end without list start");
+            continue;
+        }
+
+        if let Some(open) = container.last() {
+            if open.kind == ContainerKind::Blockquote {
+                if let Event::Start(Tag::CodeBlock(_kind)) = &event {
+                    let message = format!("code block inside a {}", open.kind.name());
+                    let err = BuildError::new(
+                        ErrorKind::Parse,
+                        Some(line_for_offset(source, global_start)),
+                        message,
+                        "move the code block out of the quote",
+                    );
                     return Err(attach_slide_context(
                         err,
                         index,
@@ -1916,32 +2029,38 @@ fn parse_slide(
                         &fragments,
                     ));
                 }
-                list_depth -= 1;
-                if list_depth == 0 {
-                    if let Some(start) = list_start.take() {
-                        let fragment = SourceFragment::list(
-                            line_for_offset(source, start),
-                            source_slice(source, start, global_end),
-                        );
-                        if let Err(err) = push_checked_fragment(
-                            source,
-                            start,
-                            global_end,
-                            &markers,
-                            &mut fragments,
-                            &mut div_stack,
-                            fragment,
-                        ) {
-                            return Err(attach_slide_context(
-                                err,
-                                index,
-                                explicit_key.as_ref(),
-                                &fragments,
-                            ));
-                        }
-                        seen_content = true;
-                    }
-                }
+            }
+        }
+
+        if container
+            .last()
+            .is_some_and(|open| event_allowed_inside_container(open.kind, &event))
+        {
+            continue;
+        }
+
+        let line = line_for_offset(source, global_start);
+        match event {
+            Event::Rule => {
+                let err = if container
+                    .last()
+                    .is_some_and(|open| open.kind == ContainerKind::Blockquote)
+                {
+                    BuildError::new(
+                        ErrorKind::Parse,
+                        Some(line),
+                        "thematic break inside a blockquote",
+                        "end the quote before the separator",
+                    )
+                } else {
+                    unsupported_construct(line, "thematic break inside slide")
+                };
+                return Err(attach_slide_context(
+                    err,
+                    index,
+                    explicit_key.as_ref(),
+                    &fragments,
+                ));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
                 if let Some((buf, _)) = html_buf.as_mut() {
@@ -1956,7 +2075,7 @@ fn parse_slide(
                         index,
                         &fragments,
                         &ctx,
-                        list_depth,
+                        container.len(),
                         seen_content,
                         &mut explicit_key,
                         &mut layout_request,
@@ -1979,8 +2098,9 @@ fn parse_slide(
                 ));
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
-                if list_depth > 0 {
-                    let err = unsupported_construct(line, "image inside list");
+                if let Some(open) = container.last() {
+                    let err =
+                        unsupported_construct(line, &format!("image inside {}", open.kind.name()));
                     return Err(attach_slide_context(
                         err,
                         index,
@@ -2045,7 +2165,19 @@ fn parse_slide(
                     }
                 }
             }
-            _ if list_depth > 0 => {}
+            Event::Start(tag) if unsupported_tag(&tag) => {
+                let name = container.last().map_or_else(
+                    || unsupported_tag_name(&tag).to_owned(),
+                    |open| format!("{} inside {}", unsupported_tag_name(&tag), open.kind.name()),
+                );
+                let err = unsupported_construct(line, &name);
+                return Err(attach_slide_context(
+                    err,
+                    index,
+                    explicit_key.as_ref(),
+                    &fragments,
+                ));
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 block = Some(OpenBlock::Heading {
                     level: heading_level_to_u8(level),
@@ -2441,7 +2573,7 @@ fn parse_slide(
                         index,
                         &fragments,
                         &ctx,
-                        list_depth,
+                        container.len(),
                         seen_content,
                         &mut explicit_key,
                         &mut layout_request,
@@ -2453,15 +2585,6 @@ fn parse_slide(
                         &mut note_fragments,
                     )?;
                 }
-            }
-            Event::Start(tag) if unsupported_tag(&tag) => {
-                let err = unsupported_construct(line, unsupported_tag_name(&tag));
-                return Err(attach_slide_context(
-                    err,
-                    index,
-                    explicit_key.as_ref(),
-                    &fragments,
-                ));
             }
             Event::Start(Tag::Item)
             | Event::End(TagEnd::Item)
@@ -2658,7 +2781,7 @@ fn revealed_footnote_reference_range(
 ) -> Option<RevealedFootnoteReferenceRange> {
     let span = fragment.reveal_span()?;
     match fragment.kind() {
-        FragmentKind::Heading { .. } | FragmentKind::Paragraph => {
+        FragmentKind::Heading { .. } | FragmentKind::Paragraph | FragmentKind::Blockquote => {
             let (start_line, end_line) = fragment_line_range(fragment);
             Some(RevealedFootnoteReferenceRange::Fragment {
                 start_line,
@@ -2779,7 +2902,7 @@ fn process_html_chunk(
     index: usize,
     fragments: &[SourceFragment],
     explicit_key_ctx: &Option<(SlideKey, usize)>,
-    list_depth: usize,
+    block_container_depth: usize,
     seen_content: bool,
     explicit_key: &mut Option<(SlideKey, usize)>,
     layout_request: &mut Option<LayoutRequest>,
@@ -2793,7 +2916,7 @@ fn process_html_chunk(
     if let Some(settings) = parse_page_comment(raw, line)
         .map_err(|err| attach_slide_context(err, index, explicit_key_ctx.as_ref(), fragments))?
     {
-        if list_depth > 0 || seen_content {
+        if block_container_depth > 0 || seen_content {
             let err = BuildError::new(
                 ErrorKind::Parse,
                 Some(line),
@@ -3087,7 +3210,7 @@ fn unsupported_construct(line: usize, name: &str) -> BuildError {
         ErrorKind::Parse,
         Some(line),
         format!("unsupported construct '{name}'"),
-        "rewrite this slide using headings, paragraphs, lists, or fenced code blocks for milestone 1",
+        "rewrite this slide using headings, paragraphs, lists, blockquotes, or fenced code blocks",
     )
 }
 
@@ -3121,15 +3244,61 @@ fn unexpected_frontmatter_content_error(source: &str, offset: usize) -> BuildErr
 fn unsupported_tag(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
-        Tag::BlockQuote(_) | Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell
+        Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell
     )
 }
 
 fn unsupported_tag_name(tag: &Tag<'_>) -> &'static str {
     match tag {
-        Tag::BlockQuote(_) => "blockquote",
         Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell => "table",
         _ => "markdown",
+    }
+}
+
+fn event_allowed_inside_container(kind: ContainerKind, event: &Event<'_>) -> bool {
+    let allowed_in_any_container = matches!(
+        event,
+        Event::Start(Tag::Heading { .. })
+            | Event::End(TagEnd::Heading(_))
+            | Event::Start(Tag::Paragraph)
+            | Event::End(TagEnd::Paragraph)
+            | Event::Start(Tag::Item)
+            | Event::End(TagEnd::Item)
+            | Event::Start(Tag::DefinitionList)
+            | Event::End(TagEnd::DefinitionList)
+            | Event::Start(Tag::DefinitionListTitle)
+            | Event::End(TagEnd::DefinitionListTitle)
+            | Event::Start(Tag::DefinitionListDefinition)
+            | Event::End(TagEnd::DefinitionListDefinition)
+            | Event::Start(Tag::Emphasis)
+            | Event::End(TagEnd::Emphasis)
+            | Event::Start(Tag::Strong)
+            | Event::End(TagEnd::Strong)
+            | Event::Start(Tag::Strikethrough)
+            | Event::End(TagEnd::Strikethrough)
+            | Event::Start(Tag::Superscript)
+            | Event::End(TagEnd::Superscript)
+            | Event::Start(Tag::Subscript)
+            | Event::End(TagEnd::Subscript)
+            | Event::Start(Tag::Link { .. })
+            | Event::End(TagEnd::Link)
+            | Event::Text(_)
+            | Event::Code(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::TaskListMarker(_)
+    );
+    match kind {
+        ContainerKind::List => {
+            allowed_in_any_container
+                || matches!(
+                    event,
+                    Event::Start(Tag::CodeBlock(_)) | Event::End(TagEnd::CodeBlock)
+                )
+        }
+        ContainerKind::Blockquote => allowed_in_any_container,
     }
 }
 
@@ -4486,7 +4655,7 @@ After reveal.
             .contains("unsupported construct 'footnote definition inside list'"));
         assert_eq!(
             err.help,
-            "rewrite this slide using headings, paragraphs, lists, or fenced code blocks for milestone 1"
+            "rewrite this slide using headings, paragraphs, lists, blockquotes, or fenced code blocks"
         );
     }
 
@@ -5076,9 +5245,32 @@ After list
     }
 
     #[test]
-    fn rejects_unsupported_construct_with_line_and_help() {
+    fn parses_blockquotes_with_nested_content_and_explicit_slot_children() {
+        let deck = parse_markdown(
+            "# Title\n\n> First paragraph.\n>\n> Second paragraph.\n>\n> > Nested quote.\n\n::: {slot=body}\n\n> Slotted quote.\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Blockquote);
+        assert_eq!(slide.fragments[1].line(), 3);
+        assert_eq!(
+            slide.fragments[1].markdown(),
+            "> First paragraph.\n>\n> Second paragraph.\n>\n> > Nested quote."
+        );
+        let FragmentKind::SlotGroup { children, .. } = slide.fragments[2].kind() else {
+            panic!("expected explicit slot group");
+        };
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].kind(), &FragmentKind::Blockquote);
+        assert_eq!(children[0].markdown(), "> Slotted quote.");
+    }
+
+    #[test]
+    fn rejects_image_inside_blockquote_with_source_line() {
         let err = parse_markdown(
-            "# Title\n\n> quoted",
+            "# Title\n\n> ![Architecture](x.png)",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
@@ -5087,17 +5279,205 @@ After list
         assert_eq!(err.line, Some(3));
         assert!(err
             .to_string()
-            .contains("unsupported construct 'blockquote'"));
+            .contains("unsupported construct 'image inside blockquote'"));
+    }
+
+    #[test]
+    fn rejects_footnote_definition_inside_blockquote_with_named_container() {
+        let err = parse_markdown(
+            "# Title\n\n> [^a]: quoted note",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'footnote definition inside blockquote'"));
+    }
+
+    #[test]
+    fn rejects_fenced_code_inside_blockquote_before_language_or_renderer_dispatch() {
+        for language in ["notalang", "mermaid", "rust"] {
+            let markdown = format!("# Title\n\n> ```{language}\n> value\n> ```");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "{language}");
+            assert_eq!(err.line, Some(3), "{language}");
+            assert!(
+                err.to_string().contains("code block inside a blockquote"),
+                "{language}: {err}"
+            );
+            assert_eq!(
+                err.help, "move the code block out of the quote",
+                "{language}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_language_fence_inside_blockquote_nested_in_list() {
+        let err = parse_markdown(
+            "# Title\n\n- > ```notalang\n  > value\n  > ```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(
+            err.to_string().contains("code block inside a blockquote"),
+            "{err}"
+        );
+        assert_eq!(err.help, "move the code block out of the quote");
+    }
+
+    #[test]
+    fn rejects_thematic_break_inside_blockquote_nested_in_list() {
+        let err = parse_markdown(
+            "# Title\n\n- > Before.\n  >\n  > ---\n  >\n  > After.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(
+            err.to_string()
+                .contains("thematic break inside a blockquote"),
+            "{err}"
+        );
+        assert_eq!(err.help, "end the quote before the separator");
+    }
+
+    #[test]
+    fn rejects_image_inside_blockquote_nested_in_list_with_innermost_name() {
+        let err = parse_markdown(
+            "# Title\n\n- > ![Architecture](x.png)",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(
+            err.to_string()
+                .contains("unsupported construct 'image inside blockquote'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn keeps_fenced_code_swallowing_for_list_nested_in_blockquote() {
+        let deck = parse_markdown(
+            "# Title\n\n> - ```notalang\n>   value\n>   ```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .expect("list-context fenced code remains deferred to #437");
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Blockquote);
+    }
+
+    #[test]
+    fn rejects_thematic_break_inside_blockquote_with_actionable_help() {
+        let err = parse_markdown(
+            "# Title\n\n> Before.\n>\n> ---\n>\n> After.",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err
+            .to_string()
+            .contains("thematic break inside a blockquote"));
+        assert_eq!(err.help, "end the quote before the separator");
+    }
+
+    #[test]
+    fn rejects_table_inside_blockquote_with_named_container() {
+        let err = parse_markdown(
+            "# Title\n\n> | A | B |\n> | - | - |\n> | 1 | 2 |",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'table inside blockquote'"));
+    }
+
+    #[test]
+    fn rejects_table_inside_list_with_named_container() {
+        let err = parse_markdown(
+            "# Title\n\n- | A | B |\n  | - | - |\n  | 1 | 2 |",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err
+            .to_string()
+            .contains("unsupported construct 'table inside list'"));
+    }
+
+    #[test]
+    fn reveal_blockquote_contributes_exactly_one_step() {
+        let deck = parse_markdown(
+            "# Title\n\n::: {reveal}\n\n> Quote.\n>\n> - nested one\n> - nested two\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slide = &deck.parsed_slides()[0];
+        let blockquote = &slide.fragments[1];
+
+        assert_eq!(blockquote.kind(), &FragmentKind::Blockquote);
+        assert_eq!(
+            blockquote.reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
+        );
+        assert_eq!(slide.step_count, 1);
+    }
+
+    #[test]
+    fn unsupported_table_help_names_blockquotes_without_milestone_wording() {
+        let err = parse_markdown(
+            "# Title\n\n| A | B |\n| - | - |\n| 1 | 2 |",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(
             err.help,
-            "rewrite this slide using headings, paragraphs, lists, or fenced code blocks for milestone 1"
+            "rewrite this slide using headings, paragraphs, lists, blockquotes, or fenced code blocks"
         );
+        assert!(!err.help.contains("milestone 1"));
     }
 
     #[test]
     fn rejects_inline_html_inside_list_items() {
         let err = parse_markdown(
             "# Title\n\n- item <b>raw</b>",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unsupported construct 'html'"));
+    }
+
+    #[test]
+    fn rejects_multiline_non_comment_html_inside_blockquote() {
+        let err = parse_markdown(
+            "# Title\n\n> <div>\n> raw html\n> </div>",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
@@ -6785,7 +7165,7 @@ After list
     #[test]
     fn unsupported_construct_after_delimiter_reports_global_line_and_slide() {
         let err = parse_markdown(
-            "# One\n\n---\n\n# Two\n\n> quote",
+            "# One\n\n---\n\n# Two\n\n| A | B |\n| - | - |\n| 1 | 2 |",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap_err();
@@ -6793,9 +7173,7 @@ After list
         assert_eq!(err.kind, ErrorKind::Parse);
         assert_eq!(err.line, Some(7));
         assert!(err.to_string().contains("slide 2 ('two'), line 7"));
-        assert!(err
-            .to_string()
-            .contains("unsupported construct 'blockquote'"));
+        assert!(err.to_string().contains("unsupported construct 'table'"));
     }
 
     #[test]

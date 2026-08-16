@@ -1163,7 +1163,13 @@ mod tests {
             "# Included\n\nIncluded paragraph\n",
         )
         .unwrap();
-        let source = "<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n\n> unsupported\n";
+        let source = "<!-- {\"include\":\"shared.md\"} -->
+---
+# After
+
+| unsupported |
+| --- |
+";
 
         let expanded = expand_includes(source, 0, &deck).unwrap();
         let frontmatter = crate::parser::parse_frontmatter(&expanded.source).unwrap();
