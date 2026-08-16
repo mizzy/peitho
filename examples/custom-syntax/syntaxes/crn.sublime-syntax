@@ -1,0 +1,34 @@
+%YAML 1.2
+---
+# A compact Carina grammar written for this example. Its HCL-like constructs
+# exercise the comment, keyword, string, constant, and operator theme classes.
+name: Carina
+file_extensions:
+  - crn
+scope: source.crn
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.crn
+    - match: '\b(resource|provider|module|variable|output)\b'
+      scope: keyword.declaration.crn
+    - match: '\b(true|false|null)\b'
+      scope: constant.language.crn
+    - match: '^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*(=)'
+      captures:
+        1: variable.other.member.crn
+        2: keyword.operator.assignment.crn
+    - match: '"'
+      scope: punctuation.definition.string.begin.crn
+      push: string
+    - match: '\b\d+(\.\d+)?\b'
+      scope: constant.numeric.crn
+
+  string:
+    - meta_scope: string.quoted.double.crn
+    - match: '\\.'
+      scope: constant.character.escape.crn
+    - match: '"'
+      scope: punctuation.definition.string.end.crn
+      pop: true

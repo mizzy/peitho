@@ -380,7 +380,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
 | `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid uses the built-in renderer; `code_images:` declares the Graphviz command and any explicit overrides |
 | `examples/math/` | Build-time LaTeX equations | Default theme | Fenced `math` blocks render as KaTeX HTML+MathML body content with embedded KaTeX assets |
-| `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/toml.sublime-syntax` turns an unknown-language build error into build-time TOML highlighting |
+| `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/crn.sublime-syntax` turns an unknown-language build error into build-time Carina highlighting |
 | `examples/custom-fonts/` | Bundled webfonts demo | Playfair Display + JetBrains Mono, all local `.woff2` | Zero-config `fonts/` auto-detect; files (including licenses) are copied verbatim into every output |
 | `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |
 | `examples/draft-skip/` | Per-slide `draft` / `skip` flags | Default theme | A draft slide is dropped at parse end and appears in no output; a skipped slide stays in output but present/preview `next`/`prev` step over it |

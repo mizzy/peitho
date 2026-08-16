@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use syntect::{
@@ -16,6 +17,28 @@ use crate::error::{BuildError, ErrorKind, Result};
 /// cannot collide with layout or slot classes.
 const CLASS_STYLE: ClassStyle = ClassStyle::SpacedPrefixed { prefix: "hl-" };
 
+const PLAIN_TEXT_ALIAS_SUBLIME_SYNTAX: &str = r#"name: Plain Text
+file_extensions:
+  - text
+  - plaintext
+scope: text.plain
+contexts:
+  main: []
+"#;
+
+static BASE_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+
+fn base_syntax_set() -> &'static SyntaxSet {
+    BASE_SYNTAX_SET.get_or_init(|| {
+        let mut builder = two_face::syntax::extra_newlines().into_builder();
+        builder.add(
+            SyntaxDefinition::load_from_str(PLAIN_TEXT_ALIAS_SUBLIME_SYNTAX, true, None)
+                .expect("embedded plain-text alias syntax should be valid"),
+        );
+        builder.build()
+    })
+}
+
 pub struct Highlighter {
     syntax_set: SyntaxSet,
 }
@@ -23,12 +46,12 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn defaults() -> Self {
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: base_syntax_set().clone(),
         }
     }
 
     pub fn with_user_dir(dir: &Path) -> Result<Self> {
-        let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+        let mut builder = base_syntax_set().clone().into_builder();
         builder.add_from_folder(dir, true).map_err(|err| {
             BuildError::new(
                 ErrorKind::Parse,
@@ -43,7 +66,7 @@ impl Highlighter {
     }
 
     pub fn with_user_files(files: &[PathBuf]) -> Result<Self> {
-        let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+        let mut builder = base_syntax_set().clone().into_builder();
         for file in files {
             builder.add(load_user_syntax_file(file)?);
         }
@@ -73,13 +96,13 @@ impl Highlighter {
 
     fn example_tokens(&self) -> Vec<&'static str> {
         const PREFERRED: &[&str] = &[
-            "rust", "js", "py", "sh", "toml", "json", "yaml", "html", "css", "md", "go", "c",
+            "rust", "js", "ts", "py", "sh", "toml", "json", "yaml", "html", "css", "md", "go", "c",
             "cpp", "java", "rb",
         ];
         PREFERRED
             .iter()
             .copied()
-            .filter(|t| self.syntax_set.find_syntax_by_token(t).is_some())
+            .filter(|token| self.syntax_set.find_syntax_by_token(token).is_some())
             .collect()
     }
 
@@ -272,6 +295,28 @@ contexts:
       scope: keyword.control.drift
 "#;
 
+    const TEXT_OVERRIDE_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: User Text
+file_extensions: [text]
+scope: source.usertext
+contexts:
+  main:
+    - match: '\boverride\b'
+      scope: keyword.control.usertext
+"#;
+
+    const TEXT_NAME_OVERRIDE_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: Plain Text
+file_extensions: [plaintext]
+scope: source.usertextname
+contexts:
+  main:
+    - match: '\boverride\b'
+      scope: keyword.control.usertextname
+"#;
+
     #[test]
     fn known_language_tokens_validate() {
         let highlighter = Highlighter::defaults();
@@ -282,13 +327,80 @@ contexts:
     }
 
     #[test]
+    fn bundled_language_tokens_validate_and_highlight() {
+        let highlighter = Highlighter::defaults();
+
+        for (token, code) in [
+            ("typescript", "const answer: number = 42;"),
+            ("ts", "const answer: number = 42;"),
+            ("toml", "answer = 42"),
+            ("dockerfile", "FROM rust:latest"),
+        ] {
+            highlighter
+                .validate_language(token, 1)
+                .unwrap_or_else(|err| panic!("{token} should validate: {err}"));
+
+            let html = highlighter
+                .highlight_html(code, token, 1)
+                .unwrap_or_else(|err| panic!("{token} should highlight: {err}"));
+            assert!(html.contains("<span class=\"hl-"), "{token}: {html}");
+
+            let lines = highlighter
+                .highlight_lines(code, token, 1)
+                .unwrap_or_else(|err| panic!("{token} lines should highlight: {err}"));
+            assert!(
+                lines.iter().any(|line| line.contains("<span class=\"hl-")),
+                "{token}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_text_aliases_validate_and_render_like_txt() {
+        let highlighter = Highlighter::defaults();
+        let code = "plain <text>\nsecond & line\n";
+        let txt_html = highlighter.highlight_html(code, "txt", 1).unwrap();
+        let txt_lines = highlighter.highlight_lines(code, "txt", 1).unwrap();
+
+        for token in ["text", "plaintext"] {
+            assert!(highlighter.validate_language(token, 1).is_ok(), "{token}");
+            assert_eq!(
+                highlighter.highlight_html(code, token, 1).unwrap(),
+                txt_html,
+                "{token} whole-block rendering differs from txt"
+            );
+            assert_eq!(
+                highlighter.highlight_lines(code, token, 1).unwrap(),
+                txt_lines,
+                "{token} line rendering differs from txt"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_text_aliases_are_case_insensitive() {
+        let syntax_set = base_syntax_set();
+        let highlighter = Highlighter::defaults();
+
+        for token in ["text", "Text", "TEXT", "plaintext", "PlainText"] {
+            assert!(
+                syntax_set.find_syntax_by_token(token).is_some(),
+                "base syntax set should resolve {token}"
+            );
+            assert!(highlighter.validate_language(token, 1).is_ok(), "{token}");
+        }
+    }
+
+    #[test]
     fn unknown_language_token_is_an_error_with_line() {
         let highlighter = Highlighter::defaults();
-        let err = highlighter.validate_language("notalang", 7).unwrap_err();
+        let err = highlighter.validate_language("crn", 23).unwrap_err();
 
         assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(7));
-        assert!(err.to_string().contains("unknown code language 'notalang'"));
+        assert_eq!(err.line, Some(23));
+        assert!(err.message.contains("unknown code language 'crn'"));
+        assert!(err.help.contains("ts"), "{}", err.help);
+        assert!(err.help.contains("toml"), "{}", err.help);
     }
 
     #[test]
@@ -306,17 +418,6 @@ contexts:
                 "help suggests '{token}' but the default set rejects it"
             );
         }
-    }
-
-    #[test]
-    fn ts_stays_unrecognized_by_default_set_reminder() {
-        // If this test fires, syntect's default set now includes TypeScript.
-        // Add "ts" to PREFERRED in `example_tokens` so the help suggests it.
-        let highlighter = Highlighter::defaults();
-        assert!(
-            highlighter.validate_language("ts", 1).is_err(),
-            "syntect defaults now recognize 'ts' - add \"ts\" to PREFERRED in example_tokens"
-        );
     }
 
     #[test]
@@ -343,6 +444,7 @@ contexts:
         let highlighter = Highlighter::with_user_dir(dir.path()).unwrap();
 
         assert!(highlighter.validate_language("carina", 1).is_ok());
+        assert!(highlighter.validate_language("ts", 1).is_ok());
         assert!(Highlighter::defaults()
             .validate_language("carina", 1)
             .is_err());
@@ -358,6 +460,33 @@ contexts:
 
         assert!(highlighter.validate_language("carina", 1).is_ok());
         assert!(highlighter.validate_language("crn", 1).is_ok());
+        assert!(highlighter.validate_language("ts", 1).is_ok());
+    }
+
+    #[test]
+    fn user_file_text_extension_shadows_bundled_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("user-text.sublime-syntax");
+        fs::write(&syntax, TEXT_OVERRIDE_SUBLIME_SYNTAX).unwrap();
+        let highlighter = Highlighter::with_user_files(&[syntax]).unwrap();
+
+        let html = highlighter.highlight_html("override", "text", 1).unwrap();
+
+        assert!(html.contains("hl-usertext"), "{html}");
+    }
+
+    #[test]
+    fn user_syntax_name_collision_shadows_bundled_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("user-text-name.sublime-syntax");
+        fs::write(&syntax, TEXT_NAME_OVERRIDE_SUBLIME_SYNTAX).unwrap();
+        let highlighter = Highlighter::with_user_files(&[syntax]).unwrap();
+
+        let html = highlighter
+            .highlight_html("override", "plaintext", 1)
+            .unwrap();
+
+        assert!(html.contains("hl-usertextname"), "{html}");
     }
 
     #[test]
