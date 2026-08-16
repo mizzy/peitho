@@ -87,6 +87,17 @@
   margin: 0 0 24px;
 }
 
+.slot-body blockquote {
+  margin: 0 0 var(--peitho-blockquote-spacing, 24px);
+  padding-left: var(--peitho-blockquote-spacing, 24px);
+  border-left: 4px solid var(--peitho-blockquote-border-color, #8a8578);
+  color: var(--peitho-blockquote-color, #8a8578);
+}
+
+.slot-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
 .slot-body ul {
   margin: 0;
   padding-left: 34px;

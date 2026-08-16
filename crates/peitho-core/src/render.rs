@@ -503,7 +503,8 @@ fn render_block_slot(
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::Text
-            | FragmentKind::List => markdown_run.push(fragment.markdown()),
+            | FragmentKind::List
+            | FragmentKind::Blockquote => markdown_run.push(fragment.markdown()),
             FragmentKind::Code | FragmentKind::Image { .. } | FragmentKind::SlotGroup { .. } => {
                 unreachable!("validated by contract guard")
             }
@@ -600,6 +601,14 @@ fn render_revealed_fragment(
             breaks,
             footnote_numbers,
         ),
+        FragmentKind::Blockquote => render_revealed_markdown_root(
+            body,
+            fragment,
+            RevealedMarkdownRoot::Blockquote,
+            span.start,
+            breaks,
+            footnote_numbers,
+        ),
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
             let code = render_code_fragment(fragment, highlighter)?;
@@ -688,6 +697,7 @@ fn render_revealed_fragment(
 enum RevealedMarkdownRoot {
     Heading,
     Paragraph,
+    Blockquote,
 }
 
 fn render_revealed_markdown_root(
@@ -700,6 +710,7 @@ fn render_revealed_markdown_root(
 ) -> Result<()> {
     let mut events = Vec::new();
     let mut stamped = false;
+    let mut in_html_comment = false;
     for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
         let event = match (root, stamped, event) {
             (
@@ -722,14 +733,23 @@ fn render_revealed_markdown_root(
                 stamped = true;
                 Event::Html(format!(r#"<p data-reveal-step="{step}">"#).into())
             }
+            (RevealedMarkdownRoot::Blockquote, false, Event::Start(Tag::BlockQuote(_kind))) => {
+                stamped = true;
+                Event::Html(format!(r#"<blockquote data-reveal-step="{step}">"#).into())
+            }
             (_, _, event) => event,
         };
-        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
+        if let Some(event) =
+            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
+        {
+            events.push(event);
+        }
     }
     if !stamped {
         let label = match root {
             RevealedMarkdownRoot::Heading => "heading",
             RevealedMarkdownRoot::Paragraph => "paragraph",
+            RevealedMarkdownRoot::Blockquote => "blockquote",
         };
         unreachable!("revealed {label} fragment produced no {label} root");
     }
@@ -747,6 +767,7 @@ fn render_revealed_list_fragment(
     let mut raw_events = Vec::new();
     let mut events = Vec::new();
     let mut top_level_item_index = 0usize;
+    let mut in_html_comment = false;
     walk_body_markdown_list_items(fragment.markdown(), |event, top_level_item| {
         if top_level_item {
             let step = span.start + top_level_item_index;
@@ -765,7 +786,11 @@ fn render_revealed_list_fragment(
         );
     }
     for event in raw_events {
-        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
+        if let Some(event) =
+            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
+        {
+            events.push(event);
+        }
     }
     html::push_html(body, events.into_iter());
     Ok(())
@@ -815,8 +840,13 @@ fn render_markdown_run(
     }
     let markdown = markdown_run.join("\n\n");
     let mut events = Vec::new();
+    let mut in_html_comment = false;
     for event in Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS) {
-        events.push(normalize_markdown_event(event, breaks, footnote_numbers)?);
+        if let Some(event) =
+            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
+        {
+            events.push(event);
+        }
     }
     html::push_html(body, events.into_iter());
     Ok(())
@@ -826,7 +856,11 @@ fn normalize_markdown_event<'a>(
     event: Event<'a>,
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
-) -> Result<Event<'a>> {
+    in_html_comment: &mut bool,
+) -> Result<Option<Event<'a>>> {
+    if drop_html_comment_event(&event, in_html_comment) {
+        return Ok(None);
+    }
     let event = match (breaks, event) {
         (true, Event::SoftBreak) => Event::HardBreak,
         (_, event) => event,
@@ -836,7 +870,7 @@ fn normalize_markdown_event<'a>(
             let Some(number) = footnote_numbers.get(label.as_ref()).copied() else {
                 return Err(missing_footnote_render_error(label.as_ref()));
             };
-            Ok(Event::Html(render_footnote_reference(number).into()))
+            Ok(Some(Event::Html(render_footnote_reference(number).into())))
         }
         Event::Start(Tag::FootnoteDefinition(label)) => {
             Err(unexpected_footnote_definition_render_error(label.as_ref()))
@@ -844,8 +878,33 @@ fn normalize_markdown_event<'a>(
         Event::End(TagEnd::FootnoteDefinition) => {
             Err(unexpected_footnote_definition_render_error(""))
         }
-        event => Ok(event),
+        event => Ok(Some(event)),
     }
+}
+
+fn drop_html_comment_event(event: &Event<'_>, in_html_comment: &mut bool) -> bool {
+    let raw = if let Event::Html(raw) = event {
+        Some(raw.as_ref())
+    } else if let Event::InlineHtml(raw) = event {
+        Some(raw.as_ref())
+    } else {
+        None
+    };
+    let Some(raw) = raw else {
+        return false;
+    };
+
+    if *in_html_comment {
+        if raw.contains("-->") {
+            *in_html_comment = false;
+        }
+        return true;
+    }
+    if !raw.trim_start().starts_with("<!--") {
+        return false;
+    }
+    *in_html_comment = !raw.contains("-->");
+    true
 }
 
 fn render_heading_inline_fragment(
@@ -966,6 +1025,7 @@ fn render_image_fragment_inner(
         | FragmentKind::GenericEmbedCard { .. }
         | FragmentKind::Footnotes { .. }
         | FragmentKind::List
+        | FragmentKind::Blockquote
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
     }
 }
@@ -1004,6 +1064,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::Heading { .. })
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
+            | (Accepts::Blocks, FragmentKind::Blockquote)
             | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::GenericEmbedCard { .. })
@@ -2129,6 +2190,106 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("~~deleted~~"), "{html}");
+    }
+
+    #[test]
+    fn renders_blockquotes_with_nested_blocks_and_inline_markup() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n> Quoted *emphasis* and ~~deleted~~.\n>\n> - nested item\n>\n> > nested quote\n",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert_eq!(html.matches("<blockquote>").count(), 2, "{html}");
+        assert!(
+            html.contains("<p>Quoted <em>emphasis</em> and <del>deleted</del>.</p>"),
+            "{html}"
+        );
+        assert!(html.contains("<ul>\n<li>nested item</li>\n</ul>"), "{html}");
+        assert!(html.contains("<p>nested quote</p>"), "{html}");
+    }
+
+    #[test]
+    fn renders_gfm_alert_marker_literally_as_quote_text() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n::: {reveal}\n\n> [!NOTE]\n> Alert body.\n\n:::\n",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="1""#), "{html}");
+        assert!(
+            html.contains(r#"<blockquote data-reveal-step="1">"#),
+            "{html}"
+        );
+        assert!(html.contains("[!NOTE]"), "{html}");
+        assert!(!html.contains("markdown-alert-"), "{html}");
+    }
+
+    #[test]
+    fn blockquote_comment_is_collected_as_notes_but_not_rendered() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n::: {reveal}\n\n> Visible quote.\n>\n> <!-- blockquote speaker secret -->\n\n:::",
+            title_body_layout(),
+        );
+        let slide = &rendered.slides()[0];
+
+        assert_eq!(slide.notes(), Some("blockquote speaker secret"));
+        assert!(slide.html().contains("Visible quote."), "{}", slide.html());
+        assert!(
+            !slide.html().contains("blockquote speaker secret"),
+            "{}",
+            slide.html()
+        );
+    }
+
+    #[test]
+    fn multiline_blockquote_comment_is_collected_as_joined_note_but_not_rendered() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n> Visible quote.\n>\n> <!--\n> blockquote speaker\n> secret\n> -->",
+            title_body_layout(),
+        );
+        let slide = &rendered.slides()[0];
+
+        assert_eq!(slide.notes(), Some("blockquote speaker\nsecret"));
+        assert!(slide.html().contains("Visible quote."), "{}", slide.html());
+        assert!(
+            !slide.html().contains("blockquote speaker"),
+            "{}",
+            slide.html()
+        );
+        assert!(!slide.html().contains("secret"), "{}", slide.html());
+    }
+
+    #[test]
+    fn list_comment_is_collected_as_notes_but_not_rendered() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n- Visible item.\n  <!-- list speaker secret -->",
+            title_body_layout(),
+        );
+        let slide = &rendered.slides()[0];
+
+        assert_eq!(slide.notes(), Some("list speaker secret"));
+        assert!(slide.html().contains("Visible item."), "{}", slide.html());
+        assert!(
+            !slide.html().contains("list speaker secret"),
+            "{}",
+            slide.html()
+        );
+    }
+
+    #[test]
+    fn multiline_list_comment_is_collected_as_joined_note_but_not_rendered() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n- Visible item.\n  <!--\n  list speaker\n  secret\n  -->",
+            title_body_layout(),
+        );
+        let slide = &rendered.slides()[0];
+
+        assert_eq!(slide.notes(), Some("list speaker\nsecret"));
+        assert!(slide.html().contains("Visible item."), "{}", slide.html());
+        assert!(!slide.html().contains("list speaker"), "{}", slide.html());
+        assert!(!slide.html().contains("secret"), "{}", slide.html());
     }
 
     #[test]

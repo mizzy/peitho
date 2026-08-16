@@ -315,6 +315,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             | FragmentKind::EmbedCard { .. }
             | FragmentKind::GenericEmbedCard { .. }
             | FragmentKind::List
+            | FragmentKind::Blockquote
             | FragmentKind::Text => {
                 SlotName::new("body").expect("conventional slot names are valid")
             }
@@ -410,6 +411,7 @@ fn shallowest_heading_line(fragments: &[SourceFragment]) -> Option<usize> {
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List
+            | FragmentKind::Blockquote
             | FragmentKind::SlotGroup { .. } => None,
         })
         .min_by_key(|(level, line)| (*level, *line))

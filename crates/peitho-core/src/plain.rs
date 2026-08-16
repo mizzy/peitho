@@ -27,7 +27,7 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                         FragmentKind::Heading { .. } | FragmentKind::Text => {
                             fragment.plain_text().to_owned()
                         }
-                        FragmentKind::Paragraph | FragmentKind::List => {
+                        FragmentKind::Paragraph | FragmentKind::List | FragmentKind::Blockquote => {
                             body_fragment_text(fragment.markdown())
                         }
                         FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
@@ -68,6 +68,7 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
 fn body_fragment_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut in_image = false;
+    let mut blockquote_depth = 0usize;
 
     for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
         match event {
@@ -75,8 +76,13 @@ fn body_fragment_text(markdown: &str) -> String {
             Event::End(TagEnd::Image) => in_image = false,
             _ if in_image => {}
             Event::FootnoteReference(_) => {}
-            Event::Start(Tag::Item) if !text.is_empty() && !text.ends_with('\n') => {
-                text.push('\n');
+            Event::Start(Tag::BlockQuote(_kind)) => blockquote_depth += 1,
+            Event::End(TagEnd::BlockQuote(_kind)) => {
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+            }
+            Event::Start(Tag::Item) => push_block_separator(&mut text),
+            Event::Start(Tag::Paragraph) if blockquote_depth > 0 => {
+                push_block_separator(&mut text);
             }
             Event::Text(value) | Event::Code(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak
@@ -90,6 +96,12 @@ fn body_fragment_text(markdown: &str) -> String {
     }
 
     text
+}
+
+fn push_block_separator(text: &mut String) {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +168,19 @@ mod tests {
         let text = checked_slide_text("# Title\n\n- item1\n- item2");
 
         assert_eq!(text.body(), "item1\nitem2");
+    }
+
+    #[test]
+    fn manifest_body_text_contains_blockquote_text_without_markers() {
+        let text = checked_slide_text(
+            "# Title\n\n> First **quoted** paragraph.\n>\n> Second paragraph with `code`.",
+        );
+
+        assert_eq!(
+            text.body(),
+            "First quoted paragraph.\nSecond paragraph with code."
+        );
+        assert!(!text.body().contains('>'));
     }
 
     #[test]
