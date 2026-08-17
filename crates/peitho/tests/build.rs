@@ -62,6 +62,57 @@ fn build_writes_index_html_and_css() {
 }
 
 #[test]
+fn build_emits_highlighted_code_inside_body_list() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+
+    fs::write(
+        &deck,
+        "<!-- {\"key\":\"container-code\"} -->\n# Container code\n\n- ```rust\n  // visible comment\n  fn answer() -> usize { 42 }\n  ```",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let slide = fs::read_to_string(out.join("slides/000-container-code.html")).unwrap();
+    assert!(
+        slide.contains(r#"<pre><code class="language-rust">"#),
+        "{slide}"
+    );
+    assert!(slide.contains(r#"class="hl-comment "#), "{slide}");
+
+    let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+    assert!(
+        css.contains(
+            r#".slot-code,
+.slot-body pre {
+  display: block;
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}"#
+        ),
+        "{css}"
+    );
+    assert!(!css.contains("--peitho-code-"), "{css}");
+    assert!(css.contains(".peitho-slide .hl-comment {"), "{css}");
+    assert!(css.contains(".peitho-slide .hl-keyword,"), "{css}");
+}
+
+#[test]
 fn build_renders_footnote_reference_and_footnotes_block() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

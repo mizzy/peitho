@@ -166,7 +166,8 @@
   overflow: hidden;
 }
 
-.slot-code {
+.slot-code,
+.slot-body pre {
   display: block;
   margin: 0;
   font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -176,28 +177,32 @@
   overflow-wrap: anywhere;
 }
 
-.slot-code .hl-comment {
+.slot-body pre {
+  margin-bottom: 24px;
+}
+
+.peitho-slide .hl-comment {
   color: #8a8578;
 }
 
-.slot-code .hl-string {
+.peitho-slide .hl-string {
   color: #2f7d4f;
 }
 
-.slot-code .hl-keyword,
-.slot-code .hl-storage {
+.peitho-slide .hl-keyword,
+.peitho-slide .hl-storage {
   color: #7141d8;
 }
 
-.slot-code .hl-constant {
+.peitho-slide .hl-constant {
   color: #b45309;
 }
 
-.slot-code .hl-function {
+.peitho-slide .hl-function {
   color: #1d4ed8;
 }
 
-.slot-code .hl-type {
+.peitho-slide .hl-type {
   color: #0f766e;
 }
 

@@ -4,12 +4,12 @@ use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
     element, errors::RewritingError, html_content::ContentType, HtmlRewriter, Settings,
 };
-use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::{
     domain::{
-        Accepts, AspectRatio, FootnoteEntry, FragmentKind, RenderedSlide, ResolvedImagePath,
-        RevealSpan, SlideKey, SlotName, SourceFragment,
+        Accepts, AspectRatio, ContainerCodeLanguage, FootnoteEntry, FragmentKind, RenderedSlide,
+        ResolvedImagePath, RevealSpan, SlideKey, SlotName, SourceFragment,
     },
     embed_card::{generic_embed_card_css, EmbedCardAssets},
     emphasis::LineEmphasis,
@@ -374,9 +374,10 @@ fn render_code_slot(
             .map(|fragment| render_code_fragment(fragment, highlighter))
             .collect::<Result<Vec<_>>>()?
             .join("\n");
-        return Ok(format!(
-            r#"<pre class="{class_name}"><code>{body}</code></pre>"#
-        ));
+        let language = (fragments.len() == 1)
+            .then(|| fragments[0].language())
+            .flatten();
+        return Ok(render_code_block(class_name, &body, language, None));
     }
 
     let mut body = String::new();
@@ -420,15 +421,63 @@ fn flush_code_run(
         .map(|fragment| render_code_fragment(fragment, highlighter))
         .collect::<Result<Vec<_>>>()?
         .join("\n");
-    body.push_str(&format!(
-        r#"<pre class="{class_name}"><code>{code}</code></pre>"#
-    ));
+    let language = (code_run.len() == 1)
+        .then(|| code_run[0].language())
+        .flatten();
+    body.push_str(&render_code_block(class_name, &code, language, None));
     Ok(())
+}
+
+fn render_code_block(
+    class_name: &str,
+    code: &str,
+    language: Option<&str>,
+    reveal_step: Option<usize>,
+) -> String {
+    let mut html = format!(r#"<pre class="{class_name}""#);
+    if let Some(step) = reveal_step {
+        html.push_str(&format!(r#" data-reveal-step="{step}""#));
+    }
+    html.push_str("><code");
+    if let Some(language) = language {
+        html.push_str(r#" class="language-"#);
+        html.push_str(&encode_double_quoted_attribute(language));
+        html.push('"');
+    }
+    html.push('>');
+    html.push_str(code);
+    html.push_str("</code></pre>");
+    html
 }
 
 fn append_code_separator(body: &mut String) {
     if !body.is_empty() {
         body.push('\n');
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BodyMarkdownFragment<'a> {
+    markdown: &'a str,
+    line: usize,
+    code_languages: &'a [ContainerCodeLanguage],
+}
+
+impl<'a> BodyMarkdownFragment<'a> {
+    fn from_source(fragment: &'a SourceFragment<ResolvedImagePath>) -> Self {
+        Self {
+            markdown: fragment.markdown(),
+            line: fragment.line(),
+            code_languages: fragment.container_code_languages(),
+        }
+    }
+
+    fn plain(markdown: &'a str, line: usize) -> Self {
+        Self {
+            markdown,
+            line,
+            code_languages: &[],
+        }
     }
 }
 
@@ -447,7 +496,13 @@ fn render_block_slot(
     let mut markdown_run = Vec::new();
     for fragment in fragments {
         if let Some(span) = fragment.reveal_span() {
-            render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+            render_markdown_run(
+                &mut body,
+                &markdown_run,
+                breaks,
+                footnote_numbers,
+                highlighter,
+            )?;
             markdown_run.clear();
             render_revealed_fragment(
                 &mut body,
@@ -462,14 +517,26 @@ fn render_block_slot(
         }
         match fragment.kind() {
             FragmentKind::Math { html } => {
-                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    footnote_numbers,
+                    highlighter,
+                )?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-math">"#);
                 body.push_str(html);
                 body.push_str("</div>");
             }
             FragmentKind::EmbedCard { html } => {
-                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    footnote_numbers,
+                    highlighter,
+                )?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-embed-card">"#);
                 body.push_str(html);
@@ -483,7 +550,13 @@ fn render_block_slot(
                 provider_html,
                 permalink_attr,
             } => {
-                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    footnote_numbers,
+                    highlighter,
+                )?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-embed-card">"#);
                 body.push_str(&render_generic_embed_card_content(
@@ -497,22 +570,36 @@ fn render_block_slot(
                 body.push_str("</div>");
             }
             FragmentKind::Footnotes { entries } => {
-                render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+                render_markdown_run(
+                    &mut body,
+                    &markdown_run,
+                    breaks,
+                    footnote_numbers,
+                    highlighter,
+                )?;
                 markdown_run.clear();
-                render_footnotes_block(&mut body, entries, breaks, footnote_numbers)?;
+                render_footnotes_block(&mut body, entries, breaks, footnote_numbers, highlighter)?;
             }
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
             | FragmentKind::Text
             | FragmentKind::List
             | FragmentKind::Blockquote
-            | FragmentKind::Table => markdown_run.push(fragment.markdown()),
+            | FragmentKind::Table => {
+                markdown_run.push(BodyMarkdownFragment::from_source(fragment));
+            }
             FragmentKind::Code | FragmentKind::Image { .. } | FragmentKind::SlotGroup { .. } => {
                 unreachable!("validated by contract guard")
             }
         }
     }
-    render_markdown_run(&mut body, &markdown_run, breaks, footnote_numbers)?;
+    render_markdown_run(
+        &mut body,
+        &markdown_run,
+        breaks,
+        footnote_numbers,
+        highlighter,
+    )?;
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
 }
 
@@ -594,6 +681,7 @@ fn render_revealed_fragment(
             span.start,
             breaks,
             footnote_numbers,
+            highlighter,
         ),
         FragmentKind::Paragraph => render_revealed_markdown_root(
             body,
@@ -602,6 +690,7 @@ fn render_revealed_fragment(
             span.start,
             breaks,
             footnote_numbers,
+            highlighter,
         ),
         FragmentKind::Blockquote => render_revealed_markdown_root(
             body,
@@ -610,6 +699,7 @@ fn render_revealed_fragment(
             span.start,
             breaks,
             footnote_numbers,
+            highlighter,
         ),
         FragmentKind::Table => render_revealed_markdown_root(
             body,
@@ -618,6 +708,7 @@ fn render_revealed_fragment(
             span.start,
             breaks,
             footnote_numbers,
+            highlighter,
         ),
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
@@ -630,13 +721,18 @@ fn render_revealed_fragment(
                 .emphasis()
                 .is_some_and(|emphasis| emphasis.stepped());
             if stepped_emphasis {
-                body.push_str(&format!(
-                    r#"<pre class="{class_name}"><code>{code}</code></pre>"#
+                body.push_str(&render_code_block(
+                    class_name,
+                    &code,
+                    fragment.language(),
+                    None,
                 ));
             } else {
-                body.push_str(&format!(
-                    r#"<pre class="{class_name}" data-reveal-step="{}"><code>{code}</code></pre>"#,
-                    span.start
+                body.push_str(&render_code_block(
+                    class_name,
+                    &code,
+                    fragment.language(),
+                    Some(span.start),
                 ));
             }
             Ok(())
@@ -694,9 +790,14 @@ fn render_revealed_fragment(
             )?);
             Ok(())
         }
-        FragmentKind::List => {
-            render_revealed_list_fragment(body, fragment, span, breaks, footnote_numbers)
-        }
+        FragmentKind::List => render_revealed_list_fragment(
+            body,
+            fragment,
+            span,
+            breaks,
+            footnote_numbers,
+            highlighter,
+        ),
         FragmentKind::SlotGroup { .. } => {
             unreachable!("revealed SlotGroup fragments are not renderable")
         }
@@ -718,11 +819,13 @@ fn render_revealed_markdown_root(
     step: usize,
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
 ) -> Result<()> {
     let mut events = Vec::new();
     let mut root_stamped = false;
-    let mut in_html_comment = false;
-    for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
+    for (event, range) in
+        Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS).into_offset_iter()
+    {
         let event = match (root, root_stamped, event) {
             (
                 RevealedMarkdownRoot::Heading,
@@ -750,11 +853,7 @@ fn render_revealed_markdown_root(
             }
             (_, _, event) => event,
         };
-        if let Some(event) =
-            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
-        {
-            events.push(event);
-        }
+        events.push((event, range));
     }
     let missing_root = match (root, root_stamped) {
         (RevealedMarkdownRoot::Heading, false) => Some("heading"),
@@ -770,7 +869,18 @@ fn render_revealed_markdown_root(
     }
 
     let mut rendered = String::new();
-    html::push_html(&mut rendered, events.into_iter());
+    let sources = [BodyMarkdownSource {
+        range: 0..fragment.markdown().len(),
+        fragment: BodyMarkdownFragment::from_source(fragment),
+    }];
+    render_body_markdown_events(
+        &mut rendered,
+        &sources,
+        events,
+        breaks,
+        footnote_numbers,
+        highlighter,
+    )?;
     if matches!(root, RevealedMarkdownRoot::Table) {
         stamp_revealed_table_root(&mut rendered, step, fragment.line())?;
     }
@@ -797,37 +907,43 @@ fn render_revealed_list_fragment(
     span: RevealSpan,
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
 ) -> Result<()> {
     let mut raw_events = Vec::new();
-    let mut events = Vec::new();
     let mut top_level_item_index = 0usize;
-    let mut in_html_comment = false;
-    walk_body_markdown_list_items(fragment.markdown(), |event, top_level_item| {
-        if top_level_item {
-            let step = span.start + top_level_item_index;
-            top_level_item_index += 1;
-            raw_events.push(Event::Html(
-                format!(r#"<li data-reveal-step="{step}">"#).into(),
-            ));
-        } else {
-            raw_events.push(event);
-        }
-    });
+    walk_body_markdown_list_items_with_ranges(
+        fragment.markdown(),
+        |event, range, top_level_item| {
+            if top_level_item {
+                let step = span.start + top_level_item_index;
+                top_level_item_index += 1;
+                raw_events.push((
+                    Event::Html(format!(r#"<li data-reveal-step="{step}">"#).into()),
+                    range,
+                ));
+            } else {
+                raw_events.push((event, range));
+            }
+        },
+    );
     if top_level_item_index != span.len {
         unreachable!(
             "revealed list span length mismatch: stamped {top_level_item_index} top-level items but span.len is {}",
             span.len
         );
     }
-    for event in raw_events {
-        if let Some(event) =
-            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
-        {
-            events.push(event);
-        }
-    }
-    html::push_html(body, events.into_iter());
-    Ok(())
+    let sources = [BodyMarkdownSource {
+        range: 0..fragment.markdown().len(),
+        fragment: BodyMarkdownFragment::from_source(fragment),
+    }];
+    render_body_markdown_events(
+        body,
+        &sources,
+        raw_events,
+        breaks,
+        footnote_numbers,
+        highlighter,
+    )
 }
 
 fn render_footnotes_block(
@@ -835,6 +951,7 @@ fn render_footnotes_block(
     entries: &[FootnoteEntry],
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
 ) -> Result<()> {
     if let Some(step) = wrapper_reveal_step(entries) {
         body.push_str(&format!(
@@ -849,7 +966,13 @@ fn render_footnotes_block(
         } else {
             body.push_str("<li>");
         }
-        render_markdown_run(body, &[entry.markdown()], breaks, footnote_numbers)?;
+        render_markdown_run(
+            body,
+            &[BodyMarkdownFragment::plain(entry.markdown(), entry.line())],
+            breaks,
+            footnote_numbers,
+            highlighter,
+        )?;
         body.push_str("</li>");
     }
     body.push_str("</ol></div>");
@@ -865,25 +988,189 @@ fn wrapper_reveal_step(entries: &[FootnoteEntry]) -> Option<usize> {
 
 fn render_markdown_run(
     body: &mut String,
-    markdown_run: &[&str],
+    markdown_run: &[BodyMarkdownFragment<'_>],
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
 ) -> Result<()> {
     if markdown_run.is_empty() {
         return Ok(());
     }
-    let markdown = markdown_run.join("\n\n");
-    let mut events = Vec::new();
+    let mut markdown = String::new();
+    let mut sources = Vec::with_capacity(markdown_run.len());
+    for (index, fragment) in markdown_run.iter().copied().enumerate() {
+        if index > 0 {
+            markdown.push_str("\n\n");
+        }
+        let start = markdown.len();
+        markdown.push_str(fragment.markdown);
+        let end = markdown.len();
+        sources.push(BodyMarkdownSource {
+            range: start..end,
+            fragment,
+        });
+    }
+    let events = Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS).into_offset_iter();
+    render_body_markdown_events(
+        body,
+        &sources,
+        events,
+        breaks,
+        footnote_numbers,
+        highlighter,
+    )
+}
+
+struct BodyMarkdownSource<'a> {
+    range: Range<usize>,
+    fragment: BodyMarkdownFragment<'a>,
+}
+
+struct HighlightedContainerCode<'a> {
+    kind: CodeBlockKind<'a>,
+    language: String,
+    text: String,
+    line: usize,
+}
+
+fn render_body_markdown_events<'a>(
+    body: &mut String,
+    sources: &[BodyMarkdownSource<'_>],
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    breaks: bool,
+    footnote_numbers: &BTreeMap<String, usize>,
+    highlighter: &Highlighter,
+) -> Result<()> {
+    let mut normalized = Vec::new();
     let mut in_html_comment = false;
-    for event in Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS) {
-        if let Some(event) =
-            normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
-        {
-            events.push(event);
+    let mut highlighted_code: Option<HighlightedContainerCode<'a>> = None;
+    let mut consumed_code_languages = vec![0usize; sources.len()];
+
+    for (event, range) in events {
+        if highlighted_code.is_some() {
+            match event {
+                Event::Text(text) => {
+                    highlighted_code
+                        .as_mut()
+                        .expect("highlighted code state is open")
+                        .text
+                        .push_str(text.as_ref());
+                    continue;
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    let code = highlighted_code
+                        .take()
+                        .expect("highlighted code state is open");
+                    let highlighted = render_highlighted_code(
+                        highlighter,
+                        &code.text,
+                        &code.language,
+                        code.line,
+                    )?;
+                    normalized.push(Event::Start(Tag::CodeBlock(code.kind)));
+                    normalized.push(Event::Html(highlighted.into()));
+                    normalized.push(Event::End(TagEnd::CodeBlock));
+                    continue;
+                }
+                _ => {
+                    let line = highlighted_code
+                        .as_ref()
+                        .expect("highlighted code state is open")
+                        .line;
+                    return Err(container_code_metadata_mismatch_error(Some(line)));
+                }
+            }
+        }
+
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let Some((source_index, source)) =
+                    body_markdown_source_for_offset(sources, range.start)
+                else {
+                    return Err(container_code_metadata_mismatch_error(
+                        sources.first().map(|source| source.fragment.line),
+                    ));
+                };
+                let line = body_markdown_line_for_offset(source, range.start);
+                let language_index = consumed_code_languages[source_index];
+                let Some(language) = source.fragment.code_languages.get(language_index) else {
+                    return Err(container_code_metadata_mismatch_error(Some(line)));
+                };
+                consumed_code_languages[source_index] += 1;
+
+                match language {
+                    ContainerCodeLanguage::Highlighted(language) => {
+                        highlighted_code = Some(HighlightedContainerCode {
+                            kind,
+                            language: language.clone(),
+                            text: String::new(),
+                            line,
+                        });
+                    }
+                    ContainerCodeLanguage::Plain => {
+                        if let Some(event) = normalize_markdown_event(
+                            Event::Start(Tag::CodeBlock(kind)),
+                            breaks,
+                            footnote_numbers,
+                            &mut in_html_comment,
+                        )? {
+                            normalized.push(event);
+                        }
+                    }
+                }
+            }
+            event => {
+                if let Some(event) =
+                    normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
+                {
+                    normalized.push(event);
+                }
+            }
         }
     }
-    html::push_html(body, events.into_iter());
+
+    if let Some(code) = highlighted_code {
+        return Err(container_code_metadata_mismatch_error(Some(code.line)));
+    }
+
+    for (source, consumed) in sources.iter().zip(consumed_code_languages) {
+        if consumed != source.fragment.code_languages.len() {
+            return Err(container_code_metadata_mismatch_error(Some(
+                source.fragment.line,
+            )));
+        }
+    }
+
+    html::push_html(body, normalized.into_iter());
     Ok(())
+}
+
+fn body_markdown_source_for_offset<'a, 'source>(
+    sources: &'a [BodyMarkdownSource<'source>],
+    offset: usize,
+) -> Option<(usize, &'a BodyMarkdownSource<'source>)> {
+    sources
+        .iter()
+        .enumerate()
+        .find(|(_, source)| source.range.contains(&offset))
+}
+
+fn body_markdown_line_for_offset(source: &BodyMarkdownSource<'_>, offset: usize) -> usize {
+    let local_offset = offset - source.range.start;
+    source.fragment.line
+        + source.fragment.markdown.as_bytes()[..local_offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+}
+
+fn container_code_metadata_mismatch_error(line: Option<usize>) -> BuildError {
+    BuildError::new(
+        ErrorKind::Layout,
+        line,
+        "internal render error: container code metadata count/order mismatch",
+        "report this issue with the container Markdown that triggered it",
+    )
 }
 
 fn normalize_markdown_event<'a>(
@@ -964,9 +1251,12 @@ fn render_code_fragment(
 
     let Some(emphasis) = fragment.emphasis() else {
         return match fragment.language() {
-            Some(language) => highlighter
-                .highlight_html(fragment.code_text(), language, fragment.line())
-                .map(|html| html.trim_end().to_owned()),
+            Some(language) => render_highlighted_code(
+                highlighter,
+                fragment.code_text(),
+                language,
+                fragment.line(),
+            ),
             None => Ok(encode_text(fragment.code_text().trim_end()).into_owned()),
         };
     };
@@ -985,6 +1275,20 @@ fn render_code_fragment(
     // the step of the first group.
     let base_step = fragment.reveal_span().map(|span| span.start);
     Ok(wrap_emphasis_lines(&lines, emphasis, base_step))
+}
+
+/// The one non-emphasis highlighting seam for top-level and container code.
+/// Syntect preserves the source's final newline; rendered code blocks do not,
+/// so trim it here before either caller adds its `<pre><code>` wrappers.
+fn render_highlighted_code(
+    highlighter: &Highlighter,
+    code: &str,
+    language: &str,
+    line: usize,
+) -> Result<String> {
+    highlighter
+        .highlight_html(code, language, line)
+        .map(|html| html.trim_end().to_owned())
 }
 
 /// Wrap each code line in a `code-line` span, marking emphasized lines.
@@ -2070,6 +2374,30 @@ mod tests {
         parse_markdown_impl(source, frontmatter, highlighter)
     }
 
+    fn highlight_class_vocabulary(html: &str) -> std::collections::BTreeSet<String> {
+        let mut classes = std::collections::BTreeSet::new();
+        let mut rest = html;
+        while let Some(start) = rest.find("class=\"") {
+            rest = &rest[start + "class=\"".len()..];
+            let Some(end) = rest.find('"') else {
+                break;
+            };
+            for class in rest[..end].split_ascii_whitespace() {
+                if class.starts_with("hl-") {
+                    classes.insert(class.to_owned());
+                }
+            }
+            rest = &rest[end + 1..];
+        }
+        classes
+    }
+
+    fn first_pre_block(html: &str) -> &str {
+        let start = html.find("<pre").expect("rendered pre block");
+        let end = html[start..].find("</pre>").expect("closed pre block") + start + "</pre>".len();
+        &html[start..end]
+    }
+
     fn javascript_timeout_ms(source: &str, name: &str) -> u64 {
         let prefix = format!("var {name} = ");
         source
@@ -2246,6 +2574,102 @@ mod tests {
         );
         assert!(html.contains("<ul>\n<li>nested item</li>\n</ul>"), "{html}");
         assert!(html.contains("<p>nested quote</p>"), "{html}");
+    }
+
+    #[test]
+    fn container_code_matches_top_level_highlighted_block_html() {
+        let top_level = render_code_html(
+            "# Title\n\n```rust\nfn example(value: usize) -> usize { value + 1 }\n```",
+        );
+        let expected =
+            first_pre_block(&top_level).replacen(r#"<pre class="slot-code">"#, "<pre>", 1);
+        assert!(expected.contains("hl-"), "{expected}");
+        assert!(
+            expected.contains(r#"<code class="language-rust">"#),
+            "{expected}"
+        );
+
+        for (container, markdown) in [
+            (
+                "list",
+                "# Title\n\n- ```rust\n  fn example(value: usize) -> usize { value + 1 }\n  ```",
+            ),
+            (
+                "blockquote",
+                "# Title\n\n> ```rust\n> fn example(value: usize) -> usize { value + 1 }\n> ```",
+            ),
+        ] {
+            let rendered = render_checked_deck_with_layout(markdown, title_body_layout());
+            let html = rendered.slides()[0].html();
+
+            assert_eq!(first_pre_block(html), expected, "{container}: {html}");
+            assert_eq!(
+                highlight_class_vocabulary(html),
+                highlight_class_vocabulary(&top_level),
+                "{container}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_code_untagged_stays_plain_and_is_never_markdown_parsed() {
+        for markdown in [
+            "# Title\n\n- ```\n  **literal** <!-- code comment -->\n  ```",
+            "# Title\n\n> ```\n> **literal** <!-- code comment -->\n> ```",
+        ] {
+            let rendered = render_checked_deck_with_layout(markdown, title_body_layout());
+            let html = rendered.slides()[0].html();
+
+            assert!(
+                html.contains("**literal** &lt;!-- code comment --&gt;"),
+                "{html}"
+            );
+            assert!(!html.contains("<strong>literal</strong>"), "{html}");
+            assert!(!html.contains("hl-"), "{html}");
+        }
+    }
+
+    #[test]
+    fn container_code_highlights_list_nested_in_blockquote() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n> - ```rust\n>   fn nested() {}\n>   ```",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains("<blockquote>"), "{html}");
+        assert!(html.contains("<ul>"), "{html}");
+        assert!(html.contains(r#"<code class="language-rust">"#), "{html}");
+        assert!(html.contains("hl-"), "{html}");
+    }
+
+    #[test]
+    fn indented_code_inside_blockquote_renders_as_plain_block() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n>     plain <code>\n>     second line",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(
+            html.contains("<pre><code>plain &lt;code&gt;\nsecond line</code></pre>"),
+            "{html}"
+        );
+        assert!(!html.contains("hl-"), "{html}");
+    }
+
+    #[test]
+    fn container_code_reveal_list_keeps_item_steps_and_highlighting() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n::: {reveal}\n\n- first\n\n  ```rust\n  fn inside() {}\n  ```\n\n- second\n\n:::",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"data-reveal-steps="2""#), "{html}");
+        assert!(html.contains(r#"<li data-reveal-step="1">"#), "{html}");
+        assert!(html.contains(r#"<li data-reveal-step="2">"#), "{html}");
+        assert!(html.contains("hl-"), "{html}");
     }
 
     #[test]
@@ -2437,7 +2861,12 @@ mod tests {
     fn extract_line_spans(html: &str) -> Vec<String> {
         // Isolate the <code> body first: line spans are newline-separated
         // there, so splitting on '\n' yields exactly one wrapper per line.
-        let start = html.find("<code>").expect("rendered code slot") + "<code>".len();
+        let code_start = html.find("<code").expect("rendered code slot");
+        let start = code_start
+            + html[code_start..]
+                .find('>')
+                .expect("closed code opening tag")
+            + 1;
         let end = html[start..].find("</code>").expect("closed code slot") + start;
 
         html[start..end]
@@ -2700,8 +3129,9 @@ mod tests {
         );
         let html = rendered.slides()[0].html();
 
-        let plain_prefix = r#"<pre class="slot-code"><code>"#;
-        let revealed_prefix = r#"<pre class="slot-code" data-reveal-step="1"><code>"#;
+        let plain_prefix = r#"<pre class="slot-code"><code class="language-rust">"#;
+        let revealed_prefix =
+            r#"<pre class="slot-code" data-reveal-step="1"><code class="language-rust">"#;
         let plain_start = html.find(plain_prefix).unwrap();
         let revealed_start = html.find(revealed_prefix).unwrap();
         assert!(plain_start < revealed_start, "{html}");
@@ -2915,6 +3345,62 @@ mod tests {
     }
 
     #[test]
+    fn container_code_metadata_count_mismatches_share_one_internal_error() {
+        let cases = [
+            SourceFragment::list(7, "- ```rust\n  fn missing() {}\n  ```"),
+            SourceFragment::list(7, "- plain item")
+                .with_container_code_languages(vec![ContainerCodeLanguage::Plain]),
+        ];
+
+        for fragment in cases {
+            let fragments = resolve_fragments(vec![fragment]);
+            let err = render_block_slot(
+                "slot-body",
+                Accepts::Blocks,
+                &fragments,
+                false,
+                &BTreeMap::new(),
+                &Highlighter::defaults(),
+            )
+            .unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Layout);
+            assert_eq!(err.line, Some(7));
+            assert_eq!(
+                err.message,
+                "internal render error: container code metadata count/order mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn container_highlight_error_uses_own_fragment_line_in_joined_run() {
+        // The source-line gap models a speaker-note comment between these
+        // fragments. Joined-buffer newline counts must not collapse that gap.
+        let fragments = resolve_fragments(vec![
+            SourceFragment::paragraph(3, "Before."),
+            SourceFragment::list(10, "- intro\n\n  ```rust\n  fn highlighted() {}\n  ```")
+                .with_container_code_languages(vec![ContainerCodeLanguage::Highlighted(
+                    "notalang".to_owned(),
+                )]),
+        ]);
+
+        let err = render_block_slot(
+            "slot-body",
+            Accepts::Blocks,
+            &fragments,
+            false,
+            &BTreeMap::new(),
+            &Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(12));
+        assert_eq!(err.message, "unknown code language 'notalang'");
+    }
+
+    #[test]
     fn block_slot_splices_math_between_markdown_runs() {
         let fragments = resolve_fragments(vec![
             SourceFragment::paragraph(3, "Before."),
@@ -3046,7 +3532,14 @@ mod tests {
         ];
         let mut body = String::new();
 
-        render_footnotes_block(&mut body, &entries, false, &BTreeMap::new()).unwrap();
+        render_footnotes_block(
+            &mut body,
+            &entries,
+            false,
+            &BTreeMap::new(),
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(
             body,
@@ -3069,7 +3562,14 @@ mod tests {
         ];
         let mut body = String::new();
 
-        render_footnotes_block(&mut body, &entries, false, &BTreeMap::new()).unwrap();
+        render_footnotes_block(
+            &mut body,
+            &entries,
+            false,
+            &BTreeMap::new(),
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
 
         assert_eq!(
             body,
@@ -3189,7 +3689,10 @@ mod tests {
         let body_region = &html[body_start..figure_start];
         assert!(body_region.contains(r#"<sup class="peitho-footnote-ref">1</sup>"#));
         assert!(!body_region.contains("peitho-footnotes"), "{html}");
-        assert!(html.contains(r#"<pre class="slot-code"><code>"#), "{html}");
+        assert!(
+            html.contains(r#"<pre class="slot-code"><code class="language-rust">"#),
+            "{html}"
+        );
         assert!(html.contains(r#"<li><p>Supporting note.</p>"#), "{html}");
         assert!(!html.contains("data-empty-slots"), "{html}");
     }

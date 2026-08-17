@@ -11,9 +11,9 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, EmbedMode,
-        EmbedOptions, ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath, Resolution,
-        RevealSpan, SlideKey, SlotName, SourceFragment,
+        AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, ContainerCodeLanguage,
+        EmbedMode, EmbedOptions, ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath,
+        Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -257,6 +257,7 @@ impl ContainerKind {
 struct OpenContainer {
     kind: ContainerKind,
     start: usize,
+    code_languages: Vec<ContainerCodeLanguage>,
 }
 
 type ContainerState = Vec<OpenContainer>;
@@ -1487,7 +1488,7 @@ fn scan_div_markers(
     source: &str,
 ) -> Result<std::collections::HashMap<usize, DivMarker>> {
     let mut markers = std::collections::HashMap::new();
-    let mut in_code_fence: Option<(char, usize)> = None;
+    let mut in_code_fence: Option<(char, usize, bool)> = None;
     let mut in_html_comment = false;
     let mut line_start = 0usize;
 
@@ -1497,16 +1498,25 @@ fn scan_div_markers(
         let line_offset = slice_start_offset + line_start;
         let line_no = line_for_offset(source, line_offset);
 
-        // Track fenced code blocks so ::: inside them is not a marker.
-        if let Some((fence_char, fence_len)) = in_code_fence {
-            if is_closing_code_fence(trimmed, fence_char, fence_len) {
+        // Track fenced code blocks so ::: inside them is not a marker. Strip
+        // Markdown container prefixes before checking both ends: list
+        // openers carry their marker only on the first line, while blockquote
+        // lines carry `>` on every line.
+        let (fence_line, has_blockquote_prefix) = strip_container_prefixes(trimmed);
+        if let Some((fence_char, fence_len, strip_blockquote_prefix)) = in_code_fence {
+            let closing_line = if strip_blockquote_prefix {
+                strip_blockquote_prefixes(trimmed)
+            } else {
+                trimmed
+            };
+            if is_closing_code_fence(closing_line, fence_char, fence_len) {
                 in_code_fence = None;
             }
             line_start += raw_line.len();
             continue;
         }
-        if let Some((ch, len)) = opening_code_fence(trimmed) {
-            in_code_fence = Some((ch, len));
+        if let Some((ch, len)) = opening_code_fence(fence_line) {
+            in_code_fence = Some((ch, len, has_blockquote_prefix));
             line_start += raw_line.len();
             continue;
         }
@@ -1555,6 +1565,57 @@ fn scan_div_markers(
         line_start += raw_line.len();
     }
     Ok(markers)
+}
+
+/// Remove a run of Markdown quote/list prefixes from the start of a source
+/// line, leaving the content pulldown-cmark treats as the container body.
+/// List markers require following whitespace; ordered markers are `N.`.
+fn strip_container_prefixes(mut line: &str) -> (&str, bool) {
+    let mut has_blockquote_prefix = false;
+    loop {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            has_blockquote_prefix = true;
+            line = rest;
+            continue;
+        }
+
+        if let Some(marker) = trimmed
+            .chars()
+            .next()
+            .filter(|marker| matches!(marker, '-' | '*' | '+'))
+        {
+            let rest = &trimmed[marker.len_utf8()..];
+            if rest.starts_with(char::is_whitespace) {
+                line = rest;
+                continue;
+            }
+        }
+
+        let digit_len = trimmed
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digit_len > 0
+            && trimmed.as_bytes().get(digit_len) == Some(&b'.')
+            && trimmed[digit_len + 1..].starts_with(char::is_whitespace)
+        {
+            line = &trimmed[digit_len + 1..];
+            continue;
+        }
+
+        return (trimmed, has_blockquote_prefix);
+    }
+}
+
+fn strip_blockquote_prefixes(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix('>') else {
+            return trimmed;
+        };
+        line = rest;
+    }
 }
 
 fn opens_unclosed_html_comment(line: &str) -> bool {
@@ -1917,7 +1978,79 @@ fn push_checked_fragment(
 }
 
 fn enter_container(container: &mut ContainerState, kind: ContainerKind, start: usize) {
-    container.push(OpenContainer { kind, start });
+    container.push(OpenContainer {
+        kind,
+        start,
+        code_languages: Vec::new(),
+    });
+}
+
+fn validate_code_fence_info<'info, 'config>(
+    info: &'info str,
+    line: usize,
+    highlighter: &Highlighter,
+    code_images: &'config CodeImagesConfig,
+) -> Result<(
+    emphasis::InfoString<'info>,
+    Option<CodeImageRenderer<'config>>,
+)> {
+    let split = emphasis::split_info_string(info, line)?;
+    let renderer = split
+        .language
+        .and_then(|language| code_images.renderer_for(language));
+    if let Some(language) = split.language {
+        if renderer.is_none() {
+            highlighter.validate_language(language, line)?;
+        }
+    }
+    Ok((split, renderer))
+}
+
+fn validate_container_code_fence(
+    container: ContainerKind,
+    kind: &CodeBlockKind<'_>,
+    line: usize,
+    highlighter: &Highlighter,
+    code_images: &CodeImagesConfig,
+) -> Result<ContainerCodeLanguage> {
+    let info = match kind {
+        CodeBlockKind::Fenced(info) => info.as_ref(),
+        CodeBlockKind::Indented => "",
+    };
+    let (split, renderer) = validate_code_fence_info(info, line, highlighter, code_images)?;
+
+    if renderer.is_some() {
+        let language = split
+            .language
+            .expect("a code_images renderer is resolved from a language tag");
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            format!(
+                "code_images block '{language}' is not supported inside a {}",
+                container.name()
+            ),
+            "move the block to the top level",
+        ));
+    }
+    if split.emphasis.is_some() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            format!(
+                "line emphasis is not supported inside a {}",
+                container.name()
+            ),
+            "remove the emphasis spec or move the block to the top level",
+        ));
+    }
+    if let Some(tail) = split.tail {
+        return Err(emphasis::unexpected_info_tail_error(tail, line));
+    }
+    Ok(match split.language {
+        Some(language) => ContainerCodeLanguage::Highlighted(language.to_owned()),
+        None => ContainerCodeLanguage::Plain,
+    })
 }
 
 fn close_container(
@@ -1949,7 +2082,8 @@ fn close_container(
         ContainerKind::List => SourceFragment::list(line, markdown),
         ContainerKind::Blockquote => SourceFragment::blockquote(line, markdown),
         ContainerKind::Table => SourceFragment::table(line, markdown),
-    };
+    }
+    .with_container_code_languages(open.code_languages);
     Ok(Some((open.start, fragment)))
 }
 
@@ -2175,23 +2309,19 @@ fn parse_slide(
             continue;
         }
 
-        if let Some(open) = container.last() {
-            if open.kind == ContainerKind::Blockquote {
-                if let Event::Start(Tag::CodeBlock(_kind)) = &event {
-                    let message = format!("code block inside a {}", open.kind.name());
-                    let err = BuildError::new(
-                        ErrorKind::Parse,
-                        Some(line_for_offset(source, global_start)),
-                        message,
-                        "move the code block out of the quote",
-                    );
-                    return Err(attach_slide_context(
-                        err,
-                        index,
-                        explicit_key.as_ref(),
-                        &fragments,
-                    ));
-                }
+        if let (Some(open), Event::Start(Tag::CodeBlock(kind))) = (container.last(), &event) {
+            if matches!(open.kind, ContainerKind::List | ContainerKind::Blockquote) {
+                let line = line_for_offset(source, global_start);
+                let language =
+                    validate_container_code_fence(open.kind, kind, line, highlighter, code_images)
+                        .map_err(|err| {
+                            attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
+                        })?;
+                container
+                    .first_mut()
+                    .expect("container code starts inside an open root container")
+                    .code_languages
+                    .push(language);
             }
         }
 
@@ -2502,20 +2632,10 @@ fn parse_slide(
                     // `code_images::transform_fragment`, which rebuilds the
                     // fragment and would silently drop the annotation.
                     let info = language.as_deref().unwrap_or_default();
-                    let split =
-                        emphasis::split_info_string(info, code_line).map_err(&mut slide_err)?;
+                    let (split, renderer) =
+                        validate_code_fence_info(info, code_line, highlighter, code_images)
+                            .map_err(&mut slide_err)?;
                     let language = split.language.map(str::to_owned);
-
-                    let renderer = language
-                        .as_deref()
-                        .and_then(|language| code_images.renderer_for(language));
-                    if let Some(language) = &language {
-                        if renderer.is_none() {
-                            highlighter
-                                .validate_language(language, code_line)
-                                .map_err(&mut slide_err)?;
-                        }
-                    }
 
                     let embed_options = match (renderer.as_ref(), split.tail) {
                         (Some(CodeImageRenderer::BuiltinEmbed), tail) => Some(
@@ -3438,14 +3558,14 @@ fn event_allowed_inside_container(kind: ContainerKind, event: &Event<'_>) -> boo
             | Event::End(TagEnd::TableCell)
     );
     match kind {
-        ContainerKind::List => {
+        ContainerKind::List | ContainerKind::Blockquote => {
             allowed_in_any_container
                 || matches!(
                     event,
                     Event::Start(Tag::CodeBlock(_)) | Event::End(TagEnd::CodeBlock)
                 )
         }
-        ContainerKind::Blockquote | ContainerKind::Table => allowed_in_any_container,
+        ContainerKind::Table => allowed_in_any_container,
     }
 }
 
@@ -5533,40 +5653,126 @@ After list
     }
 
     #[test]
-    fn rejects_fenced_code_inside_blockquote_before_language_or_renderer_dispatch() {
-        for language in ["notalang", "mermaid", "rust"] {
-            let markdown = format!("# Title\n\n> ```{language}\n> value\n> ```");
-            let err =
-                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+    fn container_code_parses_fenced_blockquote_as_markdown() {
+        let deck = parse_markdown(
+            "# Title\n\n> ```rust\n> fn quoted() {}\n> ```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
 
-            assert_eq!(err.kind, ErrorKind::Parse, "{language}");
-            assert_eq!(err.line, Some(3), "{language}");
-            assert!(
-                err.to_string().contains("code block inside a blockquote"),
-                "{language}: {err}"
-            );
+        assert_eq!(fragment.kind(), &FragmentKind::Blockquote);
+        assert_eq!(fragment.line(), 3);
+        assert!(fragment.markdown().contains("```rust"));
+        assert!(fragment.markdown().contains("fn quoted() {}"));
+    }
+
+    #[test]
+    fn container_code_parses_blockquote_nested_in_list() {
+        let deck = parse_markdown(
+            "# Title\n\n- > ```rust\n  > fn nested() {}\n  > ```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::List);
+        assert_eq!(fragment.line(), 3);
+        assert!(fragment.markdown().contains("> ```rust"));
+        assert!(fragment.markdown().contains("fn nested() {}"));
+    }
+
+    #[test]
+    fn container_code_carries_validated_languages_in_source_order() {
+        let deck = parse_markdown(
+            "# Title\n\n- ```rust\n  fn highlighted() {}\n  ```\n- ```\n  plain\n  ```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(
+            fragment.container_code_languages(),
+            &[
+                ContainerCodeLanguage::Highlighted("rust".to_owned()),
+                ContainerCodeLanguage::Plain,
+            ]
+        );
+    }
+
+    #[test]
+    fn container_code_rejects_unknown_languages_with_source_lines() {
+        for (container, markdown) in [
+            ("list", "# Title\n\n- ```notalang\n  value\n  ```"),
+            ("blockquote", "# Title\n\n> ```notalang\n> value\n> ```"),
+        ] {
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "{container}: {err}");
+            assert_eq!(err.line, Some(3), "{container}: {err}");
             assert_eq!(
-                err.help, "move the code block out of the quote",
-                "{language}"
+                err.message, "unknown code language 'notalang'",
+                "{container}: {err}"
             );
         }
     }
 
     #[test]
-    fn rejects_unknown_language_fence_inside_blockquote_nested_in_list() {
-        let err = parse_markdown(
-            "# Title\n\n- > ```notalang\n  > value\n  > ```",
-            &crate::highlight::Highlighter::defaults(),
-        )
-        .unwrap_err();
+    fn container_code_rejects_code_images_with_named_source_errors() {
+        let cases = [
+            (
+                "# Title\n\n- ```mermaid\n  graph TD\n  ```",
+                3,
+                "code_images block 'mermaid' is not supported inside a list",
+            ),
+            (
+                "# Title\n\n> ```mermaid\n> graph TD\n> ```",
+                3,
+                "code_images block 'mermaid' is not supported inside a blockquote",
+            ),
+            (
+                "---\ncode_images:\n  dot: dot -Tsvg\n---\n# Title\n\n> ```dot\n> digraph {}\n> ```",
+                7,
+                "code_images block 'dot' is not supported inside a blockquote",
+            ),
+        ];
 
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(3));
-        assert!(
-            err.to_string().contains("code block inside a blockquote"),
-            "{err}"
-        );
-        assert_eq!(err.help, "move the code block out of the quote");
+        for (markdown, line, message) in cases {
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "{err}");
+            assert_eq!(err.line, Some(line), "{err}");
+            assert_eq!(err.message, message, "{err}");
+            assert_eq!(err.help, "move the block to the top level", "{err}");
+        }
+    }
+
+    #[test]
+    fn container_code_rejects_line_emphasis_with_named_source_errors() {
+        for (container, markdown) in [
+            ("list", "# Title\n\n- ```rust {2}\n  one\n  two\n  ```"),
+            (
+                "blockquote",
+                "# Title\n\n> ```rust {2}\n> one\n> two\n> ```",
+            ),
+        ] {
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "{container}: {err}");
+            assert_eq!(err.line, Some(3), "{container}: {err}");
+            assert_eq!(
+                err.message,
+                format!("line emphasis is not supported inside a {container}"),
+                "{err}"
+            );
+            assert_eq!(
+                err.help, "remove the emphasis spec or move the block to the top level",
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -5605,15 +5811,16 @@ After list
     }
 
     #[test]
-    fn keeps_fenced_code_swallowing_for_list_nested_in_blockquote() {
-        let deck = parse_markdown(
+    fn container_code_rejects_unknown_language_in_list_nested_in_blockquote() {
+        let err = parse_markdown(
             "# Title\n\n> - ```notalang\n>   value\n>   ```",
             &crate::highlight::Highlighter::defaults(),
         )
-        .expect("list-context fenced code remains deferred to #437");
-        let slide = &deck.parsed_slides()[0];
+        .unwrap_err();
 
-        assert_eq!(slide.fragments[1].kind(), &FragmentKind::Blockquote);
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unknown code language 'notalang'");
     }
 
     #[test]
@@ -7749,6 +7956,54 @@ After list
         assert_eq!(children.len(), 1);
         assert!(matches!(children[0].kind(), FragmentKind::Paragraph));
         assert_eq!(group.line(), 3);
+    }
+
+    #[test]
+    fn list_fence_before_slot_group_does_not_desynchronize_div_scanner() {
+        for markdown in [
+            "# Title\n\n- ```rust\n  fn in_list() {}\n  ```\n\n::: {slot=body}\n\nRouted body.\n\n:::\n",
+            "# Title\n\n> - ```rust\n>   fn nested() {}\n>   ```\n\n::: {slot=body}\n\nRouted body.\n\n:::\n",
+        ] {
+            let slide = parse_first_slide(markdown);
+
+            let group = slide
+                .fragments
+                .iter()
+                .find(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. }))
+                .expect("expected the post-list div to route as a slot group");
+            let FragmentKind::SlotGroup { name, children } = group.kind() else {
+                unreachable!();
+            };
+            assert_eq!(name.as_slot_name().as_str(), "body");
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].markdown(), "Routed body.");
+        }
+    }
+
+    #[test]
+    fn fence_like_container_prefix_inside_real_fence_does_not_toggle_scanner() {
+        let slide = parse_first_slide(
+            "# Title\n\n```\n- ```text\n::: {slot=literal}\n```\n\n::: {slot=body}\n\nRouted body.\n\n:::\n",
+        );
+
+        let code = slide
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .expect("outer code fragment");
+        assert!(code.code_text().contains("- ```text"));
+        assert!(code.code_text().contains("::: {slot=literal}"));
+
+        let groups = slide
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 1);
+        let FragmentKind::SlotGroup { name, .. } = groups[0].kind() else {
+            unreachable!();
+        };
+        assert_eq!(name.as_slot_name().as_str(), "body");
     }
 
     #[test]

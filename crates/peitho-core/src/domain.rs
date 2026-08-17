@@ -641,6 +641,19 @@ pub struct FootnoteEntry {
     reveal_step: Option<usize>,
 }
 
+/// Parse-validated highlighting metadata for one code block nested inside a
+/// container fragment.
+///
+/// Entries are stored in source order on [`SourceFragment`] and consumed in
+/// the same order while that fragment's Markdown is rendered. Keeping plain
+/// blocks in the sequence makes the parse-to-render contract positional,
+/// without requiring render to inspect fence info strings again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContainerCodeLanguage {
+    Plain,
+    Highlighted(String),
+}
+
 impl FootnoteEntry {
     pub(crate) fn new(
         number: usize,
@@ -797,6 +810,7 @@ pub struct SourceFragment<S = RawImagePath> {
     kind: FragmentKind<S>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
+    container_code_languages: Vec<ContainerCodeLanguage>,
     embed_options: Option<EmbedOptions>,
     markdown: String,
     text: String,
@@ -816,6 +830,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Heading { level },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
             text: text.into(),
@@ -830,6 +845,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Paragraph,
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
@@ -844,6 +860,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::List,
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
@@ -858,6 +875,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Blockquote,
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
@@ -872,6 +890,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Table,
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
             text: String::new(),
@@ -887,6 +906,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Code,
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: code.clone(),
             text: String::new(),
@@ -906,6 +926,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Math { html: html.into() },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: latex_source.clone(),
             text: String::new(),
@@ -924,6 +945,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::EmbedCard { html: html.into() },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
             text: plain_text.into(),
@@ -938,6 +960,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::Footnotes { entries },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
             text: String::new(),
@@ -956,6 +979,7 @@ impl SourceFragment<RawImagePath> {
             kind: FragmentKind::SlotGroup { name, children },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
             text: String::new(),
@@ -976,6 +1000,14 @@ impl SourceFragment<RawImagePath> {
     /// what is emphasized comes from the deck source.
     pub(crate) fn with_emphasis(mut self, emphasis: LineEmphasis) -> Self {
         self.emphasis = Some(emphasis);
+        self
+    }
+
+    pub(crate) fn with_container_code_languages(
+        mut self,
+        languages: Vec<ContainerCodeLanguage>,
+    ) -> Self {
+        self.container_code_languages = languages;
         self
     }
 
@@ -1003,6 +1035,7 @@ impl<S> SourceFragment<S> {
             },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
             text: String::new(),
@@ -1034,6 +1067,7 @@ impl<S> SourceFragment<S> {
             },
             reveal_span: None,
             emphasis: None,
+            container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
             text: plain_text.into(),
@@ -1061,6 +1095,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            container_code_languages,
             embed_options,
             markdown,
             text,
@@ -1113,6 +1148,7 @@ impl<S> SourceFragment<S> {
             kind,
             reveal_span,
             emphasis,
+            container_code_languages,
             embed_options,
             markdown,
             text,
@@ -1135,6 +1171,10 @@ impl<S> SourceFragment<S> {
 
     pub(crate) fn emphasis(&self) -> Option<&LineEmphasis> {
         self.emphasis.as_ref()
+    }
+
+    pub(crate) fn container_code_languages(&self) -> &[ContainerCodeLanguage] {
+        &self.container_code_languages
     }
 
     #[cfg(test)]
