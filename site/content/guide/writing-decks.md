@@ -261,10 +261,59 @@ rendered as plaintext.
 
 ![Notes appear in the presenter view alongside the current and next slides](/guide-shots/presenter-view.png)
 
+## Footnotes
+
+Footnotes keep a claim short while the supporting detail stays on the slide.
+Reference a label inline with `[^label]` and define it with `[^label]: body`:
+
+```markdown
+# Claims stay short
+
+- A claim can stay crisp while the evidence stays nearby[^study]
+- The same source can support a second point without a new number[^study]
+- A separate source receives the next number by first reference[^survey]
+
+[^study]: The same label keeps the same number every time it appears here.
+[^survey]: Numbering follows first-reference order, not definition order.
+```
+
+Footnotes are scoped to a single slide, so the same label may be reused on
+another slide without collision. Markers are numbered by first-reference order
+rather than definition order, and a label referenced several times keeps one
+number. Bodies take inline Markdown — emphasis, `code`, and links.
+
+A footnote body is one paragraph. Leave a blank line after the definition;
+a definition with no paragraph content is a build error.
+
+Every reference needs a definition and every definition needs a reference:
+undefined references, unused definitions, and duplicate definitions of the same
+label are all line-numbered build errors, so a missing citation never ships
+silently.
+
+Markers inside code spans and code blocks stay literal, so a regex character
+class such as `` `/^[^a-z]+$/` `` is not read as a citation.
+
+### Placing footnotes with a slot
+
+By default footnote entries render as body content. A layout that declares a
+`footnotes` slot receives them there instead, which pins them to a footer:
+
+```html
+<footer class="footnotes">
+  <slot name="footnotes" accepts="blocks" arity="0..1"></slot>
+</footer>
+```
+
+Routing is automatic — no explicit slot syntax is needed on the Markdown side.
+
+With [incremental reveal](#incremental-reveal), a footnote entry appears with
+the step of its earliest reference. If any reference sits in content that is
+never revealed step-by-step, the entry stays visible from the start.
+
 ## Page settings comments
 
 JSON HTML comments carry page settings. The supported settings are `key`,
-`layout`, `section`, `time`, `draft`, `skip`, and `include`.
+`layout`, `section`, `time`, `draft`, `skip`, `page_number`, and `include`.
 
 ```markdown
 <!-- {"key":"checks","layout":"agenda","section":"Contracts","time":"3m"} -->
@@ -285,6 +334,11 @@ navigation, and overview grid selection can still land on skipped slides.
 
 Draft slides cannot also be skipped or declare section markers. If every slide
 is marked draft, the build fails instead of producing an empty deck.
+
+`page_number:false` hides the page number on one slide when the deck sets
+[`page_numbers`](@/guide/frontmatter.md). Only `false` is accepted; `true` is a
+build error, as is using `page_number` on a deck that never turned page numbers
+on.
 
 ## Agenda sections
 
