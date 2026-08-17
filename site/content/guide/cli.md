@@ -2,7 +2,7 @@
 title = "CLI"
 weight = 50
 template = "guide-page.html"
-description = "Scaffold, preview, lint, present, export, and publish a deck — plus inspection commands and shell completions."
+description = "Scaffold, preview, lint, present, export, and publish a deck — plus inspection commands, offline docs, and shell completions."
 +++
 
 Start a deck with `peitho new`; the day-to-day commands are `preview`,
@@ -39,6 +39,15 @@ peitho preview
 It watches the deck and its assets, serves locally, and reloads while
 preserving the current slide and overview state.
 
+`--port <PORT>` pins the server port, which is otherwise an ephemeral port
+chosen at startup. `--no-open` starts the server without launching a browser —
+useful when a browser is already pointed at a pinned port, or when nothing
+should open a window:
+
+```sh
+peitho preview --port 5173 --no-open
+```
+
 ## `peitho lint`
 
 Lint renders every slide in headless Chrome and warns when layout content
@@ -70,6 +79,37 @@ Use windowed presenter mode while debugging:
 peitho present --presenter-windowed
 ```
 
+### Keys during a talk
+
+| Key | Action |
+| --- | --- |
+| Space | Next step; in the presenter, starts or pauses the timer |
+| Arrows, PageUp / PageDown | Previous and next |
+| Home / End | First and last slide |
+| `f` | Fullscreen the current window |
+| `S` | Swap the slides and presenter displays |
+| Esc | Close the presentation and stop the server |
+
+`S` is the escape hatch for a misidentified display: each window navigates to
+its counterpart, so the windows stay where they are and only their roles swap.
+The presenter also exposes it as a Swap button. After a swap the slides window
+sits windowed, so press `f` to go back to fullscreen; the presenter timer
+resets. The shortcut is available only while the presenter is open, so a solo
+slides window cannot swap itself away.
+
+Keys combined with Cmd, Ctrl, or Alt are ignored, so browser shortcuts such as
+Cmd+F keep their usual meaning.
+
+### Controlling what opens
+
+| Flag | Effect |
+| --- | --- |
+| `--port <PORT>` | Pin the server port. Plain local runs otherwise use a random port; with `--host` the port is fixed at 6173. |
+| `--no-open` | Start the server without launching Chrome. |
+| `--no-presenter` | Open the slides window only, without the presenter view. |
+| `--no-serve` | Build the present cache and exit without serving. |
+| `--shell <PATH>` | Swap in a different present shell bundle. A development and debugging override; the built-in shell ships with the binary. |
+
 Use a phone as a clicker by exposing the present server on a reachable IP:
 
 ```sh
@@ -100,6 +140,20 @@ bar, in portrait or landscape, with iOS safe-area insets already accounted for:
 ![Peitho remote in landscape: preview on the left, notes in the center, Previous and Next on the right edge rail](/guide-shots/remote-landscape.png)
 
 </div>
+
+### Laser pointer
+
+The remote's Off / Pointer toggle turns its slide preview into a laser pointer.
+In Pointer mode, dragging a finger across the preview moves a pointer dot on the
+slide display; lifting the finger clears it. Switch back to Off to use the
+preview normally.
+
+Set the dot's color with the deck's
+[`pointer_color`](@/guide/frontmatter.md) frontmatter key:
+
+```yaml
+pointer_color: "#38bdf8"
+```
 
 Rehearse a talk with `--rehearsal` on a deck that declares
 `{"section":...}` markers, and Peitho records each section's actual time
@@ -150,8 +204,19 @@ moved or deleted.
 Export a PDF:
 
 ```sh
-peitho export pdf -o deck.pdf
+peitho export pdf
 ```
+
+`-o` / `--out` is optional; without it the PDF takes the deck's own path with a
+`.pdf` extension, so `deck.md` becomes `deck.pdf`:
+
+```sh
+peitho export pdf slides.md -o handout.pdf
+```
+
+Page size comes from the deck's [`resolution`](@/guide/frontmatter.md)
+frontmatter key when set. Export needs Chrome or Chromium, using the same
+discovery rules as `peitho lint` and `PEITHO_CHROME_PATH`.
 
 ## `peitho publish`
 
@@ -165,6 +230,32 @@ peitho publish -- aws s3 sync dist/ s3://your-bucket/
 `peitho publish` itself prints nothing on success — the output you see comes
 from the deploy command you passed after `--`, so you keep whatever progress
 reporting that command already gives you.
+
+`--dist <DIR>` inspects a directory other than `dist`. The inspection is a
+contamination check: it fails if presentation-shell or speaker-notes files
+reached the distributable output, so a deploy never ships notes.
+
+## `peitho docs`
+
+This guide is embedded in the binary, so it is readable offline and by agents
+driving Peitho without network access. With no argument, `peitho docs` lists the
+topic slugs and their descriptions:
+
+```sh
+peitho docs
+```
+
+Pass a slug to print one page as plain Markdown on stdout, or `--all` to print
+every page in guide order:
+
+```sh
+peitho docs writing-decks
+peitho docs --all
+```
+
+Output is unpaged plain Markdown with no ANSI escapes, so it pipes cleanly into
+a pager, a file, or another tool. An unknown topic exits non-zero and lists the
+valid slugs.
 
 ## `peitho completions`
 
@@ -184,6 +275,9 @@ pipeline:
 ```sh
 peitho build --watch
 ```
+
+`--watch` rebuilds on every change to the deck or its assets. `--out <DIR>`
+writes somewhere other than `dist`.
 
 ## `peitho layouts`
 

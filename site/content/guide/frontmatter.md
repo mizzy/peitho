@@ -18,8 +18,9 @@ by a missing closing `---` all stop the build.
 
 ## Keys
 
-Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `lang`,
-`layouts`, `css`, `syntaxes`, `fonts`, and `code_images`.
+Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`,
+`page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `syntaxes`, `fonts`,
+and `code_images`.
 
 | Key | Purpose |
 | --- | --- |
@@ -27,6 +28,8 @@ Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`, `lang`,
 | `aspect_ratio` | Slide canvas aspect ratio: `16:9` (default) or `4:3`. |
 | `resolution` | PDF-only physical page size in `WxH` CSS pixels. |
 | `breaks` | Render single newlines in slide body Markdown as hard line breaks: `true` or `false` (default). |
+| `page_numbers` | Show a page number on every slide: `current` or `current_of_total`. Omitted means no page numbers. |
+| `pointer_color` | Color of the laser pointer overlay driven from the phone remote: `#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`, or a CSS named color. |
 | `lang` | Deck language as a BCP 47 tag, emitted as `<html lang>` on every page that renders slides: `en` (default), `ja`, `zh-Hans`, … Language-sensitive CSS such as `word-break: auto-phrase` keys off this. |
 | `layouts` | Layout HTML file or directory. |
 | `css` | Theme CSS file or directory. |
@@ -44,6 +47,42 @@ time: 8m
 aspect_ratio: 16:9
 resolution: 1920x1080
 ```
+
+## Page numbers
+
+`page_numbers` turns on a page number for the whole deck. `current` renders the
+slide's own number; `current_of_total` renders it against the deck total:
+
+```yaml
+page_numbers: current_of_total
+```
+
+Individual slides opt out in their page settings comment with
+`"page_number":false` — useful for a cover or a closing slide:
+
+```markdown
+<!-- {"page_number":false} -->
+
+# Title slide
+```
+
+Only `false` is accepted there; `"page_number":true` is a build error, because
+the deck-level key is what turns numbering on. Using `"page_number":false`
+without a deck-level `page_numbers` is also a line-numbered error rather than a
+silent no-op.
+
+## Remote pointer color
+
+`pointer_color` sets the color of the laser pointer overlay driven from the
+phone remote:
+
+```yaml
+pointer_color: "#38bdf8"
+```
+
+Accepted values are `#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`, and CSS named
+colors such as `cyan`. See [CLI](@/guide/cli.md) for turning the pointer on
+during a talk.
 
 ## Code images
 
