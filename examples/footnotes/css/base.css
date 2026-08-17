@@ -98,6 +98,23 @@
   margin-bottom: 0;
 }
 
+.slot-body table {
+  width: 100%;
+  margin: 0 0 var(--peitho-table-spacing, 24px);
+  border-collapse: collapse;
+}
+
+.slot-body th,
+.slot-body td {
+  padding: var(--peitho-table-cell-padding, 8px 12px);
+  border: 1px solid var(--peitho-table-border-color, #8a8578);
+  vertical-align: top;
+}
+
+.slot-body th {
+  font-weight: var(--peitho-table-header-weight, 600);
+}
+
 .slot-body ul {
   margin: 0;
   padding-left: 34px;
@@ -182,4 +199,33 @@
 
 .slot-code .hl-type {
   color: #0f766e;
+}
+
+/*
+ * Static code line emphasis — "these lines are the important ones".
+ *
+ * A separate layer from syntax highlighting above: `hl-*` colors code by what
+ * it is, emphasis points at what the speaker is discussing.
+ *
+ * Only the *static* form lives here, because it is baked into the build output
+ * and must render with no shell present (PDF, preview, dist/). Stepped
+ * emphasis is styled by the present shell itself, so that it keeps working for
+ * decks that ship their own CSS and thus never load this file.
+ */
+.slot-code .code-line {
+  display: inline-block;
+  width: 100%;
+}
+
+.slot-code .code-line-emphasis {
+  background: var(--peitho-emphasis-background, rgba(217, 163, 0, 0.18));
+  box-shadow: inset 3px 0 0 var(--peitho-emphasis-marker, #d9a300);
+}
+
+/*
+ * Dim the surrounding lines, scoped by `:has()` so a block with no emphasis
+ * never renders faded.
+ */
+.slot-code:has(.code-line-emphasis) .code-line:not(.code-line-emphasis) {
+  opacity: var(--peitho-emphasis-dim, 0.45);
 }

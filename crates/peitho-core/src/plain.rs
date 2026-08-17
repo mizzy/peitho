@@ -27,9 +27,10 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
                         FragmentKind::Heading { .. } | FragmentKind::Text => {
                             fragment.plain_text().to_owned()
                         }
-                        FragmentKind::Paragraph | FragmentKind::List | FragmentKind::Blockquote => {
-                            body_fragment_text(fragment.markdown())
-                        }
+                        FragmentKind::Paragraph
+                        | FragmentKind::List
+                        | FragmentKind::Blockquote
+                        | FragmentKind::Table => body_fragment_text(fragment.markdown()),
                         FragmentKind::Math { .. } => fragment.code_text().trim_end().to_owned(),
                         FragmentKind::EmbedCard { .. } => fragment.plain_text().to_owned(),
                         FragmentKind::GenericEmbedCard { .. } => fragment.plain_text().to_owned(),
@@ -68,30 +69,88 @@ pub(crate) fn slide_text<S>(slide: &CheckedSlide<S>) -> ManifestSlideText {
 fn body_fragment_text(markdown: &str) -> String {
     let mut text = String::new();
     let mut in_image = false;
-    let mut blockquote_depth = 0usize;
+    let mut at_first_cell_of_table_row = false;
 
     for event in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS) {
         match event {
             Event::Start(Tag::Image { .. }) => in_image = true,
             Event::End(TagEnd::Image) => in_image = false,
-            _ if in_image => {}
             Event::FootnoteReference(_) => {}
-            Event::Start(Tag::BlockQuote(_kind)) => blockquote_depth += 1,
-            Event::End(TagEnd::BlockQuote(_kind)) => {
-                blockquote_depth = blockquote_depth.saturating_sub(1);
-            }
             Event::Start(Tag::Item) => push_block_separator(&mut text),
-            Event::Start(Tag::Paragraph) if blockquote_depth > 0 => {
+            Event::Start(Tag::Paragraph) => push_block_separator(&mut text),
+            Event::Start(Tag::Table(_alignments)) => {
                 push_block_separator(&mut text);
+                at_first_cell_of_table_row = true;
             }
-            Event::Text(value) | Event::Code(value) => text.push_str(&value),
+            Event::Start(Tag::TableRow) => {
+                push_block_separator(&mut text);
+                at_first_cell_of_table_row = true;
+            }
+            Event::Start(Tag::TableCell) => {
+                if !at_first_cell_of_table_row
+                    && !text.is_empty()
+                    && !text.ends_with(char::is_whitespace)
+                {
+                    text.push(' ');
+                }
+                at_first_cell_of_table_row = false;
+            }
+            Event::End(TagEnd::Table) => at_first_cell_of_table_row = false,
+            Event::Text(_) | Event::Code(_) | Event::InlineMath(_) | Event::DisplayMath(_)
+                if in_image => {}
+            Event::Text(value)
+            | Event::Code(value)
+            | Event::InlineMath(value)
+            | Event::DisplayMath(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak
-                if !text.is_empty() && !text.ends_with(char::is_whitespace) =>
+                if !in_image && !text.is_empty() && !text.ends_with(char::is_whitespace) =>
             {
                 text.push(' ');
             }
-            Event::Start(Tag::Strikethrough) | Event::End(TagEnd::Strikethrough) => {}
-            _ => {}
+            Event::Start(Tag::Heading { .. })
+            | Event::Start(Tag::CodeBlock(_))
+            | Event::Start(Tag::HtmlBlock)
+            | Event::Start(Tag::List(_))
+            | Event::Start(Tag::BlockQuote(_))
+            | Event::Start(Tag::FootnoteDefinition(_))
+            | Event::Start(Tag::DefinitionList)
+            | Event::Start(Tag::DefinitionListTitle)
+            | Event::Start(Tag::DefinitionListDefinition)
+            | Event::Start(Tag::Emphasis)
+            | Event::Start(Tag::Strong)
+            | Event::Start(Tag::Strikethrough)
+            | Event::Start(Tag::Superscript)
+            | Event::Start(Tag::Subscript)
+            | Event::Start(Tag::Link { .. })
+            | Event::Start(Tag::MetadataBlock(_))
+            | Event::Start(Tag::TableHead)
+            | Event::End(TagEnd::Paragraph)
+            | Event::End(TagEnd::Heading(_))
+            | Event::End(TagEnd::CodeBlock)
+            | Event::End(TagEnd::HtmlBlock)
+            | Event::End(TagEnd::List(_))
+            | Event::End(TagEnd::BlockQuote(_))
+            | Event::End(TagEnd::Item)
+            | Event::End(TagEnd::FootnoteDefinition)
+            | Event::End(TagEnd::DefinitionList)
+            | Event::End(TagEnd::DefinitionListTitle)
+            | Event::End(TagEnd::DefinitionListDefinition)
+            | Event::End(TagEnd::TableHead)
+            | Event::End(TagEnd::TableRow)
+            | Event::End(TagEnd::TableCell)
+            | Event::End(TagEnd::Emphasis)
+            | Event::End(TagEnd::Strong)
+            | Event::End(TagEnd::Strikethrough)
+            | Event::End(TagEnd::Superscript)
+            | Event::End(TagEnd::Subscript)
+            | Event::End(TagEnd::Link)
+            | Event::End(TagEnd::MetadataBlock(_))
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Rule
+            | Event::TaskListMarker(_) => {}
         }
     }
 
@@ -171,6 +230,13 @@ mod tests {
     }
 
     #[test]
+    fn body_slot_separates_paragraphs_in_loose_list_item() {
+        let text = checked_slide_text("# Title\n\n- first para\n\n  second para");
+
+        assert_eq!(text.body(), "first para\nsecond para");
+    }
+
+    #[test]
     fn manifest_body_text_contains_blockquote_text_without_markers() {
         let text = checked_slide_text(
             "# Title\n\n> First **quoted** paragraph.\n>\n> Second paragraph with `code`.",
@@ -181,6 +247,23 @@ mod tests {
             "First quoted paragraph.\nSecond paragraph with code."
         );
         assert!(!text.body().contains('>'));
+    }
+
+    #[test]
+    fn manifest_body_text_flattens_table_with_cell_and_row_separators() {
+        let text = checked_slide_text(
+            "# Title\n\n| Name | Score |\n| --- | --- |\n| Ada | 10 |\n| Lin | 20 |",
+        );
+
+        assert_eq!(text.body(), "Name Score\nAda 10\nLin 20");
+        assert!(!text.body().contains('|'));
+    }
+
+    #[test]
+    fn manifest_body_text_does_not_prefix_nonempty_header_after_empty_cell() {
+        let text = checked_slide_text("# Title\n\n|  | X |\n| --- | --- |\n| 1 | 2 |");
+
+        assert_eq!(text.body(), "X\n1 2");
     }
 
     #[test]

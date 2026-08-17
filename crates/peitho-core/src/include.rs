@@ -1167,8 +1167,7 @@ mod tests {
 ---
 # After
 
-| unsupported |
-| --- |
+<div>unsupported</div>
 ";
 
         let expanded = expand_includes(source, 0, &deck).unwrap();

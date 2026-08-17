@@ -23,8 +23,9 @@ use crate::{
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 
-pub(crate) const BODY_MARKDOWN_OPTIONS: Options =
-    Options::ENABLE_OLD_FOOTNOTES.union(Options::ENABLE_STRIKETHROUGH);
+pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TABLES);
 
 pub(crate) fn walk_body_markdown_list_items<'a>(
     markdown: &'a str,
@@ -504,7 +505,8 @@ fn render_block_slot(
             | FragmentKind::Paragraph
             | FragmentKind::Text
             | FragmentKind::List
-            | FragmentKind::Blockquote => markdown_run.push(fragment.markdown()),
+            | FragmentKind::Blockquote
+            | FragmentKind::Table => markdown_run.push(fragment.markdown()),
             FragmentKind::Code | FragmentKind::Image { .. } | FragmentKind::SlotGroup { .. } => {
                 unreachable!("validated by contract guard")
             }
@@ -609,6 +611,14 @@ fn render_revealed_fragment(
             breaks,
             footnote_numbers,
         ),
+        FragmentKind::Table => render_revealed_markdown_root(
+            body,
+            fragment,
+            RevealedMarkdownRoot::Table,
+            span.start,
+            breaks,
+            footnote_numbers,
+        ),
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
             let code = render_code_fragment(fragment, highlighter)?;
@@ -698,6 +708,7 @@ enum RevealedMarkdownRoot {
     Heading,
     Paragraph,
     Blockquote,
+    Table,
 }
 
 fn render_revealed_markdown_root(
@@ -709,10 +720,10 @@ fn render_revealed_markdown_root(
     footnote_numbers: &BTreeMap<String, usize>,
 ) -> Result<()> {
     let mut events = Vec::new();
-    let mut stamped = false;
+    let mut root_stamped = false;
     let mut in_html_comment = false;
     for event in Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS) {
-        let event = match (root, stamped, event) {
+        let event = match (root, root_stamped, event) {
             (
                 RevealedMarkdownRoot::Heading,
                 false,
@@ -726,15 +737,15 @@ fn render_revealed_markdown_root(
                 if id.is_some() || !classes.is_empty() || !attrs.is_empty() {
                     unreachable!("heading attributes are not enabled in BODY_MARKDOWN_OPTIONS");
                 }
-                stamped = true;
+                root_stamped = true;
                 Event::Html(format!(r#"<{level} data-reveal-step="{step}">"#).into())
             }
             (RevealedMarkdownRoot::Paragraph, false, Event::Start(Tag::Paragraph)) => {
-                stamped = true;
+                root_stamped = true;
                 Event::Html(format!(r#"<p data-reveal-step="{step}">"#).into())
             }
             (RevealedMarkdownRoot::Blockquote, false, Event::Start(Tag::BlockQuote(_kind))) => {
-                stamped = true;
+                root_stamped = true;
                 Event::Html(format!(r#"<blockquote data-reveal-step="{step}">"#).into())
             }
             (_, _, event) => event,
@@ -745,15 +756,38 @@ fn render_revealed_markdown_root(
             events.push(event);
         }
     }
-    if !stamped {
-        let label = match root {
-            RevealedMarkdownRoot::Heading => "heading",
-            RevealedMarkdownRoot::Paragraph => "paragraph",
-            RevealedMarkdownRoot::Blockquote => "blockquote",
-        };
+    let missing_root = match (root, root_stamped) {
+        (RevealedMarkdownRoot::Heading, false) => Some("heading"),
+        (RevealedMarkdownRoot::Paragraph, false) => Some("paragraph"),
+        (RevealedMarkdownRoot::Blockquote, false) => Some("blockquote"),
+        (RevealedMarkdownRoot::Heading, true)
+        | (RevealedMarkdownRoot::Paragraph, true)
+        | (RevealedMarkdownRoot::Blockquote, true)
+        | (RevealedMarkdownRoot::Table, _) => None,
+    };
+    if let Some(label) = missing_root {
         unreachable!("revealed {label} fragment produced no {label} root");
     }
-    html::push_html(body, events.into_iter());
+
+    let mut rendered = String::new();
+    html::push_html(&mut rendered, events.into_iter());
+    if matches!(root, RevealedMarkdownRoot::Table) {
+        stamp_revealed_table_root(&mut rendered, step, fragment.line())?;
+    }
+    body.push_str(&rendered);
+    Ok(())
+}
+
+fn stamp_revealed_table_root(rendered: &mut String, step: usize, line: usize) -> Result<()> {
+    let Some(root_tag_end) = rendered.find('>').filter(|_| rendered.starts_with('<')) else {
+        return Err(BuildError::new(
+            ErrorKind::Layout,
+            Some(line),
+            "internal render error: revealed table has no root HTML tag",
+            "report this issue with the table Markdown that triggered it",
+        ));
+    };
+    rendered.insert_str(root_tag_end, &format!(r#" data-reveal-step="{step}""#));
     Ok(())
 }
 
@@ -1026,6 +1060,7 @@ fn render_image_fragment_inner(
         | FragmentKind::Footnotes { .. }
         | FragmentKind::List
         | FragmentKind::Blockquote
+        | FragmentKind::Table
         | FragmentKind::SlotGroup { .. } => unreachable!("validated by contract guard"),
     }
 }
@@ -1065,6 +1100,7 @@ fn accepts_fragment(accepts: Accepts, fragment: &SourceFragment<ResolvedImagePat
             | (Accepts::Blocks, FragmentKind::Paragraph)
             | (Accepts::Blocks, FragmentKind::List)
             | (Accepts::Blocks, FragmentKind::Blockquote)
+            | (Accepts::Blocks, FragmentKind::Table)
             | (Accepts::Blocks, FragmentKind::Math { .. })
             | (Accepts::Blocks, FragmentKind::EmbedCard { .. })
             | (Accepts::Blocks, FragmentKind::GenericEmbedCard { .. })
@@ -1092,8 +1128,11 @@ fn render_heading_inline(
                 };
                 events.push(Event::Html(render_footnote_reference(number).into()));
             }
-            event if in_heading => events.push(event),
-            _ => {}
+            event => {
+                if in_heading {
+                    events.push(event);
+                }
+            }
         }
     }
     let mut rendered = String::new();
@@ -2207,6 +2246,78 @@ mod tests {
         );
         assert!(html.contains("<ul>\n<li>nested item</li>\n</ul>"), "{html}");
         assert!(html.contains("<p>nested quote</p>"), "{html}");
+    }
+
+    #[test]
+    fn renders_table_structure_alignment_and_inline_markup() {
+        let rendered = render_checked_deck_with_layout(
+            "# Title\n\n| Name | Score |\n| :--- | ---: |\n| *Ada* | `10` |",
+            title_body_layout(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains("<table>"), "{html}");
+        assert!(html.contains("<thead>"), "{html}");
+        assert!(html.contains("<tbody>"), "{html}");
+        assert!(html.contains(r#"style="text-align: right""#), "{html}");
+        assert!(html.contains("<em>Ada</em>"), "{html}");
+        assert!(html.contains("<code>10</code>"), "{html}");
+
+        let revealed = render_checked_deck_with_layout(
+            "# Title\n\n::: {reveal}\n\n| Name | Score |\n| :--- | ---: |\n| *Ada* | `10` |\n\n:::\n",
+            title_body_layout(),
+        );
+        let revealed_html = revealed.slides()[0].html();
+
+        assert!(
+            revealed_html.contains(r#"<table data-reveal-step="1">"#),
+            "{revealed_html}"
+        );
+        assert!(
+            revealed_html.contains(r#"style="text-align: right""#),
+            "{revealed_html}"
+        );
+    }
+
+    #[test]
+    fn revealed_table_stamp_tolerates_root_attributes_and_names_missing_root() {
+        let mut rendered = r#"<table class="wide"><tbody></tbody></table>"#.to_owned();
+
+        stamp_revealed_table_root(&mut rendered, 3, 7).unwrap();
+
+        assert_eq!(
+            rendered,
+            r#"<table class="wide" data-reveal-step="3"><tbody></tbody></table>"#
+        );
+
+        let err = stamp_revealed_table_root(&mut String::new(), 3, 7).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("revealed table"));
+    }
+
+    #[test]
+    fn renders_tables_inside_list_items_and_blockquotes() {
+        let cases = [
+            (
+                "# Title\n\n- Comparison:\n\n  | A | B |\n  | - | - |\n  | 1 | 2 |",
+                "<ul>",
+            ),
+            (
+                "# Title\n\n> Comparison:\n>\n> | A | B |\n> | - | - |\n> | 1 | 2 |",
+                "<blockquote>",
+            ),
+        ];
+
+        for (markdown, outer_tag) in cases {
+            let rendered = render_checked_deck_with_layout(markdown, title_body_layout());
+            let html = rendered.slides()[0].html();
+
+            assert!(html.contains(outer_tag), "{html}");
+            assert!(html.contains("<table>"), "{html}");
+            assert!(html.contains("<thead>"), "{html}");
+            assert!(html.contains("<tbody>"), "{html}");
+        }
     }
 
     #[test]

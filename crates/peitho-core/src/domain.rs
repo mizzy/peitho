@@ -710,6 +710,7 @@ pub enum FragmentKind<S = RawImagePath> {
     },
     List,
     Blockquote,
+    Table,
     /// A `::: {slot=name}` fenced block. Mapping expands the children into
     /// the named slot; SlotGroup itself never leaves the Mapped phase.
     SlotGroup {
@@ -743,6 +744,7 @@ impl<S> FragmentKind<S> {
             Self::Image { .. } => Accepts::Image,
             Self::List => Accepts::List,
             Self::Blockquote => Accepts::Blocks,
+            Self::Table => Accepts::Blocks,
             // SlotGroup is expanded in mapping, so its own accepts value never
             // reaches contract checks. Report a conservative blocks default so
             // any accidental reader gets a stable answer instead of unreachable!.
@@ -763,6 +765,7 @@ impl<S> FragmentKind<S> {
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::Blockquote => "blockquote",
+            Self::Table => "table",
             Self::SlotGroup { .. } => "slot group",
         }
     }
@@ -782,6 +785,7 @@ impl<S> fmt::Display for FragmentKind<S> {
             Self::Image { .. } => "image",
             Self::List => "list",
             Self::Blockquote => "blockquote",
+            Self::Table => "table",
             Self::SlotGroup { .. } => "slot group",
         })
     }
@@ -852,6 +856,20 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Blockquote,
+            reveal_span: None,
+            emphasis: None,
+            embed_options: None,
+            markdown: markdown.into(),
+            text: String::new(),
+            code: String::new(),
+            language: None,
+        }
+    }
+
+    pub fn table(line: usize, markdown: impl Into<String>) -> Self {
+        Self {
+            line,
+            kind: FragmentKind::Table,
             reveal_span: None,
             emphasis: None,
             embed_options: None,
@@ -1078,6 +1096,7 @@ impl<S> SourceFragment<S> {
             FragmentKind::Image { alt, src } => FragmentKind::Image { alt, src: f(src)? },
             FragmentKind::List => FragmentKind::List,
             FragmentKind::Blockquote => FragmentKind::Blockquote,
+            FragmentKind::Table => FragmentKind::Table,
             FragmentKind::SlotGroup { name, children } => {
                 let mut mapped_children = Vec::with_capacity(children.len());
                 for child in children {
