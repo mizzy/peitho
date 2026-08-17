@@ -22,6 +22,7 @@ syntect.workspace = true
 two-face.workspace = true
 ts-rs = { workspace = true, optional = true }
 url.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

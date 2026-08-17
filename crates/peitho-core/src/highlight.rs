@@ -1,14 +1,19 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use sha2::{Digest, Sha256};
 use syntect::{
     html::{line_tokens_to_classed_spans, ClassStyle, ClassedHTMLGenerator},
     parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet},
     util::LinesWithEndings,
 };
+use walkdir::WalkDir;
 
 use crate::error::{BuildError, ErrorKind, Result};
 
@@ -27,6 +32,13 @@ contexts:
 "#;
 
 static BASE_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+
+type UserSyntaxCacheKey = [u8; 32];
+
+static USER_SYNTAX_SET_CACHE: Mutex<Option<(UserSyntaxCacheKey, SyntaxSet)>> = Mutex::new(None);
+
+#[cfg(test)]
+static USER_SYNTAX_SET_BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn base_syntax_set() -> &'static SyntaxSet {
     BASE_SYNTAX_SET.get_or_init(|| {
@@ -51,27 +63,21 @@ impl Highlighter {
     }
 
     pub fn with_user_dir(dir: &Path) -> Result<Self> {
-        let mut builder = base_syntax_set().clone().into_builder();
-        builder.add_from_folder(dir, true).map_err(|err| {
-            BuildError::new(
-                ErrorKind::Parse,
-                None,
-                format!("failed to load sublime-syntax file: {err}"),
-                "check the sublime-syntax file",
-            )
-        })?;
-        Ok(Self {
-            syntax_set: builder.build(),
-        })
+        let files = user_syntax_files_in_dir(dir)?;
+        Self::with_user_files_and_error_style(&files, UserSyntaxErrorStyle::Directory)
     }
 
     pub fn with_user_files(files: &[PathBuf]) -> Result<Self> {
-        let mut builder = base_syntax_set().clone().into_builder();
-        for file in files {
-            builder.add(load_user_syntax_file(file)?);
-        }
+        Self::with_user_files_and_error_style(files, UserSyntaxErrorStyle::ExplicitFile)
+    }
+
+    fn with_user_files_and_error_style(
+        files: &[PathBuf],
+        error_style: UserSyntaxErrorStyle,
+    ) -> Result<Self> {
+        let (key, syntaxes) = load_user_syntax_files(files, error_style)?;
         Ok(Self {
-            syntax_set: builder.build(),
+            syntax_set: cached_user_syntax_set(key, syntaxes),
         })
     }
 
@@ -232,34 +238,143 @@ fn push_scope_classes(out: &mut String, scope: syntect::parsing::Scope) {
     }
 }
 
-fn load_user_syntax_file(file: &Path) -> Result<SyntaxDefinition> {
+#[derive(Clone, Copy)]
+enum UserSyntaxErrorStyle {
+    Directory,
+    ExplicitFile,
+}
+
+fn user_syntax_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(dir)
+        .follow_links(true)
+        .sort_by(|a, b| a.file_name().cmp(b.file_name()))
+    {
+        let entry = entry.map_err(|err| {
+            BuildError::new(
+                ErrorKind::Parse,
+                None,
+                format!(
+                    "failed to load sublime-syntax file: error finding all the files in a directory: {err}"
+                ),
+                "check the sublime-syntax file",
+            )
+        })?;
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "sublime-syntax")
+        {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
+}
+
+fn load_user_syntax_files(
+    files: &[PathBuf],
+    error_style: UserSyntaxErrorStyle,
+) -> Result<(UserSyntaxCacheKey, Vec<SyntaxDefinition>)> {
+    let mut hasher = Sha256::new();
+    let mut syntaxes = Vec::with_capacity(files.len());
+    for file in files {
+        let (source, syntax) = load_user_syntax_file(file, error_style)?;
+        hash_user_syntax_component(&mut hasher, file.as_os_str().as_encoded_bytes());
+        hash_user_syntax_component(&mut hasher, source.as_bytes());
+        syntaxes.push(syntax);
+    }
+    Ok((hasher.finalize().into(), syntaxes))
+}
+
+fn hash_user_syntax_component(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn load_user_syntax_file(
+    file: &Path,
+    error_style: UserSyntaxErrorStyle,
+) -> Result<(String, SyntaxDefinition)> {
     let source = fs::read_to_string(file).map_err(|err| {
-        BuildError::new(
-            ErrorKind::Parse,
-            None,
-            format!(
+        let message = match error_style {
+            UserSyntaxErrorStyle::Directory => {
+                format!("failed to load sublime-syntax file: error reading a file: {err}")
+            }
+            UserSyntaxErrorStyle::ExplicitFile => format!(
                 "failed to load sublime-syntax file {}: {err}",
                 file.display()
             ),
+        };
+        BuildError::new(
+            ErrorKind::Parse,
+            None,
+            message,
             "check the sublime-syntax file",
         )
     })?;
-    SyntaxDefinition::load_from_str(
+
+    let syntax = SyntaxDefinition::load_from_str(
         &source,
         true,
         file.file_stem().and_then(|name| name.to_str()),
     )
     .map_err(|err| {
-        BuildError::new(
-            ErrorKind::Parse,
-            None,
-            format!(
+        let message = match error_style {
+            UserSyntaxErrorStyle::Directory => format!(
+                "failed to load sublime-syntax file: {}: {err}",
+                file.display()
+            ),
+            UserSyntaxErrorStyle::ExplicitFile => format!(
                 "failed to load sublime-syntax file {}: {err}",
                 file.display()
             ),
+        };
+        BuildError::new(
+            ErrorKind::Parse,
+            None,
+            message,
             "check the sublime-syntax file",
         )
-    })
+    })?;
+
+    Ok((source, syntax))
+}
+
+fn cached_user_syntax_set(key: UserSyntaxCacheKey, syntaxes: Vec<SyntaxDefinition>) -> SyntaxSet {
+    let mut cache = USER_SYNTAX_SET_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((cached_key, syntax_set)) = cache.as_ref() {
+        if cached_key == &key {
+            return syntax_set.clone();
+        }
+    }
+
+    let mut builder = base_syntax_set().clone().into_builder();
+    for syntax in syntaxes {
+        builder.add(syntax);
+    }
+    let syntax_set = builder.build();
+    #[cfg(test)]
+    USER_SYNTAX_SET_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    *cache = Some((key, syntax_set));
+    cache
+        .as_ref()
+        .expect("user syntax cache was just populated")
+        .1
+        .clone()
+}
+
+#[cfg(test)]
+fn clear_user_syntax_set_cache() {
+    *USER_SYNTAX_SET_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+#[cfg(test)]
+fn user_syntax_set_build_count() -> usize {
+    USER_SYNTAX_SET_BUILD_COUNT.load(Ordering::Relaxed)
 }
 
 impl Default for Highlighter {
@@ -271,7 +386,15 @@ impl Default for Highlighter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, sync::MutexGuard};
+
+    static USER_SYNTAX_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_user_syntax_tests() -> MutexGuard<'static, ()> {
+        USER_SYNTAX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
 ---
@@ -293,6 +416,17 @@ contexts:
   main:
     - match: '\b(move|wait)\b'
       scope: keyword.control.drift
+"#;
+
+    const UPDATED_CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
+---
+name: Carina
+file_extensions: [crn]
+scope: source.carina
+contexts:
+  main:
+    - match: '\b(resource|provider|module)\b'
+      scope: string.quoted.carina
 "#;
 
     const TEXT_OVERRIDE_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
@@ -434,6 +568,7 @@ contexts:
 
     #[test]
     fn user_dir_validates_carina_and_defaults_reject_it() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("carina.sublime-syntax"),
@@ -452,6 +587,7 @@ contexts:
 
     #[test]
     fn user_files_validates_single_syntax_file() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let syntax = dir.path().join("carina.sublime-syntax");
         fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
@@ -465,6 +601,7 @@ contexts:
 
     #[test]
     fn user_file_text_extension_shadows_bundled_alias() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let syntax = dir.path().join("user-text.sublime-syntax");
         fs::write(&syntax, TEXT_OVERRIDE_SUBLIME_SYNTAX).unwrap();
@@ -477,6 +614,7 @@ contexts:
 
     #[test]
     fn user_syntax_name_collision_shadows_bundled_definition() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let syntax = dir.path().join("user-text-name.sublime-syntax");
         fs::write(&syntax, TEXT_NAME_OVERRIDE_SUBLIME_SYNTAX).unwrap();
@@ -491,6 +629,7 @@ contexts:
 
     #[test]
     fn user_files_validates_multiple_syntax_files() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let carina = dir.path().join("carina.sublime-syntax");
         let drift = dir.path().join("drift.sublime-syntax");
@@ -504,7 +643,114 @@ contexts:
     }
 
     #[test]
+    fn identical_user_syntax_content_reuses_cached_set() {
+        let _guard = lock_user_syntax_tests();
+        clear_user_syntax_set_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("carina.sublime-syntax");
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+
+        let builds_before = user_syntax_set_build_count();
+        let first = Highlighter::with_user_files(std::slice::from_ref(&syntax)).unwrap();
+        let builds_after_first = user_syntax_set_build_count();
+        let second = Highlighter::with_user_files(std::slice::from_ref(&syntax)).unwrap();
+
+        assert_eq!(builds_after_first, builds_before + 1);
+        assert_eq!(user_syntax_set_build_count(), builds_after_first);
+        assert!(first.validate_language("carina", 1).is_ok());
+        assert!(second.validate_language("carina", 1).is_ok());
+    }
+
+    #[test]
+    #[ignore = "manual release-mode cache measurement"]
+    fn measure_user_syntax_cache_construction() {
+        let _guard = lock_user_syntax_tests();
+        let _ = Highlighter::defaults();
+        clear_user_syntax_set_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("carina.sublime-syntax");
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+
+        let started = std::time::Instant::now();
+        let first = Highlighter::with_user_files(std::slice::from_ref(&syntax)).unwrap();
+        let first_elapsed = started.elapsed();
+        let builds_after_first = user_syntax_set_build_count();
+
+        let started = std::time::Instant::now();
+        let second = Highlighter::with_user_files(std::slice::from_ref(&syntax)).unwrap();
+        let second_elapsed = started.elapsed();
+
+        assert!(first.validate_language("carina", 1).is_ok());
+        assert!(second.validate_language("carina", 1).is_ok());
+        assert_eq!(user_syntax_set_build_count(), builds_after_first);
+        eprintln!("first construction: {first_elapsed:?}; second construction: {second_elapsed:?}");
+    }
+
+    #[test]
+    fn changed_user_syntax_content_rebuilds_cached_set() {
+        let _guard = lock_user_syntax_tests();
+        clear_user_syntax_set_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let syntax = dir.path().join("carina.sublime-syntax");
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+
+        let first = Highlighter::with_user_dir(dir.path()).unwrap();
+        let builds_after_first = user_syntax_set_build_count();
+        let first_html = first.highlight_html("resource", "carina", 1).unwrap();
+        assert!(first_html.contains("hl-keyword"), "{first_html}");
+
+        fs::write(&syntax, UPDATED_CARINA_SUBLIME_SYNTAX).unwrap();
+        let second = Highlighter::with_user_dir(dir.path()).unwrap();
+        let second_html = second.highlight_html("resource", "carina", 1).unwrap();
+
+        assert_eq!(user_syntax_set_build_count(), builds_after_first + 1);
+        assert!(second_html.contains("hl-string"), "{second_html}");
+        assert!(!second_html.contains("hl-keyword"), "{second_html}");
+    }
+
+    #[test]
+    fn user_syntax_errors_are_stable_and_do_not_replace_cached_set() {
+        let _guard = lock_user_syntax_tests();
+        clear_user_syntax_set_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("carina.sublime-syntax");
+        let malformed = dir.path().join("broken.sublime-syntax");
+        let missing = dir.path().join("missing.sublime-syntax");
+        fs::write(&valid, CARINA_SUBLIME_SYNTAX).unwrap();
+        fs::write(&malformed, ":::: not a syntax ::::").unwrap();
+
+        let missing_before = Highlighter::with_user_files(std::slice::from_ref(&missing))
+            .err()
+            .expect("missing syntax unexpectedly loaded")
+            .to_string();
+        let malformed_before = Highlighter::with_user_files(std::slice::from_ref(&malformed))
+            .err()
+            .expect("malformed syntax unexpectedly loaded")
+            .to_string();
+
+        let cached = Highlighter::with_user_files(std::slice::from_ref(&valid)).unwrap();
+        let builds_after_success = user_syntax_set_build_count();
+        assert!(cached.validate_language("carina", 1).is_ok());
+
+        let missing_after = Highlighter::with_user_files(std::slice::from_ref(&missing))
+            .err()
+            .expect("missing syntax unexpectedly loaded")
+            .to_string();
+        let malformed_after = Highlighter::with_user_files(std::slice::from_ref(&malformed))
+            .err()
+            .expect("malformed syntax unexpectedly loaded")
+            .to_string();
+        assert_eq!(missing_after.as_bytes(), missing_before.as_bytes());
+        assert_eq!(malformed_after.as_bytes(), malformed_before.as_bytes());
+
+        let cached_again = Highlighter::with_user_files(std::slice::from_ref(&valid)).unwrap();
+        assert_eq!(user_syntax_set_build_count(), builds_after_success);
+        assert!(cached_again.validate_language("carina", 1).is_ok());
+    }
+
+    #[test]
     fn malformed_user_syntax_file_returns_parse_error_with_path() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let syntax_path = dir.path().join("broken.sublime-syntax");
         fs::write(&syntax_path, ":::: not a syntax ::::").unwrap();
@@ -521,6 +767,7 @@ contexts:
 
     #[test]
     fn malformed_user_syntax_returns_parse_error_with_path() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let syntax_path = dir.path().join("broken.sublime-syntax");
         fs::write(&syntax_path, ":::: not a syntax ::::").unwrap();
@@ -537,6 +784,7 @@ contexts:
 
     #[test]
     fn empty_user_syntax_dir_is_ok_and_keeps_defaults() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
 
         let highlighter = Highlighter::with_user_dir(dir.path()).unwrap();
@@ -546,6 +794,7 @@ contexts:
 
     #[test]
     fn nonexistent_user_syntax_dir_returns_error() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
 
@@ -554,6 +803,7 @@ contexts:
 
     #[test]
     fn highlights_carina_with_user_syntax_classes() {
+        let _guard = lock_user_syntax_tests();
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("carina.sublime-syntax"),

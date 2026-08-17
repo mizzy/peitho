@@ -38,3 +38,4 @@ tiny_http = "0.12.0"
 ts-rs = { version = "12.0.1", default-features = true }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 url = "2.5.8"
+walkdir = "2"
