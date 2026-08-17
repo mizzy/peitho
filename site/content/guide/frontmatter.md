@@ -33,8 +33,8 @@ and `code_images`.
 | `lang` | Deck language as a BCP 47 tag, emitted as `<html lang>` on every page that renders slides: `en` (default), `ja`, `zh-Hans`, … Language-sensitive CSS such as `word-break: auto-phrase` keys off this. |
 | `layouts` | Layout HTML file or directory. |
 | `css` | Theme CSS file or directory. |
-| `syntaxes` | Custom syntect syntax file or directory. |
-| `fonts` | Font asset file or directory. |
+| `syntaxes` | Custom `.sublime-syntax` grammar file or directory, augmenting the built-in set. See [Syntax highlighting](@/guide/writing-decks.md#syntax-highlighting). |
+| `fonts` | Font asset file or directory, copied verbatim for your own `@font-face` rules. |
 | `code_images` | External commands or overrides that turn matching fenced code blocks into SVG images. |
 
 Examples in the repository include:
@@ -192,6 +192,34 @@ Layouts read `*.html`. CSS reads `*.css`. Syntaxes read
 `*.sublime-syntax` and augment the built-in syntax set. Fonts copy files
 verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS
 files can live side by side.
+
+## Using custom fonts
+
+Peitho copies font assets; it does not declare them. Put the files in a
+`fonts/` directory next to the deck (or point `fonts:` at a file or directory),
+then write the `@font-face` rule yourself in your theme CSS.
+
+The copied `fonts/` directory sits next to the emitted `peitho.css`, so a
+relative URL resolves:
+
+```css
+@font-face {
+  font-family: "Playfair Display";
+  src: url("fonts/playfair-display-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+.slot-title {
+  font-family: "Playfair Display", serif;
+}
+```
+
+Because fonts are copied without an extension filter, a font license or an
+`@font-face` stylesheet can sit in `fonts/` alongside the `.woff2` files and is
+copied too. See the
+[Custom Fonts example](https://peitho.gosu.ke/examples/custom-fonts/) for a
+complete deck.
 
 ## Error behavior
 

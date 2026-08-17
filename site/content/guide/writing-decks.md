@@ -192,6 +192,67 @@ Markdown fuses them to a marker, and the build fails with a line-numbered error.
 `{reveal=value}`, empty groups, unclosed fences, nested fences, and
 multi-attribute fences are line-numbered build errors.
 
+## Syntax highlighting
+
+Tag a fenced code block with a language and Peitho highlights it:
+
+````markdown
+```rust
+fn main() {
+    println!("hello");
+}
+```
+````
+
+Highlighting runs at build time with syntect, so slides carry no client-side
+highlighter and code never flashes unstyled before coloring in.
+
+A fence with no language tag stays plain text. A tag Peitho cannot resolve is a
+line-numbered build error rather than silently unhighlighted code:
+
+```
+error: slide 1 ('cover'), line 6: unknown code language 'crn'
+ help: use a language name syntect recognizes (e.g. rust, js, ts, py, sh, toml,
+       json, yaml, html, css, md, go, c, cpp, java, rb) or remove the tag
+```
+
+### Coloring code from CSS
+
+Highlighting emits `<span>` elements carrying `hl-`-prefixed classes rather
+than inline colors, so the palette lives in theme CSS like everything else. The
+classes are syntax scope names — `hl-keyword`, `hl-string`, `hl-comment`,
+`hl-function`, `hl-type`, `hl-constant`, `hl-storage`, and others depending on
+the grammar:
+
+```css
+.slot-code .hl-keyword { color: #c678dd; }
+.slot-code .hl-string  { color: #98c379; }
+.slot-code .hl-comment { color: #7f848e; font-style: italic; }
+```
+
+The `hl-` prefix keeps these from colliding with layout or slot classes.
+
+### Teaching Peitho a new language
+
+To highlight a language syntect does not ship, put a `.sublime-syntax` grammar
+in a `syntaxes/` directory next to the deck, or point the
+[`syntaxes`](@/guide/frontmatter.md) frontmatter key at a file or directory.
+Custom grammars augment the built-in set rather than replacing it.
+
+A fence tag resolves against the grammar's name **and** its declared
+`file_extensions`, so a grammar declaring:
+
+```yaml
+name: Carina
+file_extensions:
+  - crn
+scope: source.crn
+```
+
+highlights ```` ```crn ```` blocks. Adding the grammar is what turns that tag
+from a build error into highlighted code — see the
+[Custom Syntax example](https://peitho.gosu.ke/examples/custom-syntax/).
+
 ## Code line emphasis
 
 Point at specific lines of a code block — "the line I'm talking about right
