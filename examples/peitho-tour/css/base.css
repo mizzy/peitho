@@ -136,12 +136,89 @@ samp {
   font-weight: 700;
 }
 
+.slot-body table {
+  width: 100%;
+  margin: 0 0 20px;
+  border-collapse: collapse;
+  font-size: 0.84em;
+  line-height: 1.45;
+}
+
+.slot-body th,
+.slot-body td {
+  padding: 0.35em 1em;
+  text-align: left;
+}
+
+.slot-body th {
+  color: #f2f6fd;
+  font-weight: 600;
+  border-bottom: 2px solid rgba(56, 189, 248, 0.65);
+}
+
+.slot-body td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.slot-body tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.slot-body blockquote {
+  position: relative;
+  margin: 0 0 20px;
+  padding-left: 24px;
+  color: #95a4be;
+}
+
+.slot-body blockquote::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #38bdf8, #8b5cf6);
+}
+
+.slot-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.slot-body del {
+  color: #8391aa;
+  text-decoration-color: #a78bfa;
+}
+
 .slot-body code {
   font-size: 0.88em;
   color: #a5ddff;
   background: #17233e;
   padding: 2px 8px;
   border-radius: 6px;
+}
+
+.slot-body pre {
+  display: block;
+  margin: 10px 0 0;
+  padding: 16px 20px;
+  overflow: hidden;
+  border: 1px solid #223052;
+  border-radius: 12px;
+  background: rgba(9, 14, 28, 0.85);
+  color: #dbe5f5;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.slot-body pre code {
+  display: block;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .slot-body ul {
@@ -192,29 +269,29 @@ samp {
   color: #dbe5f5;
 }
 
-.code-panel .hl-comment {
+.peitho-slide .hl-comment {
   color: #5d6d8c;
 }
 
-.code-panel .hl-string {
+.peitho-slide .hl-string {
   color: #8fe3b0;
 }
 
-.code-panel .hl-keyword,
-.code-panel .hl-storage {
+.peitho-slide .hl-keyword,
+.peitho-slide .hl-storage {
   color: #c4b5fd;
 }
 
-.code-panel .hl-constant {
+.peitho-slide .hl-constant {
   color: #fda4af;
 }
 
-.code-panel .hl-function {
+.peitho-slide .hl-function {
   color: #93c5fd;
 }
 
-.code-panel .hl-type,
-.code-panel .hl-entity {
+.peitho-slide .hl-type,
+.peitho-slide .hl-entity {
   color: #5eead4;
 }
 

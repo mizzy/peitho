@@ -1,5 +1,5 @@
 ---
-time: 23m
+time: 25m
 ---
 
 <!-- {"key":"cover","section":"Intro","time":"3m"} -->
@@ -54,7 +54,7 @@ brew install mizzy/tap/peitho
 
 ---
 
-<!-- {"key":"markdown","section":"Write","time":"6m"} -->
+<!-- {"key":"markdown","section":"Write","time":"8m"} -->
 # A slide is just Markdown
 
 Split slides on `---`. The shallowest heading becomes the title, fenced code blocks become code, and everything else becomes body content — each dropped into its own slot. The slots themselves are declared by the layout HTML, which we come back to in Design.
@@ -70,6 +70,48 @@ A body paragraph.
 
 # Second slide
 ```
+
+---
+
+<!-- {"key":"gfm-body"} -->
+# Tables, quotes, and edits render natively
+
+| Construct | Best for |
+| --- | --- |
+| Tables | Side-by-side comparisons |
+| Blockquotes | Context in another voice |
+| Strikethrough | Visible revisions |
+
+> Structure should be visible, not hidden in source.
+
+A plan can move from ~~draft~~ to **ready** without leaving Markdown.
+
+<!-- These are live body fragments: the build emits semantic table, blockquote, and del elements. -->
+
+---
+
+<!-- {"key":"container-code"} -->
+# Code blocks stay highlighted in quotes
+
+A quoted `toml` fence still gets bundled highlighting and full code validation.
+
+> A configuration example:
+>
+> ```toml
+> [tour]
+> version = "1.23.0"
+> format = "markdown"
+> ```
+
+````markdown
+> ```toml
+> [tour]
+> version = "1.23.0"
+> format = "markdown"
+> ```
+````
+
+<!-- TOML comes from the bundled extended syntax set. Even inside a blockquote, the fence follows the same validation and highlighting pipeline as top-level code. -->
 
 ---
 
