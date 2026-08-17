@@ -1462,20 +1462,20 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("built 23 slide(s)"));
+        .stdout(predicate::str::contains("built 25 slide(s)"));
 
     let manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
             .unwrap();
-    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(1_380_000));
+    assert_eq!(manifest["plannedDurationMs"].as_u64(), Some(1_500_000));
     let sections = manifest["sections"].as_array().unwrap();
     let expected = [
         ("Intro", 0, 3, 180_000),
         ("Install", 4, 4, 60_000),
-        ("Write", 5, 10, 360_000),
-        ("Design", 11, 14, 300_000),
-        ("Run", 15, 21, 420_000),
-        ("Close", 22, 22, 60_000),
+        ("Write", 5, 12, 480_000),
+        ("Design", 13, 16, 300_000),
+        ("Run", 17, 23, 420_000),
+        ("Close", 24, 24, 60_000),
     ];
     assert_eq!(sections.len(), expected.len());
     for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
@@ -1485,10 +1485,25 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
         assert_eq!(section["plannedDurationMs"].as_u64(), Some(planned));
     }
 
+    // The GFM showcase is body-only, so type-driven dispatch must select the
+    // `topic` layout while preserving the rendered table.
+    let gfm_body = fs::read_to_string(out.path().join("slides/006-gfm-body.html")).unwrap();
+    assert!(gfm_body.contains("guide-topic"));
+    assert!(gfm_body.contains("<table>"));
+
+    // The top-level source fence selects `code`; the TOML fence inside the
+    // blockquote must still run through the highlighting pipeline.
+    let container_code =
+        fs::read_to_string(out.path().join("slides/007-container-code.html")).unwrap();
+    assert!(container_code.contains("guide-code"));
+    let quote_start = container_code.find("<blockquote>").unwrap();
+    let quote_end = container_code[quote_start..].find("</blockquote>").unwrap() + quote_start;
+    assert!(container_code[quote_start..quote_end].contains("hl-toml"));
+
     // The preview slide holds only text + a single image; type-driven dispatch
     // must land it on the `shot` layout (with the image slot) instead of
     // `topic`, without any explicit `layout` pin.
-    let preview = fs::read_to_string(out.path().join("slides/015-preview.html")).unwrap();
+    let preview = fs::read_to_string(out.path().join("slides/017-preview.html")).unwrap();
     assert!(preview.contains("guide-shot"));
 }
 
