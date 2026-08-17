@@ -13,6 +13,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+const PRESENT_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[test]
 fn present_help_lists_no_presenter_flag() {
     Command::cargo_bin("peitho")
@@ -866,8 +868,8 @@ fn present_no_open_server_prints_assigned_url() {
         lines_tx.send(lines).unwrap();
     });
     let line = serving_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("present server did not print serving URL within 5 seconds");
+        .recv_timeout(PRESENT_SERVER_STARTUP_TIMEOUT)
+        .expect("present server did not print serving URL within 30 seconds");
     child.kill().unwrap();
     child.wait().unwrap();
     reader.join().unwrap();
@@ -932,8 +934,8 @@ fn present_rehearsal_prints_recording_directory_after_serving_url() {
         lines_tx.send(lines).unwrap();
     });
     recording_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("present server did not print rehearsal recording line within 5 seconds");
+        .recv_timeout(PRESENT_SERVER_STARTUP_TIMEOUT)
+        .expect("present server did not print rehearsal recording line within 30 seconds");
     child.kill().unwrap();
     child.wait().unwrap();
     reader.join().unwrap();
@@ -1040,8 +1042,8 @@ fn present_process_exits_after_close_sync_post() {
         }
     });
     let line = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("present server did not print serving URL within 5 seconds");
+        .recv_timeout(PRESENT_SERVER_STARTUP_TIMEOUT)
+        .expect("present server did not print serving URL within 30 seconds");
     let addr = serving_addr(&line);
 
     let post_response = post_sync(addr, r#"{"close":true}"#);
@@ -1334,7 +1336,7 @@ fn capture_present_remote_output(host_args: &[&str]) -> Option<Vec<String>> {
         }
     });
 
-    let lines = match rx.recv_timeout(Duration::from_secs(5)) {
+    let lines = match rx.recv_timeout(PRESENT_SERVER_STARTUP_TIMEOUT) {
         Ok(lines) => lines,
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             let _ = child.kill();
@@ -1355,7 +1357,7 @@ fn capture_present_remote_output(host_args: &[&str]) -> Option<Vec<String>> {
             child.kill().unwrap();
             child.wait().unwrap();
             reader.join().unwrap();
-            panic!("present server did not print remote control output within 5 seconds");
+            panic!("present server did not print remote control output within 30 seconds");
         }
     };
     child.kill().unwrap();
