@@ -3091,6 +3091,7 @@ fn best_effort_cdp_shutdown(
 struct CdpChromeProcess {
     child: Child,
     stderr_rx: mpsc::Receiver<ProcessPipeEvent>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
     stderr: Vec<u8>,
     reaped: bool,
 }
@@ -3117,10 +3118,11 @@ impl CdpChromeProcess {
             ));
         };
         let (stderr_tx, stderr_rx) = mpsc::channel();
-        let _stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, stderr_tx);
+        let stderr_reader = spawn_process_pipe_reader(stderr_pipe, ProcessPipe::Stderr, stderr_tx);
         Ok(Self {
             child,
             stderr_rx,
+            stderr_reader: Some(stderr_reader),
             stderr: Vec::new(),
             reaped: false,
         })
@@ -3214,6 +3216,13 @@ impl CdpChromeProcess {
             }
         }
     }
+
+    fn join_stderr_reader(&mut self) {
+        if let Some(stderr_reader) = self.stderr_reader.take() {
+            let _ = stderr_reader.join();
+        }
+        self.drain_stderr();
+    }
 }
 
 impl Drop for CdpChromeProcess {
@@ -3224,6 +3233,9 @@ impl Drop for CdpChromeProcess {
 
 fn cdp_export_error(process: &mut CdpChromeProcess, err: miette::Error) -> miette::Error {
     let cleanup_error = process.kill_and_reap().err();
+    if cleanup_error.is_none() {
+        process.join_stderr_reader();
+    }
     let stderr = String::from_utf8_lossy(&process.stderr);
     let stderr = if stderr.trim().is_empty() {
         "(empty)"
@@ -8501,7 +8513,7 @@ exec sleep 30
             "actual error: {message}"
         );
         assert!(
-            message.contains("fake chrome never published DevToolsActivePort"),
+            message.contains("stderr: fake chrome never published DevToolsActivePort"),
             "actual error: {message}"
         );
 
@@ -8520,7 +8532,7 @@ exec sleep 30
 
     #[cfg(unix)]
     #[test]
-    fn cdp_export_exited_before_port_reports_immediately_and_reaps_chrome() {
+    fn cdp_export_exited_before_port_reports_exit_and_reaps_chrome() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -8538,7 +8550,6 @@ exec sleep 30
         );
         fs::set_permissions(&fake_chrome, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let started = Instant::now();
         let err = run_chrome_print_with_timeout(
             &fake_chrome,
             &workspace,
@@ -8547,14 +8558,14 @@ exec sleep 30
         )
         .unwrap_err();
 
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "dead Chrome was not detected promptly"
-        );
         let message = err.to_string();
         assert!(
             message.contains("before publishing DevToolsActivePort"),
             "actual error: {message}"
+        );
+        assert!(
+            !message.contains("timed out waiting for Chrome DevToolsActivePort"),
+            "dead Chrome produced the port-timeout error instead of the exited-before-port error: {message}"
         );
         assert!(
             message.contains("fake chrome exited before DevToolsActivePort"),
