@@ -235,6 +235,14 @@ reporting that command already gives you.
 contamination check: it fails if presentation-shell or speaker-notes files
 reached the distributable output, so a deploy never ships notes.
 
+The deploy command runs with `PEITHO_DIST` set to the inspected directory, so a
+script can find the built output without hardcoding a path — useful together
+with `--dist`:
+
+```sh
+peitho publish -- sh -c 'aws s3 sync "$PEITHO_DIST" s3://your-bucket/'
+```
+
 ## `peitho docs`
 
 This guide is embedded in the binary, so it is readable offline and by agents
