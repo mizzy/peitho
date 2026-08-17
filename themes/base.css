@@ -98,6 +98,23 @@
   margin-bottom: 0;
 }
 
+.slot-body table {
+  width: 100%;
+  margin: 0 0 var(--peitho-table-spacing, 24px);
+  border-collapse: collapse;
+}
+
+.slot-body th,
+.slot-body td {
+  padding: var(--peitho-table-cell-padding, 8px 12px);
+  border: 1px solid var(--peitho-table-border-color, #8a8578);
+  vertical-align: top;
+}
+
+.slot-body th {
+  font-weight: var(--peitho-table-header-weight, 600);
+}
+
 .slot-body ul {
   margin: 0;
   padding-left: 34px;

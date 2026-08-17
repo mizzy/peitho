@@ -42,6 +42,8 @@ Convention mapping turns Markdown into slots without extra notation:
 - An image-only paragraph maps to the image slot.
 - All other blocks map to `body`.
 
+A table ends at a blank line, so separate any following prose from it with one.
+
 Markdown images are deck-relative local files. They must use supported local
 image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`) and must map to a layout
 with exactly one unambiguous `accepts="image"` slot.

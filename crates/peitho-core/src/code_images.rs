@@ -564,7 +564,8 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
             | FragmentKind::Footnotes { .. }
             | FragmentKind::Image { .. }
             | FragmentKind::List
-            | FragmentKind::Blockquote => Ok(fragment),
+            | FragmentKind::Blockquote
+            | FragmentKind::Table => Ok(fragment),
         }
     })()?;
 
