@@ -183,10 +183,10 @@ In this example, the three top-level list items are steps 1-3; the nested items
 appear with "Demo path". The paragraph in the second group is step 4, and the
 code block is step 5.
 
-Leave a blank line after each opening `::: {reveal}` and before a closing `:::`
-that follows a list. Without the opening blank, the following paragraph can be
-swallowed (bug #360); without the closing blank after a list item, the build
-fails loudly with a line-numbered `unclosed reveal fence` error.
+Plain-text paragraphs may start directly after an opening `:::` marker or end
+directly before a closing `:::` marker. Images and other block shapes, such as
+lists, still need blank lines around the markers; those shapes are not split if
+Markdown fuses them to a marker, and the build fails with a line-numbered error.
 
 `peitho preview`, PDF export, lint, and published output show the final state.
 `{reveal=value}`, empty groups, unclosed fences, nested fences, and
