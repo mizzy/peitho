@@ -22,7 +22,10 @@ use crate::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
         PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
     },
-    render::{walk_body_markdown_list_items, walk_body_markdown_list_items_with_ranges},
+    render::{
+        walk_body_markdown_list_items, walk_body_markdown_list_items_with_ranges,
+        BODY_MARKDOWN_OPTIONS,
+    },
 };
 
 /// Page settings comment, deck-style:
@@ -223,6 +226,7 @@ enum OpenBlock {
     },
     Paragraph {
         start: usize,
+        end: usize,
         inline: ParagraphInline,
     },
     Code {
@@ -1720,6 +1724,46 @@ fn nonblank_line_range(source: &str, start: usize, end: usize) -> Option<(usize,
     first.zip(last)
 }
 
+fn span_contains_div_marker(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+) -> bool {
+    nonblank_line_range(source, start, end).is_some_and(|(first_line, last_line)| {
+        (first_line..=last_line).any(|line| markers.contains_key(&line))
+    })
+}
+
+fn fused_paragraph_marker_is_inline_code(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+) -> bool {
+    let code_ranges = Parser::new_ext(&source[start..end], BODY_MARKDOWN_OPTIONS)
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Code(_) => Some(start + range.start..start + range.end),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut line_start = start;
+    for raw_line in source[start..end].split_inclusive('\n') {
+        let line = line_for_offset(source, line_start);
+        if markers.contains_key(&line)
+            && code_ranges
+                .iter()
+                .any(|code_range| code_range.contains(&line_start))
+        {
+            return true;
+        }
+        line_start += raw_line.len();
+    }
+    false
+}
+
 /// Push a fragment into either the outer fragment list or the currently-open
 /// fenced div's children, keeping call sites free of stack bookkeeping.
 fn push_fragment(
@@ -1732,6 +1776,118 @@ fn push_fragment(
     } else {
         fragments.push(fragment);
     }
+}
+
+fn apply_div_marker(
+    marker_line: usize,
+    marker: DivMarker,
+    fragments: &mut Vec<SourceFragment>,
+    div_stack: &mut Vec<(usize, DivOpen, Vec<SourceFragment>)>,
+    next_reveal_step: &mut usize,
+) -> Result<bool> {
+    match marker {
+        DivMarker::Open(div_open) => {
+            if !div_stack.is_empty() {
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(marker_line),
+                    "nested `:::` fences are not supported",
+                    "close the current `:::` before opening another",
+                ));
+            }
+            div_stack.push((marker_line, div_open, Vec::new()));
+            Ok(false)
+        }
+        DivMarker::Close => {
+            let Some((open_line, div_open, children)) = div_stack.pop() else {
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(marker_line),
+                    "closing `:::` has no matching opening fence",
+                    "add an opening `::: {slot=name}` or `::: {reveal}` before this line",
+                ));
+            };
+            if children.is_empty() {
+                let message = match div_open {
+                    DivOpen::Slot(_) => "empty explicit slot fence",
+                    DivOpen::Reveal => "empty reveal fence",
+                };
+                return Err(BuildError::new(
+                    ErrorKind::Parse,
+                    Some(open_line),
+                    message,
+                    "add content between the opening and closing `:::`, or remove the fence",
+                ));
+            }
+            match div_open {
+                DivOpen::Slot(name) => {
+                    let group = SourceFragment::slot_group(open_line, name, children);
+                    fragments.push(group);
+                }
+                DivOpen::Reveal => {
+                    for child in children {
+                        let len = reveal_span_len(&child);
+                        let span = RevealSpan {
+                            start: *next_reveal_step,
+                            len,
+                        };
+                        *next_reveal_step += len;
+                        fragments.push(child.with_reveal_span(span));
+                    }
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+fn push_paragraph_run(
+    source: &str,
+    start: usize,
+    end: usize,
+    fragments: &mut Vec<SourceFragment>,
+    div_stack: &mut [(usize, DivOpen, Vec<SourceFragment>)],
+) -> bool {
+    let Some((first_line, _)) = nonblank_line_range(source, start, end) else {
+        return false;
+    };
+    let fragment = SourceFragment::paragraph(first_line, source_slice(source, start, end));
+    push_fragment(fragments, div_stack, fragment);
+    true
+}
+
+fn push_fused_paragraph_parts(
+    source: &str,
+    start: usize,
+    end: usize,
+    markers: &HashMap<usize, DivMarker>,
+    fragments: &mut Vec<SourceFragment>,
+    div_stack: &mut Vec<(usize, DivOpen, Vec<SourceFragment>)>,
+    next_reveal_step: &mut usize,
+) -> Result<bool> {
+    if fused_paragraph_marker_is_inline_code(source, start, end, markers) {
+        if let Some(err) = fused_div_marker_error(source, start, end, markers) {
+            return Err(err);
+        }
+    }
+
+    let mut run_start = start;
+    let mut line_start = start;
+    let mut saw_content = false;
+
+    for raw_line in source[start..end].split_inclusive('\n') {
+        let line_end = line_start + raw_line.len();
+        let line = line_for_offset(source, line_start);
+        if let Some(marker) = markers.get(&line).cloned() {
+            saw_content |= push_paragraph_run(source, run_start, line_start, fragments, div_stack);
+            saw_content |= apply_div_marker(line, marker, fragments, div_stack, next_reveal_step)?;
+            run_start = line_end;
+        }
+        line_start = line_end;
+    }
+
+    saw_content |= push_paragraph_run(source, run_start, end, fragments, div_stack);
+    Ok(saw_content)
 }
 
 fn check_finalized_block_span(
@@ -2115,7 +2271,12 @@ fn parse_slide(
                         &fragments,
                     ));
                 }
-                let Some(OpenBlock::Paragraph { inline, .. }) = block.as_mut() else {
+                let Some(OpenBlock::Paragraph {
+                    start: paragraph_start,
+                    end: paragraph_end,
+                    inline,
+                }) = block.as_mut()
+                else {
                     let err = unsupported_construct(line, "image outside paragraph");
                     return Err(attach_slide_context(
                         err,
@@ -2128,7 +2289,13 @@ fn parse_slide(
                     attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
                 })?;
                 if !start_paragraph_image(inline, global_start, src) {
-                    let err = unsupported_construct(line, "mixed image paragraph");
+                    let err = mixed_image_paragraph_error(
+                        source,
+                        *paragraph_start,
+                        *paragraph_end,
+                        line,
+                        &markers,
+                    );
                     return Err(attach_slide_context(
                         err,
                         index,
@@ -2159,10 +2326,10 @@ fn parse_slide(
             }
             Event::FootnoteReference(label) => {
                 footnotes.record_reference(label.to_string(), line);
-                if let Some(OpenBlock::Paragraph { inline, .. }) = block.as_mut() {
+                if let Some(OpenBlock::Paragraph { start, end, inline }) = block.as_mut() {
                     let marker = format!("[^{}]", label.as_ref());
                     if !push_paragraph_text(inline, &marker) {
-                        let err = unsupported_construct(line, "mixed image paragraph");
+                        let err = mixed_image_paragraph_error(source, *start, *end, line, &markers);
                         return Err(attach_slide_context(
                             err,
                             index,
@@ -2212,98 +2379,61 @@ fn parse_slide(
             Event::Start(Tag::Paragraph) => {
                 block = Some(OpenBlock::Paragraph {
                     start: global_start,
+                    end: global_end,
                     inline: ParagraphInline::Empty,
                 });
             }
             Event::End(TagEnd::Paragraph) => {
                 if matches!(block, Some(OpenBlock::Paragraph { .. })) {
-                    let Some(OpenBlock::Paragraph { start, inline }) = block.take() else {
+                    let Some(OpenBlock::Paragraph { start, inline, .. }) = block.take() else {
                         unreachable!();
                     };
                     let paragraph_line = line_for_offset(source, start);
-                    if let Err(err) =
-                        check_finalized_block_span(source, start, global_end, &markers)
-                    {
-                        return Err(attach_slide_context(
-                            err,
-                            index,
-                            explicit_key.as_ref(),
-                            &fragments,
-                        ));
+                    let has_fused_marker = nonblank_line_range(source, start, global_end)
+                        .is_some_and(|(first_line, last_line)| {
+                            first_line != last_line
+                                && (first_line..=last_line).any(|line| markers.contains_key(&line))
+                        });
+                    if has_fused_marker {
+                        match push_fused_paragraph_parts(
+                            source,
+                            start,
+                            global_end,
+                            &markers,
+                            &mut fragments,
+                            &mut div_stack,
+                            &mut next_reveal_step,
+                        ) {
+                            Ok(content_added) => seen_content |= content_added,
+                            Err(err) => {
+                                return Err(attach_slide_context(
+                                    err,
+                                    index,
+                                    explicit_key.as_ref(),
+                                    &fragments,
+                                ));
+                            }
+                        }
+                        continue;
                     }
                     // If this paragraph was actually a `:::` marker line, drop
                     // the paragraph and manipulate the fenced div stack instead.
                     if let Some(marker) = markers.get(&paragraph_line).cloned() {
-                        match marker {
-                            DivMarker::Open(div_open) => {
-                                if !div_stack.is_empty() {
-                                    let err = BuildError::new(
-                                        ErrorKind::Parse,
-                                        Some(paragraph_line),
-                                        "nested `:::` fences are not supported",
-                                        "close the current `:::` before opening another",
-                                    );
-                                    return Err(attach_slide_context(
-                                        err,
-                                        index,
-                                        explicit_key.as_ref(),
-                                        &fragments,
-                                    ));
-                                }
-                                div_stack.push((paragraph_line, div_open, Vec::new()));
-                            }
-                            DivMarker::Close => {
-                                let Some((open_line, div_open, children)) = div_stack.pop() else {
-                                    let err = BuildError::new(
-                                        ErrorKind::Parse,
-                                        Some(paragraph_line),
-                                        "closing `:::` has no matching opening fence",
-                                        "add an opening `::: {slot=name}` or `::: {reveal}` before this line",
-                                    );
-                                    return Err(attach_slide_context(
-                                        err,
-                                        index,
-                                        explicit_key.as_ref(),
-                                        &fragments,
-                                    ));
-                                };
-                                if children.is_empty() {
-                                    let message = match div_open {
-                                        DivOpen::Slot(_) => "empty explicit slot fence",
-                                        DivOpen::Reveal => "empty reveal fence",
-                                    };
-                                    let err = BuildError::new(
-                                        ErrorKind::Parse,
-                                        Some(open_line),
-                                        message,
-                                        "add content between the opening and closing `:::`, or remove the fence",
-                                    );
-                                    return Err(attach_slide_context(
-                                        err,
-                                        index,
-                                        explicit_key.as_ref(),
-                                        &fragments,
-                                    ));
-                                }
-                                match div_open {
-                                    DivOpen::Slot(name) => {
-                                        let group =
-                                            SourceFragment::slot_group(open_line, name, children);
-                                        fragments.push(group);
-                                    }
-                                    DivOpen::Reveal => {
-                                        for child in children {
-                                            let len = reveal_span_len(&child);
-                                            let span = RevealSpan {
-                                                start: next_reveal_step,
-                                                len,
-                                            };
-                                            next_reveal_step += len;
-                                            fragments.push(child.with_reveal_span(span));
-                                        }
-                                    }
-                                }
-                                seen_content = true;
+                        match apply_div_marker(
+                            paragraph_line,
+                            marker,
+                            &mut fragments,
+                            &mut div_stack,
+                            &mut next_reveal_step,
+                        ) {
+                            Ok(content_added) => seen_content |= content_added,
+                            Err(err) => {
+                                return Err(attach_slide_context(
+                                    err,
+                                    index,
+                                    explicit_key.as_ref(),
+                                    &fragments,
+                                ));
                             }
                         }
                         continue;
@@ -2515,9 +2645,9 @@ fn parse_slide(
                 Some(OpenBlock::Code {
                     text: code_text, ..
                 }) => code_text.push_str(&text),
-                Some(OpenBlock::Paragraph { inline, .. }) => {
+                Some(OpenBlock::Paragraph { start, end, inline }) => {
                     if !push_paragraph_text(inline, &text) {
-                        let err = unsupported_construct(line, "mixed image paragraph");
+                        let err = mixed_image_paragraph_error(source, *start, *end, line, &markers);
                         return Err(attach_slide_context(
                             err,
                             index,
@@ -2539,11 +2669,12 @@ fn parse_slide(
             },
             Event::SoftBreak | Event::HardBreak => match block.as_mut() {
                 Some(OpenBlock::Code { text, .. }) => text.push('\n'),
-                Some(OpenBlock::Paragraph { inline, .. }) => {
+                Some(OpenBlock::Paragraph { start, end, inline }) => {
                     match push_paragraph_text(inline, "\n") {
                         true => {}
                         false => {
-                            let err = unsupported_construct(line, "mixed image paragraph");
+                            let err =
+                                mixed_image_paragraph_error(source, *start, *end, line, &markers);
                             return Err(attach_slide_context(
                                 err,
                                 index,
@@ -3209,6 +3340,20 @@ fn unsupported_construct(line: usize, name: &str) -> BuildError {
         format!("unsupported construct '{name}'"),
         "rewrite this slide using headings, paragraphs, lists, blockquotes, tables, or fenced code blocks",
     )
+}
+
+fn mixed_image_paragraph_error(
+    source: &str,
+    start: usize,
+    end: usize,
+    line: usize,
+    markers: &HashMap<usize, DivMarker>,
+) -> BuildError {
+    let mut err = unsupported_construct(line, "mixed image paragraph");
+    if span_contains_div_marker(source, start, end, markers) {
+        err.help = "insert a blank line between the `:::` marker and the image".to_owned();
+    }
+    err
 }
 
 fn unsupported_footnote_block_error(line: usize) -> BuildError {
@@ -5213,6 +5358,23 @@ Grouped content[^grouped].
         assert!(err
             .to_string()
             .contains("unsupported construct 'mixed image paragraph'"));
+    }
+
+    #[test]
+    fn tight_fence_before_image_suggests_a_blank_line() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n![alt](a.png)\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(4));
+        assert_eq!(err.message, "unsupported construct 'mixed image paragraph'");
+        assert_eq!(
+            err.help,
+            "insert a blank line between the `:::` marker and the image"
+        );
     }
 
     #[test]
@@ -7368,20 +7530,6 @@ After list
         deck.parsed_slides()[0].clone()
     }
 
-    fn assert_fused_after_marker_error(source: &str, line: usize) {
-        let err = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(line));
-        assert_eq!(
-            err.message,
-            "content on the line after `:::` is attached to the fence"
-        );
-        assert_eq!(
-            err.help,
-            "insert a blank line between the `:::` marker and the content"
-        );
-    }
-
     fn assert_fused_before_marker_error(source: &str, line: usize) {
         let err = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Parse);
@@ -7404,34 +7552,101 @@ After list
         assert_eq!(err.help, "insert blank lines around the `:::` marker");
     }
 
+    fn slot_group_children<'a>(
+        slide: &'a ParsedSlide,
+        expected_name: &str,
+    ) -> &'a [SourceFragment] {
+        let group = slide
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. }))
+            .expect("slot group fragment");
+        let FragmentKind::SlotGroup { name, children } = group.kind() else {
+            unreachable!();
+        };
+        assert_eq!(name.as_slot_name().as_str(), expected_name);
+        children
+    }
+
     #[test]
-    fn reveal_opening_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
-        assert_fused_after_marker_error(
-            "# T\n\n::: {reveal}\nFirst, show the architecture.\n\n- a\n- b\n\n:::\n",
-            3,
+    fn tight_slot_opening_routes_following_paragraph_to_slot() {
+        let slide = parse_first_slide("# T\n\n::: {slot=left}\nLeft paragraph.\n\n:::\n");
+        let children = slot_group_children(&slide, "left");
+
+        assert_eq!(children.len(), 1);
+        assert!(matches!(children[0].kind(), FragmentKind::Paragraph));
+        assert_eq!(children[0].line(), 4);
+        assert_eq!(children[0].markdown(), "Left paragraph.");
+    }
+
+    #[test]
+    fn tight_slot_closing_routes_preceding_paragraph_to_slot() {
+        let slide = parse_first_slide("# T\n\n::: {slot=left}\n\nLeft paragraph.\n:::\n");
+        let children = slot_group_children(&slide, "left");
+
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].line(), 5);
+        assert_eq!(children[0].markdown(), "Left paragraph.");
+    }
+
+    #[test]
+    fn tight_slot_fences_on_both_sides_build_single_paragraph() {
+        let slide = parse_first_slide("# T\n\n::: {slot=left}\nLeft paragraph.\n:::\n");
+        let children = slot_group_children(&slide, "left");
+
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].line(), 4);
+        assert_eq!(children[0].markdown(), "Left paragraph.");
+    }
+
+    #[test]
+    fn marker_line_inside_multiline_inline_code_span_keeps_fused_error() {
+        assert_fused_around_marker_error("# T\n\n::: {reveal}\n\nTry `foo\n:::\nbar` here\n", 6);
+    }
+
+    #[test]
+    fn tight_reveal_paragraph_allows_single_line_inline_code_with_colons() {
+        let slide = parse_first_slide("# T\n\n::: {reveal}\nUse `:::` fences\n:::\n");
+        let revealed = slide
+            .fragments
+            .iter()
+            .find(|fragment| fragment.markdown() == "Use `:::` fences")
+            .expect("tight reveal paragraph");
+
+        assert_eq!(revealed.line(), 4);
+        assert_eq!(
+            revealed.reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
         );
     }
 
     #[test]
-    fn opening_fence_fused_to_only_paragraph_reports_fusion_not_empty_group() {
-        assert_fused_after_marker_error("# T\n\n::: {reveal}\nOnly paragraph.\n\n:::\n", 3);
-        assert_fused_after_marker_error("# T\n\n::: {slot=body}\nOnly paragraph.\n\n:::\n", 3);
+    fn tight_marker_between_content_routes_each_run_across_slot_boundary() {
+        let slide = parse_first_slide("# T\n\n::: {slot=left}\n\nInside.\n:::\nOutside.\n");
+        let children = slot_group_children(&slide, "left");
+        let outside = slide
+            .fragments
+            .iter()
+            .find(|fragment| fragment.markdown() == "Outside.")
+            .expect("paragraph after slot group");
+
+        assert_eq!(outside.line(), 7);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].line(), 5);
+        assert_eq!(children[0].markdown(), "Inside.");
     }
 
     #[test]
-    fn opening_fence_fused_to_preceding_paragraph_reports_fusion_for_reveal_and_slot() {
-        assert_fused_before_marker_error("# T\n\nBefore.\n::: {reveal}\n\nx\n\n:::\n", 4);
-        assert_fused_before_marker_error("# T\n\nBefore.\n::: {slot=body}\n\nx\n\n:::\n", 4);
-    }
+    fn tight_paragraph_keeps_later_code_error_line() {
+        let err = parse_markdown(
+            "# T\n\n::: {slot=left}\nTight paragraph.\n\n```notalang\nx\n```\n\n:::\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
 
-    #[test]
-    fn closing_reveal_fence_fused_to_preceding_paragraph_reports_fusion_not_unclosed() {
-        assert_fused_before_marker_error("# T\n\n::: {reveal}\n\nx\n:::\n", 6);
-    }
-
-    #[test]
-    fn fence_fused_to_content_on_both_sides_reports_around_marker() {
-        assert_fused_around_marker_error("# T\n\n::: {reveal}\n\nBefore.\n:::\nAfter.\n", 6);
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(6));
+        assert!(err.message.contains("unknown code language 'notalang'"));
     }
 
     #[test]
@@ -7440,8 +7655,8 @@ After list
     }
 
     #[test]
-    fn list_fused_to_close_marker_inside_reveal_reports_fusion_not_unclosed() {
-        assert_fused_before_marker_error("# T\n\n::: {reveal}\n\n- a\n- b\n:::\n", 7);
+    fn tight_fences_do_not_split_a_list_fused_to_the_close_marker() {
+        assert_fused_before_marker_error("# T\n\n::: {reveal}\n- a\n- b\n:::\n", 6);
     }
 
     #[test]
@@ -7482,30 +7697,45 @@ After list
     }
 
     #[test]
-    fn closing_reveal_fence_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
-        assert_fused_after_marker_error("# T\n\n::: {reveal}\n\n- a\n\n:::\nAfter.\n", 7);
-    }
+    fn tight_reveal_paragraph_gets_a_span_and_resolves_its_footnote_step() {
+        let slide =
+            parse_first_slide("# T\n\n::: {reveal}\nReveal me[^note].\n:::\n\n[^note]: A note.\n");
+        let revealed = slide
+            .fragments
+            .iter()
+            .find(|fragment| fragment.markdown() == "Reveal me[^note].")
+            .expect("tight reveal paragraph");
+        let footnotes = slide
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment.kind() {
+                FragmentKind::Footnotes { entries } => Some(entries),
+                FragmentKind::Heading { .. }
+                | FragmentKind::Paragraph
+                | FragmentKind::Text
+                | FragmentKind::Code
+                | FragmentKind::Math { .. }
+                | FragmentKind::EmbedCard { .. }
+                | FragmentKind::GenericEmbedCard { .. }
+                | FragmentKind::Image { .. }
+                | FragmentKind::List
+                | FragmentKind::Blockquote
+                | FragmentKind::Table
+                | FragmentKind::SlotGroup { .. } => None,
+            })
+            .expect("footnote fragment");
 
-    #[test]
-    fn slot_opening_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
-        assert_fused_after_marker_error(
-            "# T\n\n::: {slot=body}\nSlot intro.\n\n- remaining\n\n:::\n",
-            3,
+        assert_eq!(revealed.line(), 4);
+        assert_eq!(
+            revealed.reveal_span(),
+            Some(RevealSpan { start: 1, len: 1 })
         );
+        assert_eq!(slide.step_count, 1);
+        assert_eq!(footnotes[0].reveal_step(), Some(1));
     }
 
     #[test]
-    fn closing_slot_fence_fused_to_preceding_paragraph_reports_fusion_not_unclosed() {
-        assert_fused_before_marker_error("# T\n\n::: {slot=body}\n\nx\n:::\n", 6);
-    }
-
-    #[test]
-    fn closing_slot_fence_fused_to_following_paragraph_is_error_instead_of_silent_drop() {
-        assert_fused_after_marker_error("# T\n\n::: {slot=body}\n\n- a\n\n:::\nAfter.\n", 7);
-    }
-
-    #[test]
-    fn slot_group_open_close_produces_fragment() {
+    fn blank_separated_slot_fence_still_builds() {
         let slide = parse_first_slide("# Title\n\n::: {slot=left}\n\nleft body\n\n:::\n");
         let group = slide
             .fragments
