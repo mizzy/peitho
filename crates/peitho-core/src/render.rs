@@ -1603,17 +1603,19 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       }
     }
 
+    // A same-origin referrer is the only evidence this deck was reached from a
+    // page worth returning to. peitho generates the deck directory and nothing
+    // above it, so there is no site root it can assume exists; a deck published
+    // under a subdirectory would otherwise strand viewers on an unrelated page.
+    // Without that evidence, Escape does nothing.
     function exitToIndex() {
       const referrer = document.referrer;
-      if (referrer !== '') {
-        try {
-          if (new URL(referrer).origin === window.location.origin) {
-            window.history.back();
-            return;
-          }
-        } catch (_error) {}
-      }
-      window.location.assign('/');
+      if (referrer === '') return;
+      try {
+        if (new URL(referrer).origin === window.location.origin) {
+          window.history.back();
+        }
+      } catch (_error) {}
     }
 
     document.addEventListener('keydown', (event) => {
@@ -5023,8 +5025,20 @@ Paragraph after heading.
         assert!(html.contains("event.key === 'Escape'"));
         assert!(html.contains("function exitToIndex()"));
         assert!(html.contains("window.history.back()"));
-        assert!(html.contains("window.location.assign('/')"));
         assert!(html.contains("new URL(referrer).origin === window.location.origin"));
+    }
+
+    #[test]
+    fn distribution_index_escape_never_navigates_to_site_root() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        // peitho only ever generates the deck directory, so it cannot know what
+        // (if anything) lives at the origin root. A deck published under a
+        // subdirectory of an existing site would send viewers to an unrelated
+        // page. Escape leaves the deck only when a same-origin referrer proves
+        // there is somewhere to go back to.
+        assert!(!html.contains("window.location.assign('/')"));
+        assert!(!html.contains("location.assign('/')"));
     }
 
     #[test]
