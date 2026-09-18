@@ -184,7 +184,7 @@ packages/peitho-present/src/presenter.ts         wiring + indicator
 | --- | --- |
 | Timer never starts | No json, no webm, no directory (unchanged) |
 | Reset mid-rehearsal | Timeline cleared; the zeroed snapshot overwrites json, deletes the webm and clears `audio` in one sink step; the next start is a new take |
-| Display swap mid-rehearsal | Presenter navigates, recorder dies with the page, timer resets (known tradeoff); the new page starts a new take that truncates — same information-loss class as the timer itself |
+| Display swap mid-rehearsal | Measured 2026-09-18: the presenter navigates and the recorder dies with the page, but the timer does NOT reset (the new page adopts the server-held timer). The new page's timeline is seeded at the adopted position and a new take replaces the `.webm` with `audio.startMs` at the swap position, so the record honestly describes only the post-swap part (`(before first entry)` row, `offset`, `seek` column). The counterpart window runs in the other Chrome profile and needs its own microphone grant; if it is denied there, the presenter shows `ERR` and the record keeps the pre-swap take, which is then shorter than `elapsedMs` — accepted residual, visible in the presenter |
 | Mic permission denied / no device | Visible presenter error; timeline and section recording continue; record has `audio: null` |
 | Chunk POST fails | Retried in order; indicator shows the error while failing; never skipped |
 | Presenter closed by Esc | The echoed close message triggers `peitho:beforeclose`; `stop()` produces the final chunk, both final POSTs drain without `keepalive`, then the window closes (2 s client cap, 3 s rehearsal-server grace) |
