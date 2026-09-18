@@ -225,21 +225,32 @@ pointer_color: "#38bdf8"
 ```
 
 Rehearse a talk with `--rehearsal` on a deck that declares
-`{"section":...}` markers, and Peitho records each section's actual time
-into `.peitho/rehearsals/rehearsal-YYYYMMDD-HHMMSS.json` as you present:
+`{"section":...}` markers, and Peitho records each section's actual time plus
+an absolute per-slide timeline into
+`.peitho/rehearsals/rehearsal-YYYYMMDD-HHMMSS.json` as you present:
 
 ```sh
 peitho present --rehearsal
 ```
 
-Records accumulate over runs (nothing is pruned automatically). During a
-talk the agenda's live Actual / Planned and delta are enough for pacing;
-review the recorded actuals afterward with `peitho rehearsal`.
+When a run starts in this presenter or is adopted at `0:00`, the timeline
+records the current slide at `0:00`. If the presenter adopts an already-running
+timer, its first entry is the current slide at the adopted timer position.
+After that, the timeline records the timer position whenever a different slide
+is entered. Reveal steps add no entry; returning to a slide adds another entry,
+so time from all visits can be totalled later. Reset clears both timing
+accumulators for the current record. Every saved snapshot is the complete
+absolute state, and the server checks each recorded slide index/key against the
+deck it built before writing it.
+
+Records accumulate over runs (nothing is pruned automatically). During a talk
+the agenda's live Actual / Planned and delta are enough for pacing; review the
+recorded actuals afterward with `peitho rehearsal`.
 
 ## `peitho rehearsal`
 
 Print the most recent rehearsal as an aligned section / planned / actual /
-delta table with a total row:
+delta table with a total row, followed by per-slide timing:
 
 ```sh
 peitho rehearsal
@@ -252,9 +263,26 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
   Setup          1:00     0:52    -0:08
   Problem        1:00     1:10    +0:10
   Approach       2:00     1:45    -0:15
-  Wrap-up        1:00     0:58    -0:02
-  total          5:00     4:35    -0:15
+  Wrap-up        1:00     0:48    -0:12
+  total          5:00     4:35    -0:25
+
+  slide   key        entered   visits   total
+  #1      setup         0:00        1    0:48
+  #2      problem       0:48        1    1:07
+  #3      approach      1:55        1    2:40
+  total                                  4:35
 ```
+
+`key` is the recorded slide key, `entered` is the timer position of its first
+entry, and `visits` is the number of timeline entries for that slide. `total`
+adds every visit to the recorded index/key, ending each visit at the next
+timeline entry and the final visit at the saved elapsed time. If the presenter
+adopted an already-running timer, a `(before first entry)` row accounts for the
+leading gap. The final slide-table total therefore matches the run's elapsed
+time. The command uses the recorded index and key without reopening the deck,
+so later title or deck edits cannot rewrite history. A reset record with no
+entries prints `(no slide entries)`. Version 1 records created by older Peitho
+releases remain readable and keep their original section-only output exactly.
 
 Pass `--all` to list every record oldest first, one table per run:
 

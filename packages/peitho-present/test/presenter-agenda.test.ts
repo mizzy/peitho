@@ -2,6 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
 import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
 import type { AgendaOptions } from "../src/agenda";
+import type { RehearsalReportDetail } from "../src/rehearsalReporter";
 import { afterEach, expect, it, vi } from "vitest";
 
 function okJson(value: unknown): Response {
@@ -37,6 +38,7 @@ const manifest: Manifest = {
 };
 
 const notes: Notes = { version: 1, notes: {} };
+const cleanups: Array<() => void> = [];
 
 function standardFetch(overrides: Partial<Manifest> = {}): typeof fetch {
   const responseManifest = Object.assign({}, manifest, overrides) as Manifest;
@@ -51,10 +53,13 @@ function standardFetch(overrides: Partial<Manifest> = {}): typeof fetch {
 }
 
 afterEach(() => {
+  while (cleanups.length > 0) cleanups.pop()?.();
   vi.doUnmock("../src/agenda");
   vi.doUnmock("../src/sectionActuals");
+  vi.doUnmock("../src/slideTimeline");
   vi.doUnmock("../src/rehearsalReporter");
   vi.doUnmock("../src/rehearsalBridge");
+  vi.doUnmock("../src/timeTracker");
   vi.resetModules();
   vi.restoreAllMocks();
   document.body.replaceChildren();
@@ -84,21 +89,31 @@ it("delegates empty section handling to the agenda installer", async () => {
 
 it("shares one section actuals instance between agenda and rehearsal reporter", async () => {
   const actuals = { actualMs: vi.fn(() => [0]), destroy: vi.fn() };
+  const timeline = { entries: vi.fn(() => []), destroy: vi.fn() };
   const agendaCleanup = vi.fn();
   const reporterCleanup = vi.fn();
   const bridgeCleanup = vi.fn();
+  const trackerCleanup = vi.fn();
   const installSectionActuals = vi.fn((_options: unknown) => actuals);
+  const installSlideTimeline = vi.fn((_options: unknown) => timeline);
+  const installTimeTracker = vi.fn((_options: unknown) => trackerCleanup);
   const installAgenda = vi.fn((_options: { actuals: unknown }) => agendaCleanup);
   const installRehearsalReporter = vi.fn(
-    (_options: { actuals: unknown }) => reporterCleanup
+    (_options: { actuals: unknown; timeline: unknown }) => reporterCleanup
   );
   const installRehearsalBridge = vi.fn(
     (_win: Window, _bus: EventTarget, _fetcher: typeof fetch) => bridgeCleanup
   );
   vi.doMock("../src/sectionActuals", () => ({ installSectionActuals }));
+  vi.doMock("../src/slideTimeline", () => ({ installSlideTimeline }));
   vi.doMock("../src/agenda", () => ({ installAgenda }));
   vi.doMock("../src/rehearsalReporter", () => ({ installRehearsalReporter }));
   vi.doMock("../src/rehearsalBridge", () => ({ installRehearsalBridge }));
+  vi.doMock("../src/timeTracker", () => ({
+    installTimeTracker,
+    isOverrun: () => false,
+    isValidDurationMs: () => true
+  }));
   const { mountPresenterView } = await import("../src/presenter");
   const sections = [
     { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }
@@ -107,31 +122,37 @@ it("shares one section actuals instance between agenda and rehearsal reporter", 
   const view = await mountPresenterView({
     root,
     notes,
-    fetcher: standardFetch({ sections }),
+    fetcher: standardFetch({ sections, plannedDurationMs: 60_000 }),
     window,
     now: () => 1000
   });
 
   expect(installSectionActuals).toHaveBeenCalledTimes(1);
+  expect(installSlideTimeline).toHaveBeenCalledTimes(1);
   expect(installAgenda).toHaveBeenCalledTimes(1);
   expect(installRehearsalReporter).toHaveBeenCalledTimes(1);
   expect(installRehearsalBridge).toHaveBeenCalledTimes(1);
   expect(installAgenda.mock.calls[0]![0].actuals).toBe(actuals);
   expect(installRehearsalReporter.mock.calls[0]![0].actuals).toBe(actuals);
+  expect(installRehearsalReporter.mock.calls[0]![0].timeline).toBe(timeline);
 
   view.destroy();
   expect(agendaCleanup).toHaveBeenCalledTimes(1);
   expect(reporterCleanup).toHaveBeenCalledTimes(1);
   expect(bridgeCleanup).toHaveBeenCalledTimes(1);
+  expect(trackerCleanup).toHaveBeenCalledTimes(1);
+  expect(timeline.destroy).toHaveBeenCalledTimes(1);
   expect(actuals.destroy).toHaveBeenCalledTimes(1);
 });
 
 it("passes empty sections to all section-dependent installers when validation fails", async () => {
   const actuals = { actualMs: vi.fn(() => []), flush: vi.fn(), destroy: vi.fn() };
+  const timeline = { entries: vi.fn(() => []), destroy: vi.fn() };
   const agendaCleanup = vi.fn();
   const reporterCleanup = vi.fn();
   const bridgeCleanup = vi.fn();
   const installSectionActuals = vi.fn((_options: { sections: unknown[] }) => actuals);
+  const installSlideTimeline = vi.fn((_options: unknown) => timeline);
   const installAgenda = vi.fn((_options: { sections: unknown[] }) => agendaCleanup);
   const installRehearsalReporter = vi.fn(
     (_options: { sections: unknown[] }) => reporterCleanup
@@ -140,6 +161,7 @@ it("passes empty sections to all section-dependent installers when validation fa
     (_win: Window, _bus: EventTarget, _fetcher: typeof fetch) => bridgeCleanup
   );
   vi.doMock("../src/sectionActuals", () => ({ installSectionActuals }));
+  vi.doMock("../src/slideTimeline", () => ({ installSlideTimeline }));
   vi.doMock("../src/agenda", () => ({ installAgenda }));
   vi.doMock("../src/rehearsalReporter", () => ({ installRehearsalReporter }));
   vi.doMock("../src/rehearsalBridge", () => ({ installRehearsalBridge }));
@@ -161,6 +183,7 @@ it("passes empty sections to all section-dependent installers when validation fa
   });
 
   expect(installSectionActuals.mock.calls[0]![0].sections).toEqual([]);
+  expect(installSlideTimeline).toHaveBeenCalledTimes(1);
   expect(installAgenda.mock.calls[0]![0].sections).toEqual([]);
   expect(installRehearsalReporter.mock.calls[0]![0].sections).toEqual([]);
   expect(actuals.actualMs()).toEqual([]);
@@ -206,15 +229,16 @@ it("treats invalid manifest sections as empty before installing agenda and rehea
   }
 });
 
-it("attributes slidechange rehearsal reports to the previous section", async () => {
+it("emits reports after real timeline listeners record start and slidechange entries", async () => {
   const { mountPresenterView } = await import("../src/presenter");
   const root = document.createElement("main");
   const reports: RehearsalSnapshot[] = [];
   const onReport = (event: Event): void => {
-    reports.push((event as CustomEvent<RehearsalSnapshot>).detail);
+    reports.push((event as CustomEvent<RehearsalReportDetail>).detail.snapshot);
   };
   let now = 1_000;
   window.addEventListener("peitho:rehearsalreport", onReport);
+  cleanups.push(() => window.removeEventListener("peitho:rehearsalreport", onReport));
   const view = await mountPresenterView({
     root,
     notes,
@@ -248,26 +272,35 @@ it("attributes slidechange rehearsal reports to the previous section", async () 
     window,
     now: () => now
   });
+  cleanups.push(() => view.destroy());
 
-  try {
-    root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
-    now = 2_250;
-    window.dispatchEvent(
-      new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } })
-    );
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
+  now = 2_250;
+  window.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 1 } } })
+  );
 
-    expect(reports).toEqual([
-      {
-        version: 1,
-        elapsedMs: 1_250,
-        sections: [
-          { name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 },
-          { name: "Demo", plannedDurationMs: 60_000, actualMs: 0 }
-        ]
-      }
-    ]);
-  } finally {
-    window.removeEventListener("peitho:rehearsalreport", onReport);
-    view.destroy();
-  }
+  expect(reports).toEqual([
+    {
+      version: 2,
+      elapsedMs: 0,
+      sections: [
+        { name: "Setup", plannedDurationMs: 60_000, actualMs: 0 },
+        { name: "Demo", plannedDurationMs: 60_000, actualMs: 0 }
+      ],
+      timeline: [{ key: "intro", index: 0, atMs: 0 }]
+    },
+    {
+      version: 2,
+      elapsedMs: 1_250,
+      sections: [
+        { name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 },
+        { name: "Demo", plannedDurationMs: 60_000, actualMs: 0 }
+      ],
+      timeline: [
+        { key: "intro", index: 0, atMs: 0 },
+        { key: "demo", index: 1, atMs: 1_250 }
+      ]
+    }
+  ]);
 });

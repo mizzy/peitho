@@ -54,7 +54,10 @@ pub use phase::{
     ImageRequest, Mapped, Rendered,
 };
 pub use present_config::{present_config_json, PresentConfig};
-pub use rehearsal::{rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot};
+pub use rehearsal::{
+    rehearsal_record_json, RehearsalRecord, RehearsalRecordV1, RehearsalRecordV2, RehearsalSection,
+    RehearsalSlideEntry, RehearsalSnapshot,
+};
 pub use render::{
     render_deck, render_distribution_index, render_lint_document, render_pdf_document,
     render_present_index, render_presenter_index, render_preview_error_index, render_preview_index,

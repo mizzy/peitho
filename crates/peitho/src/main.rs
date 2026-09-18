@@ -3630,19 +3630,14 @@ fn read_rehearsal_record(path: &Path) -> miette::Result<peitho_core::RehearsalRe
             path.display()
         )
     })?;
-    let record: peitho_core::RehearsalRecord = serde_json::from_str(&json).map_err(|err| {
+    serde_json::from_str(&json).map_err(|err| {
         let help = rehearsal_record_recovery_help(path);
         miette::miette!(
             help = help,
             "failed to parse rehearsal record {}\ncaused by: {err}",
             path.display()
         )
-    })?;
-    record.validate().map_err(|err| {
-        let help = rehearsal_record_recovery_help(path);
-        miette::miette!(help = help, "{err} in rehearsal record {}", path.display())
-    })?;
-    Ok(record)
+    })
 }
 
 fn rehearsal_record_recovery_help(path: &Path) -> String {
@@ -3739,7 +3734,124 @@ fn write_rehearsal_record_summary(
         &format_minute_seconds(total_planned),
         &format_minute_seconds(total_actual),
         &format_rehearsal_delta(total_actual, total_planned),
+    )?;
+
+    if let peitho_core::RehearsalRecord::V2(record) = record {
+        write_rehearsal_slide_summary(stdout, record)?;
+    }
+    Ok(())
+}
+
+struct RehearsalSlideTotal {
+    index: u32,
+    key: String,
+    first_at_ms: u64,
+    visits: usize,
+    total_ms: u64,
+}
+
+fn write_rehearsal_slide_summary(
+    stdout: &mut dyn Write,
+    record: &peitho_core::RehearsalRecordV2,
+) -> miette::Result<()> {
+    writeln!(stdout).into_diagnostic()?;
+    if record.timeline().is_empty() {
+        writeln!(stdout, "  (no slide entries)").into_diagnostic()?;
+        return Ok(());
+    }
+
+    let totals = rehearsal_slide_totals(record);
+    let key_width = totals
+        .iter()
+        .map(|total| total.key.chars().count())
+        .chain(std::iter::once("key".len()))
+        .max()
+        .unwrap_or("key".len());
+    let table_width = 2 + 5 + 3 + key_width + 3 + 7 + 3 + 6 + 3 + 5;
+    write_rehearsal_slide_row(
+        stdout, key_width, "slide", "key", "entered", "visits", "total",
+    )?;
+
+    let leading_ms = record.timeline()[0].at_ms();
+    if leading_ms > 0 {
+        write_rehearsal_slide_total_row(stdout, table_width, "(before first entry)", leading_ms)?;
+    }
+    for total in &totals {
+        let slide = format!("#{}", u64::from(total.index) + 1);
+        write_rehearsal_slide_row(
+            stdout,
+            key_width,
+            &slide,
+            &total.key,
+            &format_minute_seconds(total.first_at_ms),
+            &total.visits.to_string(),
+            &format_minute_seconds(total.total_ms),
+        )?;
+    }
+    let displayed_total_ms = leading_ms + totals.iter().map(|total| total.total_ms).sum::<u64>();
+    debug_assert_eq!(displayed_total_ms, record.elapsed_ms());
+    write_rehearsal_slide_total_row(stdout, table_width, "total", displayed_total_ms)?;
+    Ok(())
+}
+
+fn write_rehearsal_slide_row(
+    stdout: &mut dyn Write,
+    key_width: usize,
+    slide: &str,
+    key: &str,
+    entered: &str,
+    visits: &str,
+    total: &str,
+) -> miette::Result<()> {
+    writeln!(
+        stdout,
+        "  {slide:<5}   {key:<key_width$}   {entered:>7}   {visits:>6}   {total:>5}"
     )
+    .into_diagnostic()
+}
+
+fn write_rehearsal_slide_total_row(
+    stdout: &mut dyn Write,
+    table_width: usize,
+    label: &str,
+    total_ms: u64,
+) -> miette::Result<()> {
+    let label = format!("  {label}");
+    let label_width = table_width - 5;
+    writeln!(
+        stdout,
+        "{label:<label_width$}{:>5}",
+        format_minute_seconds(total_ms)
+    )
+    .into_diagnostic()
+}
+
+fn rehearsal_slide_totals(record: &peitho_core::RehearsalRecordV2) -> Vec<RehearsalSlideTotal> {
+    let timeline = record.timeline();
+    let mut totals: Vec<RehearsalSlideTotal> = Vec::new();
+    for (position, entry) in timeline.iter().enumerate() {
+        let end_ms = timeline
+            .get(position + 1)
+            .map(peitho_core::RehearsalSlideEntry::at_ms)
+            .unwrap_or_else(|| record.elapsed_ms());
+        let duration_ms = end_ms - entry.at_ms();
+        if let Some(total) = totals
+            .iter_mut()
+            .find(|total| total.index == entry.index() && total.key == entry.key().as_str())
+        {
+            total.visits += 1;
+            total.total_ms += duration_ms;
+        } else {
+            totals.push(RehearsalSlideTotal {
+                index: entry.index(),
+                key: entry.key().as_str().to_owned(),
+                first_at_ms: entry.at_ms(),
+                visits: 1,
+                total_ms: duration_ms,
+            });
+        }
+    }
+    totals
 }
 
 fn write_rehearsal_row(
@@ -4004,6 +4116,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         Some(server::RehearsalSink::new(
             PathBuf::from(REHEARSALS_DIR),
             expected_rehearsal_sections(&artifacts),
+            expected_rehearsal_slide_keys(&artifacts),
         ))
     } else {
         None
@@ -4114,6 +4227,15 @@ fn expected_rehearsal_sections(artifacts: &BuildArtifacts) -> Vec<(String, u64)>
         .sections()
         .iter()
         .map(|section| (section.name().to_owned(), section.planned().as_millis()))
+        .collect()
+}
+
+fn expected_rehearsal_slide_keys(artifacts: &BuildArtifacts) -> Vec<SlideKey> {
+    artifacts
+        .rendered
+        .slides()
+        .iter()
+        .map(|slide| slide.key().clone())
         .collect()
 }
 
@@ -7991,6 +8113,21 @@ contexts:
     }
 
     #[test]
+    fn rehearsal_slide_keys_follow_final_rendered_slide_order() {
+        let fixture = WatchFixture::new(
+            "---\ntime: 1m\n---\n<!-- {\"section\":\"Setup\",\"time\":\"1m\",\"key\":\"intro\"} -->\n# Intro\n\n---\n\n<!-- {\"draft\":true} -->\n# Removed\n\n---\n\n<!-- {\"key\":\"details\"} -->\n# Details\n",
+        );
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        let keys = expected_rehearsal_slide_keys(&artifacts);
+
+        assert_eq!(
+            keys.iter().map(SlideKey::as_str).collect::<Vec<_>>(),
+            ["intro", "details"]
+        );
+    }
+
+    #[test]
     fn binding_busy_remote_default_port_reports_host_specific_help() {
         let listener = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
             Ok(listener) => listener,
@@ -9528,6 +9665,22 @@ exec sleep 30
     }
 
     #[test]
+    fn distribution_excludes_all_rehearsal_and_present_only_artifacts() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let out = fixture.options.out.clone();
+
+        emit_distribution(&out, &artifacts).unwrap();
+
+        assert!(!out.join(".peitho").exists());
+        assert!(!out.join("present.json").exists());
+        let names = recursively_list_file_names(&out);
+        assert!(!names
+            .iter()
+            .any(|name| name.starts_with("rehearsal-") || name.ends_with(".webm")));
+    }
+
+    #[test]
     fn latest_rehearsal_record_is_none_for_missing_or_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -9562,7 +9715,7 @@ exec sleep 30
         fs::create_dir_all(&rehearsals).unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-135241.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 local_recorded_at_ms(2026, 7, 19, 13, 52, 41),
                 122_100,
                 vec![
@@ -9593,6 +9746,243 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
   Problem       1:00     1:10    +0:10
   total         2:00     2:02    +0:02
 "
+        );
+    }
+
+    #[test]
+    fn rehearsal_command_prints_v2_slide_totals_with_revisits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rehearsal-20260918-120000.json");
+        write_rehearsal_record(
+            &path,
+            v2_single_section_record(
+                local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+                "Setup",
+                30_000,
+                &[
+                    ("intro", 0, 0),
+                    ("details", 1, 10_000),
+                    ("intro", 0, 25_000),
+                ],
+            ),
+        );
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: false,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "\
+rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
+
+  section    planned   actual    delta
+  Setup         0:30     0:30    -0:00
+  total         0:30     0:30    -0:00
+
+  slide   key       entered   visits   total
+  #1      intro        0:00        2    0:15
+  #2      details      0:10        1    0:15
+  total                                 0:30
+"
+        );
+    }
+
+    #[test]
+    fn rehearsal_command_accounts_for_leading_gap_and_three_visits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rehearsal-20260918-120000.json");
+        let record = v2_single_section_record(
+            local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+            "Setup",
+            40_000,
+            &[
+                ("intro", 0, 5_000),
+                ("architecture", 1, 10_000),
+                ("intro", 0, 20_000),
+                ("architecture", 1, 25_000),
+                ("intro", 0, 30_000),
+            ],
+        );
+        let peitho_core::RehearsalRecord::V2(v2) = &record else {
+            panic!("expected v2");
+        };
+        let totals = rehearsal_slide_totals(v2);
+        let row_total =
+            v2.timeline()[0].at_ms() + totals.iter().map(|total| total.total_ms).sum::<u64>();
+
+        assert_eq!(totals[0].visits, 3);
+        assert_eq!(row_total, v2.elapsed_ms());
+        write_rehearsal_record(&path, record);
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: false,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "\
+rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
+
+  section    planned   actual    delta
+  Setup         0:40     0:40    -0:00
+  total         0:40     0:40    -0:00
+
+  slide   key            entered   visits   total
+  (before first entry)                       0:05
+  #1      intro             0:05        3    0:20
+  #2      architecture      0:10        2    0:15
+  total                                      0:40
+"
+        );
+    }
+
+    #[test]
+    fn rehearsal_command_prints_zero_duration_and_empty_v2_timelines() {
+        let dir = tempfile::tempdir().unwrap();
+        let zero_path = dir.path().join("rehearsal-20260918-120000.json");
+        write_rehearsal_record(
+            &zero_path,
+            v2_single_section_record(
+                local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+                "Zero",
+                0,
+                &[("intro", 0, 0), ("details", 1, 0)],
+            ),
+        );
+        let reset_path = dir.path().join("rehearsal-20260918-120001.json");
+        write_rehearsal_record(
+            &reset_path,
+            v2_single_section_record(local_recorded_at_ms(2026, 9, 18, 12, 0, 1), "Reset", 0, &[]),
+        );
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: true,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+        let stdout = String::from_utf8(stdout).unwrap();
+
+        assert!(stdout.contains("  #1      intro        0:00        1    0:00\n"));
+        assert!(stdout.contains("  #2      details      0:00        1    0:00\n"));
+        assert!(stdout.contains("  total                                 0:00\n"));
+        assert!(stdout.contains("  (no slide entries)\n"));
+    }
+
+    #[test]
+    fn rehearsal_command_errors_on_invalid_v2_timeline_with_path() {
+        let cases = [
+            (
+                r#"{"version":2,"recordedAtMs":10,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":500},{"key":"details","index":1,"atMs":499}]}"#,
+                "rehearsal timeline positions must be non-decreasing",
+            ),
+            (
+                r#"{"version":2,"recordedAtMs":10,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":1001}]}"#,
+                "rehearsal timeline position 1001 exceeds elapsed time 1000",
+            ),
+        ];
+
+        for (index, (json, expected)) in cases.into_iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join(format!("rehearsal-20260918-12000{index}.json"));
+            fs::write(&path, json).unwrap();
+            let mut stdout = Vec::new();
+
+            let err = run_rehearsal(
+                RehearsalOptions {
+                    all: false,
+                    rehearsals_dir: dir.path().to_path_buf(),
+                },
+                &mut stdout,
+                LabelStyle::PLAIN,
+            )
+            .unwrap_err();
+            let message = err.to_string();
+
+            assert!(message.contains(expected), "actual error: {message}");
+            assert!(message.contains(&path.display().to_string()));
+            assert!(err
+                .help()
+                .expect("help must be present")
+                .to_string()
+                .contains("delete or move"));
+        }
+    }
+
+    #[test]
+    fn rehearsal_command_all_prints_mixed_v1_and_v2_records_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rehearsal_record(
+            &dir.path().join("rehearsal-20260918-120000.json"),
+            single_section_record((2026, 9, 18, 12, 0, 0), "Legacy", 1_000),
+        );
+        write_rehearsal_record(
+            &dir.path().join("rehearsal-20260918-120001.json"),
+            v2_single_section_record(
+                local_recorded_at_ms(2026, 9, 18, 12, 0, 1),
+                "Current",
+                2_000,
+                &[("intro", 0, 0)],
+            ),
+        );
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: true,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+        let stdout = String::from_utf8(stdout).unwrap();
+        let legacy = stdout.find("rehearsal-20260918-120000").unwrap();
+        let current = stdout.find("rehearsal-20260918-120001").unwrap();
+
+        assert!(legacy < current);
+        assert!(!stdout[legacy..current].contains("  slide"));
+        assert!(stdout[current..].contains("  slide"));
+    }
+
+    #[test]
+    fn rehearsal_record_selection_ignores_webm_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("rehearsal-20260918-120000.json");
+        write_rehearsal_record(
+            &json,
+            single_section_record((2026, 9, 18, 12, 0, 0), "Setup", 1_000),
+        );
+        fs::write(
+            dir.path().join("rehearsal-20260918-120001.webm"),
+            b"not a record",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rehearsal_record_paths_by_name(dir.path()).unwrap(),
+            vec![json]
         );
     }
 
@@ -9715,12 +10105,41 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
     }
 
     #[test]
+    fn rehearsal_command_errors_on_invalid_v1_record_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = dir.path().join("rehearsal-20260719-100000.json");
+        fs::write(
+            &invalid,
+            r#"{"version":1,"recordedAtMs":10,"elapsedMs":0,"sections":[]}"#,
+        )
+        .unwrap();
+        let mut stdout = Vec::new();
+
+        let err = run_rehearsal(
+            RehearsalOptions {
+                all: false,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("failed to parse rehearsal record"));
+        assert!(message.contains("rehearsal sections must not be empty"));
+        assert!(message.contains(&invalid.display().to_string()));
+        let help = err.help().expect("help must be present").to_string();
+        assert!(help.contains("delete or move"));
+    }
+
+    #[test]
     fn rehearsal_command_errors_on_out_of_range_recorded_timestamp_with_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rehearsal-20260719-135241.json");
         write_rehearsal_record(
             &path,
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 u64::try_from(i64::MAX).unwrap() + 1,
                 1_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
@@ -9753,7 +10172,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         let dir = tempfile::tempdir().unwrap();
         write_rehearsal_record(
             &dir.path().join("rehearsal-20260719-135241.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 local_recorded_at_ms(2026, 7, 19, 13, 52, 41),
                 240_998,
                 vec![
@@ -9794,7 +10213,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         let dir = tempfile::tempdir().unwrap();
         write_rehearsal_record(
             &dir.path().join("rehearsal-20260719-135241.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 local_recorded_at_ms(2026, 7, 19, 13, 52, 41),
                 60_000,
                 vec![peitho_core::RehearsalSection::new(
@@ -9828,7 +10247,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::create_dir_all(&rehearsals).unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090000.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 1_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
@@ -9836,7 +10255,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         );
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-100000.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_003_600_000,
                 2_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
@@ -9855,7 +10274,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::create_dir_all(&rehearsals).unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090000.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 1_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
@@ -9875,7 +10294,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::create_dir_all(&rehearsals).unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090507.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 1_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
@@ -9883,7 +10302,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         );
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090507-2.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 2_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
@@ -9902,7 +10321,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::create_dir_all(&rehearsals).unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090507-2.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 2_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
@@ -9910,7 +10329,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         );
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-090507-10.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 10_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 10_000)],
@@ -9934,7 +10353,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         .unwrap();
         write_rehearsal_record(
             &rehearsals.join("rehearsal-20260719-100000.json"),
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_003_600_000,
                 2_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 2_000)],
@@ -9952,7 +10371,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         let older = dir.path().join("rehearsal-20260719-090000.json");
         write_rehearsal_record(
             &older,
-            peitho_core::RehearsalRecord::new(
+            v1_rehearsal_record(
                 1_783_000_000_000,
                 1_000,
                 vec![peitho_core::RehearsalSection::new("Setup", 60_000, 1_000)],
@@ -9976,7 +10395,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         let path = dir.path().join("rehearsal-20260719-090000.json");
         fs::write(
             &path,
-            r#"{"version":2,"recordedAtMs":1783000000000,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+            r#"{"version":3,"recordedAtMs":1783000000000,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[]}"#,
         )
         .unwrap();
 
@@ -11154,6 +11573,64 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         fs::write(path, peitho_core::rehearsal_record_json(&record).unwrap()).unwrap();
     }
 
+    fn recursively_list_file_names(root: &Path) -> Vec<String> {
+        fn visit(dir: &Path, names: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(&path, names);
+                } else {
+                    names.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+
+        let mut names = Vec::new();
+        visit(root, &mut names);
+        names.sort();
+        names
+    }
+
+    fn v1_rehearsal_record(
+        recorded_at_ms: u64,
+        elapsed_ms: u64,
+        sections: Vec<peitho_core::RehearsalSection>,
+    ) -> peitho_core::RehearsalRecord {
+        peitho_core::RehearsalRecord::V1(
+            peitho_core::RehearsalRecordV1::new(recorded_at_ms, elapsed_ms, sections).unwrap(),
+        )
+    }
+
+    fn v2_single_section_record(
+        recorded_at_ms: u64,
+        name: &str,
+        elapsed_ms: u64,
+        timeline: &[(&str, u32, u64)],
+    ) -> peitho_core::RehearsalRecord {
+        let snapshot: peitho_core::RehearsalSnapshot = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "elapsedMs": elapsed_ms,
+            "sections": [{
+                "name": name,
+                "plannedDurationMs": elapsed_ms,
+                "actualMs": elapsed_ms
+            }],
+            "timeline": timeline
+                .iter()
+                .map(|(key, index, at_ms)| serde_json::json!({
+                    "key": key,
+                    "index": index,
+                    "atMs": at_ms
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+        peitho_core::RehearsalRecord::V2(
+            peitho_core::RehearsalRecordV2::from_snapshot(recorded_at_ms, &snapshot).unwrap(),
+        )
+    }
+
     fn local_recorded_at_ms(
         year: i32,
         month: u32,
@@ -11177,7 +11654,7 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         actual_ms: u64,
     ) -> peitho_core::RehearsalRecord {
         let (year, month, day, hour, minute, second) = recorded_at;
-        peitho_core::RehearsalRecord::new(
+        v1_rehearsal_record(
             local_recorded_at_ms(year, month, day, hour, minute, second),
             actual_ms,
             vec![peitho_core::RehearsalSection::new(name, 60_000, actual_ms)],

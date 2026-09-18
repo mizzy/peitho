@@ -2,4 +2,4 @@
 import type { RehearsalSection } from "./RehearsalSection";
 import type { RehearsalSlideEntry } from "./RehearsalSlideEntry";
 
-export type RehearsalSnapshot = { version: 2, elapsedMs: number, sections: Array<RehearsalSection>, timeline: Array<RehearsalSlideEntry>, };
+export type RehearsalRecordV2 = { version: 2, recordedAtMs: number, elapsedMs: number, sections: Array<RehearsalSection>, timeline: Array<RehearsalSlideEntry>, };

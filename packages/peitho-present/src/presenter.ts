@@ -3,6 +3,7 @@ import { installAgenda } from "./agenda";
 import { installRehearsalBridge } from "./rehearsalBridge";
 import { installRehearsalReporter } from "./rehearsalReporter";
 import { installSectionActuals } from "./sectionActuals";
+import { installSlideTimeline } from "./slideTimeline";
 import { installPresenterKeyboard } from "./keyboard";
 import { sectionIndexForSlide, validateSections } from "./sections";
 import {
@@ -290,6 +291,18 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
     log.error("Invalid plannedDurationMs in manifest.json");
   }
+  const manifestSections = mainShell.manifest?.sections ?? [];
+  const sections = validateSections(manifestSections, log) ? manifestSections : [];
+  // Install accumulator listeners before consumers; slidechange must attribute
+  // elapsed time to the pre-transition section before agenda/reporter reads it.
+  const sectionActuals = installSectionActuals({
+    shell: mainShell,
+    sections,
+    bus,
+    window: win,
+    log
+  });
+  const slideTimeline = installSlideTimeline({ shell: mainShell, bus, log });
   const trackerCleanup =
     plannedDurationMs == null
       ? () => undefined
@@ -302,17 +315,6 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
           document: doc,
           variant: "presenter"
         });
-  const manifestSections = mainShell.manifest?.sections ?? [];
-  const sections = validateSections(manifestSections, log) ? manifestSections : [];
-  // Install accumulator listeners before consumers; slidechange must attribute
-  // elapsed time to the pre-transition section before agenda/reporter reads it.
-  const sectionActuals = installSectionActuals({
-    shell: mainShell,
-    sections,
-    bus,
-    window: win,
-    log
-  });
   const agendaCleanup = installAgenda({
     root: agendaSlot,
     shell: mainShell,
@@ -325,6 +327,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   });
   const rehearsalReporterCleanup = installRehearsalReporter({
     actuals: sectionActuals,
+    timeline: slideTimeline,
     shell: mainShell,
     sections,
     bus,
@@ -483,6 +486,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       rehearsalBridgeCleanup();
       rehearsalReporterCleanup();
       agendaCleanup();
+      slideTimeline.destroy();
       sectionActuals.destroy();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
