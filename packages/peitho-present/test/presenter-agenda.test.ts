@@ -80,7 +80,10 @@ afterEach(() => {
 it("shows and installs audio only when requested without stopping timeline reports on mic failure", async () => {
   const audioCleanup = vi.fn();
   const installRehearsalAudio = vi.fn((options: RehearsalAudioOptions) => {
-    options.indicator.textContent = "mic unavailable: denied";
+    options.indicator.dataset.peithoAudioState = "error";
+    options.indicatorLabel.textContent = "ERR";
+    options.detail.textContent = "mic unavailable: denied";
+    options.detail.title = "mic unavailable: denied";
     return audioCleanup;
   });
   vi.doMock("../src/rehearsalAudio", () => ({ installRehearsalAudio }));
@@ -106,10 +109,11 @@ it("shows and installs audio only when requested without stopping timeline repor
   });
   expect(
     root.querySelector('[data-peitho-presenter="rehearsal-audio"]')?.textContent
+  ).toBe("ERR");
+  expect(
+    root.querySelector('[data-peitho-presenter="rehearsal-audio-detail"]')?.textContent
   ).toBe("mic unavailable: denied");
-  expect(root.querySelector<HTMLElement>(".clock-row")?.dataset.peithoRehearsalAudio).toBe(
-    "true"
-  );
+  expect(root.querySelector<HTMLElement>(".clock")?.dataset.peithoRehearsalAudio).toBe("true");
   root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
   expect(reports).toHaveLength(1);
 
@@ -128,7 +132,7 @@ it("shows and installs audio only when requested without stopping timeline repor
   expect(installRehearsalAudio).toHaveBeenCalledTimes(1);
   expect(plainRoot.querySelector('[data-peitho-presenter="rehearsal-audio"]')).toBeNull();
   expect(
-    plainRoot.querySelector<HTMLElement>(".clock-row")?.dataset.peithoRehearsalAudio
+    plainRoot.querySelector<HTMLElement>(".clock")?.dataset.peithoRehearsalAudio
   ).toBeUndefined();
   plain.destroy();
 });

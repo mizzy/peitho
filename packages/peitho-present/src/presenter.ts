@@ -220,7 +220,6 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const statePill = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="state-pill"]'
   )!;
-  const clockRow = options.root.querySelector<HTMLElement>(".clock-row")!;
   const stateLabel = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="state-label"]'
   )!;
@@ -339,15 +338,32 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
   let rehearsalAudioCleanup = (): void => undefined;
   if (options.rehearsalAudio) {
+    const status = doc.createElement("span");
+    status.className = "rehearsal-audio-status";
+    statePill.before(status);
+    status.append(statePill);
+    stateLabel.classList.add("state-word");
     const indicator = doc.createElement("span");
-    indicator.className = "rehearsal-audio mono";
+    indicator.className = "pill-seg mono";
     indicator.dataset.peithoPresenter = "rehearsal-audio";
     indicator.setAttribute("role", "status");
     indicator.setAttribute("aria-live", "polite");
-    clockRow.dataset.peithoRehearsalAudio = "true";
-    statePill.before(indicator);
+    const indicatorDot = doc.createElement("span");
+    indicatorDot.className = "state-dot rehearsal-audio-dot";
+    indicatorDot.setAttribute("aria-hidden", "true");
+    const indicatorLabel = doc.createTextNode("");
+    indicator.append(indicatorDot, indicatorLabel);
+    statePill.append(indicator);
+    const detail = doc.createElement("span");
+    detail.className = "rehearsal-audio-detail mono";
+    detail.dataset.peithoPresenter = "rehearsal-audio-detail";
+    detail.setAttribute("aria-live", "polite");
+    status.append(detail);
+    clockRoot.dataset.peithoRehearsalAudio = "true";
     const cleanupAudio = installRehearsalAudio({
       indicator,
+      indicatorLabel,
+      detail,
       shell: mainShell,
       bus,
       window: win,
@@ -356,8 +372,11 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     });
     rehearsalAudioCleanup = () => {
       cleanupAudio();
-      delete clockRow.dataset.peithoRehearsalAudio;
+      delete clockRoot.dataset.peithoRehearsalAudio;
+      stateLabel.classList.remove("state-word");
       indicator.remove();
+      status.before(statePill);
+      status.remove();
     };
   }
   const rippleTimeouts = new Set<number>();

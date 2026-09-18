@@ -376,12 +376,18 @@ peitho completions zsh
 
 `--audio` is deliberately opt-in: only `peitho present --rehearsal --audio`
 asks the presenter for microphone permission. The presenter indicator shows
-`… REC` while permission is pending, `○ REC` when ready, `● REC` while the
-timer is running, and `❙❙ REC` while it is paused. Microphone and recorder
-failures are shown as `mic unavailable: ...`; a failed chunk remains queued
-and retryable failures are appended to the current capture state. A `400`,
-`404`, or `413` response cannot succeed unchanged, so the chunk remains queued
-and the indicator reports the failure without retrying until the run is reset.
+one timer-state pill with a `REC` segment. Its dot is hollow and dim while
+permission is pending or the microphone is ready, pulses in the warning color
+while recording, and uses the pause color while paused. Any microphone,
+recorder, or upload failure changes the segment to `ERR`; a microphone failure
+uses a hollow warning dot, while an upload failure keeps the recording or paused
+dot. The full reason, such as `mic unavailable: ...` or
+`audio upload failed: ... (retrying)`, is clamped to two lines above the pill
+without changing the clock row's height, with the unclamped text available on
+hover. Below a 440px clock-card width the state word hides so the timer and
+audio segment cannot overlap. A `400`, `404`, or `413` response cannot succeed
+unchanged, so the chunk remains queued and the detail reports the failure
+without claiming to retry until the run is reset.
 Because browser microphone permission is scoped to the complete origin,
 including its port, audio mode uses the stable default port `6173` instead of
 the random port used by a plain local presentation. An explicit `--port` still

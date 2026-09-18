@@ -2263,7 +2263,6 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
     @keyframes eod-title-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
     .clock { display: flex; flex-direction: column; min-height: 0; }
     .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
-    .clock-row[data-peitho-rehearsal-audio="true"] { grid-template-columns: minmax(0, 1fr) auto auto; }
     .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }
     .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; transition: color 200ms ease; }
     .timer .overrun { color: var(--warn); font-weight: 500; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
@@ -2275,11 +2274,6 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
     .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer .planned { color: var(--warn); }
     .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer,
     .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
-    .rehearsal-audio { max-width: 28ch; overflow-wrap: anywhere; color: var(--fg-mute); font-size: 10px; line-height: 1.25; text-align: right; white-space: normal; }
-    .rehearsal-audio[data-peitho-audio-state="recording"] { color: var(--warn); }
-    .rehearsal-audio[data-peitho-audio-state="paused"] { color: var(--pause); }
-    .rehearsal-audio[data-peitho-audio-state="error"] { color: var(--warn); }
-    .clock-row[data-peitho-rehearsal-audio="true"] .state-pill { grid-column: 3; }
     .state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }
     .state-dot { width: 6px; height: 6px; background: var(--fg-dim); border-radius: 50%; transition: background 150ms ease, box-shadow 150ms ease; }
     .state-pill[data-peitho-state="running"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
@@ -2288,6 +2282,23 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
     .state-pill[data-peitho-state="paused"] .state-dot { background: var(--pause); animation: none; box-shadow: none; }
     .state-pill[data-peitho-state="stopped"] { color: var(--fg-dim); }
     .state-pill[data-peitho-state="stopped"] .state-dot { background: var(--fg-dim); animation: none; box-shadow: none; }
+    .clock[data-peitho-rehearsal-audio="true"] { container-type: inline-size; }
+    .clock[data-peitho-rehearsal-audio="true"] .timer { white-space: nowrap; }
+    .rehearsal-audio-status { display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }
+    .pill-seg { display: inline-flex; align-items: center; gap: 8px; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--line); }
+    .pill-seg[data-peitho-audio-state="pending"],
+    .pill-seg[data-peitho-audio-state="ready"] { color: var(--fg-dim); }
+    .pill-seg[data-peitho-audio-state="pending"] .rehearsal-audio-dot,
+    .pill-seg[data-peitho-audio-state="ready"] .rehearsal-audio-dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; animation: none; }
+    .pill-seg[data-peitho-audio-state="recording"] { color: var(--warn); }
+    .pill-seg[data-peitho-audio-state="recording"] .rehearsal-audio-dot { background: currentColor; box-shadow: 0 0 0 3px var(--warn-soft); animation: pulse 1.4s ease-in-out infinite; }
+    .pill-seg[data-peitho-audio-state="paused"] { color: var(--pause); }
+    .pill-seg[data-peitho-audio-state="paused"] .rehearsal-audio-dot { background: currentColor; box-shadow: none; animation: none; }
+    .pill-seg[data-peitho-audio-state="error"] { color: var(--warn); }
+    .pill-seg[data-peitho-audio-state="error"] .rehearsal-audio-dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; animation: none; }
+    .rehearsal-audio-detail { position: absolute; right: 0; bottom: calc(100% + 5px); width: max-content; max-width: 36ch; color: var(--warn); font-size: 10px; line-height: 1.3; text-align: right; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .rehearsal-audio-detail:empty { display: none; }
+    @container (max-width: 440px) { .state-word { display: none; } }
     @keyframes pulse { 50% { box-shadow: 0 0 0 6px transparent; } }
     .tracker-wrap { padding: 4px 16px 14px; }
     .tracker-wrap:empty { display: none; }
@@ -5170,20 +5181,44 @@ Paragraph after heading.
     }
 
     #[test]
-    fn presenter_audio_css_preserves_the_plain_clock_grid_and_wraps_errors() {
+    fn presenter_audio_css_preserves_plain_rules_and_styles_one_segment_and_overlay() {
         let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains(".clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }"));
-        assert!(html.contains(".clock-row[data-peitho-rehearsal-audio=\"true\"] { grid-template-columns: minmax(0, 1fr) auto auto; }"));
+        assert!(html.contains(".state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }"));
+        assert!(!html.contains("grid-template-columns: minmax(0, 1fr) auto auto"));
+        assert!(!html.contains(".clock-row[data-peitho-rehearsal-audio"));
         assert!(html.contains(
-            ".clock-row[data-peitho-rehearsal-audio=\"true\"] .state-pill { grid-column: 3; }"
+            ".clock[data-peitho-rehearsal-audio=\"true\"] { container-type: inline-size; }"
         ));
-        assert!(html.contains(".rehearsal-audio { max-width: 28ch; overflow-wrap: anywhere;"));
+        assert!(html.contains(
+            ".clock[data-peitho-rehearsal-audio=\"true\"] .timer { white-space: nowrap; }"
+        ));
+        assert!(html.contains(".rehearsal-audio-status { display: inline-flex; align-items: center; justify-content: flex-end; position: relative; }"));
+        assert!(html.contains(".pill-seg { display: inline-flex; align-items: center; gap: 8px; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--line); }"));
+        assert!(html.contains(".pill-seg[data-peitho-audio-state=\"pending\"],"));
+        assert!(html.contains(".pill-seg[data-peitho-audio-state=\"ready\"] .rehearsal-audio-dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; animation: none; }"));
+        assert!(html.contains(".pill-seg[data-peitho-audio-state=\"recording\"] .rehearsal-audio-dot { background: currentColor; box-shadow: 0 0 0 3px var(--warn-soft); animation: pulse 1.4s ease-in-out infinite; }"));
+        assert!(html.contains(".pill-seg[data-peitho-audio-state=\"paused\"] .rehearsal-audio-dot { background: currentColor; box-shadow: none; animation: none; }"));
+        assert!(html.contains(".pill-seg[data-peitho-audio-state=\"error\"] .rehearsal-audio-dot { background: transparent; box-shadow: inset 0 0 0 1px currentColor; animation: none; }"));
+        assert!(html.contains(".rehearsal-audio-detail { position: absolute; right: 0; bottom: calc(100% + 5px); width: max-content; max-width: 36ch; color: var(--warn); font-size: 10px; line-height: 1.3; text-align: right; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }"));
+        assert!(html.contains(".rehearsal-audio-detail:empty { display: none; }"));
+        assert!(html.contains("@container (max-width: 440px) { .state-word { display: none; } }"));
         let state_pill_rule = html
             .lines()
             .find(|line| line.trim_start().starts_with(".state-pill {"))
             .expect("presenter CSS must include the base state-pill rule");
         assert!(!state_pill_rule.contains("grid-column"));
+        let timer_rule = html
+            .lines()
+            .find(|line| line.trim_start().starts_with(".timer {"))
+            .expect("presenter CSS must include the base timer rule");
+        assert!(!timer_rule.contains("white-space"));
+        let clock_rule = html
+            .lines()
+            .find(|line| line.trim_start().starts_with(".clock {"))
+            .expect("presenter CSS must include the base clock rule");
+        assert!(!clock_rule.contains("container-type"));
     }
 
     #[test]

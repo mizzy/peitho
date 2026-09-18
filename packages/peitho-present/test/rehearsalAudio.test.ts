@@ -2,6 +2,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   createRehearsalAudioQueue,
   installRehearsalAudio,
+  REHEARSAL_AUDIO_DETAIL_MAX_CHARS,
+  rehearsalAudioAuthoredDetails,
+  rehearsalAudioPresentation,
   type RehearsalMediaRecorder
 } from "../src/rehearsalAudio";
 import type { BeforeCloseDetail } from "../src/sync";
@@ -102,6 +105,18 @@ class FakeRecorder extends EventTarget implements RehearsalMediaRecorder {
   }
 }
 
+function audioChrome(): {
+  indicator: HTMLElement;
+  indicatorLabel: HTMLElement;
+  detail: HTMLElement;
+} {
+  const indicator = document.createElement("span");
+  const indicatorLabel = document.createElement("span");
+  const detail = document.createElement("div");
+  indicator.append(indicatorLabel);
+  return { indicator, indicatorLabel, detail };
+}
+
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => {
@@ -114,6 +129,52 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   document.body.replaceChildren();
+});
+
+it.each([
+  ["pending", null, null, "pending", "REC", ""],
+  ["ready", null, null, "ready", "REC", ""],
+  ["recording", null, null, "recording", "REC", ""],
+  ["paused", null, null, "paused", "REC", ""],
+  [
+    "recording",
+    null,
+    "audio upload failed: server returned 500 (retrying)",
+    "recording",
+    "ERR",
+    "audio upload failed: server returned 500 (retrying)"
+  ],
+  [
+    "paused",
+    null,
+    "audio upload failed: server returned 413",
+    "paused",
+    "ERR",
+    "audio upload failed: server returned 413"
+  ],
+  [
+    "unavailable",
+    "mic unavailable: Permission denied",
+    "audio upload failed: ignored while the microphone is unavailable",
+    "error",
+    "ERR",
+    "mic unavailable: Permission denied"
+  ]
+] as const)(
+  "maps %s audio state to its segment and detail",
+  (mediaState, mediaError, uploadError, state, label, detail) => {
+    expect(rehearsalAudioPresentation(mediaState, mediaError, uploadError)).toEqual({
+      state,
+      label,
+      detail
+    });
+  }
+);
+
+it("keeps every Peitho-authored composed audio detail within the two-line clamp", () => {
+  for (const detail of rehearsalAudioAuthoredDetails(500)) {
+    expect(detail.length, detail).toBeLessThanOrEqual(REHEARSAL_AUDIO_DETAIL_MAX_CHARS);
+  }
 });
 
 it("serializes uploads and advances after a lost-response 409 proves persistence", async () => {
@@ -211,11 +272,11 @@ it("keeps the queue head for every unproven or malformed conflict", async () => 
 it.each([
   [
     { take: "take-b", nextSeq: 0 },
-    "audio upload failed: another presenter window took over the recording (retrying)"
+    "audio upload failed: another window took over the recording (retrying)"
   ],
   [
     { take: "take-a", nextSeq: 7 },
-    "audio upload failed: recording out of order (restart the rehearsal) (retrying)"
+    "audio upload failed: recording out of order; restart the run (retrying)"
   ],
   [
     { take: null, nextSeq: 0 },
@@ -402,12 +463,14 @@ it("acquires immediately and follows local timer state even when start precedes 
   const stream = { getTracks: () => [track] } as unknown as MediaStream;
   const recorder = new FakeRecorder();
   const recorderOptions: MediaRecorderOptions[] = [];
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const timer = mutableShell();
   const fetcher = vi.fn(async () => response(200)) as unknown as FetchMock;
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -425,7 +488,9 @@ it("acquires immediately and follows local timer state even when start precedes 
   });
   cleanups.push(cleanup);
 
-  expect(indicator.textContent).toBe("… REC");
+  expect(indicatorLabel.textContent).toBe("REC");
+  expect(indicator.dataset.peithoAudioState).toBe("pending");
+  expect(detail.textContent).toBe("");
   timer.state.startedAt = 100;
   timer.state.elapsedMs = 8_000;
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
@@ -434,7 +499,8 @@ it("acquires immediately and follows local timer state even when start precedes 
   await flushPromises();
   expect(recorderOptions).toEqual([{ mimeType: "audio/webm" }]);
   expect(recorder.starts).toEqual([5_000]);
-  expect(indicator.textContent).toBe("● REC");
+  expect(indicatorLabel.textContent).toBe("REC");
+  expect(indicator.dataset.peithoAudioState).toBe("recording");
 
   recorder.emitData(new Blob(["head"]));
   await flushPromises();
@@ -445,21 +511,25 @@ it("acquires immediately and follows local timer state even when start precedes 
   timer.state.paused = true;
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "pause" } }));
   expect(recorder.pauseCalls).toBe(1);
-  expect(indicator.textContent).toBe("❙❙ REC");
+  expect(indicatorLabel.textContent).toBe("REC");
+  expect(indicator.dataset.peithoAudioState).toBe("paused");
   timer.state.paused = false;
   bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "resume" } }));
   expect(recorder.resumeCalls).toBe(1);
-  expect(indicator.textContent).toBe("● REC");
+  expect(indicatorLabel.textContent).toBe("REC");
+  expect(indicator.dataset.peithoAudioState).toBe("recording");
 });
 
 it("reconciles valid adopted start pause resume and reset states", async () => {
   const recorder = new FakeRecorder();
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const timer = mutableShell();
   const stream = { getTracks: () => [] } as unknown as MediaStream;
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -469,7 +539,8 @@ it("reconciles valid adopted start pause resume and reset states", async () => {
   });
   cleanups.push(cleanup);
   await flushPromises();
-  expect(indicator.textContent).toBe("○ REC");
+  expect(indicatorLabel.textContent).toBe("REC");
+  expect(indicator.dataset.peithoAudioState).toBe("ready");
 
   const adopt = (running: boolean, previousElapsedMs: number, elapsedMs: number): void => {
     timer.state.elapsedMs = elapsedMs;
@@ -500,13 +571,15 @@ it("reconciles valid adopted start pause resume and reset states", async () => {
 
 it("reset discards old chunks and waits for stop before minting a new take", async () => {
   const recorder = new FakeRecorder();
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const timer = mutableShell();
   const fetcher = vi.fn(async () => response(200)) as unknown as FetchMock;
   const takes = ["take-a", "take-b"];
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -540,7 +613,7 @@ it("reset discards old chunks and waits for stop before minting a new take", asy
 
 it("awaits the final close chunk upload and does not duplicate it on pagehide", async () => {
   const recorder = new FakeRecorder();
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const upload = deferred<Response>();
   const fetcher = vi.fn(() => upload.promise) as unknown as FetchMock;
@@ -548,6 +621,8 @@ it("awaits the final close chunk upload and does not duplicate it on pagehide", 
   const timer = mutableShell();
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -598,12 +673,14 @@ it("awaits the final close chunk upload and does not duplicate it on pagehide", 
 
 it("uses keepalive for the pagehide fallback final chunk", async () => {
   const recorder = new FakeRecorder();
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const timer = mutableShell({ startedAt: 100, elapsedMs: 12_000 });
   const fetcher = vi.fn(async () => response(200)) as unknown as FetchMock;
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -626,11 +703,13 @@ it("uses keepalive for the pagehide fallback final chunk", async () => {
 
 it("derives recorder transitions from shell state instead of timer requests", async () => {
   const recorder = new FakeRecorder();
-  const indicator = document.createElement("span");
+  const { indicator, indicatorLabel, detail } = audioChrome();
   const bus = new EventTarget();
   const timer = mutableShell();
   const cleanup = installRehearsalAudio({
     indicator,
+    indicatorLabel,
+    detail,
     shell: timer.shell,
     bus,
     window,
@@ -661,10 +740,10 @@ it("derives recorder transitions from shell state instead of timer requests", as
 });
 
 it("renders permission construction recorder and sustained upload failures", async () => {
-  const deniedIndicator = document.createElement("span");
+  const deniedChrome = audioChrome();
   const deniedTimer = mutableShell();
   const denied = installRehearsalAudio({
-    indicator: deniedIndicator,
+    ...deniedChrome,
     shell: deniedTimer.shell,
     window,
     getUserMedia: async () => {
@@ -673,13 +752,19 @@ it("renders permission construction recorder and sustained upload failures", asy
   });
   cleanups.push(denied);
   await flushPromises();
-  expect(deniedIndicator.textContent).toContain("mic unavailable:");
-  expect(deniedIndicator.textContent).toContain("permission denied");
+  expect(deniedChrome.indicator.dataset.peithoAudioState).toBe("error");
+  expect(deniedChrome.indicatorLabel.textContent).toBe("ERR");
+  expect(deniedChrome.detail.textContent).toBe(
+    "mic unavailable: NotAllowedError: permission denied"
+  );
+  expect(deniedChrome.detail.title).toBe(
+    "mic unavailable: NotAllowedError: permission denied"
+  );
 
-  const constructionIndicator = document.createElement("span");
+  const constructionChrome = audioChrome();
   const constructionTimer = mutableShell();
   const construction = installRehearsalAudio({
-    indicator: constructionIndicator,
+    ...constructionChrome,
     shell: constructionTimer.shell,
     window,
     getUserMedia: async () => ({ getTracks: () => [] }) as unknown as MediaStream,
@@ -689,16 +774,22 @@ it("renders permission construction recorder and sustained upload failures", asy
   });
   cleanups.push(construction);
   await flushPromises();
-  expect(constructionIndicator.textContent).toContain("mic unavailable: unsupported recorder");
+  expect(constructionChrome.indicator.dataset.peithoAudioState).toBe("error");
+  expect(constructionChrome.indicatorLabel.textContent).toBe("ERR");
+  expect(constructionChrome.detail.textContent).toBe("mic unavailable: unsupported recorder");
 
   const recorder = new FakeRecorder();
-  const errorIndicator = document.createElement("span");
+  const errorChrome = audioChrome();
   const errorTimer = mutableShell();
+  const fetcher = vi
+    .fn()
+    .mockResolvedValueOnce(response(500))
+    .mockResolvedValue(response(200)) as unknown as FetchMock;
   const upload = installRehearsalAudio({
-    indicator: errorIndicator,
+    ...errorChrome,
     shell: errorTimer.shell,
     window,
-    fetcher: vi.fn(async () => response(500)) as unknown as FetchMock,
+    fetcher,
     getUserMedia: async () => ({ getTracks: () => [] }) as unknown as MediaStream,
     createMediaRecorder: () => recorder,
     takeIdFactory: () => "take-a"
@@ -709,25 +800,41 @@ it("renders permission construction recorder and sustained upload failures", asy
   window.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
   recorder.emitData(new Blob(["chunk"]));
   await flushPromises();
-  expect(errorIndicator.textContent).toBe(
-    "● REC — audio upload failed: server returned 500 (retrying)"
+  expect(errorChrome.indicator.dataset.peithoAudioState).toBe("recording");
+  expect(errorChrome.indicatorLabel.textContent).toBe("ERR");
+  expect(errorChrome.detail.textContent).toBe(
+    "audio upload failed: server returned 500 (retrying)"
+  );
+  expect(errorChrome.detail.title).toBe(
+    "audio upload failed: server returned 500 (retrying)"
   );
 
   errorTimer.state.paused = true;
   window.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "pause" } }));
-  expect(errorIndicator.textContent).toBe(
-    "❙❙ REC — audio upload failed: server returned 500 (retrying)"
+  expect(errorChrome.indicator.dataset.peithoAudioState).toBe("paused");
+  expect(errorChrome.indicatorLabel.textContent).toBe("ERR");
+  expect(errorChrome.detail.textContent).toBe(
+    "audio upload failed: server returned 500 (retrying)"
   );
 
+  await vi.advanceTimersByTimeAsync(1_000);
+  await flushPromises();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(errorChrome.indicatorLabel.textContent).toBe("REC");
+  expect(errorChrome.detail.textContent).toBe("");
+  expect(errorChrome.detail.hasAttribute("title")).toBe(false);
+
   recorder.emitError(new Error("encoder stopped"));
-  expect(errorIndicator.textContent).toContain("mic unavailable: encoder stopped");
+  expect(errorChrome.indicator.dataset.peithoAudioState).toBe("error");
+  expect(errorChrome.indicatorLabel.textContent).toBe("ERR");
+  expect(errorChrome.detail.textContent).toBe("mic unavailable: encoder stopped");
   recorder.state = "inactive";
   recorder.emitStop();
-  expect(errorIndicator.textContent).toContain("mic unavailable: encoder stopped");
+  expect(errorChrome.detail.textContent).toBe("mic unavailable: encoder stopped");
   errorTimer.state.startedAt = null;
   window.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "reset" } }));
   errorTimer.state.startedAt = 200;
   window.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
-  expect(errorIndicator.textContent).toContain("mic unavailable: encoder stopped");
+  expect(errorChrome.detail.textContent).toBe("mic unavailable: encoder stopped");
   expect(recorder.starts).toEqual([5_000]);
 });

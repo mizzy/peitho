@@ -209,6 +209,79 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(pill.textContent).toContain("Running");
   expect(play.textContent).toContain("Pause");
   expect(play.textContent).toContain("Space");
+  expect(root.querySelector('[data-peitho-presenter="rehearsal-audio"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-presenter="rehearsal-audio-detail"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-presenter="state-label"]')?.className).toBe("");
+});
+
+it("adds the rehearsal audio segment and overlaid detail only in audio mode", async () => {
+  const mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "mediaDevices");
+  const getUserMedia = vi.fn(() => new Promise<MediaStream>(() => undefined));
+  Object.defineProperty(window.navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia }
+  });
+  cleanups.push(() => {
+    if (mediaDevicesDescriptor == null) {
+      Reflect.deleteProperty(window.navigator, "mediaDevices");
+    } else {
+      Object.defineProperty(window.navigator, "mediaDevices", mediaDevicesDescriptor);
+    }
+  });
+
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    rehearsalAudio: true,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  const clock = root.querySelector<HTMLElement>('[data-peitho-presenter="clock"]')!;
+  const clockRow = clock.querySelector<HTMLElement>(".clock-row")!;
+  const statePill = clockRow.querySelector<HTMLElement>(
+    '[data-peitho-presenter="state-pill"]'
+  )!;
+  const stateWord = statePill.querySelector<HTMLElement>(
+    '[data-peitho-presenter="state-label"]'
+  )!;
+  const indicator = statePill.querySelector<HTMLElement>(
+    '[data-peitho-presenter="rehearsal-audio"]'
+  )!;
+  const status = statePill.parentElement!;
+  const detail = status.querySelector<HTMLElement>(
+    '[data-peitho-presenter="rehearsal-audio-detail"]'
+  )!;
+
+  expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+  expect(clock.dataset.peithoRehearsalAudio).toBe("true");
+  expect(clockRow.children).toHaveLength(2);
+  expect(status.classList.contains("rehearsal-audio-status")).toBe(true);
+  expect(stateWord.classList.contains("state-word")).toBe(true);
+  expect(indicator.classList.contains("pill-seg")).toBe(true);
+  expect(indicator.classList.contains("mono")).toBe(true);
+  expect(indicator.querySelector(".state-dot")).not.toBeNull();
+  expect(indicator.dataset.peithoAudioState).toBe("pending");
+  expect(indicator.textContent).toBe("REC");
+  expect(stateWord.nextElementSibling).toBe(indicator);
+  expect(detail.parentElement).toBe(status);
+  expect(detail.classList.contains("mono")).toBe(true);
+  expect(detail.textContent).toBe("");
+  expect(detail.hasAttribute("title")).toBe(false);
+
+  view.destroy();
+  views.pop();
+  expect(clock.dataset.peithoRehearsalAudio).toBeUndefined();
+  expect(clockRow.children).toHaveLength(2);
+  expect(statePill.parentElement).toBe(clockRow);
+  expect(stateWord.classList.contains("state-word")).toBe(false);
+  expect(root.querySelector('[data-peitho-presenter="rehearsal-audio"]')).toBeNull();
+  expect(root.querySelector('[data-peitho-presenter="rehearsal-audio-detail"]')).toBeNull();
 });
 
 it("loads legacy manifests without images at runtime", async () => {
