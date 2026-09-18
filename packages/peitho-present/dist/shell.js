@@ -1501,6 +1501,37 @@ function isUnitCoordinate(value) {
 var AUDIO_TIMESLICE_MS = 5e3;
 var AUDIO_RETRY_MS = 1e3;
 var AUDIO_UPLOAD_TIMEOUT_MS = 1e4;
+var INVALID_RESPONSE_REASON = "server returned an invalid response";
+var SESSION_NOT_READY_REASON = "rehearsal session is not ready";
+var OUT_OF_ORDER_REASON = "recording out of order; restart the run";
+var TAKEOVER_REASON = "another window took over the recording";
+var RECORDER_ERROR_REASON = "MediaRecorder error";
+function serverStatusReason(status) {
+  return `server returned ${status}`;
+}
+function uploadFailureMessage(reason, retrying) {
+  return `audio upload failed: ${reason}${retrying ? " (retrying)" : ""}`;
+}
+function micUnavailableMessage(reason) {
+  return `mic unavailable: ${reason}`;
+}
+function rehearsalAudioPresentation(mediaState, mediaError, uploadError) {
+  if (mediaState === "unavailable") {
+    return {
+      state: "error",
+      label: "ERR",
+      detail: mediaError
+    };
+  }
+  if (uploadError !== null) {
+    return {
+      state: mediaState,
+      label: "ERR",
+      detail: uploadError
+    };
+  }
+  return { state: mediaState, label: "REC", detail: "" };
+}
 function createRehearsalAudioQueue(options = {}) {
   const win = options.window ?? window;
   const fetcher = options.fetcher ?? win.fetch.bind(win);
@@ -1596,11 +1627,11 @@ function createRehearsalAudioQueue(options = {}) {
       }
       if (!result.retryable) {
         retryBlocked = true;
-        onUploadError(`audio upload failed: ${result.reason}`);
+        onUploadError(uploadFailureMessage(result.reason, false));
         settleDrainWaiters();
         return;
       }
-      onUploadError(`audio upload failed: ${result.reason} (retrying)`);
+      onUploadError(uploadFailureMessage(result.reason, true));
       retryTimer = win.setTimeout(() => {
         retryTimer = null;
         pump();
@@ -1622,7 +1653,7 @@ function createRehearsalAudioQueue(options = {}) {
       if (response.status !== 409) {
         return {
           accepted: false,
-          reason: `server returned ${response.status}`,
+          reason: serverStatusReason(response.status),
           retryable: !isPermanentUploadStatus(response.status)
         };
       }
@@ -1652,7 +1683,7 @@ function installRehearsalAudio(options) {
   let stopMode = null;
   let uploadError = null;
   let mediaState = "pending";
-  let mediaMessage = "\u2026 REC";
+  let mediaError = null;
   let closing = false;
   let destroyed = false;
   let closeKeepalive = false;
@@ -1667,18 +1698,23 @@ function installRehearsalAudio(options) {
     }
   });
   function renderIndicator() {
-    const unavailable = mediaState === "unavailable";
-    options.indicator.textContent = unavailable || uploadError == null ? mediaMessage : `${mediaMessage} \u2014 ${uploadError}`;
-    options.indicator.dataset.peithoAudioState = unavailable ? "error" : uploadError == null ? mediaState : "error";
+    const presentation = rehearsalAudioPresentation(mediaState, mediaError, uploadError);
+    options.indicator.dataset.peithoAudioState = presentation.state;
+    options.indicatorLabel.textContent = presentation.label;
+    options.detail.textContent = presentation.detail;
+    if (presentation.detail === "") {
+      options.detail.removeAttribute("title");
+    } else {
+      options.detail.title = presentation.detail;
+    }
   }
-  function setMediaState(state, message) {
+  function setMediaState(state) {
     mediaState = state;
-    mediaMessage = message;
     renderIndicator();
   }
   function setUnavailable(error) {
     mediaState = "unavailable";
-    mediaMessage = `mic unavailable: ${errorReason(error)}`;
+    mediaError = micUnavailableMessage(errorReason(error));
     renderIndicator();
   }
   function stopTracks() {
@@ -1701,9 +1737,9 @@ function installRehearsalAudio(options) {
       queue.beginTake(take, roundNonNegativeMs(options.shell.elapsedMs()));
       if (desiredState === "paused") {
         current.pause();
-        setMediaState("paused", "\u2759\u2759 REC");
+        setMediaState("paused");
       } else {
-        setMediaState("recording", "\u25CF REC");
+        setMediaState("recording");
       }
     } catch (error) {
       recorderFailure(error);
@@ -1732,7 +1768,7 @@ function installRehearsalAudio(options) {
     }
     if (desiredState === "inactive") {
       if (current.state === "inactive") {
-        setMediaState("ready", "\u25CB REC");
+        setMediaState("ready");
       } else {
         requestStop("reset");
       }
@@ -1745,14 +1781,14 @@ function installRehearsalAudio(options) {
     try {
       if (desiredState === "paused" && current.state === "recording") {
         current.pause();
-        setMediaState("paused", "\u2759\u2759 REC");
+        setMediaState("paused");
       } else if (desiredState === "recording" && current.state === "paused") {
         current.resume();
-        setMediaState("recording", "\u25CF REC");
+        setMediaState("recording");
       } else if (current.state === "paused") {
-        setMediaState("paused", "\u2759\u2759 REC");
+        setMediaState("paused");
       } else {
-        setMediaState("recording", "\u25CF REC");
+        setMediaState("recording");
       }
     } catch (error) {
       recorderFailure(error);
@@ -1841,12 +1877,12 @@ function installRehearsalAudio(options) {
       return;
     }
     if (!destroyed) {
-      setMediaState("ready", "\u25CB REC");
+      setMediaState("ready");
       reconcile();
     }
   }
   function onRecorderError(event) {
-    const error = event.error ?? "MediaRecorder error";
+    const error = event.error ?? RECORDER_ERROR_REASON;
     recorderFailure(error);
   }
   renderIndicator();
@@ -1870,7 +1906,7 @@ function installRehearsalAudio(options) {
     recorder.addEventListener("dataavailable", onDataAvailable);
     recorder.addEventListener("stop", onStop);
     recorder.addEventListener("error", onRecorderError);
-    setMediaState("ready", "\u25CB REC");
+    setMediaState("ready");
     reconcile();
   }).catch((error) => {
     if (!destroyed && !closing) setUnavailable(error);
@@ -1900,12 +1936,12 @@ function isPersistenceAcknowledgement(conflict, item) {
 }
 function conflictReason(conflict, requestTake) {
   if (typeof conflict !== "object" || conflict === null) {
-    return "server returned an invalid response";
+    return INVALID_RESPONSE_REASON;
   }
   const candidate = conflict;
-  if (candidate.take === null) return "rehearsal session is not ready";
-  if (typeof candidate.take !== "string") return "server returned an invalid response";
-  return candidate.take === requestTake ? "recording out of order (restart the rehearsal)" : "another presenter window took over the recording";
+  if (candidate.take === null) return SESSION_NOT_READY_REASON;
+  if (typeof candidate.take !== "string") return INVALID_RESPONSE_REASON;
+  return candidate.take === requestTake ? OUT_OF_ORDER_REASON : TAKEOVER_REASON;
 }
 function errorReason(error) {
   return error instanceof Error ? error.message : String(error);
@@ -3068,7 +3104,6 @@ async function mountPresenterView(options) {
   const statePill = options.root.querySelector(
     '[data-peitho-presenter="state-pill"]'
   );
-  const clockRow = options.root.querySelector(".clock-row");
   const stateLabel = options.root.querySelector(
     '[data-peitho-presenter="state-label"]'
   );
@@ -3178,15 +3213,32 @@ async function mountPresenterView(options) {
   const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
   let rehearsalAudioCleanup = () => void 0;
   if (options.rehearsalAudio) {
+    const status = doc.createElement("span");
+    status.className = "rehearsal-audio-status";
+    statePill.before(status);
+    status.append(statePill);
+    stateLabel.classList.add("state-word");
     const indicator = doc.createElement("span");
-    indicator.className = "rehearsal-audio mono";
+    indicator.className = "pill-seg mono";
     indicator.dataset.peithoPresenter = "rehearsal-audio";
     indicator.setAttribute("role", "status");
     indicator.setAttribute("aria-live", "polite");
-    clockRow.dataset.peithoRehearsalAudio = "true";
-    statePill.before(indicator);
+    const indicatorDot = doc.createElement("span");
+    indicatorDot.className = "state-dot rehearsal-audio-dot";
+    indicatorDot.setAttribute("aria-hidden", "true");
+    const indicatorLabel = doc.createTextNode("");
+    indicator.append(indicatorDot, indicatorLabel);
+    statePill.append(indicator);
+    const detail = doc.createElement("span");
+    detail.className = "rehearsal-audio-detail mono";
+    detail.dataset.peithoPresenter = "rehearsal-audio-detail";
+    detail.setAttribute("aria-live", "polite");
+    status.append(detail);
+    clockRoot.dataset.peithoRehearsalAudio = "true";
     const cleanupAudio = installRehearsalAudio({
       indicator,
+      indicatorLabel,
+      detail,
       shell: mainShell,
       bus,
       window: win,
@@ -3195,8 +3247,11 @@ async function mountPresenterView(options) {
     });
     rehearsalAudioCleanup = () => {
       cleanupAudio();
-      delete clockRow.dataset.peithoRehearsalAudio;
+      delete clockRoot.dataset.peithoRehearsalAudio;
+      stateLabel.classList.remove("state-word");
       indicator.remove();
+      status.before(statePill);
+      status.remove();
     };
   }
   const rippleTimeouts = /* @__PURE__ */ new Set();

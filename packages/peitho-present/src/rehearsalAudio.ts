@@ -9,6 +9,24 @@ import type { BeforeCloseDetail } from "./sync";
 const AUDIO_TIMESLICE_MS = 5_000;
 const AUDIO_RETRY_MS = 1_000;
 const AUDIO_UPLOAD_TIMEOUT_MS = 10_000;
+const INVALID_RESPONSE_REASON = "server returned an invalid response";
+const SESSION_NOT_READY_REASON = "rehearsal session is not ready";
+const OUT_OF_ORDER_REASON = "recording out of order; restart the run";
+const TAKEOVER_REASON = "another window took over the recording";
+const RECORDER_ERROR_REASON = "MediaRecorder error";
+export const REHEARSAL_AUDIO_DETAIL_MAX_CHARS = 72;
+
+function serverStatusReason(status: number): string {
+  return `server returned ${status}`;
+}
+
+function uploadFailureMessage(reason: string, retrying: boolean): string {
+  return `audio upload failed: ${reason}${retrying ? " (retrying)" : ""}`;
+}
+
+function micUnavailableMessage(reason: string): string {
+  return `mic unavailable: ${reason}`;
+}
 
 type AudioQueueItem = {
   take: string;
@@ -53,6 +71,8 @@ type RehearsalAudioShell = {
 
 export type RehearsalAudioOptions = {
   indicator: HTMLElement;
+  indicatorLabel: Node;
+  detail: HTMLElement;
   shell: RehearsalAudioShell;
   bus?: EventTarget;
   window?: Window;
@@ -65,6 +85,58 @@ export type RehearsalAudioOptions = {
   takeIdFactory?: () => string;
   console?: Pick<Console, "error">;
 };
+
+export type RehearsalAudioMediaState =
+  | "pending"
+  | "ready"
+  | "recording"
+  | "paused"
+  | "unavailable";
+
+export type RehearsalAudioPresentation = {
+  state: Exclude<RehearsalAudioMediaState, "unavailable"> | "error";
+  label: "REC" | "ERR";
+  detail: string;
+};
+
+export function rehearsalAudioAuthoredDetails(status: number): string[] {
+  const uploadReasons = [
+    serverStatusReason(status),
+    INVALID_RESPONSE_REASON,
+    SESSION_NOT_READY_REASON,
+    OUT_OF_ORDER_REASON,
+    TAKEOVER_REASON
+  ];
+  return [
+    ...uploadReasons.flatMap((reason) => [
+      uploadFailureMessage(reason, false),
+      uploadFailureMessage(reason, true)
+    ]),
+    micUnavailableMessage(RECORDER_ERROR_REASON)
+  ];
+}
+
+export function rehearsalAudioPresentation(
+  mediaState: RehearsalAudioMediaState,
+  mediaError: string | null,
+  uploadError: string | null
+): RehearsalAudioPresentation {
+  if (mediaState === "unavailable") {
+    return {
+      state: "error",
+      label: "ERR",
+      detail: mediaError!
+    };
+  }
+  if (uploadError !== null) {
+    return {
+      state: mediaState,
+      label: "ERR",
+      detail: uploadError
+    };
+  }
+  return { state: mediaState, label: "REC", detail: "" };
+}
 
 export function createRehearsalAudioQueue(
   options: RehearsalAudioQueueOptions = {}
@@ -178,11 +250,11 @@ export function createRehearsalAudioQueue(
       }
       if (!result.retryable) {
         retryBlocked = true;
-        onUploadError(`audio upload failed: ${result.reason}`);
+        onUploadError(uploadFailureMessage(result.reason, false));
         settleDrainWaiters();
         return;
       }
-      onUploadError(`audio upload failed: ${result.reason} (retrying)`);
+      onUploadError(uploadFailureMessage(result.reason, true));
       retryTimer = win.setTimeout(() => {
         retryTimer = null;
         pump();
@@ -207,7 +279,7 @@ export function createRehearsalAudioQueue(
       if (response.status !== 409) {
         return {
           accepted: false,
-          reason: `server returned ${response.status}`,
+          reason: serverStatusReason(response.status),
           retryable: !isPermanentUploadStatus(response.status)
         };
       }
@@ -249,8 +321,8 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
   let waitingForStop = false;
   let stopMode: "reset" | "close" | "destroy" | null = null;
   let uploadError: string | null = null;
-  let mediaState: "pending" | "ready" | "recording" | "paused" | "unavailable" = "pending";
-  let mediaMessage = "… REC";
+  let mediaState: RehearsalAudioMediaState = "pending";
+  let mediaError: string | null = null;
   let closing = false;
   let destroyed = false;
   let closeKeepalive = false;
@@ -267,28 +339,25 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
   });
 
   function renderIndicator(): void {
-    const unavailable = mediaState === "unavailable";
-    options.indicator.textContent =
-      unavailable || uploadError == null ? mediaMessage : `${mediaMessage} — ${uploadError}`;
-    options.indicator.dataset.peithoAudioState = unavailable
-      ? "error"
-      : uploadError == null
-        ? mediaState
-        : "error";
+    const presentation = rehearsalAudioPresentation(mediaState, mediaError, uploadError);
+    options.indicator.dataset.peithoAudioState = presentation.state;
+    options.indicatorLabel.textContent = presentation.label;
+    options.detail.textContent = presentation.detail;
+    if (presentation.detail === "") {
+      options.detail.removeAttribute("title");
+    } else {
+      options.detail.title = presentation.detail;
+    }
   }
 
-  function setMediaState(
-    state: "pending" | "ready" | "recording" | "paused",
-    message: string
-  ): void {
+  function setMediaState(state: Exclude<RehearsalAudioMediaState, "unavailable">): void {
     mediaState = state;
-    mediaMessage = message;
     renderIndicator();
   }
 
   function setUnavailable(error: unknown): void {
     mediaState = "unavailable";
-    mediaMessage = `mic unavailable: ${errorReason(error)}`;
+    mediaError = micUnavailableMessage(errorReason(error));
     renderIndicator();
   }
 
@@ -314,9 +383,9 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
       queue.beginTake(take, roundNonNegativeMs(options.shell.elapsedMs()));
       if (desiredState === "paused") {
         current.pause();
-        setMediaState("paused", "❙❙ REC");
+        setMediaState("paused");
       } else {
-        setMediaState("recording", "● REC");
+        setMediaState("recording");
       }
     } catch (error: unknown) {
       recorderFailure(error);
@@ -353,7 +422,7 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
     }
     if (desiredState === "inactive") {
       if (current.state === "inactive") {
-        setMediaState("ready", "○ REC");
+        setMediaState("ready");
       } else {
         requestStop("reset");
       }
@@ -366,14 +435,14 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
     try {
       if (desiredState === "paused" && current.state === "recording") {
         current.pause();
-        setMediaState("paused", "❙❙ REC");
+        setMediaState("paused");
       } else if (desiredState === "recording" && current.state === "paused") {
         current.resume();
-        setMediaState("recording", "● REC");
+        setMediaState("recording");
       } else if (current.state === "paused") {
-        setMediaState("paused", "❙❙ REC");
+        setMediaState("paused");
       } else {
-        setMediaState("recording", "● REC");
+        setMediaState("recording");
       }
     } catch (error: unknown) {
       recorderFailure(error);
@@ -472,13 +541,13 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
       return;
     }
     if (!destroyed) {
-      setMediaState("ready", "○ REC");
+      setMediaState("ready");
       reconcile();
     }
   }
 
   function onRecorderError(event: Event): void {
-    const error = (event as Event & { error?: unknown }).error ?? "MediaRecorder error";
+    const error = (event as Event & { error?: unknown }).error ?? RECORDER_ERROR_REASON;
     recorderFailure(error);
   }
 
@@ -505,7 +574,7 @@ export function installRehearsalAudio(options: RehearsalAudioOptions): () => voi
       recorder.addEventListener("dataavailable", onDataAvailable);
       recorder.addEventListener("stop", onStop);
       recorder.addEventListener("error", onRecorderError);
-      setMediaState("ready", "○ REC");
+      setMediaState("ready");
       reconcile();
     })
     .catch((error: unknown) => {
@@ -539,14 +608,12 @@ function isPersistenceAcknowledgement(conflict: unknown, item: AudioQueueItem): 
 
 function conflictReason(conflict: unknown, requestTake: string): string {
   if (typeof conflict !== "object" || conflict === null) {
-    return "server returned an invalid response";
+    return INVALID_RESPONSE_REASON;
   }
   const candidate = conflict as { take?: unknown };
-  if (candidate.take === null) return "rehearsal session is not ready";
-  if (typeof candidate.take !== "string") return "server returned an invalid response";
-  return candidate.take === requestTake
-    ? "recording out of order (restart the rehearsal)"
-    : "another presenter window took over the recording";
+  if (candidate.take === null) return SESSION_NOT_READY_REASON;
+  if (typeof candidate.take !== "string") return INVALID_RESPONSE_REASON;
+  return candidate.take === requestTake ? OUT_OF_ORDER_REASON : TAKEOVER_REASON;
 }
 
 function errorReason(error: unknown): string {

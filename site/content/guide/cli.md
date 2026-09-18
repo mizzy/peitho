@@ -249,23 +249,32 @@ audio mode defaults to stable port 6173 rather than a random port. An explicit
 probably running and asks you to pass `--port`; it never silently changes the
 origin.
 
-The indicator reports both capture and persistence state:
+The timer uses one state pill with a `REC` segment. The segment's dot reports
+capture state without inheriting the timer state's color:
 
-- `… REC` — waiting for microphone permission
-- `○ REC` — microphone ready; timer stopped
-- `● REC` — timer running and audio recording
-- `❙❙ REC` — timer paused and recording paused
-- `mic unavailable: ...` — permission, device, or recorder failure
-- `● REC — audio upload failed: ... (retrying)` (or `❙❙ REC — ...`) — capture
-  continues, the current chunk is retained and retried, and Peitho never skips
-  ahead to a later chunk
-- `● REC — audio upload failed: server returned N` — a `400`, `404`, or `413`
+- hollow, dim dot — waiting for microphone permission or microphone ready
+- pulsing warning-color dot — timer running and audio recording
+- pause-color dot — timer paused and recording paused
+
+Any error changes the segment label to `ERR`. Its full reason is clamped to two
+lines above the pill, with the unclamped text available on hover, and is
+positioned out of flow so the clock row never changes height:
+
+- `ERR` plus `mic unavailable: ...` — permission, device, or recorder failure;
+  the dot is hollow
+- `ERR` plus `audio upload failed: ... (retrying)` — capture continues, the dot
+  keeps its recording or paused color, the current chunk is retained and
+  retried, and Peitho never skips ahead to a later chunk
+- `ERR` plus `audio upload failed: server returned N` — a `400`, `404`, or `413`
   response cannot succeed unchanged, so the chunk remains queued and that take
   stops retrying until reset
-- `● REC — audio upload failed: another presenter window took over the recording (retrying)`
+- `ERR` plus `audio upload failed: another window took over the recording (retrying)`
   — another presenter owns the current take
-- `● REC — audio upload failed: recording out of order (restart the rehearsal) (retrying)`
+- `ERR` plus `audio upload failed: recording out of order; restart the run (retrying)`
   — the current take's sequence no longer matches the server
+
+Below a 440px clock-card width, the state word hides while the `REC`/`ERR`
+segment remains visible so it cannot overlap the non-wrapping timer.
 
 When a run starts in this presenter or is adopted at `0:00`, the timeline
 records the current slide at `0:00`. If the presenter adopts an already-running
