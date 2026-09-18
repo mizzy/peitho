@@ -32,6 +32,28 @@ export type TimerStateDetail = { running: boolean; elapsedMs: number };
 export type TimerAdoptDetail = TimerStateDetail & { previousElapsedMs: number };
 export type TimerControlDetail = { action: "start" | "pause" | "resume" | "reset" };
 
+export function isValidTimerAdoptDetail(detail: unknown): detail is TimerAdoptDetail {
+  if (typeof detail !== "object" || detail === null) return false;
+  const candidate = detail as Partial<TimerAdoptDetail>;
+  return (
+    typeof candidate.running === "boolean" &&
+    typeof candidate.elapsedMs === "number" &&
+    Number.isFinite(candidate.elapsedMs) &&
+    candidate.elapsedMs >= 0 &&
+    typeof candidate.previousElapsedMs === "number" &&
+    Number.isFinite(candidate.previousElapsedMs) &&
+    candidate.previousElapsedMs >= 0
+  );
+}
+
+export function isTimerAdoptStart(detail: TimerAdoptDetail): boolean {
+  return detail.running || detail.elapsedMs > 0;
+}
+
+export function roundNonNegativeMs(ms: number): number {
+  return Math.max(0, Math.round(ms));
+}
+
 export type PresentShell = {
   manifest: Manifest | null;
   currentIndex: number;

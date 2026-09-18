@@ -1,4 +1,4 @@
-import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
+import type { RehearsalReportDetail } from "./rehearsalReporter";
 
 export function installRehearsalBridge(
   win: Window,
@@ -6,12 +6,12 @@ export function installRehearsalBridge(
   fetcher: typeof fetch = win.fetch.bind(win)
 ): () => void {
   function onReport(event: Event): void {
-    const detail = (event as CustomEvent<RehearsalSnapshot>).detail;
+    const detail = (event as CustomEvent<RehearsalReportDetail>).detail;
     void fetcher("/rehearsal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      body: JSON.stringify(detail)
+      ...(detail.final ? { keepalive: true } : {}),
+      body: JSON.stringify(detail.snapshot)
     })
       .then((response) => {
         if (!response.ok) {

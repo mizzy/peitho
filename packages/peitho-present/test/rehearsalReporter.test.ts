@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { installRehearsalReporter } from "../src/rehearsalReporter";
+import {
+  installRehearsalReporter,
+  type RehearsalReportDetail
+} from "../src/rehearsalReporter";
 import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
 
 const cleanups: Array<() => void> = [];
+const emptyTimeline = { entries: () => [] };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -18,7 +22,15 @@ afterEach(() => {
 function collectReports(bus: EventTarget): RehearsalSnapshot[] {
   const reports: RehearsalSnapshot[] = [];
   bus.addEventListener("peitho:rehearsalreport", (event) => {
-    reports.push((event as CustomEvent<RehearsalSnapshot>).detail);
+    reports.push((event as CustomEvent<RehearsalReportDetail>).detail.snapshot);
+  });
+  return reports;
+}
+
+function collectReportDetails(bus: EventTarget): RehearsalReportDetail[] {
+  const reports: RehearsalReportDetail[] = [];
+  bus.addEventListener("peitho:rehearsalreport", (event) => {
+    reports.push((event as CustomEvent<RehearsalReportDetail>).detail);
   });
   return reports;
 }
@@ -31,6 +43,7 @@ it("does not report before the timer has started and then reports every five sec
   let elapsed = 0;
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [1_250], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => elapsed,
       startedAt: () => startedAt,
@@ -52,9 +65,10 @@ it("does not report before the timer has started and then reports every five sec
   vi.advanceTimersByTime(1);
   expect(reports).toEqual([
     {
-      version: 1,
+      version: 2,
       elapsedMs: 1_250,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 }]
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 }],
+      timeline: []
     }
   ]);
 
@@ -62,6 +76,175 @@ it("does not report before the timer has started and then reports every five sec
   elapsed = 2_000;
   vi.advanceTimersByTime(5_000);
   expect(reports).toHaveLength(1);
+});
+
+it("reports immediately on local start but not ordinary resume", () => {
+  const bus = new EventTarget();
+  const reports = collectReportDetails(bus);
+  let startedAt: number | null = null;
+  const cleanup = installRehearsalReporter({
+    actuals: { actualMs: () => [0], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "intro", index: 0, atMs: 0 }]
+    },
+    shell: {
+      elapsedMs: () => 0,
+      startedAt: () => startedAt,
+      isPaused: () => false
+    },
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window
+  });
+  cleanups.push(cleanup);
+
+  startedAt = 100;
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "start" } }));
+  bus.dispatchEvent(new CustomEvent("peitho:timercontrol", { detail: { action: "resume" } }));
+
+  expect(reports).toEqual([
+    {
+      final: false,
+      snapshot: {
+        version: 2,
+        elapsedMs: 0,
+        sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }],
+        timeline: [{ key: "intro", index: 0, atMs: 0 }]
+      }
+    }
+  ]);
+});
+
+it("reports immediately on the first positive running timer adoption", () => {
+  const bus = new EventTarget();
+  const reports = collectReports(bus);
+  let startedAt: number | null = null;
+  let elapsedMs = 0;
+  const cleanup = installRehearsalReporter({
+    actuals: { actualMs: () => [0], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "details", index: 1, atMs: 7_000 }]
+    },
+    shell: {
+      elapsedMs: () => elapsedMs,
+      startedAt: () => startedAt,
+      isPaused: () => false
+    },
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 1, plannedDurationMs: 60_000 }],
+    bus,
+    window
+  });
+  cleanups.push(cleanup);
+
+  startedAt = 100;
+  elapsedMs = 7_000;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timeradopt", {
+      detail: { running: true, previousElapsedMs: 0, elapsedMs: 7_000 }
+    })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timeradopt", {
+      detail: { running: true, previousElapsedMs: 7_000, elapsedMs: 7_000 }
+    })
+  );
+
+  expect(reports).toEqual([
+    {
+      version: 2,
+      elapsedMs: 7_000,
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }],
+      timeline: [{ key: "details", index: 1, atMs: 7_000 }]
+    }
+  ]);
+});
+
+it("reports immediately when a running timer is adopted at zero", () => {
+  const bus = new EventTarget();
+  const reports = collectReports(bus);
+  let startedAt: number | null = null;
+  const cleanup = installRehearsalReporter({
+    actuals: { actualMs: () => [0], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "intro", index: 0, atMs: 0 }]
+    },
+    shell: {
+      elapsedMs: () => 0,
+      startedAt: () => startedAt,
+      isPaused: () => false
+    },
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window
+  });
+  cleanups.push(cleanup);
+
+  startedAt = 100;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:timeradopt", {
+      detail: { running: true, previousElapsedMs: 0, elapsedMs: 0 }
+    })
+  );
+
+  expect(reports).toEqual([
+    {
+      version: 2,
+      elapsedMs: 0,
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }],
+      timeline: [{ key: "intro", index: 0, atMs: 0 }]
+    }
+  ]);
+});
+
+it("reports once when adoption transitions a running rehearsal to paused", () => {
+  const bus = new EventTarget();
+  const reports = collectReports(bus);
+  let elapsedMs = 3_000;
+  let paused = false;
+  const cleanup = installRehearsalReporter({
+    actuals: { actualMs: () => [elapsedMs], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "intro", index: 0, atMs: 0 }]
+    },
+    shell: {
+      elapsedMs: () => elapsedMs,
+      startedAt: () => 100,
+      isPaused: () => paused
+    },
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window
+  });
+  cleanups.push(cleanup);
+
+  function adopt(running: boolean, nextElapsedMs: number): void {
+    const previousElapsedMs = elapsedMs;
+    elapsedMs = nextElapsedMs;
+    paused = !running;
+    bus.dispatchEvent(
+      new CustomEvent("peitho:timeradopt", {
+        detail: { running, previousElapsedMs, elapsedMs }
+      })
+    );
+  }
+
+  adopt(true, 3_100);
+  adopt(false, 3_900);
+  adopt(false, 3_900);
+
+  expect(reports).toEqual([
+    {
+      version: 2,
+      elapsedMs: 3_900,
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 3_900 }],
+      timeline: [{ key: "intro", index: 0, atMs: 0 }]
+    }
+  ]);
+
+  adopt(true, 3_900);
+  adopt(false, 4_200);
+  expect(reports.at(-1)?.elapsedMs).toBe(4_200);
+  expect(reports).toHaveLength(2);
 });
 
 it("reports immediately on slidechange pause and reset after first start", () => {
@@ -72,6 +255,7 @@ it("reports immediately on slidechange pause and reset after first start", () =>
   let actual = 1_000;
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [actual], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => elapsed,
       startedAt: () => startedAt,
@@ -98,19 +282,22 @@ it("reports immediately on slidechange pause and reset after first start", () =>
 
   expect(reports).toEqual([
     {
-      version: 1,
+      version: 2,
       elapsedMs: 1_000,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_000 }]
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_000 }],
+      timeline: []
     },
     {
-      version: 1,
+      version: 2,
       elapsedMs: 2_000,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_000 }]
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_000 }],
+      timeline: []
     },
     {
-      version: 1,
+      version: 2,
       elapsedMs: 0,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }]
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }],
+      timeline: []
     }
   ]);
 });
@@ -120,6 +307,9 @@ it("rounds fractional elapsed and section actuals before reporting", () => {
   const reports = collectReports(bus);
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [432.4, 802.5], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "intro", index: 0, atMs: 0 }]
+    },
     shell: {
       elapsedMs: () => 1_234.6,
       startedAt: () => 100,
@@ -138,12 +328,13 @@ it("rounds fractional elapsed and section actuals before reporting", () => {
 
   expect(reports).toEqual([
     {
-      version: 1,
+      version: 2,
       elapsedMs: 1_235,
       sections: [
         { name: "Setup", plannedDurationMs: 60_000, actualMs: 432 },
         { name: "Demo", plannedDurationMs: 60_000, actualMs: 803 }
-      ]
+      ],
+      timeline: [{ key: "intro", index: 0, atMs: 0 }]
     }
   ]);
 });
@@ -153,6 +344,7 @@ it("does not report a zero adopt before the timer has ever started", () => {
   const reports = collectReports(bus);
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [0], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => 0,
       startedAt: () => null,
@@ -178,6 +370,7 @@ it("reports an adopted reset after a started session zeroes actuals", () => {
   const reports = collectReports(bus);
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [0], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => 0,
       startedAt: () => 100,
@@ -197,18 +390,20 @@ it("reports an adopted reset after a started session zeroes actuals", () => {
 
   expect(reports).toEqual([
     {
-      version: 1,
+      version: 2,
       elapsedMs: 0,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }]
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 0 }],
+      timeline: []
     }
   ]);
 });
 
 it("reports on close requests so the final section tail is persisted", () => {
   const bus = new EventTarget();
-  const reports = collectReports(bus);
+  const reports = collectReportDetails(bus);
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [2_500], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => 2_500,
       startedAt: () => 100,
@@ -224,11 +419,56 @@ it("reports on close requests so the final section tail is persisted", () => {
 
   expect(reports).toEqual([
     {
-      version: 1,
-      elapsedMs: 2_500,
-      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_500 }]
+      final: true,
+      snapshot: {
+        version: 2,
+        elapsedMs: 2_500,
+        sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_500 }],
+        timeline: []
+      }
     }
   ]);
+});
+
+it("reports on pagehide and removes the listener during cleanup", () => {
+  const bus = new EventTarget();
+  const reports = collectReportDetails(bus);
+  let elapsedMs = 3_900;
+  const cleanup = installRehearsalReporter({
+    actuals: { actualMs: () => [elapsedMs], flush: vi.fn() },
+    timeline: {
+      entries: () => [{ key: "intro", index: 0, atMs: 0 }]
+    },
+    shell: {
+      elapsedMs: () => elapsedMs,
+      startedAt: () => 100,
+      isPaused: () => true
+    },
+    sections: [{ name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }],
+    bus,
+    window
+  });
+  cleanups.push(cleanup);
+
+  window.dispatchEvent(new Event("pagehide"));
+
+  expect(reports).toEqual([
+    {
+      final: true,
+      snapshot: {
+        version: 2,
+        elapsedMs: 3_900,
+        sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 3_900 }],
+        timeline: [{ key: "intro", index: 0, atMs: 0 }]
+      }
+    }
+  ]);
+
+  cleanup();
+  cleanups.pop();
+  elapsedMs = 4_200;
+  window.dispatchEvent(new Event("pagehide"));
+  expect(reports).toHaveLength(1);
 });
 
 it("flushes pending actuals before reporting a pause snapshot", () => {
@@ -240,6 +480,7 @@ it("flushes pending actuals before reporting a pause snapshot", () => {
   });
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [actual], flush },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => 2_250,
       startedAt: () => 100,
@@ -265,6 +506,7 @@ it("is a no-op without sections", () => {
   const reports = collectReports(bus);
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [], flush: vi.fn() },
+    timeline: emptyTimeline,
     shell: {
       elapsedMs: () => 1_000,
       startedAt: () => 100,

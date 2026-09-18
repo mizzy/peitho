@@ -303,8 +303,8 @@ function installRehearsalBridge(win, bus = win, fetcher = win.fetch.bind(win)) {
     void fetcher("/rehearsal", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      body: JSON.stringify(detail)
+      ...detail.final ? { keepalive: true } : {},
+      body: JSON.stringify(detail.snapshot)
     }).then((response) => {
       if (!response.ok) {
         console.error(`failed to POST rehearsal snapshot: ${response.status}`);
@@ -317,409 +317,6 @@ function installRehearsalBridge(win, bus = win, fetcher = win.fetch.bind(win)) {
   return () => {
     bus.removeEventListener("peitho:rehearsalreport", onReport);
   };
-}
-
-// src/rehearsalReporter.ts
-function installRehearsalReporter(options) {
-  if (options.sections.length === 0) return () => void 0;
-  const win = options.window ?? window;
-  const bus = options.bus ?? win;
-  let hasStarted = options.shell.startedAt() !== null;
-  function markStarted() {
-    if (options.shell.startedAt() !== null) hasStarted = true;
-  }
-  function snapshot() {
-    const actualMs = options.actuals.actualMs();
-    return {
-      version: 1,
-      elapsedMs: roundNonNegativeMs(options.shell.elapsedMs()),
-      sections: options.sections.map((section, index) => ({
-        name: section.name,
-        plannedDurationMs: section.plannedDurationMs,
-        actualMs: roundNonNegativeMs(actualMs[index] ?? 0)
-      }))
-    };
-  }
-  function report() {
-    markStarted();
-    if (!hasStarted) return;
-    options.actuals.flush();
-    bus.dispatchEvent(
-      new CustomEvent("peitho:rehearsalreport", {
-        detail: snapshot()
-      })
-    );
-  }
-  function onSlideChange() {
-    report();
-  }
-  function onTimerControl(event) {
-    const action = event.detail?.action;
-    if (action === "start" || action === "resume") {
-      markStarted();
-      return;
-    }
-    if (action === "pause" || action === "reset") report();
-  }
-  function onTimerAdopt(event) {
-    const detail = event.detail;
-    if (!isValidTimerAdoptDetail(detail)) return;
-    if (detail.running || detail.elapsedMs > 0) hasStarted = true;
-    if (!detail.running && detail.elapsedMs === 0 && hasStarted) report();
-  }
-  function onCloseRequest() {
-    report();
-  }
-  function tick() {
-    markStarted();
-    if (!hasStarted || options.shell.startedAt() === null || options.shell.isPaused()) return;
-    report();
-  }
-  bus.addEventListener("peitho:slidechange", onSlideChange);
-  bus.addEventListener("peitho:timercontrol", onTimerControl);
-  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
-  bus.addEventListener("peitho:closerequest", onCloseRequest);
-  const interval = win.setInterval(tick, 5e3);
-  return () => {
-    win.clearInterval(interval);
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
-    bus.removeEventListener("peitho:timercontrol", onTimerControl);
-    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
-    bus.removeEventListener("peitho:closerequest", onCloseRequest);
-  };
-}
-function isValidTimerAdoptDetail(detail) {
-  return typeof detail?.running === "boolean" && typeof detail.elapsedMs === "number" && Number.isFinite(detail.elapsedMs) && detail.elapsedMs >= 0 && typeof detail.previousElapsedMs === "number" && Number.isFinite(detail.previousElapsedMs) && detail.previousElapsedMs >= 0;
-}
-function roundNonNegativeMs(ms) {
-  return Math.max(0, Math.round(ms));
-}
-
-// src/sectionActuals.ts
-function installSectionActuals(options) {
-  if (options.sections.length === 0) {
-    return {
-      actualMs: () => [],
-      flush: () => void 0,
-      destroy: () => void 0
-    };
-  }
-  const win = options.window ?? window;
-  const bus = options.bus ?? win;
-  const log = options.log ?? console;
-  const actualMs = new Array(options.sections.length).fill(0);
-  let lastElapsedMs = options.shell.elapsedMs();
-  function flushElapsedToSectionOf(slideIndex) {
-    if (slideIndex === null || options.shell.startedAt() === null) return;
-    const elapsedMs = options.shell.elapsedMs();
-    const delta = Math.max(0, elapsedMs - lastElapsedMs);
-    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
-    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
-    lastElapsedMs = elapsedMs;
-  }
-  function onSlideChange(event) {
-    const previousIndex = event.detail?.previousIndex ?? null;
-    flushElapsedToSectionOf(previousIndex);
-  }
-  function onTimerControl(event) {
-    const action = event.detail?.action;
-    if (action !== "reset") return;
-    actualMs.fill(0);
-    lastElapsedMs = 0;
-  }
-  function onTimerAdopt(event) {
-    const detail = event.detail;
-    if (typeof detail?.running !== "boolean" || typeof detail.elapsedMs !== "number" || !Number.isFinite(detail.elapsedMs) || detail.elapsedMs < 0 || typeof detail.previousElapsedMs !== "number" || !Number.isFinite(detail.previousElapsedMs) || detail.previousElapsedMs < 0) {
-      log.error("Invalid peitho:timeradopt event");
-      return;
-    }
-    if (!detail.running && detail.elapsedMs === 0) {
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      return;
-    }
-    if (options.shell.startedAt() !== null) {
-      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
-      if (sectionIndex >= 0) {
-        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
-      }
-    }
-    lastElapsedMs = detail.elapsedMs;
-  }
-  function tick() {
-    if (options.shell.startedAt() === null) {
-      actualMs.fill(0);
-      lastElapsedMs = 0;
-      return;
-    }
-    flush();
-  }
-  function flush() {
-    flushElapsedToSectionOf(options.shell.currentIndex);
-  }
-  bus.addEventListener("peitho:slidechange", onSlideChange);
-  bus.addEventListener("peitho:timercontrol", onTimerControl);
-  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
-  const interval = win.setInterval(tick, 250);
-  return {
-    actualMs: () => actualMs.slice(),
-    flush,
-    destroy() {
-      win.clearInterval(interval);
-      bus.removeEventListener("peitho:slidechange", onSlideChange);
-      bus.removeEventListener("peitho:timercontrol", onTimerControl);
-      bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
-    }
-  };
-}
-
-// src/clickNavigationGuard.ts
-var DEFAULT_MOVE_THRESHOLD_PX = 5;
-function createClickNavigationGuard(options) {
-  const win = options.window ?? window;
-  const moveThresholdPx = options.moveThresholdPx ?? DEFAULT_MOVE_THRESHOLD_PX;
-  let clickStart = null;
-  const onMouseDown = (event) => {
-    clickStart = { x: event.clientX, y: event.clientY };
-  };
-  options.target.addEventListener("mousedown", onMouseDown);
-  return {
-    shouldIgnoreClick(event) {
-      const start = clickStart;
-      clickStart = null;
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest("a") !== null) return true;
-      if (hasNonCollapsedSelection(win)) return true;
-      if (start === null) return false;
-      return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
-    },
-    destroy() {
-      options.target.removeEventListener("mousedown", onMouseDown);
-    }
-  };
-}
-function hasNonCollapsedSelection(win) {
-  const selection = win.getSelection();
-  return selection !== null && !selection.isCollapsed;
-}
-
-// src/keyboard.ts
-var navigationKeyMap = /* @__PURE__ */ new Map([
-  ["ArrowRight", "next"],
-  ["PageDown", "next"],
-  ["ArrowLeft", "prev"],
-  ["PageUp", "prev"],
-  ["Home", "first"],
-  ["End", "last"]
-]);
-var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
-function hasChordModifier(event) {
-  return event.metaKey || event.ctrlKey || event.altKey;
-}
-function dispatchNavigate(bus, to) {
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
-}
-function installKeyboardNavigation(win = window, bus = win) {
-  const onKeyDown = (event) => {
-    if (hasChordModifier(event)) return;
-    const to = keyMap.get(event.key);
-    if (!to) return;
-    event.preventDefault();
-    dispatchNavigate(bus, to);
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-function installPresenterKeyboard(win, bus, onPlaypause) {
-  const onKeyDown = (event) => {
-    if (hasChordModifier(event)) return;
-    const to = navigationKeyMap.get(event.key);
-    if (to) {
-      event.preventDefault();
-      dispatchNavigate(bus, to);
-      return;
-    }
-    if (event.key !== " ") return;
-    event.preventDefault();
-    if (event.repeat) return;
-    onPlaypause();
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-function installCloseOnEscape(win = window, bus = win) {
-  const onKeyDown = (event) => {
-    if (hasChordModifier(event)) return;
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-
-// src/presentDisplay.ts
-var PRESENTER_URL = "presenter.html";
-var PRESENTER_TARGET = "peitho-presenter";
-function fallbackFeatures() {
-  return "popup=yes,width=1200,height=800,left=80,top=80";
-}
-function openPresenterPopup(options = {}) {
-  const win = options.window ?? window;
-  const url = options.url ?? PRESENTER_URL;
-  const features = options.features ?? fallbackFeatures();
-  const openWindow = options.openWindow ?? ((nextUrl, target, nextFeatures) => win.open(nextUrl, target, nextFeatures));
-  return openWindow(url, PRESENTER_TARGET, features);
-}
-
-// src/controls.ts
-function installPresentationControls(options) {
-  const win = options.window ?? window;
-  const doc = options.document ?? document;
-  const bus = options.bus ?? win;
-  const idleMs = options.idleMs ?? 3e3;
-  const openPresenter = options.openPresenter ?? (() => openPresenterPopup({
-    window: win,
-    openWindow: options.openPresenterWindow
-  }));
-  const bar = doc.createElement("nav");
-  bar.dataset.peithoControlBar = "true";
-  bar.className = "peitho-control-bar";
-  bar.hidden = true;
-  bar.innerHTML = [
-    '<button type="button" data-peitho-action="prev" aria-label="Previous slide">\u25C0</button>',
-    '<button type="button" data-peitho-action="next" aria-label="Next slide">\u25B6</button>',
-    '<output data-peitho-control="counter">\u2013 / \u2013</output>',
-    '<button type="button" data-peitho-action="fullscreen" aria-label="Toggle fullscreen">\u26F6</button>',
-    '<button type="button" data-peitho-action="presenter">Presenter</button>',
-    '<button type="button" data-peitho-action="close" aria-label="Close presentation">\u2715</button>'
-  ].join("");
-  options.root.appendChild(bar);
-  let hideTimer = null;
-  const clearHideTimer = () => {
-    if (hideTimer !== null) win.clearTimeout(hideTimer);
-    hideTimer = null;
-  };
-  const show = () => {
-    bar.hidden = false;
-    clearHideTimer();
-    hideTimer = win.setTimeout(() => {
-      bar.hidden = true;
-      hideTimer = null;
-    }, idleMs);
-  };
-  const dispatchNavigate2 = (to) => {
-    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
-  };
-  const onClick = (event) => {
-    event.stopPropagation();
-    const action = event.target.closest("[data-peitho-action]")?.dataset.peithoAction;
-    if (action === "prev" || action === "next") dispatchNavigate2(action);
-    if (action === "presenter") void openPresenter();
-    if (action === "fullscreen") toggleFullscreen(doc);
-    if (action === "close") bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
-  };
-  const onSlideChange = (event) => {
-    const detail = event.detail;
-    const counter = bar.querySelector('[data-peitho-control="counter"]');
-    if (counter) counter.textContent = `${detail.index + 1} / ${detail.total}`;
-  };
-  win.addEventListener("mousemove", show);
-  bar.addEventListener("click", onClick);
-  bus.addEventListener("peitho:slidechange", onSlideChange);
-  return () => {
-    clearHideTimer();
-    win.removeEventListener("mousemove", show);
-    bar.removeEventListener("click", onClick);
-    bus.removeEventListener("peitho:slidechange", onSlideChange);
-    bar.remove();
-  };
-}
-function installCanvasClickNavigation(options) {
-  const win = options.window ?? window;
-  const bus = options.bus ?? win;
-  const clickGuard = createClickNavigationGuard({ target: options.root, window: win });
-  const onClick = (event) => {
-    if (clickGuard.shouldIgnoreClick(event)) return;
-    if (event.target.closest('[data-peitho-control-bar="true"]')) return;
-    const to = event.clientX < win.innerWidth / 4 ? "prev" : "next";
-    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
-  };
-  options.root.addEventListener("click", onClick);
-  return () => {
-    clickGuard.destroy();
-    options.root.removeEventListener("click", onClick);
-  };
-}
-function installSwipeNavigation(options) {
-  const win = options.window ?? window;
-  const bus = options.bus ?? win;
-  const minHorizontalPx = options.minHorizontalPx ?? 50;
-  const maxDurationMs = options.maxDurationMs ?? 800;
-  const minRatio = options.minRatio ?? 1.5;
-  const clickSuppressPx = minHorizontalPx / 2;
-  let active = false;
-  let x0 = 0;
-  let y0 = 0;
-  let t0 = 0;
-  const onTouchStart = (event) => {
-    if (active) return;
-    if (event.touches.length !== 1) return;
-    if (event.target.closest('[data-peitho-control-bar="true"]')) return;
-    const touch = event.touches[0];
-    x0 = touch.clientX;
-    y0 = touch.clientY;
-    t0 = win.performance.now();
-    active = true;
-  };
-  const onTouchEnd = (event) => {
-    if (!active) return;
-    active = false;
-    const touch = event.changedTouches[0];
-    if (!touch) return;
-    const dx = touch.clientX - x0;
-    const dy = touch.clientY - y0;
-    const dt = win.performance.now() - t0;
-    if (Math.abs(dx) >= clickSuppressPx) event.preventDefault();
-    if (Math.abs(dx) < minHorizontalPx) return;
-    if (Math.abs(dx) / Math.max(Math.abs(dy), 1) <= minRatio) return;
-    if (dt > maxDurationMs) return;
-    bus.dispatchEvent(
-      new CustomEvent("peitho:navigate", {
-        detail: { to: dx < 0 ? "next" : "prev" }
-      })
-    );
-  };
-  const onTouchCancel = () => {
-    active = false;
-  };
-  options.root.addEventListener("touchstart", onTouchStart, { passive: true });
-  options.root.addEventListener("touchend", onTouchEnd, { passive: false });
-  options.root.addEventListener("touchcancel", onTouchCancel);
-  return () => {
-    options.root.removeEventListener("touchstart", onTouchStart);
-    options.root.removeEventListener("touchend", onTouchEnd);
-    options.root.removeEventListener("touchcancel", onTouchCancel);
-  };
-}
-function installFullscreenShortcut(options = {}) {
-  const win = options.window ?? window;
-  const doc = options.document ?? document;
-  const onKeyDown = (event) => {
-    if (hasChordModifier(event)) return;
-    if (event.key !== "f") return;
-    event.preventDefault();
-    toggleFullscreen(doc);
-  };
-  win.addEventListener("keydown", onKeyDown);
-  return () => win.removeEventListener("keydown", onKeyDown);
-}
-function toggleFullscreen(doc = document) {
-  if (doc.fullscreenElement) {
-    void doc.exitFullscreen?.();
-    return;
-  }
-  void doc.documentElement.requestFullscreen?.();
 }
 
 // src/fontscope.ts
@@ -999,6 +596,17 @@ function resolveStepTarget(slides, position, direction) {
 }
 
 // src/shell.ts
+function isValidTimerAdoptDetail(detail) {
+  if (typeof detail !== "object" || detail === null) return false;
+  const candidate = detail;
+  return typeof candidate.running === "boolean" && typeof candidate.elapsedMs === "number" && Number.isFinite(candidate.elapsedMs) && candidate.elapsedMs >= 0 && typeof candidate.previousElapsedMs === "number" && Number.isFinite(candidate.previousElapsedMs) && candidate.previousElapsedMs >= 0;
+}
+function isTimerAdoptStart(detail) {
+  return detail.running || detail.elapsedMs > 0;
+}
+function roundNonNegativeMs(ms) {
+  return Math.max(0, Math.round(ms));
+}
 var DEFAULT_POINTER_BASE_COLOR = "#38bdf8";
 var DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
 var POINTER_TRAIL_DURATION_MS = 500;
@@ -1882,6 +1490,540 @@ function isUnitCoordinate(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+// src/rehearsalReporter.ts
+function installRehearsalReporter(options) {
+  if (options.sections.length === 0) return () => void 0;
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  let hasStarted = options.shell.startedAt() !== null;
+  let hasReportedRunStart = hasStarted;
+  let timerPaused = hasStarted && options.shell.isPaused();
+  function markStarted() {
+    if (options.shell.startedAt() !== null) hasStarted = true;
+  }
+  function snapshot() {
+    const actualMs = options.actuals.actualMs();
+    return {
+      version: 2,
+      elapsedMs: roundNonNegativeMs(options.shell.elapsedMs()),
+      sections: options.sections.map((section, index) => ({
+        name: section.name,
+        plannedDurationMs: section.plannedDurationMs,
+        actualMs: roundNonNegativeMs(actualMs[index] ?? 0)
+      })),
+      timeline: options.timeline.entries()
+    };
+  }
+  function report(final) {
+    markStarted();
+    if (!hasStarted) return;
+    options.actuals.flush();
+    bus.dispatchEvent(
+      new CustomEvent("peitho:rehearsalreport", {
+        detail: { snapshot: snapshot(), final }
+      })
+    );
+  }
+  function onSlideChange() {
+    report(false);
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action === "start") {
+      timerPaused = false;
+      hasStarted = true;
+      report(false);
+      hasReportedRunStart = true;
+      return;
+    }
+    if (action === "resume") {
+      timerPaused = false;
+      markStarted();
+      return;
+    }
+    if (action === "pause") {
+      timerPaused = true;
+      report(false);
+    }
+    if (action === "reset") {
+      timerPaused = false;
+      report(false);
+      hasReportedRunStart = false;
+    }
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (!isValidTimerAdoptDetail(detail)) return;
+    const adoptedStart = isTimerAdoptStart(detail);
+    const adoptedPause = !detail.running && detail.elapsedMs > 0;
+    const transitionedToPaused = adoptedPause && !timerPaused;
+    timerPaused = adoptedPause;
+    if (adoptedStart) hasStarted = true;
+    if (adoptedStart && !hasReportedRunStart) {
+      report(false);
+      hasReportedRunStart = true;
+      return;
+    }
+    if (transitionedToPaused) report(false);
+    if (!detail.running && detail.elapsedMs === 0 && hasStarted) {
+      report(false);
+      hasReportedRunStart = false;
+    }
+  }
+  function onCloseRequest() {
+    report(true);
+  }
+  function tick() {
+    markStarted();
+    if (!hasStarted || options.shell.startedAt() === null || options.shell.isPaused()) return;
+    report(false);
+  }
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  bus.addEventListener("peitho:closerequest", onCloseRequest);
+  win.addEventListener("pagehide", onCloseRequest);
+  const interval = win.setInterval(tick, 5e3);
+  return () => {
+    win.clearInterval(interval);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    bus.removeEventListener("peitho:closerequest", onCloseRequest);
+    win.removeEventListener("pagehide", onCloseRequest);
+  };
+}
+
+// src/sectionActuals.ts
+function installSectionActuals(options) {
+  if (options.sections.length === 0) {
+    return {
+      actualMs: () => [],
+      flush: () => void 0,
+      destroy: () => void 0
+    };
+  }
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const log = options.log ?? console;
+  const actualMs = new Array(options.sections.length).fill(0);
+  let lastElapsedMs = options.shell.elapsedMs();
+  function flushElapsedToSectionOf(slideIndex) {
+    if (slideIndex === null || options.shell.startedAt() === null) return;
+    const elapsedMs = options.shell.elapsedMs();
+    const delta = Math.max(0, elapsedMs - lastElapsedMs);
+    const sectionIndex = sectionIndexForSlide(options.sections, slideIndex);
+    if (sectionIndex >= 0) actualMs[sectionIndex] += delta;
+    lastElapsedMs = elapsedMs;
+  }
+  function onSlideChange(event) {
+    const previousIndex = event.detail?.previousIndex ?? null;
+    flushElapsedToSectionOf(previousIndex);
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "reset") return;
+    actualMs.fill(0);
+    lastElapsedMs = 0;
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (!isValidTimerAdoptDetail(detail)) {
+      log.error("Invalid peitho:timeradopt event");
+      return;
+    }
+    if (!detail.running && detail.elapsedMs === 0) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      return;
+    }
+    if (options.shell.startedAt() !== null) {
+      const sectionIndex = sectionIndexForSlide(options.sections, options.shell.currentIndex);
+      if (sectionIndex >= 0) {
+        actualMs[sectionIndex] += Math.max(0, detail.previousElapsedMs - lastElapsedMs);
+      }
+    }
+    lastElapsedMs = detail.elapsedMs;
+  }
+  function tick() {
+    if (options.shell.startedAt() === null) {
+      actualMs.fill(0);
+      lastElapsedMs = 0;
+      return;
+    }
+    flush();
+  }
+  function flush() {
+    flushElapsedToSectionOf(options.shell.currentIndex);
+  }
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  const interval = win.setInterval(tick, 250);
+  return {
+    actualMs: () => actualMs.slice(),
+    flush,
+    destroy() {
+      win.clearInterval(interval);
+      bus.removeEventListener("peitho:slidechange", onSlideChange);
+      bus.removeEventListener("peitho:timercontrol", onTimerControl);
+      bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    }
+  };
+}
+
+// src/slideTimeline.ts
+function installSlideTimeline(options) {
+  const bus = options.bus ?? window;
+  const log = options.log ?? console;
+  const entries = [];
+  let hasStarted = options.shell.startedAt() !== null;
+  function append(entry) {
+    const previous = entries.at(-1);
+    if (previous?.key === entry.key && previous.index === entry.index && previous.atMs === entry.atMs) {
+      return;
+    }
+    entries.push(entry);
+  }
+  function currentSlideEntry(atMs) {
+    const { currentIndex, manifest } = options.shell;
+    const slide = manifest?.slides[currentIndex];
+    if (slide == null || slide.index !== currentIndex) return null;
+    return { key: slide.key, index: slide.index, atMs };
+  }
+  function onPresentationStart() {
+    hasStarted = true;
+    const entry = currentSlideEntry(0);
+    if (entry == null) {
+      log.error("Invalid current slide for peitho:presentationstart event");
+      return;
+    }
+    append(entry);
+  }
+  function onSlideChange(event) {
+    const detail = event.detail;
+    if (!isValidSlideChangeDetail2(detail, options.shell)) {
+      log.error("Invalid peitho:slidechange event");
+      return;
+    }
+    if (!hasStarted) return;
+    const atMs = timelinePosition(options.shell.elapsedMs());
+    if (atMs == null) {
+      log.error("Invalid rehearsal timeline elapsed time");
+      return;
+    }
+    append({ key: detail.key, index: detail.index, atMs });
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "reset") return;
+    entries.length = 0;
+    hasStarted = false;
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (!isValidTimerAdoptDetail(detail)) {
+      log.error("Invalid peitho:timeradopt event");
+      return;
+    }
+    if (!detail.running && detail.elapsedMs === 0) {
+      entries.length = 0;
+      hasStarted = false;
+      return;
+    }
+    const adoptedAtMs = timelinePosition(detail.elapsedMs);
+    if (adoptedAtMs == null) {
+      log.error("Invalid rehearsal timeline elapsed time");
+      return;
+    }
+    for (const entry2 of entries) {
+      if (entry2.atMs > adoptedAtMs) entry2.atMs = adoptedAtMs;
+    }
+    if (!isTimerAdoptStart(detail)) return;
+    hasStarted = true;
+    if (entries.length > 0) return;
+    const entry = currentSlideEntry(adoptedAtMs);
+    if (entry == null) {
+      log.error("Invalid current slide for peitho:timeradopt event");
+      return;
+    }
+    append(entry);
+  }
+  bus.addEventListener("peitho:presentationstart", onPresentationStart);
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  return {
+    entries: () => entries.map((entry) => ({ ...entry })),
+    destroy() {
+      bus.removeEventListener("peitho:presentationstart", onPresentationStart);
+      bus.removeEventListener("peitho:slidechange", onSlideChange);
+      bus.removeEventListener("peitho:timercontrol", onTimerControl);
+      bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    }
+  };
+}
+function isValidSlideChangeDetail2(detail, shell) {
+  if (typeof detail !== "object" || detail === null) return false;
+  const candidate = detail;
+  const slide = shell.manifest?.slides[candidate.index];
+  return slide != null && candidate.total === shell.manifest?.slideCount && slide.index === candidate.index && slide.key === candidate.key;
+}
+function timelinePosition(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const rounded = roundNonNegativeMs(ms);
+  return Number.isSafeInteger(rounded) ? rounded : null;
+}
+
+// src/clickNavigationGuard.ts
+var DEFAULT_MOVE_THRESHOLD_PX = 5;
+function createClickNavigationGuard(options) {
+  const win = options.window ?? window;
+  const moveThresholdPx = options.moveThresholdPx ?? DEFAULT_MOVE_THRESHOLD_PX;
+  let clickStart = null;
+  const onMouseDown = (event) => {
+    clickStart = { x: event.clientX, y: event.clientY };
+  };
+  options.target.addEventListener("mousedown", onMouseDown);
+  return {
+    shouldIgnoreClick(event) {
+      const start = clickStart;
+      clickStart = null;
+      const origin = event.composedPath()[0];
+      if (origin instanceof Element && origin.closest("a") !== null) return true;
+      if (hasNonCollapsedSelection(win)) return true;
+      if (start === null) return false;
+      return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
+    },
+    destroy() {
+      options.target.removeEventListener("mousedown", onMouseDown);
+    }
+  };
+}
+function hasNonCollapsedSelection(win) {
+  const selection = win.getSelection();
+  return selection !== null && !selection.isCollapsed;
+}
+
+// src/keyboard.ts
+var navigationKeyMap = /* @__PURE__ */ new Map([
+  ["ArrowRight", "next"],
+  ["PageDown", "next"],
+  ["ArrowLeft", "prev"],
+  ["PageUp", "prev"],
+  ["Home", "first"],
+  ["End", "last"]
+]);
+var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
+function hasChordModifier(event) {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+function dispatchNavigate(bus, to) {
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+}
+function installKeyboardNavigation(win = window, bus = win) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    const to = keyMap.get(event.key);
+    if (!to) return;
+    event.preventDefault();
+    dispatchNavigate(bus, to);
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function installPresenterKeyboard(win, bus, onPlaypause) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    const to = navigationKeyMap.get(event.key);
+    if (to) {
+      event.preventDefault();
+      dispatchNavigate(bus, to);
+      return;
+    }
+    if (event.key !== " ") return;
+    event.preventDefault();
+    if (event.repeat) return;
+    onPlaypause();
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function installCloseOnEscape(win = window, bus = win) {
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+
+// src/presentDisplay.ts
+var PRESENTER_URL = "presenter.html";
+var PRESENTER_TARGET = "peitho-presenter";
+function fallbackFeatures() {
+  return "popup=yes,width=1200,height=800,left=80,top=80";
+}
+function openPresenterPopup(options = {}) {
+  const win = options.window ?? window;
+  const url = options.url ?? PRESENTER_URL;
+  const features = options.features ?? fallbackFeatures();
+  const openWindow = options.openWindow ?? ((nextUrl, target, nextFeatures) => win.open(nextUrl, target, nextFeatures));
+  return openWindow(url, PRESENTER_TARGET, features);
+}
+
+// src/controls.ts
+function installPresentationControls(options) {
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const bus = options.bus ?? win;
+  const idleMs = options.idleMs ?? 3e3;
+  const openPresenter = options.openPresenter ?? (() => openPresenterPopup({
+    window: win,
+    openWindow: options.openPresenterWindow
+  }));
+  const bar = doc.createElement("nav");
+  bar.dataset.peithoControlBar = "true";
+  bar.className = "peitho-control-bar";
+  bar.hidden = true;
+  bar.innerHTML = [
+    '<button type="button" data-peitho-action="prev" aria-label="Previous slide">\u25C0</button>',
+    '<button type="button" data-peitho-action="next" aria-label="Next slide">\u25B6</button>',
+    '<output data-peitho-control="counter">\u2013 / \u2013</output>',
+    '<button type="button" data-peitho-action="fullscreen" aria-label="Toggle fullscreen">\u26F6</button>',
+    '<button type="button" data-peitho-action="presenter">Presenter</button>',
+    '<button type="button" data-peitho-action="close" aria-label="Close presentation">\u2715</button>'
+  ].join("");
+  options.root.appendChild(bar);
+  let hideTimer = null;
+  const clearHideTimer = () => {
+    if (hideTimer !== null) win.clearTimeout(hideTimer);
+    hideTimer = null;
+  };
+  const show = () => {
+    bar.hidden = false;
+    clearHideTimer();
+    hideTimer = win.setTimeout(() => {
+      bar.hidden = true;
+      hideTimer = null;
+    }, idleMs);
+  };
+  const dispatchNavigate2 = (to) => {
+    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+  };
+  const onClick = (event) => {
+    event.stopPropagation();
+    const action = event.target.closest("[data-peitho-action]")?.dataset.peithoAction;
+    if (action === "prev" || action === "next") dispatchNavigate2(action);
+    if (action === "presenter") void openPresenter();
+    if (action === "fullscreen") toggleFullscreen(doc);
+    if (action === "close") bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+  };
+  const onSlideChange = (event) => {
+    const detail = event.detail;
+    const counter = bar.querySelector('[data-peitho-control="counter"]');
+    if (counter) counter.textContent = `${detail.index + 1} / ${detail.total}`;
+  };
+  win.addEventListener("mousemove", show);
+  bar.addEventListener("click", onClick);
+  bus.addEventListener("peitho:slidechange", onSlideChange);
+  return () => {
+    clearHideTimer();
+    win.removeEventListener("mousemove", show);
+    bar.removeEventListener("click", onClick);
+    bus.removeEventListener("peitho:slidechange", onSlideChange);
+    bar.remove();
+  };
+}
+function installCanvasClickNavigation(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const clickGuard = createClickNavigationGuard({ target: options.root, window: win });
+  const onClick = (event) => {
+    if (clickGuard.shouldIgnoreClick(event)) return;
+    if (event.target.closest('[data-peitho-control-bar="true"]')) return;
+    const to = event.clientX < win.innerWidth / 4 ? "prev" : "next";
+    bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
+  };
+  options.root.addEventListener("click", onClick);
+  return () => {
+    clickGuard.destroy();
+    options.root.removeEventListener("click", onClick);
+  };
+}
+function installSwipeNavigation(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const minHorizontalPx = options.minHorizontalPx ?? 50;
+  const maxDurationMs = options.maxDurationMs ?? 800;
+  const minRatio = options.minRatio ?? 1.5;
+  const clickSuppressPx = minHorizontalPx / 2;
+  let active = false;
+  let x0 = 0;
+  let y0 = 0;
+  let t0 = 0;
+  const onTouchStart = (event) => {
+    if (active) return;
+    if (event.touches.length !== 1) return;
+    if (event.target.closest('[data-peitho-control-bar="true"]')) return;
+    const touch = event.touches[0];
+    x0 = touch.clientX;
+    y0 = touch.clientY;
+    t0 = win.performance.now();
+    active = true;
+  };
+  const onTouchEnd = (event) => {
+    if (!active) return;
+    active = false;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - x0;
+    const dy = touch.clientY - y0;
+    const dt = win.performance.now() - t0;
+    if (Math.abs(dx) >= clickSuppressPx) event.preventDefault();
+    if (Math.abs(dx) < minHorizontalPx) return;
+    if (Math.abs(dx) / Math.max(Math.abs(dy), 1) <= minRatio) return;
+    if (dt > maxDurationMs) return;
+    bus.dispatchEvent(
+      new CustomEvent("peitho:navigate", {
+        detail: { to: dx < 0 ? "next" : "prev" }
+      })
+    );
+  };
+  const onTouchCancel = () => {
+    active = false;
+  };
+  options.root.addEventListener("touchstart", onTouchStart, { passive: true });
+  options.root.addEventListener("touchend", onTouchEnd, { passive: false });
+  options.root.addEventListener("touchcancel", onTouchCancel);
+  return () => {
+    options.root.removeEventListener("touchstart", onTouchStart);
+    options.root.removeEventListener("touchend", onTouchEnd);
+    options.root.removeEventListener("touchcancel", onTouchCancel);
+  };
+}
+function installFullscreenShortcut(options = {}) {
+  const win = options.window ?? window;
+  const doc = options.document ?? document;
+  const onKeyDown = (event) => {
+    if (hasChordModifier(event)) return;
+    if (event.key !== "f") return;
+    event.preventDefault();
+    toggleFullscreen(doc);
+  };
+  win.addEventListener("keydown", onKeyDown);
+  return () => win.removeEventListener("keydown", onKeyDown);
+}
+function toggleFullscreen(doc = document) {
+  if (doc.fullscreenElement) {
+    void doc.exitFullscreen?.();
+    return;
+  }
+  void doc.documentElement.requestFullscreen?.();
+}
+
 // src/swap.ts
 var SWAP_ROUTES = Object.freeze({
   "/present.html": Object.freeze({ swapped: false, counterpart: "presenter-swapped" }),
@@ -2522,15 +2664,6 @@ async function mountPresenterView(options) {
   if (rawPlannedDurationMs != null && plannedDurationMs == null) {
     log.error("Invalid plannedDurationMs in manifest.json");
   }
-  const trackerCleanup = plannedDurationMs == null ? () => void 0 : installTimeTracker({
-    root: trackerSlot,
-    shell: mainShell,
-    plannedDurationMs,
-    bus,
-    window: win,
-    document: doc,
-    variant: "presenter"
-  });
   const manifestSections = mainShell.manifest?.sections ?? [];
   const sections = validateSections(manifestSections, log) ? manifestSections : [];
   const sectionActuals = installSectionActuals({
@@ -2539,6 +2672,16 @@ async function mountPresenterView(options) {
     bus,
     window: win,
     log
+  });
+  const slideTimeline = installSlideTimeline({ shell: mainShell, bus, log });
+  const trackerCleanup = plannedDurationMs == null ? () => void 0 : installTimeTracker({
+    root: trackerSlot,
+    shell: mainShell,
+    plannedDurationMs,
+    bus,
+    window: win,
+    document: doc,
+    variant: "presenter"
   });
   const agendaCleanup = installAgenda({
     root: agendaSlot,
@@ -2552,6 +2695,7 @@ async function mountPresenterView(options) {
   });
   const rehearsalReporterCleanup = installRehearsalReporter({
     actuals: sectionActuals,
+    timeline: slideTimeline,
     shell: mainShell,
     sections,
     bus,
@@ -2696,6 +2840,7 @@ async function mountPresenterView(options) {
       rehearsalBridgeCleanup();
       rehearsalReporterCleanup();
       agendaCleanup();
+      slideTimeline.destroy();
       sectionActuals.destroy();
       trackerCleanup();
       bus.removeEventListener("peitho:slidechange", onSlideChange);
@@ -2724,6 +2869,7 @@ export {
   installRehearsalBridge,
   installRehearsalReporter,
   installSectionActuals,
+  installSlideTimeline,
   installSwapShortcut,
   installSwipeNavigation,
   installSyncBridge,

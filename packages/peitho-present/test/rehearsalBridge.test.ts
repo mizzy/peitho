@@ -10,18 +10,43 @@ afterEach(() => {
 });
 
 const snapshot: RehearsalSnapshot = {
-  version: 1,
+  version: 2,
   elapsedMs: 1_250,
-  sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 }]
+  sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 1_250 }],
+  timeline: [{ key: "intro", index: 0, atMs: 0 }]
 };
 
-it("posts rehearsal report events to the server", async () => {
+it("posts non-final rehearsal reports without keepalive", async () => {
   const bus = new EventTarget();
   const fetcher = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
   const cleanup = installRehearsalBridge(window, bus, fetcher);
   cleanups.push(cleanup);
 
-  bus.dispatchEvent(new CustomEvent("peitho:rehearsalreport", { detail: snapshot }));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:rehearsalreport", {
+      detail: { snapshot, final: false }
+    })
+  );
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+
+  expect(fetcher).toHaveBeenCalledWith("/rehearsal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(snapshot)
+  });
+});
+
+it("uses keepalive for final rehearsal reports without changing the body", async () => {
+  const bus = new EventTarget();
+  const fetcher = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
+  const cleanup = installRehearsalBridge(window, bus, fetcher);
+  cleanups.push(cleanup);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:rehearsalreport", {
+      detail: { snapshot, final: true }
+    })
+  );
   await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
 
   expect(fetcher).toHaveBeenCalledWith("/rehearsal", {
@@ -39,7 +64,11 @@ it("logs fetch failures", async () => {
   const cleanup = installRehearsalBridge(window, bus, fetcher);
   cleanups.push(cleanup);
 
-  bus.dispatchEvent(new CustomEvent("peitho:rehearsalreport", { detail: snapshot }));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:rehearsalreport", {
+      detail: { snapshot, final: false }
+    })
+  );
   await vi.waitFor(() => expect(error).toHaveBeenCalled());
 
   expect(error.mock.calls[0]?.[0]).toContain("failed to POST rehearsal snapshot");
@@ -51,7 +80,11 @@ it("removes the report listener on cleanup", async () => {
   const cleanup = installRehearsalBridge(window, bus, fetcher);
 
   cleanup();
-  bus.dispatchEvent(new CustomEvent("peitho:rehearsalreport", { detail: snapshot }));
+  bus.dispatchEvent(
+    new CustomEvent("peitho:rehearsalreport", {
+      detail: { snapshot, final: false }
+    })
+  );
 
   await Promise.resolve();
   expect(fetcher).not.toHaveBeenCalled();

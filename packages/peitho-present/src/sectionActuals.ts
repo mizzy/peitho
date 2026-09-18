@@ -1,10 +1,11 @@
 import type { ManifestSection } from "../../../bindings/ManifestSection";
 import { sectionIndexForSlide } from "./sections";
-import type {
-  PresentShell,
-  SlideChangeDetail,
-  TimerAdoptDetail,
-  TimerControlDetail
+import {
+  isValidTimerAdoptDetail,
+  type PresentShell,
+  type SlideChangeDetail,
+  type TimerAdoptDetail,
+  type TimerControlDetail
 } from "./shell";
 
 export type SectionActualsShell = Pick<
@@ -65,15 +66,7 @@ export function installSectionActuals(options: SectionActualsOptions): SectionAc
 
   function onTimerAdopt(event: Event): void {
     const detail = (event as CustomEvent<TimerAdoptDetail>).detail;
-    if (
-      typeof detail?.running !== "boolean" ||
-      typeof detail.elapsedMs !== "number" ||
-      !Number.isFinite(detail.elapsedMs) ||
-      detail.elapsedMs < 0 ||
-      typeof detail.previousElapsedMs !== "number" ||
-      !Number.isFinite(detail.previousElapsedMs) ||
-      detail.previousElapsedMs < 0
-    ) {
+    if (!isValidTimerAdoptDetail(detail)) {
       log.error("Invalid peitho:timeradopt event");
       return;
     }

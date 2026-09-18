@@ -15,11 +15,14 @@ use std::{
 
 use chrono::{Local, NaiveDateTime};
 use peitho_core::{
-    domain::SlideKey, rehearsal_record_json, RehearsalRecord, RehearsalSection, RehearsalSnapshot,
+    domain::SlideKey, rehearsal_record_json, RehearsalRecord, RehearsalRecordV2, RehearsalSection,
+    RehearsalSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+use crate::labels::LabelStyle;
 
 static SERVER_CLOCK_START: OnceLock<Instant> = OnceLock::new();
 static SYNC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -435,7 +438,14 @@ pub enum NotesWriteError {
 pub struct RehearsalSink {
     dir: PathBuf,
     expected: Vec<(String, u64)>,
-    session: Mutex<Option<RehearsalSession>>,
+    expected_slide_keys: Vec<SlideKey>,
+    state: Mutex<RehearsalSinkState>,
+}
+
+#[derive(Debug, Default)]
+struct RehearsalSinkState {
+    session: Option<RehearsalSession>,
+    last_rejection: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -453,6 +463,7 @@ struct ReservedRehearsalFile {
 #[derive(Debug)]
 enum RehearsalWriteError {
     SectionMismatch,
+    InvalidTimeline(String),
     Io(io::Error),
     Serialize(String),
 }
@@ -461,6 +472,7 @@ impl fmt::Display for RehearsalWriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SectionMismatch => write!(f, "rehearsal sections do not match this deck"),
+            Self::InvalidTimeline(message) => write!(f, "{message}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Serialize(err) => write!(f, "{err}"),
         }
@@ -468,34 +480,65 @@ impl fmt::Display for RehearsalWriteError {
 }
 
 impl RehearsalSink {
-    pub fn new(dir: PathBuf, expected: Vec<(String, u64)>) -> Self {
+    pub fn new(
+        dir: PathBuf,
+        expected: Vec<(String, u64)>,
+        expected_slide_keys: Vec<SlideKey>,
+    ) -> Self {
         Self {
             dir,
             expected,
-            session: Mutex::new(None),
+            expected_slide_keys,
+            state: Mutex::new(RehearsalSinkState::default()),
         }
     }
 
-    fn write_snapshot(&self, snapshot: &RehearsalSnapshot) -> Result<(), RehearsalWriteError> {
+    fn write_snapshot(
+        &self,
+        state: &mut RehearsalSinkState,
+        snapshot: &RehearsalSnapshot,
+    ) -> Result<(), RehearsalWriteError> {
         if !snapshot_matches_expected(snapshot.sections(), &self.expected) {
             return Err(RehearsalWriteError::SectionMismatch);
         }
+        snapshot
+            .validate_timeline()
+            .map_err(RehearsalWriteError::InvalidTimeline)?;
+        for entry in snapshot.timeline() {
+            let Some(expected_key) = self.expected_slide_keys.get(entry.index() as usize) else {
+                return Err(RehearsalWriteError::InvalidTimeline(format!(
+                    "rehearsal timeline index {} is outside this deck",
+                    entry.index()
+                )));
+            };
+            if entry.key() != expected_key {
+                return Err(RehearsalWriteError::InvalidTimeline(format!(
+                    "rehearsal timeline key {} does not match slide {} key {}",
+                    entry.key().as_str(),
+                    entry.index(),
+                    expected_key.as_str()
+                )));
+            }
+        }
 
-        // Hold the session mutex through serialization and disk writes; it
-        // serializes concurrent POSTs that share this session path.
-        let mut session = self.session.lock().expect("rehearsal sink mutex");
-        if let Some(session) = session.as_ref() {
-            let record = RehearsalRecord::from_snapshot(session.recorded_at_ms, snapshot);
+        if let Some(session) = state.session.as_ref() {
+            let record = RehearsalRecord::V2(
+                RehearsalRecordV2::from_snapshot(session.recorded_at_ms, snapshot)
+                    .map_err(RehearsalWriteError::InvalidTimeline)?,
+            );
             let json = rehearsal_record_json(&record)
                 .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
 
-            // Keep the session mutex held through the atomic rewrite; it also
+            // Keep the sink mutex held through the atomic rewrite; it also
             // serializes concurrent POSTs that share this session path and temp file.
             return write_atomic(&session.path, json.as_bytes()).map_err(RehearsalWriteError::Io);
         }
 
         let recorded_at_ms = epoch_ms_now();
-        let record = RehearsalRecord::from_snapshot(recorded_at_ms, snapshot);
+        let record = RehearsalRecord::V2(
+            RehearsalRecordV2::from_snapshot(recorded_at_ms, snapshot)
+                .map_err(RehearsalWriteError::InvalidTimeline)?,
+        );
         let json = rehearsal_record_json(&record)
             .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
         let reserved = reserve_rehearsal_path(&self.dir, Local::now().naive_local())
@@ -506,7 +549,7 @@ impl RehearsalSink {
             Ok(path) => path,
             Err(err) => return Err(RehearsalWriteError::Io(err)),
         };
-        *session = Some(RehearsalSession {
+        state.session = Some(RehearsalSession {
             path,
             recorded_at_ms,
         });
@@ -1257,26 +1300,102 @@ struct RehearsalPostOutcome {
 }
 
 fn rehearsal_post_outcome(sink: Option<&RehearsalSink>, body: &str) -> RehearsalPostOutcome {
-    let Ok(snapshot) = serde_json::from_str::<RehearsalSnapshot>(body) else {
-        return text_rehearsal_outcome(400, "invalid rehearsal body\n");
+    let style = LabelStyle::for_stderr();
+    let mut stderr = io::stderr().lock();
+    rehearsal_post_outcome_with_warnings(sink, body, &mut stderr, style)
+}
+
+fn rehearsal_post_outcome_with_warnings(
+    sink: Option<&RehearsalSink>,
+    body: &str,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+) -> RehearsalPostOutcome {
+    // Serialize validation, warning deduplication, and writes as one sink operation.
+    let mut state = sink.map(|sink| sink.state.lock().expect("rehearsal sink mutex"));
+    let snapshot = match serde_json::from_str::<RehearsalSnapshot>(body) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return rejected_rehearsal_outcome(
+                state.as_deref_mut(),
+                warnings,
+                style,
+                400,
+                format!("invalid rehearsal body: {err}"),
+            );
+        }
     };
     if let Err(message) = snapshot.validate() {
-        return text_rehearsal_outcome(400, format!("invalid rehearsal snapshot: {message}\n"));
+        return rejected_rehearsal_outcome(
+            state.as_deref_mut(),
+            warnings,
+            style,
+            400,
+            format!("invalid rehearsal snapshot: {message}"),
+        );
     }
     let Some(sink) = sink else {
         return json_rehearsal_outcome(rehearsal_post_response_body(false));
     };
-    match sink.write_snapshot(&snapshot) {
-        Ok(()) => {}
+    let state = state.as_deref_mut().expect("rehearsal sink state");
+    match sink.write_snapshot(state, &snapshot) {
+        Ok(()) => state.last_rejection = None,
         Err(RehearsalWriteError::SectionMismatch) => {
-            return text_rehearsal_outcome(422, "rehearsal sections do not match this deck\n");
+            return rejected_rehearsal_outcome(
+                Some(state),
+                warnings,
+                style,
+                422,
+                "rehearsal sections do not match this deck",
+            );
+        }
+        Err(RehearsalWriteError::InvalidTimeline(message)) => {
+            return rejected_rehearsal_outcome(Some(state), warnings, style, 422, message);
         }
         Err(err) => {
-            eprintln!("warning: failed to write rehearsal snapshot: {err}");
+            write_rehearsal_rejection_warning(
+                Some(state),
+                warnings,
+                style,
+                &format!("failed to write rehearsal snapshot: {err}"),
+            );
             return text_rehearsal_outcome(500, "failed to write rehearsal snapshot\n");
         }
     }
     json_rehearsal_outcome(rehearsal_post_response_body(true))
+}
+
+fn rejected_rehearsal_outcome(
+    state: Option<&mut RehearsalSinkState>,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    status: u16,
+    reason: impl Into<String>,
+) -> RehearsalPostOutcome {
+    let reason = reason.into();
+    write_rehearsal_rejection_warning(
+        state,
+        warnings,
+        style,
+        &format!("rejected rehearsal snapshot: {reason}"),
+    );
+    text_rehearsal_outcome(status, format!("{reason}\n"))
+}
+
+fn write_rehearsal_rejection_warning(
+    state: Option<&mut RehearsalSinkState>,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    message: &str,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    if state.last_rejection.as_deref() == Some(message) {
+        return;
+    }
+    let _ = writeln!(warnings, "{}{message}", style.warning());
+    state.last_rejection = Some(message.to_owned());
 }
 
 fn json_rehearsal_outcome(body: String) -> RehearsalPostOutcome {
@@ -2336,11 +2455,22 @@ mod tests {
         assert_eq!(fs::read(target.join("keep")).unwrap(), b"keep");
     }
 
+    fn rehearsal_sink(dir: PathBuf) -> RehearsalSink {
+        RehearsalSink::new(
+            dir,
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+        )
+    }
+
     #[test]
     fn non_rehearsal_server_discards_rehearsal_reports() {
         let response = rehearsal_post_outcome(
             None,
-            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
         );
 
         assert_eq!(response.status, 200);
@@ -2353,11 +2483,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rehearsals = dir.path().join("rehearsals");
         fs::create_dir_all(&rehearsals).unwrap();
-        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+        let sink = rehearsal_sink(rehearsals.clone());
 
         let first = rehearsal_post_outcome(
             Some(&sink),
-            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
         );
         assert_eq!(first.status, 200);
         assert_eq!(first.body, r#"{"recorded":true}"#);
@@ -2374,7 +2504,7 @@ mod tests {
 
         let second = rehearsal_post_outcome(
             Some(&sink),
-            r#"{"version":1,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}]}"#,
+            r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"details","index":1,"atMs":1000}]}"#,
         );
         assert_eq!(second.status, 200);
         assert_eq!(second.body, r#"{"recorded":true}"#);
@@ -2389,6 +2519,23 @@ mod tests {
             second_record.recorded_at_ms(),
             first_record.recorded_at_ms()
         );
+        let peitho_core::RehearsalRecord::V2(second_record) = second_record else {
+            panic!("expected v2");
+        };
+        assert_eq!(second_record.timeline().len(), 2);
+
+        let reset = rehearsal_post_outcome(
+            Some(&sink),
+            r#"{"version":2,"elapsedMs":0,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":0}],"timeline":[]}"#,
+        );
+        assert_eq!(reset.status, 200);
+        let reset_record: peitho_core::RehearsalRecord =
+            serde_json::from_str(&fs::read_to_string(&second_path).unwrap()).unwrap();
+        assert_eq!(reset_record.recorded_at_ms(), first_record.recorded_at_ms());
+        let peitho_core::RehearsalRecord::V2(reset_record) = reset_record else {
+            panic!("expected v2");
+        };
+        assert!(reset_record.timeline().is_empty());
         assert!(fs::read_dir(&rehearsals)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -2400,7 +2547,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rehearsals = dir.path().join("rehearsals");
         fs::create_dir_all(&rehearsals).unwrap();
-        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+        let sink = rehearsal_sink(rehearsals.clone());
 
         let response = rehearsal_post_outcome(Some(&sink), "not json");
 
@@ -2410,21 +2557,155 @@ mod tests {
     }
 
     #[test]
-    fn rehearsal_server_rejects_future_version_with_reason() {
+    fn rehearsal_server_rejects_v1_snapshot_with_reason() {
         let dir = tempfile::tempdir().unwrap();
         let rehearsals = dir.path().join("rehearsals");
         fs::create_dir_all(&rehearsals).unwrap();
-        let sink = RehearsalSink::new(rehearsals, vec![("Setup".to_owned(), 60_000)]);
+        let sink = rehearsal_sink(rehearsals);
 
         let response = rehearsal_post_outcome(
             Some(&sink),
-            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
         );
 
         assert_eq!(response.status, 400);
-        assert!(response
-            .body
-            .contains("invalid rehearsal snapshot: unsupported rehearsal version 2"));
+        assert!(response.body.contains("unsupported rehearsal version 1"));
+    }
+
+    #[test]
+    fn rehearsal_server_warns_for_every_rejection_class_through_label_style() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = rehearsal_sink(rehearsals);
+        let mut warnings = Vec::new();
+        let cases = [
+            ("not json", 400, "invalid rehearsal body"),
+            (
+                r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+                400,
+                "unsupported rehearsal version 1",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":0,"sections":[],"timeline":[]}"#,
+                400,
+                "rehearsal sections must not be empty",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}],"timeline":[]}"#,
+                422,
+                "rehearsal sections do not match this deck",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":1001}]}"#,
+                422,
+                "rehearsal timeline position 1001 exceeds elapsed time 1000",
+            ),
+        ];
+
+        for (body, status, reason) in cases {
+            let warning_start = warnings.len();
+            let response = rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                body,
+                &mut warnings,
+                crate::labels::LabelStyle::COLORED,
+            );
+            assert_eq!(response.status, status);
+            let warning = String::from_utf8_lossy(&warnings[warning_start..]);
+            assert!(warning.starts_with("\x1b[1;33mwarning:\x1b[0m rejected rehearsal snapshot:"));
+            assert!(
+                warning.contains(reason),
+                "expected {reason:?} in {warning:?}"
+            );
+        }
+
+        let blocker = dir.path().join("not-a-directory");
+        fs::write(&blocker, b"file").unwrap();
+        let missing_sink = rehearsal_sink(blocker.join("rehearsals"));
+        let response = rehearsal_post_outcome_with_warnings(
+            Some(&missing_sink),
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
+            &mut warnings,
+            crate::labels::LabelStyle::COLORED,
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(String::from_utf8_lossy(&warnings)
+            .contains("\x1b[1;33mwarning:\x1b[0m failed to write rehearsal snapshot:"));
+    }
+
+    #[test]
+    fn rehearsal_server_deduplicates_rejection_warnings_until_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = rehearsal_sink(rehearsals);
+        let section_mismatch = r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}],"timeline":[]}"#;
+        let invalid_timeline = r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":1001}]}"#;
+        let valid = r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":0}]}"#;
+        let mut warnings = Vec::new();
+
+        for _ in 0..2 {
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                section_mismatch,
+                &mut warnings,
+                crate::labels::LabelStyle::PLAIN,
+            );
+        }
+        for _ in 0..2 {
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                invalid_timeline,
+                &mut warnings,
+                crate::labels::LabelStyle::PLAIN,
+            );
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&warnings),
+            "warning: rejected rehearsal snapshot: rehearsal sections do not match this deck\n\
+warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds elapsed time 1000\n"
+        );
+
+        assert_eq!(
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                valid,
+                &mut warnings,
+                crate::labels::LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        rehearsal_post_outcome_with_warnings(
+            Some(&sink),
+            invalid_timeline,
+            &mut warnings,
+            crate::labels::LabelStyle::PLAIN,
+        );
+
+        assert_eq!(
+            String::from_utf8_lossy(&warnings)
+                .matches("rehearsal timeline position 1001 exceeds elapsed time 1000")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn non_rehearsal_server_does_not_warn_for_rejected_reports() {
+        let mut warnings = Vec::new();
+
+        let response = rehearsal_post_outcome_with_warnings(
+            None,
+            "not json",
+            &mut warnings,
+            crate::labels::LabelStyle::PLAIN,
+        );
+
+        assert_eq!(response.status, 400);
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -2432,16 +2713,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rehearsals = dir.path().join("rehearsals");
         fs::create_dir_all(&rehearsals).unwrap();
-        let sink = RehearsalSink::new(rehearsals.clone(), vec![("Setup".to_owned(), 60_000)]);
+        let sink = rehearsal_sink(rehearsals.clone());
 
         let response = rehearsal_post_outcome(
             Some(&sink),
-            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}]}"#,
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}],"timeline":[]}"#,
         );
 
         assert_eq!(response.status, 422);
         assert!(!response.json);
         assert!(fs::read_dir(rehearsals).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rehearsal_server_rejects_invalid_timelines_without_changing_record_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        fs::create_dir_all(&rehearsals).unwrap();
+        let sink = rehearsal_sink(rehearsals.clone());
+        let valid = r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"details","index":1,"atMs":1000}]}"#;
+        assert_eq!(rehearsal_post_outcome(Some(&sink), valid).status, 200);
+        let path = single_rehearsal_file(&rehearsals);
+        let original = fs::read(&path).unwrap();
+
+        let cases = [
+            (
+                r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"details","index":1,"atMs":1000},{"key":"intro","index":0,"atMs":500}]}"#,
+                "rehearsal timeline positions must be non-decreasing\n",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"details","index":1,"atMs":2001}]}"#,
+                "rehearsal timeline position 2001 exceeds elapsed time 2000\n",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"details","index":2,"atMs":1000}]}"#,
+                "rehearsal timeline index 2 is outside this deck\n",
+            ),
+            (
+                r#"{"version":2,"elapsedMs":2000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":2000}],"timeline":[{"key":"intro","index":0,"atMs":0},{"key":"intro","index":1,"atMs":1000}]}"#,
+                "rehearsal timeline key intro does not match slide 1 key details\n",
+            ),
+        ];
+
+        for (body, expected_message) in cases {
+            let response = rehearsal_post_outcome(Some(&sink), body);
+            assert_eq!(response.status, 422);
+            assert_eq!(response.body, expected_message);
+            assert!(!response.json);
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
     }
 
     #[test]
@@ -2453,7 +2773,7 @@ mod tests {
             &server,
             "POST",
             "/rehearsal",
-            r#"{"version":1,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}]}"#,
+            r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],"timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
         );
 
         assert_eq!(response.status, 200);
