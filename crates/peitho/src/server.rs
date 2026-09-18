@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::{
@@ -15,8 +15,8 @@ use std::{
 
 use chrono::{Local, NaiveDateTime};
 use peitho_core::{
-    domain::SlideKey, rehearsal_record_json, RehearsalRecord, RehearsalRecordV2, RehearsalSection,
-    RehearsalSnapshot,
+    domain::SlideKey, rehearsal_record_json, RehearsalAudio, RehearsalRecord, RehearsalRecordV2,
+    RehearsalSection, RehearsalSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,6 +29,11 @@ static SYNC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const REMOTE_WEBMANIFEST: &str = r##"{"name":"Peitho Remote","short_name":"Remote","start_url":"/remote","display":"standalone","background_color":"#101216","theme_color":"#101216","icons":[{"src":"remote-icon.png","sizes":"180x180","type":"image/png"}]}"##;
 const REMOTE_ICON_PNG: &[u8] = include_bytes!("../assets/remote-icon.png");
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+const REHEARSAL_AUDIO_MAX_BYTES: usize = 5 * 1024 * 1024;
+const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 500;
+// Must exceed BEFORE_CLOSE_TIMEOUT_MS (2,000 ms) in peitho-present's sync bridge so
+// rehearsal snapshot and audio flush requests finish before the listeners unblock.
+const REHEARSAL_SHUTDOWN_GRACE_MS: u64 = 3_000;
 
 fn new_sync_session() -> String {
     let millis = SystemTime::now()
@@ -439,25 +444,108 @@ pub struct RehearsalSink {
     dir: PathBuf,
     expected: Vec<(String, u64)>,
     expected_slide_keys: Vec<SlideKey>,
+    audio_recording: AudioRecording,
     state: Mutex<RehearsalSinkState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRecording {
+    Disabled,
+    Enabled,
 }
 
 #[derive(Debug, Default)]
 struct RehearsalSinkState {
     session: Option<RehearsalSession>,
-    last_rejection: Option<String>,
+    current_take: Option<AudioTake>,
+    audio_write_error: Option<String>,
+    last_snapshot_rejection: Option<String>,
+    last_audio_rejection: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct RehearsalSession {
+    identity: RehearsalFileIdentity,
     path: PathBuf,
     recorded_at_ms: u64,
+    snapshot: RehearsalSnapshot,
+    audio: Option<RehearsalAudio>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioTake {
+    id: String,
+    next_seq: u64,
 }
 
 #[derive(Debug)]
 struct ReservedRehearsalFile {
+    identity: RehearsalFileIdentity,
     path: PathBuf,
     file: fs::File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RehearsalFileIdentity {
+    stamp: String,
+    suffix: u32,
+}
+
+impl RehearsalFileIdentity {
+    fn at(local: NaiveDateTime, suffix: u32) -> Self {
+        Self {
+            stamp: local.format("%Y%m%d-%H%M%S").to_string(),
+            suffix,
+        }
+    }
+
+    fn stem(&self) -> String {
+        if self.suffix <= 1 {
+            format!("rehearsal-{}", self.stamp)
+        } else {
+            format!("rehearsal-{}-{}", self.stamp, self.suffix)
+        }
+    }
+
+    pub fn json_name(&self) -> String {
+        format!("{}.json", self.stem())
+    }
+
+    pub fn webm_name(&self) -> String {
+        format!("{}.webm", self.stem())
+    }
+}
+
+#[derive(Debug)]
+struct AudioAppendError {
+    write: io::Error,
+    rollback: Option<io::Error>,
+}
+
+impl fmt::Display for AudioAppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.write)?;
+        if let Some(rollback) = &self.rollback {
+            write!(f, "; failed to roll back partial append: {rollback}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AudioChunkDisposition {
+    Accepted,
+    Conflict {
+        take: Option<String>,
+        next_seq: u64,
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
+enum RehearsalSnapshotDisposition {
+    Written,
+    Reset { audio_cleanup_error: Option<String> },
 }
 
 #[derive(Debug)]
@@ -484,20 +572,26 @@ impl RehearsalSink {
         dir: PathBuf,
         expected: Vec<(String, u64)>,
         expected_slide_keys: Vec<SlideKey>,
+        audio_recording: AudioRecording,
     ) -> Self {
         Self {
             dir,
             expected,
             expected_slide_keys,
+            audio_recording,
             state: Mutex::new(RehearsalSinkState::default()),
         }
+    }
+
+    fn audio_enabled(&self) -> bool {
+        self.audio_recording == AudioRecording::Enabled
     }
 
     fn write_snapshot(
         &self,
         state: &mut RehearsalSinkState,
         snapshot: &RehearsalSnapshot,
-    ) -> Result<(), RehearsalWriteError> {
+    ) -> Result<RehearsalSnapshotDisposition, RehearsalWriteError> {
         if !snapshot_matches_expected(snapshot.sections(), &self.expected) {
             return Err(RehearsalWriteError::SectionMismatch);
         }
@@ -521,28 +615,49 @@ impl RehearsalSink {
             }
         }
 
-        if let Some(session) = state.session.as_ref() {
-            let record = RehearsalRecord::V2(
-                RehearsalRecordV2::from_snapshot(session.recorded_at_ms, snapshot)
-                    .map_err(RehearsalWriteError::InvalidTimeline)?,
-            );
-            let json = rehearsal_record_json(&record)
-                .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
+        let reset_audio = snapshot_resets_audio(snapshot);
+        if let Some(session) = state.session.as_mut() {
+            let path = session.path.clone();
+            let recorded_at_ms = session.recorded_at_ms;
+            let identity = session.identity.clone();
+            let retained_audio = if reset_audio {
+                None
+            } else {
+                session.audio.clone()
+            };
+            let json =
+                rehearsal_snapshot_record_json(recorded_at_ms, snapshot, retained_audio.clone())?;
 
             // Keep the sink mutex held through the atomic rewrite; it also
             // serializes concurrent POSTs that share this session path and temp file.
-            return write_atomic(&session.path, json.as_bytes()).map_err(RehearsalWriteError::Io);
+            write_atomic(&path, json.as_bytes()).map_err(RehearsalWriteError::Io)?;
+            session.snapshot = snapshot.clone();
+            session.audio = retained_audio;
+
+            if reset_audio {
+                let audio_path = self.dir.join(identity.webm_name());
+                state.current_take = None;
+                state.audio_write_error = None;
+                let audio_cleanup_error = match fs::remove_file(&audio_path) {
+                    Ok(()) => None,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                    Err(err) => Some(format!(
+                        "failed to remove rehearsal audio {}: {err}",
+                        audio_path.display()
+                    )),
+                };
+                return Ok(RehearsalSnapshotDisposition::Reset {
+                    audio_cleanup_error,
+                });
+            }
+            return Ok(RehearsalSnapshotDisposition::Written);
         }
 
         let recorded_at_ms = epoch_ms_now();
-        let record = RehearsalRecord::V2(
-            RehearsalRecordV2::from_snapshot(recorded_at_ms, snapshot)
-                .map_err(RehearsalWriteError::InvalidTimeline)?,
-        );
-        let json = rehearsal_record_json(&record)
-            .map_err(|err| RehearsalWriteError::Serialize(err.to_string()))?;
+        let json = rehearsal_snapshot_record_json(recorded_at_ms, snapshot, None)?;
         let reserved = reserve_rehearsal_path(&self.dir, Local::now().naive_local())
             .map_err(RehearsalWriteError::Io)?;
+        let identity = reserved.identity.clone();
         let path = match write_first_rehearsal_record(reserved, json.as_bytes(), |file, bytes| {
             file.write_all(bytes)
         }) {
@@ -550,11 +665,132 @@ impl RehearsalSink {
             Err(err) => return Err(RehearsalWriteError::Io(err)),
         };
         state.session = Some(RehearsalSession {
+            identity,
             path,
             recorded_at_ms,
+            snapshot: snapshot.clone(),
+            audio: None,
         });
-        Ok(())
+        Ok(RehearsalSnapshotDisposition::Written)
     }
+
+    fn write_audio_chunk(
+        &self,
+        state: &mut RehearsalSinkState,
+        take: &str,
+        seq: u64,
+        start_ms: u64,
+        bytes: &[u8],
+    ) -> Result<AudioChunkDisposition, String> {
+        if let Some(message) = &state.audio_write_error {
+            return Err(format!(
+                "audio writes are disabled after rollback failure: {message}"
+            ));
+        }
+        let Some(session) = state.session.as_ref() else {
+            return Ok(AudioChunkDisposition::Conflict {
+                take: None,
+                next_seq: 0,
+                reason: "no rehearsal session yet".to_owned(),
+            });
+        };
+        if seq == 0 && session.snapshot.timeline().is_empty() {
+            return Ok(AudioChunkDisposition::Conflict {
+                take: state.current_take.as_ref().map(|take| take.id.clone()),
+                next_seq: state.current_take.as_ref().map_or(0, |take| take.next_seq),
+                reason: "rehearsal timer has not started".to_owned(),
+            });
+        }
+
+        let replace_take = match state.current_take.as_ref() {
+            None if seq == 0 => true,
+            None => {
+                return Ok(AudioChunkDisposition::Conflict {
+                    take: None,
+                    next_seq: 0,
+                    reason: "expected a new take at sequence 0".to_owned(),
+                });
+            }
+            Some(current) if current.id == take && current.next_seq == seq => false,
+            Some(current) if current.id != take && seq == 0 => true,
+            Some(current) => {
+                return Ok(AudioChunkDisposition::Conflict {
+                    take: Some(current.id.clone()),
+                    next_seq: current.next_seq,
+                    reason: if current.id == take {
+                        format!("expected take {} sequence {}", current.id, current.next_seq)
+                    } else {
+                        format!(
+                            "current take is {} at sequence {}",
+                            current.id, current.next_seq
+                        )
+                    },
+                });
+            }
+        };
+
+        let identity = session.identity.clone();
+        let record_path = session.path.clone();
+        let recorded_at_ms = session.recorded_at_ms;
+        let snapshot = session.snapshot.clone();
+        let audio_name = identity.webm_name();
+        let audio_path = self.dir.join(&audio_name);
+
+        if replace_take {
+            write_atomic(&audio_path, bytes).map_err(|err| err.to_string())?;
+        } else if let Err(err) =
+            append_audio_file(&audio_path, bytes, |file, chunk| file.write_all(chunk))
+        {
+            if err.rollback.is_some() {
+                state.audio_write_error = Some(err.to_string());
+            }
+            return Err(err.to_string());
+        }
+
+        if replace_take {
+            let audio = RehearsalAudio::new(audio_name, start_ms);
+            let json =
+                rehearsal_snapshot_record_json(recorded_at_ms, &snapshot, Some(audio.clone()))
+                    .map_err(|err| err.to_string())?;
+            if let Err(err) = write_atomic(&record_path, json.as_bytes()) {
+                if let Err(remove_err) = fs::remove_file(&audio_path) {
+                    if remove_err.kind() != io::ErrorKind::NotFound {
+                        state.audio_write_error = Some(format!(
+                            "{err}; failed to remove uncommitted audio chunk: {remove_err}"
+                        ));
+                    }
+                }
+                return Err(err.to_string());
+            }
+            state
+                .session
+                .as_mut()
+                .expect("audio session remains installed")
+                .audio = Some(audio);
+        }
+
+        state.current_take = Some(AudioTake {
+            id: take.to_owned(),
+            next_seq: seq + 1,
+        });
+        Ok(AudioChunkDisposition::Accepted)
+    }
+}
+
+fn snapshot_resets_audio(snapshot: &RehearsalSnapshot) -> bool {
+    snapshot.elapsed_ms() == 0 && snapshot.timeline().is_empty()
+}
+
+fn rehearsal_snapshot_record_json(
+    recorded_at_ms: u64,
+    snapshot: &RehearsalSnapshot,
+    audio: Option<RehearsalAudio>,
+) -> Result<String, RehearsalWriteError> {
+    let record = RehearsalRecord::V2(
+        RehearsalRecordV2::from_snapshot(recorded_at_ms, snapshot, audio)
+            .map_err(RehearsalWriteError::InvalidTimeline)?,
+    );
+    rehearsal_record_json(&record).map_err(|err| RehearsalWriteError::Serialize(err.to_string()))
 }
 
 impl PresentServer {
@@ -704,9 +940,19 @@ impl PresentServer {
         }
     }
 
+    fn shutdown_grace(&self) -> Duration {
+        shutdown_grace(self.rehearsal_sink.is_some())
+    }
+
     fn serve_listener(&self, server: Arc<Server>) {
         for request in server.incoming_requests() {
-            self.respond(request, Some(ShutdownHandle::new(self.listeners.clone())));
+            self.respond(
+                request,
+                Some(ShutdownHandle::new(
+                    self.listeners.clone(),
+                    self.shutdown_grace(),
+                )),
+            );
         }
     }
 
@@ -731,6 +977,10 @@ impl PresentServer {
             }
             (&Method::Post, "/rehearsal") => {
                 self.respond_rehearsal_post(request);
+                return;
+            }
+            (&Method::Post, "/rehearsal/audio") => {
+                self.respond_rehearsal_audio_post(request);
                 return;
             }
             (&Method::Post, "/notes") => {
@@ -874,14 +1124,38 @@ impl PresentServer {
             return;
         }
         let outcome = rehearsal_post_outcome(self.rehearsal_sink.as_deref(), &body);
-        if outcome.json {
-            send_json_response(request, outcome.body);
-            return;
-        }
-        send_response(
-            request,
-            Response::from_string(outcome.body).with_status_code(StatusCode(outcome.status)),
-        );
+        send_rehearsal_outcome(request, outcome);
+    }
+
+    fn respond_rehearsal_audio_post(&self, mut request: tiny_http::Request) {
+        let url = request.url().to_owned();
+        let content_type = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Content-Type"))
+            .map(|header| header.value.as_str().to_owned());
+        let mut body = Vec::new();
+        let read_result = request
+            .as_reader()
+            .take((REHEARSAL_AUDIO_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut body);
+        let outcome = match read_result {
+            Ok(_) => rehearsal_audio_post_outcome(
+                self.rehearsal_sink.as_deref(),
+                &url,
+                content_type.as_deref(),
+                &body,
+                &mut io::stderr().lock(),
+                LabelStyle::for_stderr(),
+            ),
+            Err(err) => rehearsal_audio_read_error_outcome(
+                self.rehearsal_sink.as_deref(),
+                &mut io::stderr().lock(),
+                LabelStyle::for_stderr(),
+                err,
+            ),
+        };
+        send_rehearsal_outcome(request, outcome);
     }
 
     fn respond_notes_post(&self, request: tiny_http::Request) {
@@ -1010,18 +1284,28 @@ fn validate_extra_listener_host(host: IpAddr) -> miette::Result<()> {
     Ok(())
 }
 
+fn shutdown_grace(has_rehearsal_sink: bool) -> Duration {
+    let millis = if has_rehearsal_sink {
+        REHEARSAL_SHUTDOWN_GRACE_MS
+    } else {
+        DEFAULT_SHUTDOWN_GRACE_MS
+    };
+    Duration::from_millis(millis)
+}
+
 struct ShutdownHandle {
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
+    grace: Duration,
 }
 
 impl ShutdownHandle {
-    fn new(listeners: Arc<Mutex<Vec<Arc<Server>>>>) -> Self {
-        Self { listeners }
+    fn new(listeners: Arc<Mutex<Vec<Arc<Server>>>>, grace: Duration) -> Self {
+        Self { listeners, grace }
     }
 
     fn start(self) {
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(self.grace);
             let listeners = self
                 .listeners
                 .lock()
@@ -1339,7 +1623,17 @@ fn rehearsal_post_outcome_with_warnings(
     };
     let state = state.as_deref_mut().expect("rehearsal sink state");
     match sink.write_snapshot(state, &snapshot) {
-        Ok(()) => state.last_rejection = None,
+        Ok(RehearsalSnapshotDisposition::Written) => state.last_snapshot_rejection = None,
+        Ok(RehearsalSnapshotDisposition::Reset {
+            audio_cleanup_error,
+        }) => {
+            state.last_snapshot_rejection = None;
+            if let Some(message) = audio_cleanup_error {
+                write_rehearsal_audio_warning(Some(state), warnings, style, &message);
+            } else {
+                state.last_audio_rejection = None;
+            }
+        }
         Err(RehearsalWriteError::SectionMismatch) => {
             return rejected_rehearsal_outcome(
                 Some(state),
@@ -1353,7 +1647,7 @@ fn rehearsal_post_outcome_with_warnings(
             return rejected_rehearsal_outcome(Some(state), warnings, style, 422, message);
         }
         Err(err) => {
-            write_rehearsal_rejection_warning(
+            write_rehearsal_snapshot_warning(
                 Some(state),
                 warnings,
                 style,
@@ -1365,6 +1659,225 @@ fn rehearsal_post_outcome_with_warnings(
     json_rehearsal_outcome(rehearsal_post_response_body(true))
 }
 
+fn rehearsal_audio_post_outcome(
+    sink: Option<&RehearsalSink>,
+    url: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+) -> RehearsalPostOutcome {
+    let Some(sink) = sink else {
+        return text_rehearsal_outcome(404, "404\n");
+    };
+    let mut state = sink.state.lock().expect("rehearsal sink mutex");
+    if !sink.audio_enabled() {
+        write_rehearsal_audio_warning(
+            Some(&mut state),
+            warnings,
+            style,
+            "rejected rehearsal audio chunk: audio recording is disabled",
+        );
+        return text_rehearsal_outcome(404, "404\n");
+    }
+    if body.len() > REHEARSAL_AUDIO_MAX_BYTES {
+        return rejected_rehearsal_audio_outcome(
+            &mut state,
+            warnings,
+            style,
+            413,
+            format!(
+                "rehearsal audio chunk exceeds {} byte limit",
+                REHEARSAL_AUDIO_MAX_BYTES
+            ),
+        );
+    }
+    let Some(content_type) = content_type else {
+        return rejected_rehearsal_audio_outcome(
+            &mut state,
+            warnings,
+            style,
+            400,
+            "missing rehearsal audio content type",
+        );
+    };
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("audio/webm"))
+    {
+        return rejected_rehearsal_audio_outcome(
+            &mut state,
+            warnings,
+            style,
+            400,
+            "invalid rehearsal audio content type",
+        );
+    }
+    let (take, seq, start_ms) = match parse_rehearsal_audio_request(url) {
+        Ok(request) => request,
+        Err(message) => {
+            return rejected_rehearsal_audio_outcome(&mut state, warnings, style, 400, message);
+        }
+    };
+    if body.is_empty() {
+        return rejected_rehearsal_audio_outcome(
+            &mut state,
+            warnings,
+            style,
+            400,
+            "rehearsal audio chunk must not be empty",
+        );
+    }
+
+    match sink.write_audio_chunk(&mut state, &take, seq, start_ms, body) {
+        Ok(AudioChunkDisposition::Accepted) => {
+            state.last_audio_rejection = None;
+            json_rehearsal_outcome(r#"{"accepted":true}"#.to_owned())
+        }
+        Ok(AudioChunkDisposition::Conflict {
+            take: current_take,
+            next_seq,
+            reason,
+        }) => {
+            if rehearsal_audio_conflict_warns(&take, seq, current_take.as_deref(), next_seq) {
+                write_rehearsal_audio_warning(
+                    Some(&mut state),
+                    warnings,
+                    style,
+                    &format!("rejected rehearsal audio chunk: {reason}"),
+                );
+            }
+            json_rehearsal_status_outcome(
+                409,
+                rehearsal_audio_conflict_response_body(current_take.as_deref(), next_seq),
+            )
+        }
+        Err(err) => {
+            write_rehearsal_audio_warning(
+                Some(&mut state),
+                warnings,
+                style,
+                &format!("failed to write rehearsal audio chunk: {err}"),
+            );
+            text_rehearsal_outcome(500, "failed to write rehearsal audio chunk\n")
+        }
+    }
+}
+
+fn rehearsal_audio_read_error_outcome(
+    sink: Option<&RehearsalSink>,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    err: io::Error,
+) -> RehearsalPostOutcome {
+    let Some(sink) = sink else {
+        return text_rehearsal_outcome(404, "404\n");
+    };
+    let mut state = sink.state.lock().expect("rehearsal sink mutex");
+    write_rehearsal_audio_warning(
+        Some(&mut state),
+        warnings,
+        style,
+        &format!("rejected rehearsal audio chunk: failed to read body: {err}"),
+    );
+    text_rehearsal_outcome(400, "invalid rehearsal audio body\n")
+}
+
+fn rejected_rehearsal_audio_outcome(
+    state: &mut RehearsalSinkState,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    status: u16,
+    reason: impl Into<String>,
+) -> RehearsalPostOutcome {
+    let reason = reason.into();
+    write_rehearsal_audio_warning(
+        Some(state),
+        warnings,
+        style,
+        &format!("rejected rehearsal audio chunk: {reason}"),
+    );
+    text_rehearsal_outcome(status, format!("{reason}\n"))
+}
+
+fn parse_rehearsal_audio_request(url: &str) -> Result<(String, u64, u64), String> {
+    let (path, query) = url
+        .split_once('?')
+        .ok_or_else(|| "rehearsal audio query must contain take, seq, and startMs".to_owned())?;
+    if path != "/rehearsal/audio" || query.is_empty() {
+        return Err("rehearsal audio query must contain take, seq, and startMs".to_owned());
+    }
+    let mut take = None;
+    let mut seq = None;
+    let mut start_ms = None;
+    for part in query.split('&') {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| "invalid rehearsal audio query parameter".to_owned())?;
+        match key {
+            "take" if take.is_none() => take = Some(value.to_owned()),
+            "seq" if seq.is_none() => seq = Some(value.to_owned()),
+            "startMs" if start_ms.is_none() => start_ms = Some(value.to_owned()),
+            "take" | "seq" | "startMs" => {
+                return Err(format!("rehearsal audio query repeats {key}"));
+            }
+            _ => return Err(format!("unknown rehearsal audio query parameter {key}")),
+        }
+    }
+    let take = take.ok_or_else(|| "rehearsal audio query is missing take".to_owned())?;
+    if take.is_empty()
+        || take.len() > 128
+        || !take
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+    {
+        return Err("invalid rehearsal audio take".to_owned());
+    }
+    let seq = parse_rehearsal_audio_u64(
+        &seq.ok_or_else(|| "rehearsal audio query is missing seq".to_owned())?,
+        "seq",
+    )?;
+    let start_ms = parse_rehearsal_audio_u64(
+        &start_ms.ok_or_else(|| "rehearsal audio query is missing startMs".to_owned())?,
+        "startMs",
+    )?;
+    Ok((take, seq, start_ms))
+}
+
+fn parse_rehearsal_audio_u64(value: &str, name: &str) -> Result<u64, String> {
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!("invalid rehearsal audio {name}"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid rehearsal audio {name}"))
+}
+
+fn rehearsal_audio_conflict_warns(
+    request_take: &str,
+    request_seq: u64,
+    current_take: Option<&str>,
+    next_seq: u64,
+) -> bool {
+    current_take == Some(request_take) && request_seq.checked_add(1) != Some(next_seq)
+}
+
+fn rehearsal_audio_conflict_response_body(take: Option<&str>, next_seq: u64) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RehearsalAudioConflictResponse<'a> {
+        take: Option<&'a str>,
+        next_seq: u64,
+    }
+
+    serde_json::to_string(&RehearsalAudioConflictResponse { take, next_seq })
+        .expect("rehearsal audio conflict response serializes")
+}
+
 fn rejected_rehearsal_outcome(
     state: Option<&mut RehearsalSinkState>,
     warnings: &mut dyn Write,
@@ -1373,7 +1886,7 @@ fn rejected_rehearsal_outcome(
     reason: impl Into<String>,
 ) -> RehearsalPostOutcome {
     let reason = reason.into();
-    write_rehearsal_rejection_warning(
+    write_rehearsal_snapshot_warning(
         state,
         warnings,
         style,
@@ -1382,25 +1895,57 @@ fn rejected_rehearsal_outcome(
     text_rehearsal_outcome(status, format!("{reason}\n"))
 }
 
-fn write_rehearsal_rejection_warning(
+fn write_rehearsal_snapshot_warning(
     state: Option<&mut RehearsalSinkState>,
     warnings: &mut dyn Write,
     style: LabelStyle,
     message: &str,
 ) {
-    let Some(state) = state else {
+    write_rehearsal_channel_warning(
+        state.map(|state| &mut state.last_snapshot_rejection),
+        warnings,
+        style,
+        message,
+    );
+}
+
+fn write_rehearsal_audio_warning(
+    state: Option<&mut RehearsalSinkState>,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    message: &str,
+) {
+    write_rehearsal_channel_warning(
+        state.map(|state| &mut state.last_audio_rejection),
+        warnings,
+        style,
+        message,
+    );
+}
+
+fn write_rehearsal_channel_warning(
+    last_rejection: Option<&mut Option<String>>,
+    warnings: &mut dyn Write,
+    style: LabelStyle,
+    message: &str,
+) {
+    let Some(last_rejection) = last_rejection else {
         return;
     };
-    if state.last_rejection.as_deref() == Some(message) {
+    if last_rejection.as_deref() == Some(message) {
         return;
     }
     let _ = writeln!(warnings, "{}{message}", style.warning());
-    state.last_rejection = Some(message.to_owned());
+    *last_rejection = Some(message.to_owned());
 }
 
 fn json_rehearsal_outcome(body: String) -> RehearsalPostOutcome {
+    json_rehearsal_status_outcome(200, body)
+}
+
+fn json_rehearsal_status_outcome(status: u16, body: String) -> RehearsalPostOutcome {
     RehearsalPostOutcome {
-        status: 200,
+        status,
         body,
         json: true,
     }
@@ -1424,20 +1969,14 @@ fn snapshot_matches_expected(sections: &[RehearsalSection], expected: &[(String,
             })
 }
 
-fn format_rehearsal_filename(local: NaiveDateTime, suffix: u32) -> String {
-    let stamp = local.format("%Y%m%d-%H%M%S");
-    if suffix <= 1 {
-        format!("rehearsal-{stamp}.json")
-    } else {
-        format!("rehearsal-{stamp}-{suffix}.json")
-    }
-}
-
 /// Parses Peitho rehearsal record filenames for the CLI's baseline selection.
-pub fn parse_rehearsal_filename(name: &str) -> Option<(String, u32)> {
+pub fn parse_rehearsal_filename(name: &str) -> Option<RehearsalFileIdentity> {
     let stem = name.strip_prefix("rehearsal-")?.strip_suffix(".json")?;
     if is_rehearsal_stamp(stem) {
-        return Some((stem.to_owned(), 1));
+        return Some(RehearsalFileIdentity {
+            stamp: stem.to_owned(),
+            suffix: 1,
+        });
     }
     let (stamp, suffix) = stem.rsplit_once('-')?;
     if !is_rehearsal_stamp(stamp) || suffix.starts_with('0') {
@@ -1447,7 +1986,10 @@ pub fn parse_rehearsal_filename(name: &str) -> Option<(String, u32)> {
     if suffix <= 1 {
         return None;
     }
-    Some((stamp.to_owned(), suffix))
+    Some(RehearsalFileIdentity {
+        stamp: stamp.to_owned(),
+        suffix,
+    })
 }
 
 fn is_rehearsal_stamp(stamp: &str) -> bool {
@@ -1462,9 +2004,16 @@ fn reserve_rehearsal_path(dir: &Path, local: NaiveDateTime) -> io::Result<Reserv
     fs::create_dir_all(dir)?;
     let mut suffix = 1;
     loop {
-        let path = dir.join(format_rehearsal_filename(local, suffix));
+        let identity = RehearsalFileIdentity::at(local, suffix);
+        let path = dir.join(identity.json_name());
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok(ReservedRehearsalFile { path, file }),
+            Ok(file) => {
+                return Ok(ReservedRehearsalFile {
+                    identity,
+                    path,
+                    file,
+                });
+            }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 suffix += 1;
             }
@@ -1481,7 +2030,11 @@ fn write_first_rehearsal_record<F>(
 where
     F: FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
 {
-    let ReservedRehearsalFile { path, mut file } = reserved;
+    let ReservedRehearsalFile {
+        identity: _,
+        path,
+        mut file,
+    } = reserved;
     let result = write_bytes(&mut file, bytes).and_then(|()| file.flush());
     if let Err(err) = result {
         drop(file);
@@ -1492,6 +2045,37 @@ where
         return Err(first_rehearsal_write_error(&path, err));
     }
     Ok(path)
+}
+
+fn append_audio_file<F>(path: &Path, bytes: &[u8], write_bytes: F) -> Result<(), AudioAppendError>
+where
+    F: FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+{
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|write| AudioAppendError {
+            write,
+            rollback: None,
+        })?;
+    let original_len = file
+        .metadata()
+        .map_err(|write| AudioAppendError {
+            write,
+            rollback: None,
+        })?
+        .len();
+    file.seek(SeekFrom::End(0))
+        .map_err(|write| AudioAppendError {
+            write,
+            rollback: None,
+        })?;
+    if let Err(write) = write_bytes(&mut file, bytes).and_then(|()| file.flush()) {
+        let rollback = file.set_len(original_len).and_then(|()| file.flush()).err();
+        return Err(AudioAppendError { write, rollback });
+    }
+    Ok(())
 }
 
 fn first_rehearsal_write_error(path: &Path, err: io::Error) -> io::Error {
@@ -1559,6 +2143,17 @@ fn send_json_response_with_status(request: tiny_http::Request, status: u16, body
     send_bytes_response(request, status, JSON_CONTENT_TYPE, body.as_bytes());
 }
 
+fn send_rehearsal_outcome(request: tiny_http::Request, outcome: RehearsalPostOutcome) {
+    if outcome.json {
+        send_json_response_with_status(request, outcome.status, outcome.body);
+    } else {
+        send_response(
+            request,
+            Response::from_string(outcome.body).with_status_code(StatusCode(outcome.status)),
+        );
+    }
+}
+
 fn send_remote_webmanifest_response(request: tiny_http::Request) {
     send_bytes_response(
         request,
@@ -1604,6 +2199,16 @@ mod tests {
         sync::atomic::AtomicUsize,
         time::Duration,
     };
+
+    #[test]
+    fn server_selects_longer_shutdown_grace_when_a_rehearsal_sink_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+        let rehearsal =
+            rehearsal_audio_server(dir.path().join("rehearsals"), AudioRecording::Enabled);
+
+        assert!(rehearsal.shutdown_grace() > plain.shutdown_grace());
+    }
 
     #[test]
     fn resolves_root_to_configured_default_document() {
@@ -2307,11 +2912,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            format_rehearsal_filename(local, 1),
+            RehearsalFileIdentity::at(local, 1).json_name(),
             "rehearsal-20260719-090507.json"
         );
         assert_eq!(
-            format_rehearsal_filename(local, 2),
+            RehearsalFileIdentity::at(local, 2).json_name(),
             "rehearsal-20260719-090507-2.json"
         );
     }
@@ -2354,12 +2959,14 @@ mod tests {
     #[test]
     fn parses_only_rehearsal_filename_scheme() {
         assert_eq!(
-            parse_rehearsal_filename("rehearsal-20260719-090507.json"),
-            Some(("20260719-090507".to_owned(), 1))
+            parse_rehearsal_filename("rehearsal-20260719-090507.json")
+                .map(|identity| identity.json_name()),
+            Some("rehearsal-20260719-090507.json".to_owned())
         );
         assert_eq!(
-            parse_rehearsal_filename("rehearsal-20260719-090507-10.json"),
-            Some(("20260719-090507".to_owned(), 10))
+            parse_rehearsal_filename("rehearsal-20260719-090507-10.json")
+                .map(|identity| identity.json_name()),
+            Some("rehearsal-20260719-090507-10.json".to_owned())
         );
         assert_eq!(parse_rehearsal_filename("zzz-notes.json"), None);
         assert_eq!(
@@ -2370,6 +2977,18 @@ mod tests {
             parse_rehearsal_filename("rehearsal-20260719-090507-01.json"),
             None
         );
+        assert_eq!(
+            parse_rehearsal_filename("rehearsal-20260719-090507.webm"),
+            None
+        );
+    }
+
+    #[test]
+    fn rehearsal_file_identity_formats_json_and_webm_from_one_stem() {
+        let identity = parse_rehearsal_filename("rehearsal-20260719-090507-10.json").unwrap();
+
+        assert_eq!(identity.json_name(), "rehearsal-20260719-090507-10.json");
+        assert_eq!(identity.webm_name(), "rehearsal-20260719-090507-10.webm");
     }
 
     #[test]
@@ -2463,6 +3082,7 @@ mod tests {
                 SlideKey::new("intro").unwrap(),
                 SlideKey::new("details").unwrap(),
             ],
+            AudioRecording::Disabled,
         )
     }
 
@@ -2540,6 +3160,719 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .all(|path| path.extension().and_then(|ext| ext.to_str()) != Some("tmp")));
+    }
+
+    #[test]
+    fn rehearsal_audio_route_enforces_take_sequence_and_sink_side_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        let server = rehearsal_audio_server(rehearsals.clone(), AudioRecording::Enabled);
+        post_snapshot_over_http(&server, running_snapshot(2_000));
+
+        assert_eq!(
+            post_audio_over_http(&server, "take-a", 0, "head-a").status,
+            200
+        );
+        assert_eq!(
+            post_audio_over_http(&server, "take-a", 1, "-one").status,
+            200
+        );
+        let lost_response = post_audio_over_http(&server, "take-a", 1, "-one");
+        assert_eq!(lost_response.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&lost_response.body).unwrap(),
+            serde_json::json!({"take":"take-a","nextSeq":2})
+        );
+
+        assert_eq!(
+            post_audio_over_http(&server, "take-b", 0, "head-b").status,
+            200
+        );
+        let losing_window = post_audio_over_http(&server, "take-a", 2, "-lost");
+        assert_eq!(losing_window.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&losing_window.body).unwrap(),
+            serde_json::json!({"take":"take-b","nextSeq":1})
+        );
+
+        let json_path = single_rehearsal_file(&rehearsals);
+        let identity = parse_rehearsal_filename(
+            json_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap(),
+        )
+        .unwrap();
+        let audio_path = rehearsals.join(identity.webm_name());
+        assert_eq!(fs::read(&audio_path).unwrap(), b"head-b");
+        let record = read_v2_record(&json_path);
+        let audio = record.audio().expect("audio metadata");
+        assert_eq!(audio.file(), identity.webm_name());
+        assert_eq!(audio.start_ms(), 0);
+
+        post_snapshot_over_http(&server, reset_snapshot());
+        assert!(!audio_path.exists());
+        assert_eq!(read_v2_record(&json_path).audio(), None);
+        let stale = post_audio_over_http(&server, "take-b", 1, "-stale");
+        assert_eq!(stale.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stale.body).unwrap(),
+            serde_json::json!({"take":null,"nextSeq":0})
+        );
+        let stale_head = post_audio_over_http(&server, "take-b", 0, "stale-head");
+        assert_eq!(stale_head.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stale_head.body).unwrap(),
+            serde_json::json!({"take":null,"nextSeq":0})
+        );
+        assert!(!audio_path.exists());
+        assert_eq!(read_v2_record(&json_path).audio(), None);
+
+        post_snapshot_over_http(&server, running_snapshot(3_000));
+        assert_eq!(
+            post_audio_with_start_ms_over_http(&server, "take-c", 0, 3_000, "head-c").status,
+            200
+        );
+        assert_eq!(fs::read(&audio_path).unwrap(), b"head-c");
+        let record = read_v2_record(&json_path);
+        let audio = record.audio().expect("audio metadata");
+        assert_eq!(audio.file(), identity.webm_name());
+        assert_eq!(audio.start_ms(), 3_000);
+    }
+
+    #[test]
+    fn rehearsal_audio_records_the_first_chunks_offset_for_each_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        let server = rehearsal_audio_server(rehearsals.clone(), AudioRecording::Enabled);
+        post_snapshot_over_http(&server, running_snapshot(480_000));
+
+        assert_eq!(
+            post_audio_with_start_ms_over_http(&server, "late-open", 0, 480_123, "head").status,
+            200
+        );
+        let json_path = single_rehearsal_file(&rehearsals);
+        let first = read_v2_record(&json_path);
+        let first_audio = first.audio().expect("first take metadata");
+        assert_eq!(first_audio.start_ms(), 480_123);
+
+        assert_eq!(
+            post_audio_with_start_ms_over_http(&server, "new-take", 0, 900_000, "replacement")
+                .status,
+            200
+        );
+        let second = read_v2_record(&json_path);
+        let second_audio = second.audio().expect("replacement take metadata");
+        assert_eq!(second_audio.start_ms(), 900_000);
+    }
+
+    #[test]
+    fn rehearsal_audio_route_returns_current_state_for_no_session_and_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = rehearsal_audio_server(dir.path().join("rehearsals"), AudioRecording::Enabled);
+
+        let no_session = post_audio_over_http(&server, "take-a", 0, "head");
+        assert_eq!(no_session.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&no_session.body).unwrap(),
+            serde_json::json!({"take":null,"nextSeq":0})
+        );
+
+        post_snapshot_over_http(&server, running_snapshot(2_000));
+        for (take, seq, expected) in [
+            ("take-a", 1, serde_json::json!({"take":null,"nextSeq":0})),
+            ("take-a", 0, serde_json::json!({"accepted":true})),
+            (
+                "take-a",
+                2,
+                serde_json::json!({"take":"take-a","nextSeq":1}),
+            ),
+            (
+                "take-b",
+                1,
+                serde_json::json!({"take":"take-a","nextSeq":1}),
+            ),
+        ] {
+            let response = post_audio_over_http(&server, take, seq, "chunk");
+            let value = serde_json::from_str::<Value>(&response.body).unwrap();
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
+    fn rehearsal_audio_route_validates_authorization_query_content_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_sink = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+        assert_eq!(
+            post_audio_over_http(&no_sink, "take-a", 0, "chunk").status,
+            404
+        );
+
+        let disabled =
+            rehearsal_audio_server(dir.path().join("disabled"), AudioRecording::Disabled);
+        assert_eq!(
+            post_audio_over_http(&disabled, "take-a", 0, "chunk").status,
+            404
+        );
+
+        let enabled = rehearsal_audio_server(dir.path().join("enabled"), AudioRecording::Enabled);
+        post_snapshot_over_http(&enabled, running_snapshot(1_000));
+        for path in [
+            "/rehearsal/audio",
+            "/rehearsal/audio?take=take-a",
+            "/rehearsal/audio?seq=0",
+            "/rehearsal/audio?take=take-a&seq=0",
+            "/rehearsal/audio?take=&seq=0&startMs=0",
+            "/rehearsal/audio?take=take-a&take=take-b&seq=0&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=0&seq=1&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=0&startMs=1",
+            "/rehearsal/audio?take=take-a&seq=nope&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=+1&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=01&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=00&startMs=0",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=-1",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=+1",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=1.5",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=01",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=00",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=%31",
+            "/rehearsal/audio?take=take-a&seq=0&startMs=0&extra=true",
+        ] {
+            let response =
+                http_request_with_content_type(&enabled, "POST", path, "chunk", Some("audio/webm"));
+            assert_eq!(response.status, 400, "{path}");
+        }
+
+        assert_eq!(
+            http_request(
+                &enabled,
+                "POST",
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                "chunk"
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            http_request_with_content_type(
+                &enabled,
+                "POST",
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                "chunk",
+                Some("application/octet-stream"),
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            http_request_with_content_type(
+                &enabled,
+                "POST",
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                "",
+                Some("audio/webm"),
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            http_request_with_content_type(
+                &enabled,
+                "POST",
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                "chunk",
+                Some("audio/webm;codecs=opus"),
+            )
+            .status,
+            200
+        );
+
+        let oversized = "x".repeat(REHEARSAL_AUDIO_MAX_BYTES + 1);
+        assert_eq!(
+            http_request_with_content_type(
+                &enabled,
+                "POST",
+                "/rehearsal/audio?take=take-b&seq=0&startMs=0",
+                &oversized,
+                Some("audio/webm"),
+            )
+            .status,
+            413
+        );
+
+        let streamed = chunked_http_request_with_content_type(
+            &enabled,
+            "POST",
+            "/rehearsal/audio?take=take-b&seq=0&startMs=0",
+            oversized.as_bytes(),
+            "audio/webm",
+        );
+        assert_eq!(streamed.status, 413);
+    }
+
+    #[test]
+    fn rehearsal_audio_query_accepts_the_full_u64_range() {
+        assert_eq!(
+            parse_rehearsal_audio_request(
+                "/rehearsal/audio?take=take-a&seq=18446744073709551615&startMs=18446744073709551615"
+            ),
+            Ok(("take-a".to_owned(), u64::MAX, u64::MAX))
+        );
+    }
+
+    #[test]
+    fn rehearsal_audio_partial_append_rolls_back_and_failed_write_keeps_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.webm");
+        fs::write(&path, b"head").unwrap();
+        let error = append_audio_file(&path, b"-partial", |file, bytes| {
+            file.write_all(&bytes[..3])?;
+            Err(io::Error::other("injected append failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected append failure"));
+        assert_eq!(fs::read(&path).unwrap(), b"head");
+
+        let rehearsals = dir.path().join("rehearsals");
+        let server = rehearsal_audio_server(rehearsals.clone(), AudioRecording::Enabled);
+        post_snapshot_over_http(&server, running_snapshot(2_000));
+        assert_eq!(
+            post_audio_over_http(&server, "take-a", 0, "head").status,
+            200
+        );
+        let json_path = single_rehearsal_file(&rehearsals);
+        let identity = parse_rehearsal_filename(
+            json_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap(),
+        )
+        .unwrap();
+        let audio_path = rehearsals.join(identity.webm_name());
+        fs::remove_file(&audio_path).unwrap();
+        fs::create_dir(&audio_path).unwrap();
+
+        assert_eq!(
+            post_audio_over_http(&server, "take-a", 1, "-one").status,
+            500
+        );
+        let conflict = post_audio_over_http(&server, "take-a", 2, "-two");
+        assert_eq!(conflict.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&conflict.body).unwrap(),
+            serde_json::json!({"take":"take-a","nextSeq":1})
+        );
+    }
+
+    #[test]
+    fn rehearsal_audio_concurrent_new_takes_never_interleave() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        let server = rehearsal_audio_server(rehearsals.clone(), AudioRecording::Enabled);
+        post_snapshot_over_http(&server, running_snapshot(1_000));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for (take, body) in [("take-a", "head-a"), ("take-b", "head-b")] {
+            let server = server.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                post_audio_over_http(&server, take, 0, body)
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().status, 200);
+        }
+
+        let json_path = single_rehearsal_file(&rehearsals);
+        let identity = parse_rehearsal_filename(
+            json_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap(),
+        )
+        .unwrap();
+        let bytes = fs::read(rehearsals.join(identity.webm_name())).unwrap();
+        assert!(bytes == b"head-a" || bytes == b"head-b");
+    }
+
+    #[test]
+    fn rehearsal_audio_warnings_only_report_current_take_ordering_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = RehearsalSink::new(
+            dir.path().join("rehearsals"),
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+            AudioRecording::Enabled,
+        );
+        let mut warnings = Vec::new();
+
+        let no_session = rehearsal_audio_post_outcome(
+            Some(&sink),
+            "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+            Some("audio/webm"),
+            b"head",
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(no_session.status, 409);
+        assert!(warnings.is_empty());
+
+        assert_eq!(
+            rehearsal_post_outcome(Some(&sink), &running_snapshot(1_000)).status,
+            200
+        );
+        assert_eq!(
+            rehearsal_audio_post_outcome(
+                Some(&sink),
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                Some("audio/webm"),
+                b"head",
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        let lost_response = rehearsal_audio_post_outcome(
+            Some(&sink),
+            "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+            Some("audio/webm"),
+            b"head",
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(lost_response.status, 409);
+        assert!(warnings.is_empty());
+
+        let foreign_take = rehearsal_audio_post_outcome(
+            Some(&sink),
+            "/rehearsal/audio?take=take-b&seq=1&startMs=0",
+            Some("audio/webm"),
+            b"foreign",
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(foreign_take.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&foreign_take.body).unwrap(),
+            serde_json::json!({"take":"take-a","nextSeq":1})
+        );
+        assert!(warnings.is_empty());
+
+        for _ in 0..2 {
+            assert_eq!(
+                rehearsal_audio_post_outcome(
+                    Some(&sink),
+                    "/rehearsal/audio?take=take-a&seq=2&startMs=0",
+                    Some("audio/webm"),
+                    b"gap",
+                    &mut warnings,
+                    LabelStyle::PLAIN,
+                )
+                .status,
+                409
+            );
+        }
+        assert_eq!(
+            String::from_utf8(warnings).unwrap(),
+            "warning: rejected rehearsal audio chunk: expected take take-a sequence 1\n"
+        );
+    }
+
+    #[test]
+    fn stale_take_conflicts_around_reset_are_benign() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = RehearsalSink::new(
+            dir.path().join("rehearsals"),
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+            AudioRecording::Enabled,
+        );
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                &running_snapshot(1_000),
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            rehearsal_audio_post_outcome(
+                Some(&sink),
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                Some("audio/webm"),
+                b"head",
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                &reset_snapshot(),
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        warnings.clear();
+
+        let stale_head = rehearsal_audio_post_outcome(
+            Some(&sink),
+            "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+            Some("audio/webm"),
+            b"head",
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(stale_head.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stale_head.body).unwrap(),
+            serde_json::json!({"take":null,"nextSeq":0})
+        );
+
+        assert_eq!(
+            rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                &running_snapshot(2_000),
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        let stale_tail = rehearsal_audio_post_outcome(
+            Some(&sink),
+            "/rehearsal/audio?take=take-a&seq=1&startMs=0",
+            Some("audio/webm"),
+            b"tail",
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(stale_tail.status, 409);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stale_tail.body).unwrap(),
+            serde_json::json!({"take":null,"nextSeq":0})
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn rehearsal_audio_query_requires_canonical_decimal_u64_values() {
+        for (seq, start_ms, expected) in [
+            ("01", "0", "invalid rehearsal audio seq"),
+            ("00", "0", "invalid rehearsal audio seq"),
+            ("0", "01", "invalid rehearsal audio startMs"),
+            ("0", "00", "invalid rehearsal audio startMs"),
+        ] {
+            assert_eq!(
+                parse_rehearsal_audio_request(&format!(
+                    "/rehearsal/audio?take=take-a&seq={seq}&startMs={start_ms}"
+                )),
+                Err(expected.to_owned())
+            );
+        }
+        assert_eq!(
+            parse_rehearsal_audio_request("/rehearsal/audio?take=take-a&seq=0&startMs=0"),
+            Ok(("take-a".to_owned(), 0, 0))
+        );
+    }
+
+    #[test]
+    fn rehearsal_warning_deduplication_is_independent_per_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = RehearsalSink::new(
+            dir.path().join("rehearsals"),
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+            AudioRecording::Enabled,
+        );
+        let bad_snapshot = r#"{"version":2,"elapsedMs":1000,"sections":[{"name":"Setup","plannedDurationMs":61000,"actualMs":1000}],"timeline":[]}"#;
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            rehearsal_post_outcome(Some(&sink), &running_snapshot(1_000)).status,
+            200
+        );
+        rehearsal_post_outcome_with_warnings(
+            Some(&sink),
+            bad_snapshot,
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+        assert_eq!(
+            rehearsal_audio_post_outcome(
+                Some(&sink),
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                Some("audio/webm"),
+                b"head",
+                &mut warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        rehearsal_post_outcome_with_warnings(
+            Some(&sink),
+            bad_snapshot,
+            &mut warnings,
+            LabelStyle::PLAIN,
+        );
+
+        for _ in 0..2 {
+            assert_eq!(
+                rehearsal_audio_post_outcome(
+                    Some(&sink),
+                    "/rehearsal/audio?take=take-a&seq=2&startMs=0",
+                    Some("audio/webm"),
+                    b"gap",
+                    &mut warnings,
+                    LabelStyle::PLAIN,
+                )
+                .status,
+                409
+            );
+            assert_eq!(
+                rehearsal_post_outcome(Some(&sink), &running_snapshot(2_000)).status,
+                200
+            );
+        }
+
+        let warnings = String::from_utf8(warnings).unwrap();
+        assert_eq!(
+            warnings
+                .matches("rehearsal sections do not match this deck")
+                .count(),
+            1
+        );
+        assert_eq!(
+            warnings.matches("expected take take-a sequence 1").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn zeroed_snapshot_clears_an_audio_latch_without_a_current_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        let sink = RehearsalSink::new(
+            rehearsals.clone(),
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+            AudioRecording::Enabled,
+        );
+        assert_eq!(
+            rehearsal_post_outcome(Some(&sink), &running_snapshot(1_000)).status,
+            200
+        );
+        let json_path = single_rehearsal_file(&rehearsals);
+        let identity =
+            parse_rehearsal_filename(json_path.file_name().unwrap().to_str().unwrap()).unwrap();
+        let audio_path = rehearsals.join(identity.webm_name());
+        fs::write(&audio_path, b"orphaned").unwrap();
+        {
+            let mut state = sink.state.lock().unwrap();
+            state.audio_write_error = Some("failed rollback".to_owned());
+            state.current_take = None;
+            state.session.as_mut().unwrap().audio =
+                Some(RehearsalAudio::new(identity.webm_name(), 0));
+        }
+
+        assert_eq!(
+            rehearsal_post_outcome(Some(&sink), &reset_snapshot()).status,
+            200
+        );
+        assert!(!audio_path.exists());
+        let state = sink.state.lock().unwrap();
+        assert_eq!(state.audio_write_error, None);
+        assert_eq!(state.current_take, None);
+        assert_eq!(state.session.as_ref().unwrap().audio, None);
+    }
+
+    #[test]
+    fn reset_warns_with_the_audio_path_when_cleanup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let rehearsals = dir.path().join("rehearsals");
+        let sink = RehearsalSink::new(
+            rehearsals.clone(),
+            vec![("Setup".to_owned(), 60_000)],
+            vec![
+                SlideKey::new("intro").unwrap(),
+                SlideKey::new("details").unwrap(),
+            ],
+            AudioRecording::Enabled,
+        );
+        assert_eq!(
+            rehearsal_post_outcome(Some(&sink), &running_snapshot(1_000)).status,
+            200
+        );
+        let mut audio_warnings = Vec::new();
+        assert_eq!(
+            rehearsal_audio_post_outcome(
+                Some(&sink),
+                "/rehearsal/audio?take=take-a&seq=0&startMs=0",
+                Some("audio/webm"),
+                b"head",
+                &mut audio_warnings,
+                LabelStyle::PLAIN,
+            )
+            .status,
+            200
+        );
+        let json_path = single_rehearsal_file(&rehearsals);
+        let audio_path = rehearsals.join(read_v2_record(&json_path).audio().unwrap().file());
+        fs::remove_file(&audio_path).unwrap();
+        fs::create_dir(&audio_path).unwrap();
+        let mut warnings = Vec::new();
+
+        for _ in 0..2 {
+            let response = rehearsal_post_outcome_with_warnings(
+                Some(&sink),
+                &reset_snapshot(),
+                &mut warnings,
+                LabelStyle::PLAIN,
+            );
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, r#"{"recorded":true}"#);
+        }
+
+        assert_eq!(read_v2_record(&json_path).audio(), None);
+        let warnings = String::from_utf8(warnings).unwrap();
+        assert_eq!(
+            warnings.matches(&audio_path.display().to_string()).count(),
+            1
+        );
+        assert!(warnings.contains("failed to remove rehearsal audio"));
+        assert!(!warnings.contains("failed to write rehearsal snapshot"));
+        let state = sink.state.lock().unwrap();
+        assert_eq!(state.audio_write_error, None);
+        assert_eq!(state.current_take, None);
+        assert_eq!(state.last_snapshot_rejection, None);
+        assert!(state
+            .last_audio_rejection
+            .as_deref()
+            .is_some_and(|warning| warning.contains("failed to remove rehearsal audio")));
     }
 
     #[test]
@@ -3101,6 +4434,33 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         parse_http_response(&raw)
     }
 
+    fn chunked_http_request_with_content_type(
+        server: &PresentServer,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        content_type: &str,
+    ) -> TestHttpResponse {
+        let addr = server.addr();
+        let server_for_request = server.clone();
+        let handle = thread::spawn(move || server_for_request.handle_one());
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let headers = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{:x}\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        handle.join().unwrap();
+
+        parse_http_response(&raw)
+    }
+
     fn parse_http_response(raw: &str) -> TestHttpResponse {
         let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
         let status = head
@@ -3123,5 +4483,68 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             .collect::<Vec<_>>();
         assert_eq!(files.len(), 1);
         files[0].clone()
+    }
+
+    fn rehearsal_audio_server(dir: PathBuf, audio: AudioRecording) -> PresentServer {
+        PresentServer::bind(PathBuf::new(), 0, "present.html")
+            .unwrap()
+            .with_rehearsal_sink(RehearsalSink::new(
+                dir,
+                vec![("Setup".to_owned(), 60_000)],
+                vec![
+                    SlideKey::new("intro").unwrap(),
+                    SlideKey::new("details").unwrap(),
+                ],
+                audio,
+            ))
+    }
+
+    fn running_snapshot(elapsed_ms: u64) -> String {
+        format!(
+            r#"{{"version":2,"elapsedMs":{elapsed_ms},"sections":[{{"name":"Setup","plannedDurationMs":60000,"actualMs":{elapsed_ms}}}],"timeline":[{{"key":"intro","index":0,"atMs":0}}]}}"#
+        )
+    }
+
+    fn reset_snapshot() -> String {
+        r#"{"version":2,"elapsedMs":0,"sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":0}],"timeline":[]}"#.to_owned()
+    }
+
+    fn post_snapshot_over_http(server: &PresentServer, body: String) {
+        let response = http_request(server, "POST", "/rehearsal", &body);
+        assert_eq!(response.status, 200, "{}", response.body);
+    }
+
+    fn post_audio_over_http(
+        server: &PresentServer,
+        take: &str,
+        seq: u64,
+        body: &str,
+    ) -> TestHttpResponse {
+        post_audio_with_start_ms_over_http(server, take, seq, 0, body)
+    }
+
+    fn post_audio_with_start_ms_over_http(
+        server: &PresentServer,
+        take: &str,
+        seq: u64,
+        start_ms: u64,
+        body: &str,
+    ) -> TestHttpResponse {
+        http_request_with_content_type(
+            server,
+            "POST",
+            &format!("/rehearsal/audio?take={take}&seq={seq}&startMs={start_ms}"),
+            body,
+            Some("audio/webm"),
+        )
+    }
+
+    fn read_v2_record(path: &Path) -> peitho_core::RehearsalRecordV2 {
+        let record: peitho_core::RehearsalRecord =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let peitho_core::RehearsalRecord::V2(record) = record else {
+            panic!("expected v2 rehearsal record");
+        };
+        record
     }
 }

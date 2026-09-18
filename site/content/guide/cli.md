@@ -173,7 +173,7 @@ Cmd+F keep their usual meaning.
 
 | Flag | Effect |
 | --- | --- |
-| `--port <PORT>` | Pin the server port. Plain local runs otherwise use a random port; with `--host` the port is fixed at 6173. |
+| `--port <PORT>` | Pin the server port. Plain local runs otherwise use a random port; with `--host` or `--audio` the port is fixed at 6173. |
 | `--no-open` | Start the server without launching Chrome. |
 | `--no-presenter` | Open the slides window only, without the presenter view. |
 | `--no-serve` | Build the present cache and exit without serving. |
@@ -233,15 +233,67 @@ an absolute per-slide timeline into
 peitho present --rehearsal
 ```
 
+Add explicit microphone recording with both flags:
+
+```sh
+peitho present --rehearsal --audio
+```
+
+`--audio` requires `--rehearsal` and a presenter view. It is also the privacy
+boundary: without it, the presenter does not touch the browser media APIs and
+the server does not accept audio. With it, the presenter asks for microphone
+permission immediately and shows one compact status beside the clock. Browser
+microphone permission is scoped to the complete origin, including its port, so
+audio mode defaults to stable port 6173 rather than a random port. An explicit
+`--port` wins. If 6173 is occupied, Peitho reports that another presentation is
+probably running and asks you to pass `--port`; it never silently changes the
+origin.
+
+The indicator reports both capture and persistence state:
+
+- `… REC` — waiting for microphone permission
+- `○ REC` — microphone ready; timer stopped
+- `● REC` — timer running and audio recording
+- `❙❙ REC` — timer paused and recording paused
+- `mic unavailable: ...` — permission, device, or recorder failure
+- `● REC — audio upload failed: ... (retrying)` (or `❙❙ REC — ...`) — capture
+  continues, the current chunk is retained and retried, and Peitho never skips
+  ahead to a later chunk
+- `● REC — audio upload failed: server returned N` — a `400`, `404`, or `413`
+  response cannot succeed unchanged, so the chunk remains queued and that take
+  stops retrying until reset
+- `● REC — audio upload failed: another presenter window took over the recording (retrying)`
+  — another presenter owns the current take
+- `● REC — audio upload failed: recording out of order (restart the rehearsal) (retrying)`
+  — the current take's sequence no longer matches the server
+
 When a run starts in this presenter or is adopted at `0:00`, the timeline
 records the current slide at `0:00`. If the presenter adopts an already-running
 timer, its first entry is the current slide at the adopted timer position.
 After that, the timeline records the timer position whenever a different slide
 is entered. Reveal steps add no entry; returning to a slide adds another entry,
 so time from all visits can be totalled later. Reset clears both timing
-accumulators for the current record. Every saved snapshot is the complete
-absolute state, and the server checks each recorded slide index/key against the
-deck it built before writing it.
+accumulators for the current record. In audio mode it also stops the current
+take and removes that session's WebM; the next timer start begins a fresh take.
+Every saved snapshot is the complete absolute state, and the server checks each
+recorded slide index/key against the deck it built before writing it.
+
+Once the server accepts the first audio chunk, the files share one stem:
+
+```text
+.peitho/rehearsals/rehearsal-20260918-120000.json
+.peitho/rehearsals/rehearsal-20260918-120000.webm
+```
+
+Audio start, pause, resume, and reset follow the timer's actual state. A take
+can nevertheless begin after timer position zero when the presenter opens late
+or microphone permission is still pending. The record therefore stores
+`audio.startMs`: for an entry at or after that offset, the WebM seek position is
+`atMs - audio.startMs`; earlier entries have no audio. When the offset rounds
+to at least one second, `peitho rehearsal` prints it and a ready-to-use `seek`
+column beside the WebM path. Chrome's WebM carries no duration metadata;
+`ffmpeg -i in.webm -c copy out.webm` adds it for players that require one. The
+JSON and WebM are rehearsal data and are never copied into `dist/`.
 
 Records accumulate over runs (nothing is pruned automatically). During a talk
 the agenda's live Actual / Planned and delta are enough for pacing; review the
@@ -266,23 +318,42 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
   Wrap-up        1:00     0:48    -0:12
   total          5:00     4:35    -0:25
 
-  slide   key        entered   visits   total
-  #1      setup         0:00        1    0:48
-  #2      problem       0:48        1    1:07
-  #3      approach      1:55        1    2:40
-  total                                  4:35
+  slide   key        entered      seek   visits   total
+  #1      setup         0:00      0:00        1    0:48
+  #2      problem       0:48      0:40        1    1:07
+  #3      approach      1:55      1:47        1    2:40
+  total                                           4:35
+  audio   .peitho/rehearsals/rehearsal-20260719-135241.webm
+  offset  0:08
 ```
 
 `key` is the recorded slide key, `entered` is the timer position of its first
-entry, and `visits` is the number of timeline entries for that slide. `total`
-adds every visit to the recorded index/key, ending each visit at the next
-timeline entry and the final visit at the saved elapsed time. If the presenter
-adopted an already-running timer, a `(before first entry)` row accounts for the
-leading gap. The final slide-table total therefore matches the run's elapsed
-time. The command uses the recorded index and key without reopening the deck,
-so later title or deck edits cannot rewrite history. A reset record with no
-entries prints `(no slide entries)`. Version 1 records created by older Peitho
-releases remain readable and keep their original section-only output exactly.
+entry, `seek` is the ready-to-use position in the WebM, and `visits` is the
+number of timeline entries for that slide. A `-` seek means the slide's first
+visit ended at or before the audio began; when audio begins during that visit,
+the seek is `0:00`. For example, jump directly to Approach with:
+
+```sh
+ffplay -ss 1:47 .peitho/rehearsals/rehearsal-20260719-135241.webm
+```
+
+The terminal intentionally shows only each slide's first entry. Every revisit
+is retained in the JSON `timeline`; calculate its audio position as
+`atMs - audio.startMs`. `total` adds every visit to the recorded index/key,
+ending each visit at the next timeline entry and the final visit at the saved
+elapsed time. If the presenter adopted an already-running timer, a
+`(before first entry)` row accounts for the leading gap. The final slide-table
+total therefore matches the run's elapsed time. The command uses the recorded
+index and key without reopening the deck, so later title or deck edits cannot
+rewrite history. A reset record with no entries prints `(no slide entries)`.
+Version 1 records created by older Peitho releases remain readable and keep
+their original section-only output exactly. The `audio` line appears only when
+that v2 record has accepted audio; rehearsal runs without audio and older
+records omit it. An offset that rounds to at least one second adds the `seek`
+column and `offset` line. If the record names its correct same-stem WebM but the
+file is missing, the command prints a `note:` naming that path. A mismatched
+audio filename instead makes the record corrupt and produces a file-named hard
+error without opening an unrelated path.
 
 Pass `--all` to list every record oldest first, one table per run:
 

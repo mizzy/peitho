@@ -2263,6 +2263,7 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
     @keyframes eod-title-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
     .clock { display: flex; flex-direction: column; min-height: 0; }
     .clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }
+    .clock-row[data-peitho-rehearsal-audio="true"] { grid-template-columns: minmax(0, 1fr) auto auto; }
     .timer { display: block; font-size: 48px; font-weight: 500; letter-spacing: 0; line-height: 1; color: var(--fg); transition: color 200ms ease; font-variant-numeric: tabular-nums; }
     .timer .planned { color: var(--fg-dim); font-weight: 400; margin-left: 8px; font-size: 18px; letter-spacing: 0; transition: color 200ms ease; }
     .timer .overrun { color: var(--warn); font-weight: 500; margin-left: 8px; font-size: 18px; letter-spacing: 0; }
@@ -2274,6 +2275,11 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
     .clock[data-peitho-state="running"][data-peitho-urgency="urgent"] .timer .planned { color: var(--warn); }
     .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer,
     .clock[data-peitho-state][data-peitho-urgency="overrun"] .timer .planned { color: var(--warn); }
+    .rehearsal-audio { max-width: 28ch; overflow-wrap: anywhere; color: var(--fg-mute); font-size: 10px; line-height: 1.25; text-align: right; white-space: normal; }
+    .rehearsal-audio[data-peitho-audio-state="recording"] { color: var(--warn); }
+    .rehearsal-audio[data-peitho-audio-state="paused"] { color: var(--pause); }
+    .rehearsal-audio[data-peitho-audio-state="error"] { color: var(--warn); }
+    .clock-row[data-peitho-rehearsal-audio="true"] .state-pill { grid-column: 3; }
     .state-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-mute); transition: color 150ms ease, border-color 150ms ease; white-space: nowrap; }
     .state-dot { width: 6px; height: 6px; background: var(--fg-dim); border-radius: 50%; transition: background 150ms ease, box-shadow 150ms ease; }
     .state-pill[data-peitho-state="running"] { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line)); }
@@ -2379,10 +2385,16 @@ pub fn render_presenter_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Str
       const root = document.getElementById('peitho-presenter-root');
       try {
         const notes = await fetchOk('notes.json').then((response) => response.json());
+        const config = await fetchOk('present.json').then((response) => response.json());
+        const rehearsalAudio = config?.rehearsalAudio === true;
+        if (rehearsalAudio && typeof peitho.installRehearsalAudio !== 'function') {
+          throw new Error("shell bundle does not provide installRehearsalAudio; run npm run build or provide a current --shell bundle");
+        }
         peitho.installCloseOnEscape(window);
         await peitho.mountPresenterView({
           root,
           notes,
+          rehearsalAudio,
           syncChannelFactory: peitho.serverSyncChannelFactory()
         });
         if (typeof peitho.installSwapShortcut === 'function') {
@@ -5158,6 +5170,23 @@ Paragraph after heading.
     }
 
     #[test]
+    fn presenter_audio_css_preserves_the_plain_clock_grid_and_wraps_errors() {
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains(".clock-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 12px 16px 6px; }"));
+        assert!(html.contains(".clock-row[data-peitho-rehearsal-audio=\"true\"] { grid-template-columns: minmax(0, 1fr) auto auto; }"));
+        assert!(html.contains(
+            ".clock-row[data-peitho-rehearsal-audio=\"true\"] .state-pill { grid-column: 3; }"
+        ));
+        assert!(html.contains(".rehearsal-audio { max-width: 28ch; overflow-wrap: anywhere;"));
+        let state_pill_rule = html
+            .lines()
+            .find(|line| line.trim_start().starts_with(".state-pill {"))
+            .expect("presenter CSS must include the base state-pill rule");
+        assert!(!state_pill_rule.contains("grid-column"));
+    }
+
+    #[test]
     fn presenter_index_uses_deck_aspect_ratio_css_variable() {
         let html = render_presenter_index(AspectRatio::Ratio4To3, &DeckLang::default());
 
@@ -5331,6 +5360,19 @@ Paragraph after heading.
 
         assert!(html.contains("serverSyncChannelFactory"));
         assert!(html.contains("syncChannelFactory: peitho.serverSyncChannelFactory()"));
+    }
+
+    #[test]
+    fn presenter_index_carries_explicit_audio_intent_with_stale_shell_detection() {
+        let html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("fetchOk('present.json')"));
+        assert!(html.contains("config?.rehearsalAudio === true"));
+        assert!(html.contains("rehearsalAudio,"));
+        assert!(html.contains("typeof peitho.installRehearsalAudio !== 'function'"));
+        assert!(html.contains(
+            "shell bundle does not provide installRehearsalAudio; run npm run build or provide a current --shell bundle"
+        ));
     }
 
     #[test]

@@ -300,18 +300,25 @@ function diffSeconds(actual, planned) {
 function installRehearsalBridge(win, bus = win, fetcher = win.fetch.bind(win)) {
   function onReport(event) {
     const detail = event.detail;
-    void fetcher("/rehearsal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      ...detail.final ? { keepalive: true } : {},
-      body: JSON.stringify(detail.snapshot)
-    }).then((response) => {
+    let request;
+    try {
+      request = fetcher("/rehearsal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        ...detail.keepalive ? { keepalive: true } : {},
+        body: JSON.stringify(detail.snapshot)
+      });
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    const completion = request.then((response) => {
       if (!response.ok) {
         console.error(`failed to POST rehearsal snapshot: ${response.status}`);
       }
     }).catch((error) => {
       console.error("failed to POST rehearsal snapshot", error);
     });
+    if (detail.final) detail.waitUntil?.(completion);
   }
   bus.addEventListener("peitho:rehearsalreport", onReport);
   return () => {
@@ -1490,6 +1497,420 @@ function isUnitCoordinate(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+// src/rehearsalAudio.ts
+var AUDIO_TIMESLICE_MS = 5e3;
+var AUDIO_RETRY_MS = 1e3;
+var AUDIO_UPLOAD_TIMEOUT_MS = 1e4;
+function createRehearsalAudioQueue(options = {}) {
+  const win = options.window ?? window;
+  const fetcher = options.fetcher ?? win.fetch.bind(win);
+  const onUploadError = options.onUploadError ?? (() => void 0);
+  let generation = 0;
+  let currentTake = null;
+  let nextSeq = 0;
+  let queued = [];
+  let active = null;
+  let retryTimer = null;
+  let retryBlocked = false;
+  let destroyed = false;
+  const drainWaiters = /* @__PURE__ */ new Set();
+  function settleDrainWaiters() {
+    if (!destroyed && !retryBlocked && (active !== null || queued.length > 0 || retryTimer !== null)) {
+      return;
+    }
+    for (const resolve of drainWaiters) resolve();
+    drainWaiters.clear();
+  }
+  function beginTake(take, startMs) {
+    if (destroyed) return;
+    currentTake = { id: take, startMs };
+    nextSeq = 0;
+  }
+  function enqueue(blob, keepalive) {
+    if (destroyed || currentTake === null || blob.size === 0) return;
+    queued.push({
+      take: currentTake.id,
+      seq: nextSeq,
+      startMs: currentTake.startMs,
+      blob,
+      keepalive,
+      generation
+    });
+    nextSeq += 1;
+    pump();
+  }
+  function drain() {
+    if (destroyed || retryBlocked || active === null && queued.length === 0 && retryTimer === null) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      drainWaiters.add(resolve);
+    });
+  }
+  function reset() {
+    if (destroyed) return;
+    generation += 1;
+    currentTake = null;
+    nextSeq = 0;
+    queued = [];
+    retryBlocked = false;
+    if (retryTimer !== null) {
+      win.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    onUploadError(null);
+    settleDrainWaiters();
+  }
+  function destroy() {
+    if (destroyed) return;
+    destroyed = true;
+    generation += 1;
+    currentTake = null;
+    queued = [];
+    if (retryTimer !== null) {
+      win.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    settleDrainWaiters();
+  }
+  function pump() {
+    if (destroyed || active !== null || retryTimer !== null || retryBlocked) return;
+    const item = queued[0];
+    if (item == null) {
+      settleDrainWaiters();
+      return;
+    }
+    active = item;
+    void upload(item).then((result) => {
+      if (active !== item) return;
+      active = null;
+      if (destroyed || item.generation !== generation) {
+        pump();
+        return;
+      }
+      if (result.accepted) {
+        if (queued[0] === item) queued.shift();
+        onUploadError(null);
+        pump();
+        return;
+      }
+      if (!result.retryable) {
+        retryBlocked = true;
+        onUploadError(`audio upload failed: ${result.reason}`);
+        settleDrainWaiters();
+        return;
+      }
+      onUploadError(`audio upload failed: ${result.reason} (retrying)`);
+      retryTimer = win.setTimeout(() => {
+        retryTimer = null;
+        pump();
+      }, AUDIO_RETRY_MS);
+    });
+  }
+  async function upload(item) {
+    try {
+      const response = await fetcher(
+        `/rehearsal/audio?take=${encodeURIComponent(item.take)}&seq=${item.seq}&startMs=${item.startMs}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "audio/webm" },
+          body: item.blob,
+          ...item.keepalive ? { keepalive: true } : { signal: AbortSignal.timeout(AUDIO_UPLOAD_TIMEOUT_MS) }
+        }
+      );
+      if (response.ok) return { accepted: true };
+      if (response.status !== 409) {
+        return {
+          accepted: false,
+          reason: `server returned ${response.status}`,
+          retryable: !isPermanentUploadStatus(response.status)
+        };
+      }
+      const conflict = await response.json();
+      if (isPersistenceAcknowledgement(conflict, item)) return { accepted: true };
+      return { accepted: false, reason: conflictReason(conflict, item.take), retryable: true };
+    } catch (error) {
+      return { accepted: false, reason: errorReason(error), retryable: true };
+    }
+  }
+  return { beginTake, enqueue, drain, reset, destroy };
+}
+function isPermanentUploadStatus(status) {
+  return status === 400 || status === 404 || status === 413;
+}
+function installRehearsalAudio(options) {
+  const win = options.window ?? window;
+  const bus = options.bus ?? win;
+  const log = options.console ?? console;
+  const getUserMedia = options.getUserMedia ?? ((constraints) => win.navigator.mediaDevices.getUserMedia(constraints));
+  const createMediaRecorder = options.createMediaRecorder ?? ((stream2, recorderOptions) => new MediaRecorder(stream2, recorderOptions));
+  const takeIdFactory = options.takeIdFactory ?? (() => win.crypto.randomUUID());
+  let desiredState = options.shell.startedAt() == null ? "inactive" : options.shell.isPaused() ? "paused" : "recording";
+  let recorder = null;
+  let stream = null;
+  let waitingForStop = false;
+  let stopMode = null;
+  let uploadError = null;
+  let mediaState = "pending";
+  let mediaMessage = "\u2026 REC";
+  let closing = false;
+  let destroyed = false;
+  let closeKeepalive = false;
+  let closePromise = null;
+  let resolveCloseStop = null;
+  const queue = createRehearsalAudioQueue({
+    fetcher: options.fetcher,
+    window: win,
+    onUploadError(message) {
+      uploadError = message;
+      renderIndicator();
+    }
+  });
+  function renderIndicator() {
+    const unavailable = mediaState === "unavailable";
+    options.indicator.textContent = unavailable || uploadError == null ? mediaMessage : `${mediaMessage} \u2014 ${uploadError}`;
+    options.indicator.dataset.peithoAudioState = unavailable ? "error" : uploadError == null ? mediaState : "error";
+  }
+  function setMediaState(state, message) {
+    mediaState = state;
+    mediaMessage = message;
+    renderIndicator();
+  }
+  function setUnavailable(error) {
+    mediaState = "unavailable";
+    mediaMessage = `mic unavailable: ${errorReason(error)}`;
+    renderIndicator();
+  }
+  function stopTracks() {
+    const currentStream = stream;
+    if (currentStream == null) return;
+    stream = null;
+    for (const track of currentStream.getTracks()) track.stop();
+  }
+  function recorderFailure(error) {
+    setUnavailable(error);
+    desiredState = "inactive";
+    stopTracks();
+  }
+  function startTake() {
+    const current = recorder;
+    if (current == null || current.state !== "inactive") return;
+    try {
+      const take = takeIdFactory();
+      current.start(AUDIO_TIMESLICE_MS);
+      queue.beginTake(take, roundNonNegativeMs(options.shell.elapsedMs()));
+      if (desiredState === "paused") {
+        current.pause();
+        setMediaState("paused", "\u2759\u2759 REC");
+      } else {
+        setMediaState("recording", "\u25CF REC");
+      }
+    } catch (error) {
+      recorderFailure(error);
+    }
+  }
+  function requestStop(mode) {
+    const current = recorder;
+    if (current == null || current.state === "inactive") {
+      if (mode === "close" || mode === "destroy") stopTracks();
+      return;
+    }
+    waitingForStop = true;
+    stopMode = mode;
+    try {
+      current.stop();
+    } catch (error) {
+      waitingForStop = false;
+      stopMode = null;
+      recorderFailure(error);
+    }
+  }
+  function reconcile() {
+    const current = recorder;
+    if (current == null || destroyed || closing || waitingForStop || mediaState === "unavailable") {
+      return;
+    }
+    if (desiredState === "inactive") {
+      if (current.state === "inactive") {
+        setMediaState("ready", "\u25CB REC");
+      } else {
+        requestStop("reset");
+      }
+      return;
+    }
+    if (current.state === "inactive") {
+      startTake();
+      return;
+    }
+    try {
+      if (desiredState === "paused" && current.state === "recording") {
+        current.pause();
+        setMediaState("paused", "\u2759\u2759 REC");
+      } else if (desiredState === "recording" && current.state === "paused") {
+        current.resume();
+        setMediaState("recording", "\u25CF REC");
+      } else if (current.state === "paused") {
+        setMediaState("paused", "\u2759\u2759 REC");
+      } else {
+        setMediaState("recording", "\u25CF REC");
+      }
+    } catch (error) {
+      recorderFailure(error);
+    }
+  }
+  function reset() {
+    desiredState = "inactive";
+    queue.reset();
+    reconcile();
+  }
+  function reconcileWithShell() {
+    if (options.shell.startedAt() == null) {
+      reset();
+      return;
+    }
+    desiredState = options.shell.isPaused() ? "paused" : "recording";
+    reconcile();
+  }
+  function onTimerControl(event) {
+    const action = event.detail?.action;
+    if (action !== "start" && action !== "pause" && action !== "resume" && action !== "reset") {
+      return;
+    }
+    reconcileWithShell();
+  }
+  function onTimerAdopt(event) {
+    const detail = event.detail;
+    if (!isValidTimerAdoptDetail(detail)) {
+      log.error("Invalid peitho:timeradopt event for rehearsal audio");
+      return;
+    }
+    reconcileWithShell();
+  }
+  function stopForClose() {
+    const current = recorder;
+    if (current == null || current.state === "inactive") {
+      stopTracks();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      resolveCloseStop = resolve;
+      requestStop("close");
+      if (!waitingForStop) {
+        resolveCloseStop = null;
+        resolve();
+      }
+    });
+  }
+  function close(keepalive) {
+    if (closePromise !== null) return closePromise;
+    if (destroyed) return Promise.resolve();
+    closing = true;
+    closeKeepalive = keepalive;
+    desiredState = "inactive";
+    closePromise = stopForClose().then(() => queue.drain());
+    return closePromise;
+  }
+  function onBeforeClose(event) {
+    const detail = event.detail;
+    if (typeof detail?.waitUntil !== "function") return;
+    detail.waitUntil(close(false));
+  }
+  function onPageHide() {
+    void close(true);
+  }
+  function onDataAvailable(event) {
+    const data = event.data;
+    if (destroyed || stopMode === "reset" || stopMode === "destroy") return;
+    queue.enqueue(data, stopMode === "close" && closeKeepalive);
+  }
+  function onStop() {
+    const completedMode = stopMode;
+    stopMode = null;
+    waitingForStop = false;
+    if (completedMode === "close" || completedMode === "destroy") {
+      stopTracks();
+      if (completedMode === "close") {
+        const resolve = resolveCloseStop;
+        resolveCloseStop = null;
+        resolve?.();
+      }
+      return;
+    }
+    if (mediaState === "unavailable") {
+      stopTracks();
+      return;
+    }
+    if (!destroyed) {
+      setMediaState("ready", "\u25CB REC");
+      reconcile();
+    }
+  }
+  function onRecorderError(event) {
+    const error = event.error ?? "MediaRecorder error";
+    recorderFailure(error);
+  }
+  renderIndicator();
+  bus.addEventListener("peitho:timercontrol", onTimerControl);
+  bus.addEventListener("peitho:timeradopt", onTimerAdopt);
+  bus.addEventListener("peitho:beforeclose", onBeforeClose);
+  win.addEventListener("pagehide", onPageHide);
+  void getUserMedia({ audio: true }).then((mediaStream) => {
+    if (destroyed || closing) {
+      for (const track of mediaStream.getTracks()) track.stop();
+      return;
+    }
+    stream = mediaStream;
+    try {
+      recorder = createMediaRecorder(mediaStream, { mimeType: "audio/webm" });
+    } catch (error) {
+      setUnavailable(error);
+      stopTracks();
+      return;
+    }
+    recorder.addEventListener("dataavailable", onDataAvailable);
+    recorder.addEventListener("stop", onStop);
+    recorder.addEventListener("error", onRecorderError);
+    setMediaState("ready", "\u25CB REC");
+    reconcile();
+  }).catch((error) => {
+    if (!destroyed && !closing) setUnavailable(error);
+  });
+  return () => {
+    if (destroyed) return;
+    destroyed = true;
+    bus.removeEventListener("peitho:timercontrol", onTimerControl);
+    bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
+    bus.removeEventListener("peitho:beforeclose", onBeforeClose);
+    win.removeEventListener("pagehide", onPageHide);
+    queue.destroy();
+    const resolve = resolveCloseStop;
+    resolveCloseStop = null;
+    resolve?.();
+    requestStop("destroy");
+    recorder?.removeEventListener("dataavailable", onDataAvailable);
+    recorder?.removeEventListener("stop", onStop);
+    recorder?.removeEventListener("error", onRecorderError);
+    stopTracks();
+  };
+}
+function isPersistenceAcknowledgement(conflict, item) {
+  if (typeof conflict !== "object" || conflict === null) return false;
+  const candidate = conflict;
+  return candidate.take === item.take && candidate.nextSeq === item.seq + 1;
+}
+function conflictReason(conflict, requestTake) {
+  if (typeof conflict !== "object" || conflict === null) {
+    return "server returned an invalid response";
+  }
+  const candidate = conflict;
+  if (candidate.take === null) return "rehearsal session is not ready";
+  if (typeof candidate.take !== "string") return "server returned an invalid response";
+  return candidate.take === requestTake ? "recording out of order (restart the rehearsal)" : "another presenter window took over the recording";
+}
+function errorReason(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // src/rehearsalReporter.ts
 function installRehearsalReporter(options) {
   if (options.sections.length === 0) return () => void 0;
@@ -1514,13 +1935,18 @@ function installRehearsalReporter(options) {
       timeline: options.timeline.entries()
     };
   }
-  function report(final) {
+  function report(final, keepalive = false, waitUntil) {
     markStarted();
     if (!hasStarted) return;
     options.actuals.flush();
     bus.dispatchEvent(
       new CustomEvent("peitho:rehearsalreport", {
-        detail: { snapshot: snapshot(), final }
+        detail: {
+          snapshot: snapshot(),
+          final,
+          ...keepalive ? { keepalive: true } : {},
+          ...waitUntil ? { waitUntil } : {}
+        }
       })
     );
   }
@@ -1570,8 +1996,13 @@ function installRehearsalReporter(options) {
       hasReportedRunStart = false;
     }
   }
-  function onCloseRequest() {
-    report(true);
+  function onBeforeClose(event) {
+    const detail = event.detail;
+    if (typeof detail?.waitUntil !== "function") return;
+    report(true, false, detail.waitUntil);
+  }
+  function onPageHide() {
+    report(true, true);
   }
   function tick() {
     markStarted();
@@ -1581,16 +2012,16 @@ function installRehearsalReporter(options) {
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:timercontrol", onTimerControl);
   bus.addEventListener("peitho:timeradopt", onTimerAdopt);
-  bus.addEventListener("peitho:closerequest", onCloseRequest);
-  win.addEventListener("pagehide", onCloseRequest);
+  bus.addEventListener("peitho:beforeclose", onBeforeClose);
+  win.addEventListener("pagehide", onPageHide);
   const interval = win.setInterval(tick, 5e3);
   return () => {
     win.clearInterval(interval);
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:timercontrol", onTimerControl);
     bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
-    bus.removeEventListener("peitho:closerequest", onCloseRequest);
-    win.removeEventListener("pagehide", onCloseRequest);
+    bus.removeEventListener("peitho:beforeclose", onBeforeClose);
+    win.removeEventListener("pagehide", onPageHide);
   };
 }
 
@@ -2049,6 +2480,7 @@ function installSwapShortcut(win = window, bus = win) {
 }
 
 // src/sync.ts
+var BEFORE_CLOSE_TIMEOUT_MS = 2e3;
 function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
@@ -2325,6 +2757,9 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   const pathname = hooks.pathname ?? (() => win.location.pathname);
   const navigate = hooks.navigate ?? ((url) => win.location.replace(url));
   let synced = false;
+  let closeStarted = false;
+  let closeTimeout = null;
+  let destroyed = false;
   const navigationStateMessage = (detail) => {
     if (!isRecord2(detail) || !isFiniteNumber(detail.index) || !isFiniteNumber(detail.step)) {
       return null;
@@ -2361,6 +2796,39 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       timer: { running: detail.running, elapsedMs: Math.round(detail.elapsedMs) }
     });
   };
+  const finishClose = () => {
+    if (destroyed) return;
+    if (closeTimeout !== null) {
+      win.clearTimeout(closeTimeout);
+      closeTimeout = null;
+    }
+    closeWindow();
+  };
+  const beginClose = () => {
+    if (closeStarted || destroyed) return;
+    closeStarted = true;
+    const pending = [];
+    let accepting = true;
+    const detail = {
+      waitUntil(promise) {
+        if (!accepting) {
+          console.error("peitho:beforeclose waitUntil() called after event dispatch");
+          return;
+        }
+        pending.push(promise);
+      }
+    };
+    bus.dispatchEvent(new CustomEvent("peitho:beforeclose", { detail }));
+    accepting = false;
+    if (pending.length === 0) {
+      finishClose();
+      return;
+    }
+    const timeout = new Promise((resolve) => {
+      closeTimeout = win.setTimeout(resolve, BEFORE_CLOSE_TIMEOUT_MS);
+    });
+    void Promise.race([Promise.allSettled(pending), timeout]).then(finishClose);
+  };
   channel.onmessage = (event) => {
     const data = event.data;
     if (isSyncedSyncMessage(data)) {
@@ -2368,7 +2836,7 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       return;
     }
     if (isCloseSyncMessage(data)) {
-      closeWindow();
+      beginClose();
       return;
     }
     if (isIndexSyncMessage(data)) {
@@ -2413,6 +2881,11 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
   bus.addEventListener("peitho:swaprequest", onSwapRequest);
   bus.addEventListener("peitho:timerchange", onTimerChange);
   return () => {
+    destroyed = true;
+    if (closeTimeout !== null) {
+      win.clearTimeout(closeTimeout);
+      closeTimeout = null;
+    }
     bus.removeEventListener("peitho:slidechange", onNavigationStateChange);
     bus.removeEventListener("peitho:stepchange", onNavigationStateChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);
@@ -2595,6 +3068,7 @@ async function mountPresenterView(options) {
   const statePill = options.root.querySelector(
     '[data-peitho-presenter="state-pill"]'
   );
+  const clockRow = options.root.querySelector(".clock-row");
   const stateLabel = options.root.querySelector(
     '[data-peitho-presenter="state-label"]'
   );
@@ -2702,6 +3176,29 @@ async function mountPresenterView(options) {
     window: win
   });
   const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
+  let rehearsalAudioCleanup = () => void 0;
+  if (options.rehearsalAudio) {
+    const indicator = doc.createElement("span");
+    indicator.className = "rehearsal-audio mono";
+    indicator.dataset.peithoPresenter = "rehearsal-audio";
+    indicator.setAttribute("role", "status");
+    indicator.setAttribute("aria-live", "polite");
+    clockRow.dataset.peithoRehearsalAudio = "true";
+    statePill.before(indicator);
+    const cleanupAudio = installRehearsalAudio({
+      indicator,
+      shell: mainShell,
+      bus,
+      window: win,
+      fetcher,
+      console: log
+    });
+    rehearsalAudioCleanup = () => {
+      cleanupAudio();
+      delete clockRow.dataset.peithoRehearsalAudio;
+      indicator.remove();
+    };
+  }
   const rippleTimeouts = /* @__PURE__ */ new Set();
   function setTimerStateChrome(state) {
     clockRoot.dataset.peithoState = state;
@@ -2837,6 +3334,7 @@ async function mountPresenterView(options) {
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      rehearsalAudioCleanup();
       rehearsalBridgeCleanup();
       rehearsalReporterCleanup();
       agendaCleanup();
@@ -2866,6 +3364,7 @@ export {
   installPointerOverlay,
   installPresentationControls,
   installPresenterKeyboard,
+  installRehearsalAudio,
   installRehearsalBridge,
   installRehearsalReporter,
   installSectionActuals,

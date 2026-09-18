@@ -7,6 +7,7 @@ import {
 } from "../src/index";
 import type { PresentShell } from "../src/index";
 import {
+  BEFORE_CLOSE_TIMEOUT_MS,
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
@@ -15,6 +16,7 @@ import {
   isSwappedSyncMessage,
   isTimerReplaySyncMessage,
   isTimerSyncMessage,
+  type BeforeCloseDetail,
   type SyncChannel
 } from "../src/sync";
 
@@ -562,6 +564,7 @@ beforeEach(() => {
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (shells.length > 0) shells.pop()?.destroy();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -1086,7 +1089,7 @@ it("does not post swap state on unknown routes", () => {
   expect(error).toHaveBeenCalledWith("peitho: swap unavailable on this route");
 });
 
-it("closes the window when a remote close sync message arrives", () => {
+it("closes the window immediately when a remote close has no registrants", () => {
   const channel = mockChannel();
   const closeWindow = vi.fn();
   const cleanup = installSyncBridge(window, () => channel, window, { closeWindow });
@@ -1094,6 +1097,97 @@ it("closes the window when a remote close sync message arrives", () => {
 
   channel.onmessage?.({ data: { close: true } });
 
+  expect(closeWindow).toHaveBeenCalledTimes(1);
+});
+
+it("reports and ignores beforeclose waitUntil calls made after dispatch", async () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const closeWindow = vi.fn();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  bus.addEventListener("peitho:beforeclose", (event) => {
+    const detail = (event as CustomEvent<BeforeCloseDetail>).detail;
+    void Promise.resolve().then(() => {
+      detail.waitUntil(new Promise<void>(() => undefined));
+    });
+  });
+  const cleanup = installSyncBridge(window, () => channel, bus, { closeWindow });
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { close: true } });
+  expect(closeWindow).toHaveBeenCalledTimes(1);
+
+  await flushPromises();
+  expect(error).toHaveBeenCalledWith(
+    "peitho:beforeclose waitUntil() called after event dispatch"
+  );
+});
+
+it("awaits beforeclose registrants before closing the window", async () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const closeWindow = vi.fn();
+  let resolveFlush!: () => void;
+  const flush = new Promise<void>((resolve) => {
+    resolveFlush = resolve;
+  });
+  bus.addEventListener("peitho:beforeclose", (event) => {
+    (event as CustomEvent<BeforeCloseDetail>).detail.waitUntil(flush);
+  });
+  const cleanup = installSyncBridge(window, () => channel, bus, { closeWindow });
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { close: true } });
+  expect(closeWindow).not.toHaveBeenCalled();
+
+  resolveFlush();
+  await flushPromises();
+  expect(closeWindow).toHaveBeenCalledTimes(1);
+});
+
+it("caps beforeclose flushing at the hard timeout", async () => {
+  vi.useFakeTimers();
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const closeWindow = vi.fn();
+  bus.addEventListener("peitho:beforeclose", (event) => {
+    (event as CustomEvent<BeforeCloseDetail>).detail.waitUntil(
+      new Promise<void>(() => undefined)
+    );
+  });
+  const cleanup = installSyncBridge(window, () => channel, bus, { closeWindow });
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { close: true } });
+  await vi.advanceTimersByTimeAsync(BEFORE_CLOSE_TIMEOUT_MS - 1);
+  expect(closeWindow).not.toHaveBeenCalled();
+
+  await vi.advanceTimersByTimeAsync(1);
+  expect(closeWindow).toHaveBeenCalledTimes(1);
+});
+
+it("coalesces a second close message while beforeclose is flushing", async () => {
+  const channel = mockChannel();
+  const bus = new EventTarget();
+  const closeWindow = vi.fn();
+  let resolveFlush!: () => void;
+  const flush = new Promise<void>((resolve) => {
+    resolveFlush = resolve;
+  });
+  const beforeClose = vi.fn((event: Event) => {
+    (event as CustomEvent<BeforeCloseDetail>).detail.waitUntil(flush);
+  });
+  bus.addEventListener("peitho:beforeclose", beforeClose);
+  const cleanup = installSyncBridge(window, () => channel, bus, { closeWindow });
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { close: true } });
+  channel.onmessage?.({ data: { close: true } });
+  expect(beforeClose).toHaveBeenCalledTimes(1);
+  expect(closeWindow).not.toHaveBeenCalled();
+
+  resolveFlush();
+  await flushPromises();
   expect(closeWindow).toHaveBeenCalledTimes(1);
 });
 

@@ -4,6 +4,7 @@ import {
   type RehearsalReportDetail
 } from "../src/rehearsalReporter";
 import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
+import type { BeforeCloseDetail } from "../src/sync";
 
 const cleanups: Array<() => void> = [];
 const emptyTimeline = { entries: () => [] };
@@ -398,9 +399,10 @@ it("reports an adopted reset after a started session zeroes actuals", () => {
   ]);
 });
 
-it("reports on close requests so the final section tail is persisted", () => {
+it("reports through beforeclose and forwards its waitUntil registration", () => {
   const bus = new EventTarget();
   const reports = collectReportDetails(bus);
+  const waitUntil = vi.fn();
   const cleanup = installRehearsalReporter({
     actuals: { actualMs: () => [2_500], flush: vi.fn() },
     timeline: emptyTimeline,
@@ -415,19 +417,23 @@ it("reports on close requests so the final section tail is persisted", () => {
   });
   cleanups.push(cleanup);
 
-  bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
+  bus.dispatchEvent(
+    new CustomEvent<BeforeCloseDetail>("peitho:beforeclose", {
+      detail: { waitUntil }
+    })
+  );
 
-  expect(reports).toEqual([
-    {
-      final: true,
-      snapshot: {
-        version: 2,
-        elapsedMs: 2_500,
-        sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_500 }],
-        timeline: []
-      }
-    }
-  ]);
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toEqual({
+    final: true,
+    snapshot: {
+      version: 2,
+      elapsedMs: 2_500,
+      sections: [{ name: "Setup", plannedDurationMs: 60_000, actualMs: 2_500 }],
+      timeline: []
+    },
+    waitUntil
+  });
 });
 
 it("reports on pagehide and removes the listener during cleanup", () => {
@@ -455,6 +461,7 @@ it("reports on pagehide and removes the listener during cleanup", () => {
   expect(reports).toEqual([
     {
       final: true,
+      keepalive: true,
       snapshot: {
         version: 2,
         elapsedMs: 3_900,

@@ -694,6 +694,7 @@ struct PresentOptions {
     presenter_windowed: bool,
     host: Option<Option<IpAddr>>,
     rehearsal: bool,
+    audio: bool,
 }
 
 struct RehearsalOptions {
@@ -817,6 +818,13 @@ enum Command {
         rehearsal: bool,
         #[arg(
             long,
+            requires = "rehearsal",
+            conflicts_with = "no_presenter",
+            help = "Record timer-aligned microphone audio from the presenter view to .peitho/rehearsals/ (requires --rehearsal)"
+        )]
+        audio: bool,
+        #[arg(
+            long,
             value_name = "IP",
             num_args = 0..=1,
             help = "Expose /remote on an optional IP; bare --host picks the best address automatically (VPN, e.g. Tailscale, preferred)"
@@ -889,14 +897,16 @@ const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/di
 const BUILTIN_PREVIEW_JS: &str = include_str!("../../../packages/peitho-present/dist/preview.js");
 const BUILTIN_REMOTE_JS: &str = include_str!("../../../packages/peitho-present/dist/remote.js");
 
-const REMOTE_DEFAULT_PORT: u16 = 6173;
+// Keeps remote URLs and the microphone-permission origin stable across runs.
+const STABLE_PRESENT_PORT: u16 = 6173;
 
 fn present_port_help() -> String {
     format!(
-        "Port for the present server (default: random; with --host and no --port: {}; pass 0 for an OS-assigned random port)",
-        REMOTE_DEFAULT_PORT
+        "Port for the present server (default: random; with --host or --audio and no --port: {}; pass 0 for an OS-assigned random port)",
+        STABLE_PRESENT_PORT
     )
 }
+
 const PRESENT_CACHE: &str = ".peitho/present-cache";
 const PREVIEW_CACHE: &str = ".peitho/preview-cache";
 const REHEARSALS_DIR: &str = ".peitho/rehearsals";
@@ -987,6 +997,7 @@ fn run() -> miette::Result<()> {
             no_presenter,
             presenter_windowed,
             rehearsal,
+            audio,
             host,
         } => present(PresentOptions {
             input,
@@ -997,6 +1008,7 @@ fn run() -> miette::Result<()> {
             no_presenter,
             presenter_windowed,
             rehearsal,
+            audio,
             host,
         }),
         Command::Rehearsal { all } => {
@@ -3630,14 +3642,49 @@ fn read_rehearsal_record(path: &Path) -> miette::Result<peitho_core::RehearsalRe
             path.display()
         )
     })?;
-    serde_json::from_str(&json).map_err(|err| {
+    let record: peitho_core::RehearsalRecord = serde_json::from_str(&json).map_err(|err| {
         let help = rehearsal_record_recovery_help(path);
         miette::miette!(
             help = help,
             "failed to parse rehearsal record {}\ncaused by: {err}",
             path.display()
         )
-    })
+    })?;
+    if let peitho_core::RehearsalRecord::V2(record) = &record {
+        if let Some(audio) = record.audio() {
+            let expected = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(server::parse_rehearsal_filename)
+                .map(|identity| identity.webm_name());
+            if expected.as_deref() != Some(audio.file()) {
+                let help = rehearsal_record_recovery_help(path);
+                return Err(miette::miette!(
+                    help = help,
+                    "rehearsal record {} has audio filename {:?}, which does not match its session filename",
+                    path.display(),
+                    audio.file()
+                ));
+            }
+        }
+    }
+    Ok(record)
+}
+
+fn rehearsal_audio_path(
+    record_path: &Path,
+    record: &peitho_core::RehearsalRecord,
+) -> Option<PathBuf> {
+    let peitho_core::RehearsalRecord::V2(record) = record else {
+        return None;
+    };
+    let audio = record.audio()?;
+    Some(
+        record_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(audio.file()),
+    )
 }
 
 fn rehearsal_record_recovery_help(path: &Path) -> String {
@@ -3686,7 +3733,7 @@ fn run_rehearsal(
         if index > 0 {
             writeln!(stdout).into_diagnostic()?;
         }
-        write_rehearsal_record_summary(stdout, path, record)?;
+        write_rehearsal_record_summary(stdout, path, record, style)?;
     }
     Ok(())
 }
@@ -3695,7 +3742,9 @@ fn write_rehearsal_record_summary(
     stdout: &mut dyn Write,
     path: &Path,
     record: &peitho_core::RehearsalRecord,
+    style: LabelStyle,
 ) -> miette::Result<()> {
+    let audio_path = rehearsal_audio_path(path, record);
     let stem = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -3738,6 +3787,27 @@ fn write_rehearsal_record_summary(
 
     if let peitho_core::RehearsalRecord::V2(record) = record {
         write_rehearsal_slide_summary(stdout, record)?;
+        if let Some(audio_path) = audio_path {
+            writeln!(stdout, "  audio   {}", audio_path.display()).into_diagnostic()?;
+            let audio = record.audio().expect("audio path requires audio metadata");
+            if round_non_negative_millis_to_seconds(audio.start_ms()) > 0 {
+                writeln!(
+                    stdout,
+                    "  offset  {}",
+                    format_minute_seconds(audio.start_ms())
+                )
+                .into_diagnostic()?;
+            }
+            if !audio_path.is_file() {
+                writeln!(
+                    stdout,
+                    "{}audio file is missing: {}",
+                    style.note(),
+                    audio_path.display()
+                )
+                .into_diagnostic()?;
+            }
+        }
     }
     Ok(())
 }
@@ -3746,8 +3816,18 @@ struct RehearsalSlideTotal {
     index: u32,
     key: String,
     first_at_ms: u64,
+    first_visit_end_ms: u64,
     visits: usize,
     total_ms: u64,
+}
+
+struct RehearsalSlideRow<'a> {
+    slide: &'a str,
+    key: &'a str,
+    entered: &'a str,
+    seek: Option<&'a str>,
+    visits: &'a str,
+    total: &'a str,
 }
 
 fn write_rehearsal_slide_summary(
@@ -3767,56 +3847,109 @@ fn write_rehearsal_slide_summary(
         .chain(std::iter::once("key".len()))
         .max()
         .unwrap_or("key".len());
-    let table_width = 2 + 5 + 3 + key_width + 3 + 7 + 3 + 6 + 3 + 5;
+    let seek_start_ms = record
+        .audio()
+        .map(peitho_core::RehearsalAudio::start_ms)
+        .filter(|start_ms| round_non_negative_millis_to_seconds(*start_ms) > 0);
+    let seek_width = seek_start_ms.map_or(0, |_| 3 + 7);
+    let table_width = 2 + 5 + 3 + key_width + 3 + 7 + seek_width + 3 + 6 + 3 + 5;
     write_rehearsal_slide_row(
-        stdout, key_width, "slide", "key", "entered", "visits", "total",
+        stdout,
+        key_width,
+        RehearsalSlideRow {
+            slide: "slide",
+            key: "key",
+            entered: "entered",
+            seek: seek_start_ms.map(|_| "seek"),
+            visits: "visits",
+            total: "total",
+        },
     )?;
 
     let leading_ms = record.timeline()[0].at_ms();
     if leading_ms > 0 {
-        write_rehearsal_slide_total_row(stdout, table_width, "(before first entry)", leading_ms)?;
+        write_rehearsal_slide_total_row(
+            stdout,
+            table_width,
+            "(before first entry)",
+            seek_start_ms.map(|_| "-"),
+            leading_ms,
+        )?;
     }
     for total in &totals {
         let slide = format!("#{}", u64::from(total.index) + 1);
+        let seek = seek_start_ms.map(|start_ms| {
+            if total.first_visit_end_ms <= start_ms {
+                "-".to_owned()
+            } else {
+                format_minute_seconds(total.first_at_ms.saturating_sub(start_ms))
+            }
+        });
         write_rehearsal_slide_row(
             stdout,
             key_width,
-            &slide,
-            &total.key,
-            &format_minute_seconds(total.first_at_ms),
-            &total.visits.to_string(),
-            &format_minute_seconds(total.total_ms),
+            RehearsalSlideRow {
+                slide: &slide,
+                key: &total.key,
+                entered: &format_minute_seconds(total.first_at_ms),
+                seek: seek.as_deref(),
+                visits: &total.visits.to_string(),
+                total: &format_minute_seconds(total.total_ms),
+            },
         )?;
     }
     let displayed_total_ms = leading_ms + totals.iter().map(|total| total.total_ms).sum::<u64>();
     debug_assert_eq!(displayed_total_ms, record.elapsed_ms());
-    write_rehearsal_slide_total_row(stdout, table_width, "total", displayed_total_ms)?;
+    write_rehearsal_slide_total_row(stdout, table_width, "total", None, displayed_total_ms)?;
     Ok(())
 }
 
 fn write_rehearsal_slide_row(
     stdout: &mut dyn Write,
     key_width: usize,
-    slide: &str,
-    key: &str,
-    entered: &str,
-    visits: &str,
-    total: &str,
+    row: RehearsalSlideRow<'_>,
 ) -> miette::Result<()> {
-    writeln!(
-        stdout,
-        "  {slide:<5}   {key:<key_width$}   {entered:>7}   {visits:>6}   {total:>5}"
-    )
-    .into_diagnostic()
+    let RehearsalSlideRow {
+        slide,
+        key,
+        entered,
+        seek,
+        visits,
+        total,
+    } = row;
+    if let Some(seek) = seek {
+        writeln!(
+            stdout,
+            "  {slide:<5}   {key:<key_width$}   {entered:>7}   {seek:>7}   {visits:>6}   {total:>5}"
+        )
+        .into_diagnostic()
+    } else {
+        writeln!(
+            stdout,
+            "  {slide:<5}   {key:<key_width$}   {entered:>7}   {visits:>6}   {total:>5}"
+        )
+        .into_diagnostic()
+    }
 }
 
 fn write_rehearsal_slide_total_row(
     stdout: &mut dyn Write,
     table_width: usize,
     label: &str,
+    seek: Option<&str>,
     total_ms: u64,
 ) -> miette::Result<()> {
     let label = format!("  {label}");
+    if let Some(seek) = seek {
+        let label_width = table_width - 7 - 3 - 6 - 3 - 5;
+        return writeln!(
+            stdout,
+            "{label:<label_width$}{seek:>7}   {:>6}   {:>5}",
+            "",
+            format_minute_seconds(total_ms)
+        )
+        .into_diagnostic();
+    }
     let label_width = table_width - 5;
     writeln!(
         stdout,
@@ -3846,6 +3979,7 @@ fn rehearsal_slide_totals(record: &peitho_core::RehearsalRecordV2) -> Vec<Rehear
                 index: entry.index(),
                 key: entry.key().as_str().to_owned(),
                 first_at_ms: entry.at_ms(),
+                first_visit_end_ms: end_ms,
                 visits: 1,
                 total_ms: duration_ms,
             });
@@ -3893,10 +4027,14 @@ fn local_recorded_minute(path: &Path, recorded_at_ms: u64) -> miette::Result<Str
 }
 
 fn format_minute_seconds(ms: u64) -> String {
-    let total_seconds = ms.saturating_add(500) / 1000;
+    let total_seconds = round_non_negative_millis_to_seconds(ms);
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes}:{seconds:02}")
+}
+
+fn round_non_negative_millis_to_seconds(ms: u64) -> u64 {
+    ms.saturating_add(500) / 1000
 }
 
 fn format_rehearsal_delta(actual_ms: u64, planned_ms: u64) -> String {
@@ -4094,7 +4232,7 @@ fn require_slides_dir_with_files(dist: &Path) -> miette::Result<()> {
 fn present(options: PresentOptions) -> miette::Result<()> {
     validate_present_options(&options)?;
     let resolved_host = resolve_present_host(options.host)?;
-    let resolved_port = resolve_present_port(options.port, &resolved_host);
+    let resolved_port = resolve_present_port(options.port, &resolved_host, options.audio);
 
     let cache = PathBuf::from(PRESENT_CACHE);
     if cache.exists() {
@@ -4107,7 +4245,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         validate_rehearsal_sections(&artifacts)?;
     }
     if options.no_serve {
-        emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false)?;
+        emit_present_cache(&cache, &artifacts, options.shell.as_deref(), false, false)?;
         println!("generated present cache at {}", cache.display());
         return Ok(());
     }
@@ -4117,6 +4255,11 @@ fn present(options: PresentOptions) -> miette::Result<()> {
             PathBuf::from(REHEARSALS_DIR),
             expected_rehearsal_sections(&artifacts),
             expected_rehearsal_slide_keys(&artifacts),
+            if options.audio {
+                server::AudioRecording::Enabled
+            } else {
+                server::AudioRecording::Disabled
+            },
         ))
     } else {
         None
@@ -4143,10 +4286,16 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     let presenter_open = browser_plan
         .as_ref()
         .is_some_and(|plan| plan.opens_presenter);
-    emit_present_cache(&cache, &artifacts, options.shell.as_deref(), presenter_open)?;
+    emit_present_cache(
+        &cache,
+        &artifacts,
+        options.shell.as_deref(),
+        presenter_open,
+        options.audio,
+    )?;
     println!("serving presentation at {url}");
     if options.rehearsal {
-        println!("recording rehearsal to {REHEARSALS_DIR}/");
+        println!("{}", rehearsal_startup_line(options.audio));
     }
     if let Some(target) =
         remote_control_target_for_resolved_host(&resolved_host, server.addr().port())
@@ -4183,6 +4332,14 @@ fn present(options: PresentOptions) -> miette::Result<()> {
         browser::quit_profile_instances();
     }
     result
+}
+
+fn rehearsal_startup_line(audio: bool) -> String {
+    if audio {
+        format!("recording rehearsal (with audio) to {REHEARSALS_DIR}/")
+    } else {
+        format!("recording rehearsal to {REHEARSALS_DIR}/")
+    }
 }
 
 fn validate_present_options(options: &PresentOptions) -> miette::Result<()> {
@@ -4249,18 +4406,22 @@ struct ResolvedPresentPort {
 enum PresentPortSource {
     Explicit,
     RandomDefault,
-    RemoteDefault,
+    StableDefault,
 }
 
-fn resolve_present_port(port: Option<u16>, host: &ResolvedPresentHost) -> ResolvedPresentPort {
+fn resolve_present_port(
+    port: Option<u16>,
+    host: &ResolvedPresentHost,
+    audio: bool,
+) -> ResolvedPresentPort {
     match port {
         Some(port) => ResolvedPresentPort {
             port,
             source: PresentPortSource::Explicit,
         },
-        None if !matches!(host, ResolvedPresentHost::None) => ResolvedPresentPort {
-            port: REMOTE_DEFAULT_PORT,
-            source: PresentPortSource::RemoteDefault,
+        None if audio || !matches!(host, ResolvedPresentHost::None) => ResolvedPresentPort {
+            port: STABLE_PRESENT_PORT,
+            source: PresentPortSource::StableDefault,
         },
         None => ResolvedPresentPort {
             port: 0,
@@ -4286,10 +4447,10 @@ fn bind_present_server(
 }
 
 fn annotate_present_bind_error(port: ResolvedPresentPort, err: miette::Report) -> miette::Report {
-    if port.source == PresentPortSource::RemoteDefault
+    if port.source == PresentPortSource::StableDefault
         && present_server_bind_error_kind(&err) == Some(io::ErrorKind::AddrInUse)
     {
-        return miette::Report::new(RemoteDefaultPortInUseError {
+        return miette::Report::new(PresentDefaultPortInUseError {
             port: port.port,
             source: err,
         });
@@ -4303,34 +4464,34 @@ fn present_server_bind_error_kind(err: &miette::Report) -> Option<io::ErrorKind>
 }
 
 #[derive(Debug)]
-struct RemoteDefaultPortInUseError {
+struct PresentDefaultPortInUseError {
     port: u16,
     source: miette::Report,
 }
 
 #[cfg(test)]
-impl RemoteDefaultPortInUseError {
+impl PresentDefaultPortInUseError {
     fn source_io_kind(&self) -> Option<io::ErrorKind> {
         present_server_bind_error_kind(&self.source)
     }
 }
 
-impl fmt::Display for RemoteDefaultPortInUseError {
+impl fmt::Display for PresentDefaultPortInUseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "failed to bind default --host port {}", self.port)
+        write!(f, "failed to bind default present port {}", self.port)
     }
 }
 
-impl Error for RemoteDefaultPortInUseError {
+impl Error for PresentDefaultPortInUseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(<miette::Report as AsRef<dyn Error>>::as_ref(&self.source))
     }
 }
 
-impl miette::Diagnostic for RemoteDefaultPortInUseError {
+impl miette::Diagnostic for PresentDefaultPortInUseError {
     fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
         Some(Box::new(
-            "another `peitho present --host` is probably running; pass `--port` to choose another port, or close the other instance",
+            "another `peitho present` is probably running; pass `--port` to choose another port, or close the other instance",
         ))
     }
 
@@ -4739,6 +4900,7 @@ fn emit_present_cache(
     artifacts: &BuildArtifacts,
     shell: Option<&Path>,
     presenter_open: bool,
+    rehearsal_audio: bool,
 ) -> miette::Result<()> {
     if let Some(shell) = shell {
         ensure_shell_bundle(shell)?;
@@ -4750,7 +4912,7 @@ fn emit_present_cache(
     fs::write(
         cache.join("present.json"),
         core(peitho_core::present_config_json(
-            &peitho_core::PresentConfig::new(presenter_open),
+            &peitho_core::PresentConfig::new(presenter_open, rehearsal_audio),
         ))?,
     )
     .into_diagnostic()?;
@@ -7931,6 +8093,30 @@ contexts:
     }
 
     #[test]
+    fn present_audio_requires_rehearsal_at_clap_boundary() {
+        let err = Cli::try_parse_from(["peitho", "present", "deck.md", "--audio"]).unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(err.to_string().contains("--rehearsal"));
+    }
+
+    #[test]
+    fn present_audio_conflicts_with_no_presenter_at_clap_boundary() {
+        let err = Cli::try_parse_from([
+            "peitho",
+            "present",
+            "deck.md",
+            "--rehearsal",
+            "--audio",
+            "--no-presenter",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert!(err.to_string().contains("--no-presenter"));
+    }
+
+    #[test]
     fn rehearsal_command_accepts_all_flag() {
         let cli = Cli::parse_from(["peitho", "rehearsal", "--all"]);
 
@@ -7955,7 +8141,7 @@ contexts:
     }
 
     #[test]
-    fn present_port_resolution_matrix_keeps_explicit_ports_and_defaults_host() {
+    fn present_port_resolution_matrix_keeps_explicit_ports_and_defaults_stable_origins() {
         let host = ResolvedPresentHost::Explicit("100.64.0.5".parse().unwrap());
         let auto_host = ResolvedPresentHost::Auto(AutoHostCandidate {
             address: "100.64.0.5".parse().unwrap(),
@@ -7963,42 +8149,49 @@ contexts:
         });
 
         assert_eq!(
-            resolve_present_port(Some(4321), &ResolvedPresentHost::None),
+            resolve_present_port(Some(4321), &ResolvedPresentHost::None, true),
             ResolvedPresentPort {
                 port: 4321,
                 source: PresentPortSource::Explicit,
             }
         );
         assert_eq!(
-            resolve_present_port(Some(6174), &host),
+            resolve_present_port(Some(6174), &host, true),
             ResolvedPresentPort {
                 port: 6174,
                 source: PresentPortSource::Explicit,
             }
         );
         assert_eq!(
-            resolve_present_port(Some(0), &host),
+            resolve_present_port(Some(0), &host, true),
             ResolvedPresentPort {
                 port: 0,
                 source: PresentPortSource::Explicit,
             }
         );
         assert_eq!(
-            resolve_present_port(None, &host),
+            resolve_present_port(None, &host, false),
             ResolvedPresentPort {
-                port: REMOTE_DEFAULT_PORT,
-                source: PresentPortSource::RemoteDefault,
+                port: STABLE_PRESENT_PORT,
+                source: PresentPortSource::StableDefault,
             }
         );
         assert_eq!(
-            resolve_present_port(None, &auto_host),
+            resolve_present_port(None, &auto_host, true),
             ResolvedPresentPort {
-                port: REMOTE_DEFAULT_PORT,
-                source: PresentPortSource::RemoteDefault,
+                port: STABLE_PRESENT_PORT,
+                source: PresentPortSource::StableDefault,
             }
         );
         assert_eq!(
-            resolve_present_port(None, &ResolvedPresentHost::None),
+            resolve_present_port(None, &ResolvedPresentHost::None, true),
+            ResolvedPresentPort {
+                port: STABLE_PRESENT_PORT,
+                source: PresentPortSource::StableDefault,
+            }
+        );
+        assert_eq!(
+            resolve_present_port(None, &ResolvedPresentHost::None, false),
             ResolvedPresentPort {
                 port: 0,
                 source: PresentPortSource::RandomDefault,
@@ -8033,6 +8226,7 @@ contexts:
             presenter_windowed: false,
             host: Some(Some("100.64.0.5".parse().unwrap())),
             rehearsal: false,
+            audio: false,
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -8056,6 +8250,7 @@ contexts:
             presenter_windowed: false,
             host: Some(Some("127.0.0.1".parse().unwrap())),
             rehearsal: false,
+            audio: false,
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -8077,6 +8272,7 @@ contexts:
             presenter_windowed: false,
             host: None,
             rehearsal: true,
+            audio: false,
         };
 
         let err = validate_present_options(&options).unwrap_err();
@@ -8128,7 +8324,7 @@ contexts:
     }
 
     #[test]
-    fn binding_busy_remote_default_port_reports_host_specific_help() {
+    fn binding_busy_stable_default_port_reports_present_specific_help() {
         let listener = match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
             Ok(listener) => listener,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -8144,7 +8340,7 @@ contexts:
             dir.path().to_path_buf(),
             ResolvedPresentPort {
                 port,
-                source: PresentPortSource::RemoteDefault,
+                source: PresentPortSource::StableDefault,
             },
             "present.html",
             &ResolvedPresentHost::None,
@@ -8152,35 +8348,34 @@ contexts:
         .err()
         .unwrap();
         let err = err
-            .downcast_ref::<RemoteDefaultPortInUseError>()
-            .expect("expected remote default port-in-use diagnostic");
+            .downcast_ref::<PresentDefaultPortInUseError>()
+            .expect("expected stable default port-in-use diagnostic");
 
         assert_eq!(err.port, port);
         assert_eq!(err.source_io_kind(), Some(std::io::ErrorKind::AddrInUse));
-        assert!(miette::Diagnostic::help(err)
-            .unwrap()
-            .to_string()
-            .contains("pass `--port`"));
+        let help = miette::Diagnostic::help(err).unwrap().to_string();
+        assert!(help.contains("another `peitho present` is probably running"));
+        assert!(help.contains("pass `--port`"));
     }
 
     #[test]
-    fn remote_default_bind_help_is_limited_to_addr_in_use() {
-        let remote_default = ResolvedPresentPort {
-            port: REMOTE_DEFAULT_PORT,
-            source: PresentPortSource::RemoteDefault,
+    fn stable_default_bind_help_is_limited_to_addr_in_use() {
+        let stable_default = ResolvedPresentPort {
+            port: STABLE_PRESENT_PORT,
+            source: PresentPortSource::StableDefault,
         };
 
         let in_use = annotate_present_bind_error(
-            remote_default,
+            stable_default,
             synthesized_bind_error(std::io::ErrorKind::AddrInUse),
         );
         let in_use = in_use
-            .downcast_ref::<RemoteDefaultPortInUseError>()
-            .expect("expected remote default port-in-use diagnostic");
+            .downcast_ref::<PresentDefaultPortInUseError>()
+            .expect("expected stable default port-in-use diagnostic");
         assert_eq!(in_use.source_io_kind(), Some(std::io::ErrorKind::AddrInUse));
 
         let addr_not_available = annotate_present_bind_error(
-            remote_default,
+            stable_default,
             synthesized_bind_error(std::io::ErrorKind::AddrNotAvailable),
         );
         let addr_not_available = addr_not_available
@@ -8418,7 +8613,7 @@ contexts:
 
     fn synthesized_bind_error(kind: std::io::ErrorKind) -> miette::Report {
         miette::Report::new(server::PresentServerBindError::new(
-            std::net::SocketAddr::from(([127, 0, 0, 1], REMOTE_DEFAULT_PORT)),
+            std::net::SocketAddr::from(([127, 0, 0, 1], STABLE_PRESENT_PORT)),
             std::io::Error::from(kind),
         ))
     }
@@ -9646,11 +9841,32 @@ exec sleep 30
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
 
         fs::create_dir_all(&fixture.options.out).unwrap();
-        emit_present_cache(&fixture.options.out, &artifacts, None, true).unwrap();
+        emit_present_cache(&fixture.options.out, &artifacts, None, true, true).unwrap();
 
         let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
         assert!(json.contains(r#""presenterOpen": true"#));
+        assert!(json.contains(r#""rehearsalAudio": true"#));
         assert_theme_fonts_written(&fixture.options.out);
+    }
+
+    #[test]
+    fn emit_present_cache_disables_audio_without_explicit_audio_intent() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        for presenter_open in [false, true] {
+            fs::create_dir_all(&fixture.options.out).unwrap();
+            emit_present_cache(
+                &fixture.options.out,
+                &artifacts,
+                None,
+                presenter_open,
+                false,
+            )
+            .unwrap();
+            let json = fs::read_to_string(fixture.options.out.join("present.json")).unwrap();
+            assert!(json.contains(r#""rehearsalAudio": false"#));
+        }
     }
 
     #[test]
@@ -9659,7 +9875,7 @@ exec sleep 30
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
 
         fs::create_dir_all(&fixture.options.out).unwrap();
-        emit_present_cache(&fixture.options.out, &artifacts, None, false).unwrap();
+        emit_present_cache(&fixture.options.out, &artifacts, None, false, false).unwrap();
 
         assert!(!fixture.options.out.join("rehearsal.json").exists());
     }
@@ -9778,8 +9994,10 @@ rehearsal-20260719-135241  (recorded 2026-07-19 13:52)
         )
         .unwrap();
 
+        let output = String::from_utf8(stdout).unwrap();
+        assert!(!output.contains("audio"));
         assert_eq!(
-            String::from_utf8(stdout).unwrap(),
+            output,
             "\
 rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
@@ -9793,6 +10011,164 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
   total                                 0:30
 "
         );
+    }
+
+    #[test]
+    fn rehearsal_command_seeks_from_a_first_visit_that_overlaps_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rehearsal-20260918-120000.json");
+        let record = v2_single_section_record_with_audio(
+            local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+            "Setup",
+            76_102,
+            &[("cover", 0, 62_056), ("problem", 1, 70_054)],
+            Some(peitho_core::RehearsalAudio::new(
+                "rehearsal-20260918-120000.webm".to_owned(),
+                62_159,
+            )),
+        );
+        write_rehearsal_record(&path, record);
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: false,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+
+        let stdout = String::from_utf8(stdout).unwrap();
+        let audio_path = dir.path().join("rehearsal-20260918-120000.webm");
+        assert_eq!(
+            stdout,
+            format!(
+                "\
+rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
+
+  section    planned   actual    delta
+  Setup         1:16     1:16    -0:00
+  total         1:16     1:16    -0:00
+
+  slide   key       entered      seek   visits   total
+  (before first entry)              -             1:02
+  #1      cover        1:02      0:00        1    0:08
+  #2      problem      1:10      0:08        1    0:06
+  total                                           1:16
+  audio   {}
+  offset  1:02
+note: audio file is missing: {}
+",
+                audio_path.display(),
+                audio_path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn rehearsal_command_has_no_seek_when_the_first_visit_ended_before_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rehearsal-20260918-120000.json");
+        let record = v2_single_section_record_with_audio(
+            local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+            "Setup",
+            76_102,
+            &[
+                ("prelude", 0, 60_000),
+                ("cover", 1, 62_056),
+                ("problem", 2, 70_054),
+                ("prelude", 0, 75_000),
+            ],
+            Some(peitho_core::RehearsalAudio::new(
+                "rehearsal-20260918-120000.webm".to_owned(),
+                62_159,
+            )),
+        );
+        write_rehearsal_record(&path, record);
+        let mut stdout = Vec::new();
+
+        run_rehearsal(
+            RehearsalOptions {
+                all: false,
+                rehearsals_dir: dir.path().to_path_buf(),
+            },
+            &mut stdout,
+            LabelStyle::PLAIN,
+        )
+        .unwrap();
+
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(stdout.contains("  #1      prelude      1:00         -        2    0:03\n"));
+        assert!(stdout.contains("  #2      cover        1:02      0:00        1    0:08\n"));
+    }
+
+    #[test]
+    fn rehearsal_command_prints_only_offsets_that_round_to_at_least_one_second() {
+        for (start_ms, expected_offset) in [(1, None), (499, None), (500, Some("0:01"))] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("rehearsal-20260918-120000.json");
+            let record = v2_single_section_record_with_audio(
+                local_recorded_at_ms(2026, 9, 18, 12, 0, 0),
+                "Setup",
+                30_000,
+                &[("intro", 0, 0)],
+                Some(peitho_core::RehearsalAudio::new(
+                    "rehearsal-20260918-120000.webm".to_owned(),
+                    start_ms,
+                )),
+            );
+            write_rehearsal_record(&path, record);
+            let mut stdout = Vec::new();
+
+            run_rehearsal(
+                RehearsalOptions {
+                    all: false,
+                    rehearsals_dir: dir.path().to_path_buf(),
+                },
+                &mut stdout,
+                LabelStyle::PLAIN,
+            )
+            .unwrap();
+
+            let stdout = String::from_utf8(stdout).unwrap();
+            match expected_offset {
+                Some(offset) => {
+                    assert!(stdout.contains(&format!("  offset  {offset}\n")));
+                    assert!(stdout.contains("   seek   "));
+                }
+                None => {
+                    assert!(!stdout.contains("  offset  "));
+                    assert!(!stdout.contains("   seek   "));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rehearsal_command_rejects_audio_that_is_not_the_selected_records_sibling() {
+        for audio in [
+            "rehearsal-20260918-120001.webm",
+            "../rehearsal-20260918-120000.webm",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("rehearsal-20260918-120000.json");
+            let json = format!(
+                r#"{{"version":2,"recordedAtMs":10,"elapsedMs":1000,"sections":[{{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}}],"timeline":[{{"key":"intro","index":0,"atMs":0}}],"audio":{{"file":"{audio}","startMs":0}}}}"#
+            );
+            fs::write(&path, json).unwrap();
+
+            let err = read_rehearsal_record(&path).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(&path.display().to_string()));
+            assert!(message.contains("does not match its session filename"));
+            assert!(err
+                .help()
+                .expect("help must be present")
+                .to_string()
+                .contains("delete or move"));
+        }
     }
 
     #[test]
@@ -9975,7 +10351,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             single_section_record((2026, 9, 18, 12, 0, 0), "Setup", 1_000),
         );
         fs::write(
-            dir.path().join("rehearsal-20260918-120001.webm"),
+            dir.path().join("rehearsal-20260918-120000.webm"),
             b"not a record",
         )
         .unwrap();
@@ -10434,7 +10810,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
         let artifacts = build_artifacts(&deck).unwrap();
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false, false).unwrap();
 
         let mut assets = fs::read_dir(cache.join("assets"))
             .unwrap()
@@ -10461,7 +10837,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
         let artifacts = build_artifacts(&deck).unwrap();
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false, false).unwrap();
 
         assert_eq!(
             fs::read(cache.join("fonts/deck-font.woff2")).unwrap(),
@@ -10476,7 +10852,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         let cache = fixture._dir.path().join("present-cache");
 
         fs::create_dir_all(&cache).unwrap();
-        emit_present_cache(&cache, &artifacts, None, false).unwrap();
+        emit_present_cache(&cache, &artifacts, None, false, false).unwrap();
 
         assert_eq!(
             fs::read(cache.join("katex-fonts/KaTeX_Main-Regular.woff2")).unwrap(),
@@ -11608,6 +11984,16 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         elapsed_ms: u64,
         timeline: &[(&str, u32, u64)],
     ) -> peitho_core::RehearsalRecord {
+        v2_single_section_record_with_audio(recorded_at_ms, name, elapsed_ms, timeline, None)
+    }
+
+    fn v2_single_section_record_with_audio(
+        recorded_at_ms: u64,
+        name: &str,
+        elapsed_ms: u64,
+        timeline: &[(&str, u32, u64)],
+        audio: Option<peitho_core::RehearsalAudio>,
+    ) -> peitho_core::RehearsalRecord {
         let snapshot: peitho_core::RehearsalSnapshot = serde_json::from_value(serde_json::json!({
             "version": 2,
             "elapsedMs": elapsed_ms,
@@ -11627,7 +12013,8 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         }))
         .unwrap();
         peitho_core::RehearsalRecord::V2(
-            peitho_core::RehearsalRecordV2::from_snapshot(recorded_at_ms, &snapshot).unwrap(),
+            peitho_core::RehearsalRecordV2::from_snapshot(recorded_at_ms, &snapshot, audio)
+                .unwrap(),
         )
     }
 

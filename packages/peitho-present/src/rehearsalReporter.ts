@@ -9,6 +9,7 @@ import {
 } from "./shell";
 import type { SectionActuals } from "./sectionActuals";
 import type { SlideTimeline } from "./slideTimeline";
+import type { BeforeCloseDetail } from "./sync";
 
 export type RehearsalReporterShell = {
   elapsedMs(): number;
@@ -19,6 +20,8 @@ export type RehearsalReporterShell = {
 export type RehearsalReportDetail = {
   snapshot: RehearsalSnapshot;
   final: boolean;
+  keepalive?: boolean;
+  waitUntil?: BeforeCloseDetail["waitUntil"];
 };
 
 export type RehearsalReporterOptions = {
@@ -57,13 +60,22 @@ export function installRehearsalReporter(options: RehearsalReporterOptions): () 
     };
   }
 
-  function report(final: boolean): void {
+  function report(
+    final: boolean,
+    keepalive = false,
+    waitUntil?: BeforeCloseDetail["waitUntil"]
+  ): void {
     markStarted();
     if (!hasStarted) return;
     options.actuals.flush();
     bus.dispatchEvent(
       new CustomEvent<RehearsalReportDetail>("peitho:rehearsalreport", {
-        detail: { snapshot: snapshot(), final }
+        detail: {
+          snapshot: snapshot(),
+          final,
+          ...(keepalive ? { keepalive: true } : {}),
+          ...(waitUntil ? { waitUntil } : {})
+        }
       })
     );
   }
@@ -117,8 +129,14 @@ export function installRehearsalReporter(options: RehearsalReporterOptions): () 
     }
   }
 
-  function onCloseRequest(): void {
-    report(true);
+  function onBeforeClose(event: Event): void {
+    const detail = (event as CustomEvent<BeforeCloseDetail>).detail;
+    if (typeof detail?.waitUntil !== "function") return;
+    report(true, false, detail.waitUntil);
+  }
+
+  function onPageHide(): void {
+    report(true, true);
   }
 
   function tick(): void {
@@ -130,8 +148,8 @@ export function installRehearsalReporter(options: RehearsalReporterOptions): () 
   bus.addEventListener("peitho:slidechange", onSlideChange);
   bus.addEventListener("peitho:timercontrol", onTimerControl);
   bus.addEventListener("peitho:timeradopt", onTimerAdopt);
-  bus.addEventListener("peitho:closerequest", onCloseRequest);
-  win.addEventListener("pagehide", onCloseRequest);
+  bus.addEventListener("peitho:beforeclose", onBeforeClose);
+  win.addEventListener("pagehide", onPageHide);
   const interval = win.setInterval(tick, 5_000);
 
   return () => {
@@ -139,7 +157,7 @@ export function installRehearsalReporter(options: RehearsalReporterOptions): () 
     bus.removeEventListener("peitho:slidechange", onSlideChange);
     bus.removeEventListener("peitho:timercontrol", onTimerControl);
     bus.removeEventListener("peitho:timeradopt", onTimerAdopt);
-    bus.removeEventListener("peitho:closerequest", onCloseRequest);
-    win.removeEventListener("pagehide", onCloseRequest);
+    bus.removeEventListener("peitho:beforeclose", onBeforeClose);
+    win.removeEventListener("pagehide", onPageHide);
   };
 }

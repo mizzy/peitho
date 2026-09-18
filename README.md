@@ -355,6 +355,9 @@ peitho present --presenter-windowed
 # Rehearse: record per-section actuals and an absolute per-slide timeline into .peitho/rehearsals/ (requires {"section":...} markers)
 peitho present --rehearsal
 
+# Add timer-aligned microphone audio to the rehearsal (requires --rehearsal and a presenter view)
+peitho present --rehearsal --audio
+
 # Review section timing plus each slide's recorded key, entry time, visits, and total time (pass --all to list every record; v1 records remain readable)
 peitho rehearsal
 
@@ -370,6 +373,48 @@ peitho publish -- aws s3 sync dist/ s3://your-bucket/
 # Generate a shell completion script (bash / zsh / fish / powershell / elvish)
 peitho completions zsh
 ```
+
+`--audio` is deliberately opt-in: only `peitho present --rehearsal --audio`
+asks the presenter for microphone permission. The presenter indicator shows
+`… REC` while permission is pending, `○ REC` when ready, `● REC` while the
+timer is running, and `❙❙ REC` while it is paused. Microphone and recorder
+failures are shown as `mic unavailable: ...`; a failed chunk remains queued
+and retryable failures are appended to the current capture state. A `400`,
+`404`, or `413` response cannot succeed unchanged, so the chunk remains queued
+and the indicator reports the failure without retrying until the run is reset.
+Because browser microphone permission is scoped to the complete origin,
+including its port, audio mode uses the stable default port `6173` instead of
+the random port used by a plain local presentation. An explicit `--port` still
+wins; if default port 6173 is occupied, Peitho reports that another presentation
+is probably running instead of silently changing origins.
+
+After Peitho accepts audio, the rehearsal JSON and WebM share a filename stem,
+for example `rehearsal-20260918-120000.json` and
+`rehearsal-20260918-120000.webm`. `peitho rehearsal` prints the WebM path below
+the slide table. Recording follows the timer's actual start, pause, resume, and
+reset state. The record also stores the timer position `audio.startMs` at which
+the recorder began: for a timeline entry at or after that offset, seek to
+`atMs - audio.startMs`; earlier entries have no audio. `peitho rehearsal` prints
+an offset that rounds to at least one second, adds a directly usable `seek`
+column, and notes if the named WebM is missing. For example:
+
+```text
+  slide   key        entered      seek   visits   total
+  #3      approach      1:55      1:47        1    2:40
+  audio   .peitho/rehearsals/rehearsal-20260719-135241.webm
+  offset  0:08
+```
+
+```sh
+ffplay -ss 1:47 .peitho/rehearsals/rehearsal-20260719-135241.webm
+```
+
+The terminal table shows only each slide's first entry. Every revisit remains
+in the JSON `timeline`; for an entry with audio, its seek position is
+`atMs - audio.startMs`. Chrome's WebM carries no duration metadata;
+`ffmpeg -i in.webm -c copy out.webm` adds it for players that require one.
+Rehearsal JSON and audio remain in `.peitho/rehearsals/`; neither is copied
+into `dist/`.
 
 `peitho lint` renders each slide in headless Chrome and warns when layout
 content exceeds the slide box by more than 1px on either axis. It also warns

@@ -91,6 +91,19 @@ pub struct RehearsalSlideEntry {
     any(test, feature = "ts-bindings"),
     ts(export, export_to = "../../bindings/")
 )]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RehearsalAudio {
+    file: String,
+    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "number"))]
+    start_ms: u64,
+}
+
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RehearsalRecordV1 {
@@ -128,6 +141,7 @@ pub struct RehearsalRecordV2 {
     elapsed_ms: u64,
     sections: Vec<RehearsalSection>,
     timeline: Vec<RehearsalSlideEntry>,
+    audio: Option<RehearsalAudio>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +152,8 @@ struct RawRehearsalRecordV2 {
     elapsed_ms: u64,
     sections: Vec<RehearsalSection>,
     timeline: Vec<RehearsalSlideEntry>,
+    #[serde(default)]
+    audio: Option<RehearsalAudio>,
 }
 
 #[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
@@ -185,6 +201,23 @@ impl RehearsalSlideEntry {
 
     pub fn at_ms(&self) -> u64 {
         self.at_ms
+    }
+}
+
+impl RehearsalAudio {
+    pub fn new(file: impl Into<String>, start_ms: u64) -> Self {
+        Self {
+            file: file.into(),
+            start_ms,
+        }
+    }
+
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    pub fn start_ms(&self) -> u64 {
+        self.start_ms
     }
 }
 
@@ -264,6 +297,7 @@ impl RehearsalRecordV2 {
     pub fn from_snapshot(
         recorded_at_ms: u64,
         snapshot: &RehearsalSnapshot,
+        audio: Option<RehearsalAudio>,
     ) -> std::result::Result<Self, String> {
         Self::try_from(RawRehearsalRecordV2 {
             version: RehearsalVersion2,
@@ -271,6 +305,7 @@ impl RehearsalRecordV2 {
             elapsed_ms: snapshot.elapsed_ms(),
             sections: snapshot.sections().to_vec(),
             timeline: snapshot.timeline().to_vec(),
+            audio,
         })
     }
 
@@ -289,6 +324,10 @@ impl RehearsalRecordV2 {
     pub fn timeline(&self) -> &[RehearsalSlideEntry] {
         &self.timeline
     }
+
+    pub fn audio(&self) -> Option<&RehearsalAudio> {
+        self.audio.as_ref()
+    }
 }
 
 impl TryFrom<RawRehearsalRecordV2> for RehearsalRecordV2 {
@@ -303,6 +342,7 @@ impl TryFrom<RawRehearsalRecordV2> for RehearsalRecordV2 {
             elapsed_ms: raw.elapsed_ms,
             sections: raw.sections,
             timeline: raw.timeline,
+            audio: raw.audio,
         })
     }
 }
@@ -406,8 +446,8 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::{
-        RehearsalRecord, RehearsalRecordV1, RehearsalRecordV2, RehearsalSection,
-        RehearsalSlideEntry, RehearsalSnapshot,
+        rehearsal_record_json, RehearsalAudio, RehearsalRecord, RehearsalRecordV1,
+        RehearsalRecordV2, RehearsalSection, RehearsalSlideEntry, RehearsalSnapshot,
     };
 
     fn snapshot(json: &str) -> RehearsalSnapshot {
@@ -420,6 +460,7 @@ mod tests {
         RehearsalSection::export_all(&cfg).unwrap();
         RehearsalSlideEntry::export_all(&cfg).unwrap();
         RehearsalSnapshot::export_all(&cfg).unwrap();
+        RehearsalAudio::export_all(&cfg).unwrap();
         RehearsalRecordV1::export_all(&cfg).unwrap();
         RehearsalRecordV2::export_all(&cfg).unwrap();
         RehearsalRecord::export_all(&cfg).unwrap();
@@ -428,6 +469,7 @@ mod tests {
         let snapshot = fs::read_to_string(bindings.join("RehearsalSnapshot.ts")).unwrap();
         let v1 = fs::read_to_string(bindings.join("RehearsalRecordV1.ts")).unwrap();
         let v2 = fs::read_to_string(bindings.join("RehearsalRecordV2.ts")).unwrap();
+        let audio = fs::read_to_string(bindings.join("RehearsalAudio.ts")).unwrap();
         let record = fs::read_to_string(bindings.join("RehearsalRecord.ts")).unwrap();
 
         assert!(snapshot.contains("version: 2"));
@@ -436,7 +478,61 @@ mod tests {
         assert!(!v1.contains("timeline"));
         assert!(v2.contains("version: 2"));
         assert!(v2.contains("timeline: Array<RehearsalSlideEntry>"));
+        assert!(v2.contains("audio: RehearsalAudio | null"));
+        assert!(audio.contains("file: string"));
+        assert!(audio.contains("startMs: number"));
         assert!(record.contains("RehearsalRecordV1 | RehearsalRecordV2"));
+    }
+
+    #[test]
+    fn m1_v2_records_default_audio_to_none() {
+        let record: RehearsalRecord = serde_json::from_str(
+            r#"{"version":2,"recordedAtMs":10,"elapsedMs":9000,
+                 "sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":9000}],
+                 "timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
+        )
+        .unwrap();
+
+        let RehearsalRecord::V2(record) = record else {
+            panic!("expected v2");
+        };
+        assert_eq!(record.audio(), None);
+        assert!(rehearsal_record_json(&RehearsalRecord::V2(record))
+            .unwrap()
+            .contains("\"audio\": null"));
+
+        let with_audio: RehearsalRecordV2 = serde_json::from_str(
+            r#"{"version":2,"recordedAtMs":10,"elapsedMs":9000,
+                 "sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":9000}],
+                 "timeline":[{"key":"intro","index":0,"atMs":0}],
+                 "audio":{"file":"rehearsal-20260918-120000.webm","startMs":8000}}"#,
+        )
+        .unwrap();
+        let audio = with_audio.audio().expect("audio metadata");
+        assert_eq!(audio.file(), "rehearsal-20260918-120000.webm");
+        assert_eq!(audio.start_ms(), 8_000);
+    }
+
+    #[test]
+    fn v2_constructor_serializes_typed_audio_metadata() {
+        let snapshot = snapshot(
+            r#"{"version":2,"elapsedMs":9000,
+                "sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":9000}],
+                "timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
+        );
+        let record = RehearsalRecord::V2(
+            RehearsalRecordV2::from_snapshot(
+                10,
+                &snapshot,
+                Some(RehearsalAudio::new("rehearsal-20260918-120000.webm", 8_000)),
+            )
+            .unwrap(),
+        );
+
+        let json = rehearsal_record_json(&record).unwrap();
+        assert!(json.contains(
+            "\"audio\": {\n    \"file\": \"rehearsal-20260918-120000.webm\",\n    \"startMs\": 8000\n  }"
+        ));
     }
 
     #[test]
@@ -539,8 +635,9 @@ mod tests {
                 "sections":[{"name":"Setup","plannedDurationMs":60000,"actualMs":1000}],
                 "timeline":[{"key":"intro","index":0,"atMs":0}]}"#,
         );
-        let record =
-            RehearsalRecord::V2(RehearsalRecordV2::from_snapshot(10, &valid_snapshot).unwrap());
+        let record = RehearsalRecord::V2(
+            RehearsalRecordV2::from_snapshot(10, &valid_snapshot, None).unwrap(),
+        );
         assert_eq!(record.recorded_at_ms(), 10);
         assert_eq!(record.elapsed_ms(), 1_000);
         assert_eq!(record.sections()[0].name(), "Setup");
@@ -552,13 +649,13 @@ mod tests {
                             {"key":"details","index":1,"atMs":499}]}"#,
         );
         assert_eq!(
-            RehearsalRecordV2::from_snapshot(10, &invalid).unwrap_err(),
+            RehearsalRecordV2::from_snapshot(10, &invalid, None).unwrap_err(),
             "rehearsal timeline positions must be non-decreasing"
         );
 
         let empty = snapshot(r#"{"version":2,"elapsedMs":0,"sections":[],"timeline":[]}"#);
         assert_eq!(
-            RehearsalRecordV2::from_snapshot(10, &empty).unwrap_err(),
+            RehearsalRecordV2::from_snapshot(10, &empty, None).unwrap_err(),
             "rehearsal sections must not be empty"
         );
     }
