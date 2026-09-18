@@ -162,9 +162,17 @@ peitho present --presenter-windowed
 `S` is the escape hatch for a misidentified display: each window navigates to
 its counterpart, so the windows stay where they are and only their roles swap.
 The presenter also exposes it as a Swap button. After a swap the slides window
-sits windowed, so press `f` to go back to fullscreen; the presenter timer
-resets. The shortcut is available only while the presenter is open, so a solo
-slides window cannot swap itself away.
+sits windowed, so press `f` to go back to fullscreen. The timer keeps running:
+the new presenter page adopts the timer position the server holds. What does
+start over is everything the old presenter page measured itself — the agenda's
+per-section actuals and, under `--rehearsal`, the slide timeline — so a swap in
+the middle of a rehearsal leaves a record that only describes the part after
+the swap (the time before it shows up as `(before first entry)`). With
+`--audio` the swap also starts a new recording that replaces the old one, and
+the other window belongs to a different Chrome profile, which needs its own
+microphone permission: swap before you start a rehearsal, not during one. The
+shortcut is available only while the presenter is open, so a solo slides
+window cannot swap itself away.
 
 Keys combined with Cmd, Ctrl, or Alt are ignored, so browser shortcuts such as
 Cmd+F keep their usual meaning.
