@@ -2,6 +2,7 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { Notes } from "../../../bindings/Notes";
 import type { RehearsalSnapshot } from "../../../bindings/RehearsalSnapshot";
 import type { AgendaOptions } from "../src/agenda";
+import type { RehearsalAudioOptions } from "../src/rehearsalAudio";
 import type { RehearsalReportDetail } from "../src/rehearsalReporter";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -52,6 +53,16 @@ function standardFetch(overrides: Partial<Manifest> = {}): typeof fetch {
   }) as typeof fetch;
 }
 
+function collectPresenterReports(bus: EventTarget): RehearsalSnapshot[] {
+  const reports: RehearsalSnapshot[] = [];
+  const listener = (event: Event): void => {
+    reports.push((event as CustomEvent<RehearsalReportDetail>).detail.snapshot);
+  };
+  bus.addEventListener("peitho:rehearsalreport", listener);
+  cleanups.push(() => bus.removeEventListener("peitho:rehearsalreport", listener));
+  return reports;
+}
+
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   vi.doUnmock("../src/agenda");
@@ -59,10 +70,67 @@ afterEach(() => {
   vi.doUnmock("../src/slideTimeline");
   vi.doUnmock("../src/rehearsalReporter");
   vi.doUnmock("../src/rehearsalBridge");
+  vi.doUnmock("../src/rehearsalAudio");
   vi.doUnmock("../src/timeTracker");
   vi.resetModules();
   vi.restoreAllMocks();
   document.body.replaceChildren();
+});
+
+it("shows and installs audio only when requested without stopping timeline reports on mic failure", async () => {
+  const audioCleanup = vi.fn();
+  const installRehearsalAudio = vi.fn((options: RehearsalAudioOptions) => {
+    options.indicator.textContent = "mic unavailable: denied";
+    return audioCleanup;
+  });
+  vi.doMock("../src/rehearsalAudio", () => ({ installRehearsalAudio }));
+  const { mountPresenterView } = await import("../src/presenter");
+  const sections = [
+    { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 }
+  ];
+  const reports = collectPresenterReports(window);
+  const root = document.createElement("main");
+  const view = await mountPresenterView({
+    root,
+    notes,
+    rehearsalAudio: true,
+    fetcher: standardFetch({ sections }),
+    window,
+    now: () => 1_000
+  });
+
+  expect(installRehearsalAudio).toHaveBeenCalledTimes(1);
+  expect(installRehearsalAudio.mock.calls[0]?.[0]).toMatchObject({
+    bus: window,
+    window
+  });
+  expect(
+    root.querySelector('[data-peitho-presenter="rehearsal-audio"]')?.textContent
+  ).toBe("mic unavailable: denied");
+  expect(root.querySelector<HTMLElement>(".clock-row")?.dataset.peithoRehearsalAudio).toBe(
+    "true"
+  );
+  root.querySelector<HTMLButtonElement>('[data-peitho-action="playpause"]')?.click();
+  expect(reports).toHaveLength(1);
+
+  view.destroy();
+  expect(audioCleanup).toHaveBeenCalledTimes(1);
+
+  const plainRoot = document.createElement("main");
+  const plain = await mountPresenterView({
+    root: plainRoot,
+    notes,
+    rehearsalAudio: false,
+    fetcher: standardFetch({ sections }),
+    window,
+    now: () => 1_000
+  });
+  expect(installRehearsalAudio).toHaveBeenCalledTimes(1);
+  expect(plainRoot.querySelector('[data-peitho-presenter="rehearsal-audio"]')).toBeNull();
+  expect(
+    plainRoot.querySelector<HTMLElement>(".clock-row")?.dataset.peithoRehearsalAudio
+  ).toBeUndefined();
+  plain.destroy();
 });
 
 it("delegates empty section handling to the agenda installer", async () => {
@@ -73,6 +141,7 @@ it("delegates empty section handling to the agenda installer", async () => {
   const view = await mountPresenterView({
     root,
     notes,
+    rehearsalAudio: false,
     fetcher: standardFetch({ sections: [] }),
     window,
     now: () => 1000
@@ -122,6 +191,7 @@ it("shares one section actuals instance between agenda and rehearsal reporter", 
   const view = await mountPresenterView({
     root,
     notes,
+    rehearsalAudio: false,
     fetcher: standardFetch({ sections, plannedDurationMs: 60_000 }),
     window,
     now: () => 1000
@@ -171,6 +241,7 @@ it("passes empty sections to all section-dependent installers when validation fa
   const view = await mountPresenterView({
     root,
     notes,
+    rehearsalAudio: false,
     fetcher: standardFetch({
       sections: [
         { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
@@ -204,6 +275,7 @@ it("treats invalid manifest sections as empty before installing agenda and rehea
   const view = await mountPresenterView({
     root,
     notes,
+    rehearsalAudio: false,
     fetcher: standardFetch({
       sections: [
         { name: "Setup", startIndex: 0, endIndex: 0, plannedDurationMs: 60_000 },
@@ -242,6 +314,7 @@ it("emits reports after real timeline listeners record start and slidechange ent
   const view = await mountPresenterView({
     root,
     notes,
+    rehearsalAudio: false,
     fetcher: standardFetch({
       slideCount: 2,
       sections: [

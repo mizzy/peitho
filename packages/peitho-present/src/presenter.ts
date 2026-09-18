@@ -1,6 +1,7 @@
 import type { Notes } from "../../../bindings/Notes";
 import { installAgenda } from "./agenda";
 import { installRehearsalBridge } from "./rehearsalBridge";
+import { installRehearsalAudio } from "./rehearsalAudio";
 import { installRehearsalReporter } from "./rehearsalReporter";
 import { installSectionActuals } from "./sectionActuals";
 import { installSlideTimeline } from "./slideTimeline";
@@ -20,6 +21,7 @@ import { installTimeTracker, isOverrun, isValidDurationMs } from "./timeTracker"
 export type PresenterOptions = {
   root: HTMLElement;
   notes: Notes;
+  rehearsalAudio: boolean;
   fetcher?: typeof fetch;
   window?: Window;
   document?: Document;
@@ -218,6 +220,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
   const statePill = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="state-pill"]'
   )!;
+  const clockRow = options.root.querySelector<HTMLElement>(".clock-row")!;
   const stateLabel = options.root.querySelector<HTMLElement>(
     '[data-peitho-presenter="state-label"]'
   )!;
@@ -334,6 +337,29 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     window: win
   });
   const rehearsalBridgeCleanup = installRehearsalBridge(win, bus, fetcher);
+  let rehearsalAudioCleanup = (): void => undefined;
+  if (options.rehearsalAudio) {
+    const indicator = doc.createElement("span");
+    indicator.className = "rehearsal-audio mono";
+    indicator.dataset.peithoPresenter = "rehearsal-audio";
+    indicator.setAttribute("role", "status");
+    indicator.setAttribute("aria-live", "polite");
+    clockRow.dataset.peithoRehearsalAudio = "true";
+    statePill.before(indicator);
+    const cleanupAudio = installRehearsalAudio({
+      indicator,
+      shell: mainShell,
+      bus,
+      window: win,
+      fetcher,
+      console: log
+    });
+    rehearsalAudioCleanup = () => {
+      cleanupAudio();
+      delete clockRow.dataset.peithoRehearsalAudio;
+      indicator.remove();
+    };
+  }
   const rippleTimeouts = new Set<number>();
 
   function setTimerStateChrome(state: TimerState): void {
@@ -483,6 +509,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
       rippleTimeouts.clear();
       options.root.removeEventListener("pointerdown", onPointerDown);
       while (buttonCleanups.length > 0) buttonCleanups.pop()?.();
+      rehearsalAudioCleanup();
       rehearsalBridgeCleanup();
       rehearsalReporterCleanup();
       agendaCleanup();

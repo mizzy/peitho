@@ -12,18 +12,25 @@ pub struct PresentConfig {
     version: u8,
     #[serde(rename = "presenterOpen")]
     presenter_open: bool,
+    #[serde(rename = "rehearsalAudio")]
+    rehearsal_audio: bool,
 }
 
 impl PresentConfig {
-    pub fn new(presenter_open: bool) -> Self {
+    pub fn new(presenter_open: bool, rehearsal_audio: bool) -> Self {
         Self {
             version: 1,
             presenter_open,
+            rehearsal_audio,
         }
     }
 
     pub fn presenter_open(&self) -> bool {
         self.presenter_open
+    }
+
+    pub fn rehearsal_audio(&self) -> bool {
+        self.rehearsal_audio
     }
 }
 
@@ -45,9 +52,12 @@ mod tests {
 
     #[test]
     fn serializes_present_config_schema_exactly() {
-        let json = present_config_json(&PresentConfig::new(true)).unwrap();
+        let json = present_config_json(&PresentConfig::new(true, true)).unwrap();
 
-        assert_eq!(json, "{\n  \"version\": 1,\n  \"presenterOpen\": true\n}\n");
+        assert_eq!(
+            json,
+            "{\n  \"version\": 1,\n  \"presenterOpen\": true,\n  \"rehearsalAudio\": true\n}\n"
+        );
     }
 
     #[test]
@@ -60,5 +70,6 @@ mod tests {
 
         assert!(ts.contains("version: number"));
         assert!(ts.contains("presenterOpen: boolean"));
+        assert!(ts.contains("rehearsalAudio: boolean"));
     }
 }

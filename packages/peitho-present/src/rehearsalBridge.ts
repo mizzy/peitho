@@ -7,12 +7,18 @@ export function installRehearsalBridge(
 ): () => void {
   function onReport(event: Event): void {
     const detail = (event as CustomEvent<RehearsalReportDetail>).detail;
-    void fetcher("/rehearsal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      ...(detail.final ? { keepalive: true } : {}),
-      body: JSON.stringify(detail.snapshot)
-    })
+    let request: Promise<Response>;
+    try {
+      request = fetcher("/rehearsal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(detail.keepalive ? { keepalive: true } : {}),
+        body: JSON.stringify(detail.snapshot)
+      });
+    } catch (error: unknown) {
+      request = Promise.reject(error);
+    }
+    const completion = request
       .then((response) => {
         if (!response.ok) {
           console.error(`failed to POST rehearsal snapshot: ${response.status}`);
@@ -21,6 +27,7 @@ export function installRehearsalBridge(
       .catch((error) => {
         console.error("failed to POST rehearsal snapshot", error);
       });
+    if (detail.final) detail.waitUntil?.(completion);
   }
 
   bus.addEventListener("peitho:rehearsalreport", onReport);

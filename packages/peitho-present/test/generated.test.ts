@@ -91,10 +91,11 @@ describe("generated manifest contract", () => {
   });
 
   it("uses the Rust-generated PresentConfig type shape", () => {
-    const config: PresentConfig = { version: 1, presenterOpen: true };
+    const config: PresentConfig = { version: 1, presenterOpen: true, rehearsalAudio: true };
 
     expect(config.version).toBe(1);
     expect(config.presenterOpen).toBe(true);
+    expect(config.rehearsalAudio).toBe(true);
   });
 
   it("exports presenter and presentation event types", () => {
@@ -102,9 +103,10 @@ describe("generated manifest contract", () => {
     const step: StepChangeDetail = { index: 0, step: 1, stepCount: 3 };
     const end: PresentationEndDetail = { endedAt: 2000, elapsedMs: 1000 };
     const control: TimerControlDetail = { action: "pause" };
-    const options: Pick<PresenterOptions, "root" | "notes"> = {
+    const options: Pick<PresenterOptions, "root" | "notes" | "rehearsalAudio"> = {
       root: document.createElement("main"),
-      notes: { version: 1, notes: {} }
+      notes: { version: 1, notes: {} },
+      rehearsalAudio: false
     };
 
     expect(start.total).toBe(3);

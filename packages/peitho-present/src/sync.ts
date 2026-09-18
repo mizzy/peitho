@@ -1,5 +1,12 @@
 import { swapRoute } from "./swap";
 
+// The rehearsal server grace period must remain longer than this client-side cap.
+export const BEFORE_CLOSE_TIMEOUT_MS = 2_000;
+
+export type BeforeCloseDetail = {
+  waitUntil(promise: PromiseLike<unknown>): void;
+};
+
 export type TimerSyncState = { running: boolean; elapsedMs: number };
 export type TimerSyncSnapshot = TimerSyncState & { atMs: number };
 export type TimerSyncMessage = { timer: TimerSyncState };
@@ -383,6 +390,9 @@ export function installSyncBridge(
   const pathname = hooks.pathname ?? (() => win.location.pathname);
   const navigate = hooks.navigate ?? ((url) => win.location.replace(url));
   let synced = false;
+  let closeStarted = false;
+  let closeTimeout: number | null = null;
+  let destroyed = false;
   const navigationStateMessage = (detail: unknown): IndexSyncMessage | null => {
     if (!isRecord(detail) || !isFiniteNumber(detail.index) || !isFiniteNumber(detail.step)) {
       return null;
@@ -422,6 +432,41 @@ export function installSyncBridge(
       timer: { running: detail.running, elapsedMs: Math.round(detail.elapsedMs) }
     });
   };
+  const finishClose = (): void => {
+    if (destroyed) return;
+    if (closeTimeout !== null) {
+      win.clearTimeout(closeTimeout);
+      closeTimeout = null;
+    }
+    closeWindow();
+  };
+  const beginClose = (): void => {
+    if (closeStarted || destroyed) return;
+    closeStarted = true;
+    const pending: PromiseLike<unknown>[] = [];
+    let accepting = true;
+    const detail: BeforeCloseDetail = {
+      waitUntil(promise) {
+        if (!accepting) {
+          console.error("peitho:beforeclose waitUntil() called after event dispatch");
+          return;
+        }
+        pending.push(promise);
+      }
+    };
+    bus.dispatchEvent(new CustomEvent<BeforeCloseDetail>("peitho:beforeclose", { detail }));
+    // Like ExtendableEvent, waitUntil registration ends when synchronous dispatch returns.
+    accepting = false;
+    if (pending.length === 0) {
+      finishClose();
+      return;
+    }
+
+    const timeout = new Promise<void>((resolve) => {
+      closeTimeout = win.setTimeout(resolve, BEFORE_CLOSE_TIMEOUT_MS);
+    });
+    void Promise.race([Promise.allSettled(pending), timeout]).then(finishClose);
+  };
   channel.onmessage = (event: { data: unknown }): void => {
     const data = event.data;
     if (isSyncedSyncMessage(data)) {
@@ -429,7 +474,7 @@ export function installSyncBridge(
       return;
     }
     if (isCloseSyncMessage(data)) {
-      closeWindow();
+      beginClose();
       return;
     }
     if (isIndexSyncMessage(data)) {
@@ -476,6 +521,11 @@ export function installSyncBridge(
   bus.addEventListener("peitho:swaprequest", onSwapRequest);
   bus.addEventListener("peitho:timerchange", onTimerChange);
   return () => {
+    destroyed = true;
+    if (closeTimeout !== null) {
+      win.clearTimeout(closeTimeout);
+      closeTimeout = null;
+    }
     bus.removeEventListener("peitho:slidechange", onNavigationStateChange);
     bus.removeEventListener("peitho:stepchange", onNavigationStateChange);
     bus.removeEventListener("peitho:closerequest", onCloseRequest);

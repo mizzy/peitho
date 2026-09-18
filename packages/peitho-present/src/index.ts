@@ -2,6 +2,7 @@ export { calculateCanvasFit, installCanvasScaler } from "./canvas";
 export { installAgenda } from "./agenda";
 export type { AgendaOptions } from "./agenda";
 export { installRehearsalBridge } from "./rehearsalBridge";
+export { installRehearsalAudio } from "./rehearsalAudio";
 export { installRehearsalReporter } from "./rehearsalReporter";
 export { installSectionActuals } from "./sectionActuals";
 export { installSlideTimeline } from "./slideTimeline";
@@ -42,6 +43,7 @@ export {
   isValidDurationMs
 } from "./timeTracker";
 export type { PresenterOptions, PresenterView } from "./presenter";
+export type { RehearsalAudioOptions } from "./rehearsalAudio";
 export type {
   RehearsalReportDetail,
   RehearsalReporterOptions,
@@ -68,6 +70,7 @@ export type {
   TimerStateDetail
 } from "./shell";
 export type {
+  BeforeCloseDetail,
   ServerSyncOptions,
   SyncBridgeHooks,
   SyncChannel,

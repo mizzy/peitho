@@ -90,6 +90,9 @@ fn present_no_serve_writes_clean_present_cache() {
     assert!(fs::read_to_string(cache.join("present.json"))
         .unwrap()
         .contains(r#""presenterOpen": false"#));
+    assert!(fs::read_to_string(cache.join("present.json"))
+        .unwrap()
+        .contains(r#""rehearsalAudio": false"#));
     let present_html = fs::read_to_string(cache.join("present.html")).unwrap();
     assert!(present_html.contains("peitho.installSyncBridge("));
     assert!(present_html.contains("adoptTimerState: (state) => shell.adoptTimerState(state)"));
@@ -949,6 +952,73 @@ fn present_rehearsal_prints_recording_directory_after_serving_url() {
         lines.get(serving_index + 1).map(String::as_str),
         Some("recording rehearsal to .peitho/rehearsals/"),
         "rehearsal line should immediately follow serving URL: {lines:?}"
+    );
+    assert!(
+        fs::read_to_string(dir.path().join(".peitho/present-cache/present.json"))
+            .unwrap()
+            .contains(r#""rehearsalAudio": false"#)
+    );
+}
+
+#[test]
+fn present_rehearsal_audio_writes_explicit_presenter_intent() {
+    let dir = tempdir().unwrap();
+    let fixture = Fixture::write(dir.path());
+    fs::write(
+        &fixture.deck,
+        deck_with_assets(
+            "./layout.html",
+            "<!-- {\"key\":\"arch-1\",\"section\":\"Setup\",\"time\":\"1m\"} -->\n# Architecture\n\nBody",
+        ),
+    )
+    .unwrap();
+    let shell = dir.path().join("shell.js");
+    fs::write(
+        &shell,
+        "export function mountPresentShell() {}\nexport function installKeyboardNavigation() {}\nexport function installSyncBridge() {}\nexport function serverSyncChannelFactory() {}\nexport function installRehearsalAudio() {}\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("peitho"))
+        .current_dir(dir.path())
+        .args(fixture.present_args(&shell))
+        .args(["--no-open", "--port", "0", "--rehearsal", "--audio"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout = child.stdout.take().unwrap();
+    let (serving_tx, serving_rx) = mpsc::channel();
+    let (lines_tx, lines_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        let mut serving_tx = Some(serving_tx);
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line.contains("serving presentation at") {
+                if let Some(tx) = serving_tx.take() {
+                    tx.send(()).unwrap();
+                }
+            }
+            lines.push(line);
+        }
+        lines_tx.send(lines).unwrap();
+    });
+    serving_rx
+        .recv_timeout(PRESENT_SERVER_STARTUP_TIMEOUT)
+        .expect("present server did not start within 30 seconds");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    reader.join().unwrap();
+    let lines = lines_rx.recv().unwrap();
+
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("serving presentation at")));
+    assert!(
+        fs::read_to_string(dir.path().join(".peitho/present-cache/present.json"))
+            .unwrap()
+            .contains(r#""rehearsalAudio": true"#)
     );
 }
 
