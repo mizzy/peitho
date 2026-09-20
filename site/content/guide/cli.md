@@ -41,7 +41,9 @@ and reloads while preserving the current slide and overview state. The
 single-slide view keeps a filmstrip of thumbnails on the left and shows the
 current slide's speaker notes in an editable panel below the slide, headed by
 the slide's position (`3 / 25`); the overview grid shows neither. See
-[Editing speaker notes in preview](#editing-speaker-notes-in-preview). Every thumbnail
+[Editing speaker notes in preview](#editing-speaker-notes-in-preview); text on
+the slide itself can be fixed in place too — see
+[Editing slide text in preview](#editing-slide-text-in-preview). Every thumbnail
 and grid tile carries its slide number in the bottom-left corner. These
 numbers are preview chrome only; a page number on the slide itself comes from
 the `page_numbers` frontmatter key.
@@ -99,6 +101,70 @@ What a save writes:
   next click-away or slide change.
 
 Edits go to the Markdown source only; notes never enter `dist/`.
+
+### Editing slide text in preview
+
+Click a paragraph, heading, tight list item, or table cell in single view to
+replace its rendering with its inline Markdown source. Enter or blur saves,
+Shift+Enter inserts a newline, and Escape cancels. Markdown is the only source
+of truth; Peitho never converts rendered HTML back to Markdown.
+
+It is meant for the small fixes — a typo, a reworded sentence — that are not
+worth a trip to the editor. The clicked block shows exactly what is in the
+file (`Peitho is a *fast* tool`), so inline syntax such as `**bold**`,
+`` `code` ``, and links can be added, changed, and removed. A footnote
+reference is editable text too, but the deck must still build: removing the
+last reference to a footnote, or referencing one that has no definition, is
+refused with the parser's own message. The save writes that text back into the deck, the ordinary rebuild
+runs, and the preview reloads on the same slide.
+
+- **Where it works.** The single-slide view, on the current slide only. The
+  overview grid keeps its click-to-open meaning and the filmstrip thumbnails
+  stay inert. A click on a link still opens the link instead of starting an
+  edit.
+- **Keys.** Enter saves and Shift+Enter inserts a newline (with
+  `breaks: true` that is a visible line break). Escape cancels and puts the
+  rendered block back — deliberately unlike the notes panel, where Escape
+  keeps the text, because a click on a slide is easier to make by accident.
+  While a block is being edited the other preview shortcuts are off; only
+  PageUp and PageDown still change slides, and they save first. The Enter
+  that confirms an IME conversion never saves.
+- **Text only, not structure.** An edit may change the words and the inline
+  syntax of that one block. Anything that would change the slide's structure
+  is refused with the reason and the edit stays open: emptying the block,
+  starting it with a list or heading marker, a blank line that would split
+  it, a newline inside a heading or a table cell, a slide separator, a `:::` fence, a note comment, a `|` that would add
+  a table cell, or leading spaces that would re-nest a list. Make structural
+  changes in your editor.
+- **A failed save blocks the way out.** The reason appears next to the
+  position line, the text stays in the block, and changing slides or entering
+  the overview is cancelled until the save succeeds or Escape cancels the
+  edit — the same rule as the notes panel.
+- **Headings and slide keys.** The heading's level cannot be edited (the `#`
+  markers are outside the editable text). Editing a heading may change that
+  slide's derived key; an explicit `{"key": …}` never changes. If a keyed CSS
+  selector still names the old key, the next build fails — see the banner
+  below.
+- **Build errors show in the page.** When a rebuild fails while the preview is
+  open — after an inline edit or after a save from your editor — the
+  diagnostic appears in a banner across the top and the last good build stays
+  on screen underneath. The banner disappears with the next successful build.
+- **Your editor wins.** A rebuild that arrives while a block is open does not
+  reload the page and throw the text away; the reload waits until the edit is
+  saved or cancelled. If the file really changed under the edit (your editor,
+  or a second preview tab), the save is refused with "the deck changed on
+  disk; reload and retry": press Escape and the preview reloads with the
+  current text.
+- **What is written.** Only the bytes of that block. A CRLF file stays CRLF,
+  a leading BOM is kept, and a block that comes from an `include` is written
+  to the included file, not to the deck that includes it.
+
+Not editable, by design: code blocks, generated `code_images` output
+(diagrams, math, embeds), images, footnote definitions, raw HTML, page
+settings and frontmatter, any block that contains a speaker-note comment
+(edit the note in the notes panel) or other inline HTML, and anything that comes from the layout HTML
+rather than the Markdown. Inline editing exists only in `peitho preview`;
+`peitho present`, `peitho build`, and `dist/` never see it.
 
 ## `peitho lint`
 
