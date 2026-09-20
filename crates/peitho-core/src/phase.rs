@@ -465,6 +465,20 @@ pub enum KeySource {
     Derived { line: Option<usize> },
 }
 
+impl KeySource {
+    pub(crate) fn same_kind_as(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Explicit { .. }, Self::Explicit { .. })
+                | (Self::Derived { .. }, Self::Derived { .. })
+        )
+    }
+
+    pub(crate) fn is_derived(&self) -> bool {
+        matches!(self, Self::Derived { .. })
+    }
+}
+
 /// An explicit `{"layout":"name"}` request from the slide's page settings
 /// comment. The name is resolved against the provided layouts at dispatch;
 /// the line makes an unknown name a位置付きビルドエラー.
@@ -491,6 +505,12 @@ pub struct ParsedSlide {
 }
 
 impl ParsedSlide {
+    pub(crate) fn layout_request_name(&self) -> Option<&str> {
+        self.layout_request
+            .as_ref()
+            .map(|request| request.name.as_str())
+    }
+
     /// Return every parser-authorized editable span in source order, recursing
     /// into `SlotGroup` children.
     pub fn editable_spans(&self) -> Vec<EditableSpan> {

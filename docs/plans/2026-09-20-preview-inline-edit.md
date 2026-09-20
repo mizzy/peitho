@@ -575,6 +575,17 @@ must remain identical. Source line numbers are diagnostic positions and are
 not semantic equality fields because a permitted internal newline can shift
 later lines.
 
+As implemented (Task 4 review), the target comparison is stricter than the
+list above, because shape/count/kind alone let real structure changes through:
+every non-edited span's text must be byte-identical and the edited span must
+equal the replacement modulo surrounding spaces/tabs (a `|` typed in a table
+cell displaced its sibling cell with every count unchanged), and each target
+fragment's block-level pulldown event sequence must be unchanged (leading
+spaces in a tight item un-nested its child list). The replacement's line
+endings are normalized to `\n`, and a BOM-prefixed source is handled with the
+helpers shared with `notes_edit`. A bare `-->` is harmless paragraph text and
+is accepted; `rejects_comment_close` became `rejects_note_comment`.
+
 Return the new parser diagnostic directly when the candidate does not parse.
 Map every other mismatch to the exact reason asserted above, with the target
 span's line and help directing structural edits to the Markdown editor.
