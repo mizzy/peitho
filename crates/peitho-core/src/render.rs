@@ -2330,6 +2330,10 @@ pub fn render_preview_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Strin
   <script type="module">
     import * as peitho from './preview.js';
 
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) location.reload();
+    });
+
     function showError(message) {
       const root = document.getElementById('peitho-preview-root');
       root.textContent = message;
@@ -5869,6 +5873,15 @@ Paragraph after heading.
         assert!(html.contains("cleanups.push(() => shell.destroy());"));
         assert!(html.contains("cleanups.push(peitho.installPreviewReload(shell));"));
         assert!(html.contains("window.addEventListener('pagehide', dispose, { once: true });"));
+    }
+
+    #[test]
+    fn preview_index_bootstrap_reloads_bfcache_restores() {
+        let html = render_preview_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains(
+            "window.addEventListener('pageshow', (event) => {\n      if (event.persisted) location.reload();\n    });"
+        ));
     }
 
     #[test]
