@@ -1,16 +1,19 @@
-use std::{collections::BTreeMap, error::Error, ops::Range};
+use std::{collections::BTreeMap, error::Error, fmt::Write as _, ops::Range};
 
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
     element, errors::RewritingError, html_content::ContentType, rewrite_str, HtmlRewriter,
     RewriteStrSettings, Settings,
 };
-use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    html, Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 
 use crate::{
     domain::{
-        Accepts, AspectRatio, ContainerCodeLanguage, FootnoteEntry, FragmentKind, RenderedSlide,
-        ResolvedImagePath, RevealSpan, SlideKey, SlotName, SourceFragment,
+        Accepts, AspectRatio, ContainerCodeLanguage, EditableSpan, FootnoteEntry, FragmentKind,
+        RenderedSlide, ResolvedImagePath, RevealSpan, SlideKey, SlotName, SourceFragment,
+        SourceSpan,
     },
     embed_card::{generic_embed_card_css, EmbedCardAssets},
     emphasis::LineEmphasis,
@@ -27,6 +30,15 @@ const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_TABLES);
+
+/// Controls whether rendered blocks expose parser-authorized editing metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAnnotations {
+    /// Preserve the ordinary rendered HTML byte-for-byte.
+    Off,
+    /// Annotate exact renderer/parser range matches for preview editing.
+    On,
+}
 
 pub(crate) fn walk_body_markdown_list_items<'a>(
     markdown: &'a str,
@@ -69,6 +81,7 @@ pub fn render_deck(
     deck: Deck<Checked<ResolvedImagePath>>,
     highlighter: &Highlighter,
     theme_css: String,
+    edit_annotations: EditAnnotations,
 ) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let breaks = settings.breaks();
@@ -100,6 +113,7 @@ pub fn render_deck(
                 reveal_steps: slide.step_count(),
             },
             highlighter,
+            edit_annotations,
         )?;
         let notes = slide.notes().map(|s| s.to_owned());
         slides.push(RenderedSlide::new(
@@ -167,6 +181,7 @@ fn render_slide(
     breaks: bool,
     attrs: SlideRenderAttributes,
     highlighter: &Highlighter,
+    edit_annotations: EditAnnotations,
 ) -> Result<String> {
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
@@ -249,6 +264,7 @@ fn render_slide(
                         breaks,
                         &footnote_numbers,
                         highlighter,
+                        edit_annotations,
                     )
                     .map_err(box_build_error)?;
                     el.replace(&html, ContentType::Html);
@@ -280,6 +296,7 @@ fn render_slot(
     breaks: bool,
     footnote_numbers: &BTreeMap<String, usize>,
     highlighter: &Highlighter,
+    edit_annotations: EditAnnotations,
 ) -> Result<String> {
     if fragments.is_empty() {
         return Ok(String::new());
@@ -290,7 +307,9 @@ fn render_slot(
         Accepts::Inline => {
             let body = fragments
                 .iter()
-                .map(|fragment| render_heading_inline_fragment(fragment, footnote_numbers))
+                .map(|fragment| {
+                    render_heading_inline_fragment(fragment, footnote_numbers, edit_annotations)
+                })
                 .collect::<Result<Vec<_>>>()?
                 .join(" ");
             if let Some(span) = fragments.iter().find_map(SourceFragment::reveal_span) {
@@ -307,24 +326,21 @@ fn render_slot(
                 format!(r#"<span class="{class_name}">{body}</span>"#)
             }
         }
-        Accepts::Code => render_code_slot(&class_name, fragments, highlighter)?,
+        Accepts::Code => render_code_slot(&class_name, fragments, highlighter, edit_annotations)?,
         Accepts::Image => {
+            let context = BodyRenderContext {
+                breaks,
+                footnote_numbers,
+                highlighter,
+                edit_annotations,
+            };
             let body = fragments
                 .iter()
                 .map(|fragment| {
                     if let Some(span) = fragment.reveal_span() {
                         ensure_fragment_matches_contract(Accepts::Image, fragment)?;
                         let mut html = String::new();
-                        let footnote_numbers = BTreeMap::new();
-                        render_revealed_fragment(
-                            &mut html,
-                            &class_name,
-                            fragment,
-                            span,
-                            breaks,
-                            &footnote_numbers,
-                            highlighter,
-                        )?;
+                        render_revealed_fragment(&mut html, &class_name, fragment, span, context)?;
                         Ok(html)
                     } else {
                         render_image_fragment(fragment)
@@ -338,9 +354,12 @@ fn render_slot(
             &class_name,
             accepts,
             fragments,
-            breaks,
-            footnote_numbers,
-            highlighter,
+            BodyRenderContext {
+                breaks,
+                footnote_numbers,
+                highlighter,
+                edit_annotations,
+            },
         )?,
     };
     open_external_links_in_new_tab(&html, fragments[0].line())
@@ -402,6 +421,7 @@ fn render_code_slot(
     class_name: &str,
     fragments: &[SourceFragment<ResolvedImagePath>],
     highlighter: &Highlighter,
+    edit_annotations: EditAnnotations,
 ) -> Result<String> {
     if fragments
         .iter()
@@ -421,21 +441,19 @@ fn render_code_slot(
     let mut body = String::new();
     let mut code_run = Vec::new();
     let footnote_numbers = BTreeMap::new();
+    let context = BodyRenderContext {
+        breaks: false,
+        footnote_numbers: &footnote_numbers,
+        highlighter,
+        edit_annotations,
+    };
     for fragment in fragments {
         ensure_fragment_matches_contract(Accepts::Code, fragment)?;
         if let Some(span) = fragment.reveal_span() {
             flush_code_run(&mut body, class_name, &code_run, highlighter)?;
             code_run.clear();
             append_code_separator(&mut body);
-            render_revealed_fragment(
-                &mut body,
-                class_name,
-                fragment,
-                span,
-                false,
-                &footnote_numbers,
-                highlighter,
-            )?;
+            render_revealed_fragment(&mut body, class_name, fragment, span, context)?;
         } else {
             code_run.push(fragment);
         }
@@ -499,6 +517,8 @@ struct BodyMarkdownFragment<'a> {
     markdown: &'a str,
     line: usize,
     code_languages: &'a [ContainerCodeLanguage],
+    source_span: Option<SourceSpan>,
+    editable_spans: &'a [EditableSpan],
 }
 
 impl<'a> BodyMarkdownFragment<'a> {
@@ -507,6 +527,8 @@ impl<'a> BodyMarkdownFragment<'a> {
             markdown: fragment.markdown(),
             line: fragment.line(),
             code_languages: fragment.container_code_languages(),
+            source_span: fragment.source_span(),
+            editable_spans: fragment.editable_spans(),
         }
     }
 
@@ -515,6 +537,8 @@ impl<'a> BodyMarkdownFragment<'a> {
             markdown,
             line,
             code_languages: &[],
+            source_span: None,
+            editable_spans: &[],
         }
     }
 }
@@ -523,9 +547,7 @@ fn render_block_slot(
     class_name: &str,
     accepts: Accepts,
     fragments: &[SourceFragment<ResolvedImagePath>],
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<String> {
     for fragment in fragments {
         ensure_fragment_matches_contract(accepts, fragment)?;
@@ -534,47 +556,21 @@ fn render_block_slot(
     let mut markdown_run = Vec::new();
     for fragment in fragments {
         if let Some(span) = fragment.reveal_span() {
-            render_markdown_run(
-                &mut body,
-                &markdown_run,
-                breaks,
-                footnote_numbers,
-                highlighter,
-            )?;
+            render_markdown_run(&mut body, &markdown_run, context)?;
             markdown_run.clear();
-            render_revealed_fragment(
-                &mut body,
-                class_name,
-                fragment,
-                span,
-                breaks,
-                footnote_numbers,
-                highlighter,
-            )?;
+            render_revealed_fragment(&mut body, class_name, fragment, span, context)?;
             continue;
         }
         match fragment.kind() {
             FragmentKind::Math { html } => {
-                render_markdown_run(
-                    &mut body,
-                    &markdown_run,
-                    breaks,
-                    footnote_numbers,
-                    highlighter,
-                )?;
+                render_markdown_run(&mut body, &markdown_run, context)?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-math">"#);
                 body.push_str(html);
                 body.push_str("</div>");
             }
             FragmentKind::EmbedCard { html } => {
-                render_markdown_run(
-                    &mut body,
-                    &markdown_run,
-                    breaks,
-                    footnote_numbers,
-                    highlighter,
-                )?;
+                render_markdown_run(&mut body, &markdown_run, context)?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-embed-card">"#);
                 body.push_str(html);
@@ -588,13 +584,7 @@ fn render_block_slot(
                 provider_html,
                 permalink_attr,
             } => {
-                render_markdown_run(
-                    &mut body,
-                    &markdown_run,
-                    breaks,
-                    footnote_numbers,
-                    highlighter,
-                )?;
+                render_markdown_run(&mut body, &markdown_run, context)?;
                 markdown_run.clear();
                 body.push_str(r#"<div class="peitho-embed-card">"#);
                 body.push_str(&render_generic_embed_card_content(
@@ -608,15 +598,9 @@ fn render_block_slot(
                 body.push_str("</div>");
             }
             FragmentKind::Footnotes { entries } => {
-                render_markdown_run(
-                    &mut body,
-                    &markdown_run,
-                    breaks,
-                    footnote_numbers,
-                    highlighter,
-                )?;
+                render_markdown_run(&mut body, &markdown_run, context)?;
                 markdown_run.clear();
-                render_footnotes_block(&mut body, entries, breaks, footnote_numbers, highlighter)?;
+                render_footnotes_block(&mut body, entries, context)?;
             }
             FragmentKind::Heading { .. }
             | FragmentKind::Paragraph
@@ -631,13 +615,7 @@ fn render_block_slot(
             }
         }
     }
-    render_markdown_run(
-        &mut body,
-        &markdown_run,
-        breaks,
-        footnote_numbers,
-        highlighter,
-    )?;
+    render_markdown_run(&mut body, &markdown_run, context)?;
     Ok(format!(r#"<div class="{class_name}">{body}</div>"#))
 }
 
@@ -702,14 +680,20 @@ fn render_generic_embed_card_content(
     html
 }
 
+#[derive(Clone, Copy)]
+struct BodyRenderContext<'a> {
+    breaks: bool,
+    footnote_numbers: &'a BTreeMap<String, usize>,
+    highlighter: &'a Highlighter,
+    edit_annotations: EditAnnotations,
+}
+
 fn render_revealed_fragment(
     body: &mut String,
     class_name: &str,
     fragment: &SourceFragment<ResolvedImagePath>,
     span: RevealSpan,
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
     match fragment.kind() {
         FragmentKind::Heading { .. } => render_revealed_markdown_root(
@@ -717,40 +701,32 @@ fn render_revealed_fragment(
             fragment,
             RevealedMarkdownRoot::Heading,
             span.start,
-            breaks,
-            footnote_numbers,
-            highlighter,
+            context,
         ),
         FragmentKind::Paragraph => render_revealed_markdown_root(
             body,
             fragment,
             RevealedMarkdownRoot::Paragraph,
             span.start,
-            breaks,
-            footnote_numbers,
-            highlighter,
+            context,
         ),
         FragmentKind::Blockquote => render_revealed_markdown_root(
             body,
             fragment,
             RevealedMarkdownRoot::Blockquote,
             span.start,
-            breaks,
-            footnote_numbers,
-            highlighter,
+            context,
         ),
         FragmentKind::Table => render_revealed_markdown_root(
             body,
             fragment,
             RevealedMarkdownRoot::Table,
             span.start,
-            breaks,
-            footnote_numbers,
-            highlighter,
+            context,
         ),
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
-            let code = render_code_fragment(fragment, highlighter)?;
+            let code = render_code_fragment(fragment, context.highlighter)?;
             // A stepped-emphasis block owns its span for *emphasis* steps, not
             // for appearing: the code is visible from the start and only the
             // emphasized line moves. Stamping `data-reveal-step` on the `<pre>`
@@ -828,14 +804,7 @@ fn render_revealed_fragment(
             )?);
             Ok(())
         }
-        FragmentKind::List => render_revealed_list_fragment(
-            body,
-            fragment,
-            span,
-            breaks,
-            footnote_numbers,
-            highlighter,
-        ),
+        FragmentKind::List => render_revealed_list_fragment(body, fragment, span, context),
         FragmentKind::SlotGroup { .. } => {
             unreachable!("revealed SlotGroup fragments are not renderable")
         }
@@ -855,43 +824,45 @@ fn render_revealed_markdown_root(
     fragment: &SourceFragment<ResolvedImagePath>,
     root: RevealedMarkdownRoot,
     step: usize,
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
     let mut events = Vec::new();
     let mut root_stamped = false;
     for (event, range) in
         Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS).into_offset_iter()
     {
-        let event = match (root, root_stamped, event) {
+        let reveal_step = match (root, root_stamped, &event) {
             (
                 RevealedMarkdownRoot::Heading,
                 false,
                 Event::Start(Tag::Heading {
-                    level,
-                    id,
-                    classes,
-                    attrs,
+                    id, classes, attrs, ..
                 }),
             ) => {
                 if id.is_some() || !classes.is_empty() || !attrs.is_empty() {
                     unreachable!("heading attributes are not enabled in BODY_MARKDOWN_OPTIONS");
                 }
                 root_stamped = true;
-                Event::Html(format!(r#"<{level} data-reveal-step="{step}">"#).into())
+                Some(step)
             }
             (RevealedMarkdownRoot::Paragraph, false, Event::Start(Tag::Paragraph)) => {
                 root_stamped = true;
-                Event::Html(format!(r#"<p data-reveal-step="{step}">"#).into())
+                Some(step)
             }
             (RevealedMarkdownRoot::Blockquote, false, Event::Start(Tag::BlockQuote(_kind))) => {
                 root_stamped = true;
-                Event::Html(format!(r#"<blockquote data-reveal-step="{step}">"#).into())
+                Some(step)
             }
-            (_, _, event) => event,
+            (RevealedMarkdownRoot::Heading, _, _)
+            | (RevealedMarkdownRoot::Paragraph, _, _)
+            | (RevealedMarkdownRoot::Blockquote, _, _)
+            | (RevealedMarkdownRoot::Table, _, _) => None,
         };
-        events.push((event, range));
+        events.push(BodyMarkdownEvent {
+            event,
+            range,
+            reveal_step,
+        });
     }
     let missing_root = match (root, root_stamped) {
         (RevealedMarkdownRoot::Heading, false) => Some("heading"),
@@ -911,14 +882,7 @@ fn render_revealed_markdown_root(
         range: 0..fragment.markdown().len(),
         fragment: BodyMarkdownFragment::from_source(fragment),
     }];
-    render_body_markdown_events(
-        &mut rendered,
-        &sources,
-        events,
-        breaks,
-        footnote_numbers,
-        highlighter,
-    )?;
+    render_body_markdown_events(&mut rendered, &sources, events, context)?;
     if matches!(root, RevealedMarkdownRoot::Table) {
         stamp_revealed_table_root(&mut rendered, step, fragment.line())?;
     }
@@ -943,25 +907,25 @@ fn render_revealed_list_fragment(
     body: &mut String,
     fragment: &SourceFragment<ResolvedImagePath>,
     span: RevealSpan,
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
     let mut raw_events = Vec::new();
     let mut top_level_item_index = 0usize;
     walk_body_markdown_list_items_with_ranges(
         fragment.markdown(),
         |event, range, top_level_item| {
-            if top_level_item {
+            let reveal_step = if top_level_item {
                 let step = span.start + top_level_item_index;
                 top_level_item_index += 1;
-                raw_events.push((
-                    Event::Html(format!(r#"<li data-reveal-step="{step}">"#).into()),
-                    range,
-                ));
+                Some(step)
             } else {
-                raw_events.push((event, range));
-            }
+                None
+            };
+            raw_events.push(BodyMarkdownEvent {
+                event,
+                range,
+                reveal_step,
+            });
         },
     );
     if top_level_item_index != span.len {
@@ -974,22 +938,13 @@ fn render_revealed_list_fragment(
         range: 0..fragment.markdown().len(),
         fragment: BodyMarkdownFragment::from_source(fragment),
     }];
-    render_body_markdown_events(
-        body,
-        &sources,
-        raw_events,
-        breaks,
-        footnote_numbers,
-        highlighter,
-    )
+    render_body_markdown_events(body, &sources, raw_events, context)
 }
 
 fn render_footnotes_block(
     body: &mut String,
     entries: &[FootnoteEntry],
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
     if let Some(step) = wrapper_reveal_step(entries) {
         body.push_str(&format!(
@@ -1007,9 +962,7 @@ fn render_footnotes_block(
         render_markdown_run(
             body,
             &[BodyMarkdownFragment::plain(entry.markdown(), entry.line())],
-            breaks,
-            footnote_numbers,
-            highlighter,
+            context,
         )?;
         body.push_str("</li>");
     }
@@ -1027,9 +980,7 @@ fn wrapper_reveal_step(entries: &[FootnoteEntry]) -> Option<usize> {
 fn render_markdown_run(
     body: &mut String,
     markdown_run: &[BodyMarkdownFragment<'_>],
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
     if markdown_run.is_empty() {
         return Ok(());
@@ -1048,20 +999,314 @@ fn render_markdown_run(
             fragment,
         });
     }
-    let events = Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS).into_offset_iter();
-    render_body_markdown_events(
-        body,
-        &sources,
-        events,
-        breaks,
-        footnote_numbers,
-        highlighter,
-    )
+    let events = Parser::new_ext(&markdown, BODY_MARKDOWN_OPTIONS)
+        .into_offset_iter()
+        .map(|(event, range)| BodyMarkdownEvent {
+            event,
+            range,
+            reveal_step: None,
+        });
+    render_body_markdown_events(body, &sources, events, context)
 }
 
 struct BodyMarkdownSource<'a> {
     range: Range<usize>,
     fragment: BodyMarkdownFragment<'a>,
+}
+
+struct BodyMarkdownEvent<'a> {
+    event: Event<'a>,
+    range: Range<usize>,
+    reveal_step: Option<usize>,
+}
+
+#[derive(Debug)]
+struct EditAnnotation {
+    source_span: SourceSpan,
+    markdown: String,
+}
+
+fn edit_annotation_plan(
+    sources: &[BodyMarkdownSource<'_>],
+    events: &[BodyMarkdownEvent<'_>],
+) -> Vec<Option<EditAnnotation>> {
+    let mut annotations = (0..events.len()).map(|_| None).collect::<Vec<_>>();
+    for (opening_event, _kind, range) in crate::parser::editable_inline_ranges(
+        events
+            .iter()
+            .map(|event| (&event.event, event.range.clone())),
+        |event_start| body_markdown_inline_start(sources, event_start),
+    ) {
+        annotations[opening_event] = authorize_edit_annotation(sources, range);
+    }
+    annotations
+}
+
+fn body_markdown_inline_start(sources: &[BodyMarkdownSource<'_>], offset: usize) -> usize {
+    let Some((_, source)) = body_markdown_source_for_offset(sources, offset) else {
+        return offset;
+    };
+    let local_offset = offset - source.range.start;
+    source.range.start
+        + crate::parser::editable_inline_start(source.fragment.markdown, local_offset)
+}
+
+fn authorize_edit_annotation(
+    sources: &[BodyMarkdownSource<'_>],
+    range: Range<usize>,
+) -> Option<EditAnnotation> {
+    let source = sources
+        .iter()
+        .find(|source| source.range.start <= range.start && range.end <= source.range.end)?;
+    let fragment_span = source.fragment.source_span?;
+    let local_start = range.start.checked_sub(source.range.start)?;
+    let local_end = range.end.checked_sub(source.range.start)?;
+    let source_span = SourceSpan {
+        start: fragment_span.start + local_start,
+        end: fragment_span.start + local_end,
+    };
+    // Authorization is intentionally range-only. Joining adjacent fragments
+    // can make the renderer emit a loose-list paragraph for a range the parser
+    // saw as a tight item; the exact, non-overlapping source range remains the
+    // parser's authority in either element shape.
+    source
+        .fragment
+        .editable_spans
+        .iter()
+        .any(|authorized| authorized.source_span() == source_span)
+        .then(|| EditAnnotation {
+            source_span,
+            markdown: source.fragment.markdown[local_start..local_end].to_owned(),
+        })
+}
+
+#[derive(Default)]
+struct TableRenderContext {
+    alignments: Vec<Alignment>,
+    in_head: bool,
+    cell_index: usize,
+}
+
+impl TableRenderContext {
+    fn observe(&mut self, event: &Event<'_>) {
+        match event {
+            Event::Start(Tag::Table(alignments)) => {
+                self.alignments.clone_from(alignments);
+                self.in_head = false;
+                self.cell_index = 0;
+            }
+            Event::Start(Tag::TableHead) => {
+                self.in_head = true;
+                self.cell_index = 0;
+            }
+            Event::Start(Tag::TableRow) => self.cell_index = 0,
+            Event::End(TagEnd::TableHead) => self.in_head = false,
+            Event::End(TagEnd::TableCell) => self.cell_index += 1,
+            Event::End(TagEnd::Table) => {
+                self.alignments.clear();
+                self.in_head = false;
+                self.cell_index = 0;
+            }
+            Event::Start(_)
+            | Event::End(_)
+            | Event::Text(_)
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Rule
+            | Event::TaskListMarker(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_) => {}
+        }
+    }
+
+    fn cell_name(&self) -> &'static str {
+        if self.in_head {
+            "th"
+        } else {
+            "td"
+        }
+    }
+
+    fn cell_alignment(&self) -> Option<Alignment> {
+        self.alignments.get(self.cell_index).copied()
+    }
+}
+
+enum MarkdownOpeningTagName<'a> {
+    Static(&'static str),
+    Heading(&'a HeadingLevel),
+}
+
+fn annotated_markdown_opening_tag(
+    event: &Event<'_>,
+    reveal_step: Option<usize>,
+    annotation: Option<&EditAnnotation>,
+    table_context: &TableRenderContext,
+    writer_at_fresh_line: bool,
+) -> Option<String> {
+    if reveal_step.is_none() && annotation.is_none() {
+        return None;
+    }
+
+    let (name, alignment, requires_fresh_line) = match event {
+        Event::Start(Tag::Paragraph) => (MarkdownOpeningTagName::Static("p"), None, true),
+        Event::Start(Tag::Heading { level, .. }) => {
+            (MarkdownOpeningTagName::Heading(level), None, true)
+        }
+        Event::Start(Tag::Item) => (MarkdownOpeningTagName::Static("li"), None, true),
+        Event::Start(Tag::TableCell) => (
+            MarkdownOpeningTagName::Static(table_context.cell_name()),
+            table_context.cell_alignment(),
+            false,
+        ),
+        Event::Start(Tag::BlockQuote(_)) if reveal_step.is_some() => {
+            (MarkdownOpeningTagName::Static("blockquote"), None, true)
+        }
+        Event::Start(_)
+        | Event::End(_)
+        | Event::Text(_)
+        | Event::Code(_)
+        | Event::Html(_)
+        | Event::InlineHtml(_)
+        | Event::FootnoteReference(_)
+        | Event::SoftBreak
+        | Event::HardBreak
+        | Event::Rule
+        | Event::TaskListMarker(_)
+        | Event::InlineMath(_)
+        | Event::DisplayMath(_) => return None,
+    };
+
+    let mut html = String::new();
+    if requires_fresh_line && !writer_at_fresh_line {
+        html.push('\n');
+    }
+    html.push('<');
+    match name {
+        MarkdownOpeningTagName::Static(name) => html.push_str(name),
+        MarkdownOpeningTagName::Heading(level) => {
+            write!(&mut html, "{level}").expect("writing to a String cannot fail");
+        }
+    }
+    match alignment {
+        Some(Alignment::Left) => html.push_str(r#" style="text-align: left""#),
+        Some(Alignment::Center) => html.push_str(r#" style="text-align: center""#),
+        Some(Alignment::Right) => html.push_str(r#" style="text-align: right""#),
+        Some(Alignment::None) | None => {}
+    }
+    if let Some(step) = reveal_step {
+        html.push_str(&format!(r#" data-reveal-step="{step}""#));
+    }
+    if let Some(annotation) = annotation {
+        push_edit_annotation_attributes(&mut html, annotation);
+    }
+    html.push('>');
+    Some(html)
+}
+
+// Mirrors pulldown-cmark's HtmlWriter newline state so an opening tag replaced
+// by raw HTML can preserve the original block-start formatting.
+fn markdown_event_leaves_writer_at_fresh_line(event: &Event<'_>, was_fresh: bool) -> bool {
+    match event {
+        Event::Start(tag) => match tag {
+            Tag::HtmlBlock | Tag::MetadataBlock(_) => was_fresh,
+            Tag::BlockQuote(_) | Tag::List(_) | Tag::DefinitionList => true,
+            Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::CodeBlock(_)
+            | Tag::Item
+            | Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
+            | Tag::Emphasis
+            | Tag::Strong
+            | Tag::Strikethrough
+            | Tag::Link { .. }
+            | Tag::Image { .. }
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::Superscript
+            | Tag::Subscript
+            | Tag::FootnoteDefinition(_) => false,
+        },
+        Event::End(tag) => match tag {
+            TagEnd::HtmlBlock | TagEnd::Image | TagEnd::MetadataBlock(_) => was_fresh,
+            TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::BlockQuote(_)
+            | TagEnd::CodeBlock
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::FootnoteDefinition
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition => true,
+            TagEnd::TableCell
+            | TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Link
+            | TagEnd::Superscript
+            | TagEnd::Subscript => false,
+        },
+        Event::Text(text) => text.ends_with('\n'),
+        Event::Html(html) | Event::InlineHtml(html) => {
+            if html.is_empty() {
+                was_fresh
+            } else {
+                html.ends_with('\n')
+            }
+        }
+        Event::SoftBreak | Event::HardBreak | Event::Rule | Event::TaskListMarker(_) => true,
+        Event::Code(_)
+        | Event::FootnoteReference(_)
+        | Event::InlineMath(_)
+        | Event::DisplayMath(_) => false,
+    }
+}
+
+fn push_normalized_markdown_event<'a>(
+    normalized: &mut Vec<Event<'a>>,
+    event: Event<'a>,
+    writer_at_fresh_line: &mut bool,
+) {
+    *writer_at_fresh_line =
+        markdown_event_leaves_writer_at_fresh_line(&event, *writer_at_fresh_line);
+    normalized.push(event);
+}
+
+fn push_edit_annotation_attributes(html: &mut String, annotation: &EditAnnotation) {
+    html.push_str(&format!(
+        r#" data-peitho-src="{}-{}" data-peitho-md="{}""#,
+        annotation.source_span.start,
+        annotation.source_span.end,
+        encode_edit_markdown_attribute(&annotation.markdown)
+    ));
+}
+
+fn encode_edit_markdown_attribute(markdown: &str) -> String {
+    // Numeric line-ending references survive HTML parsing without CRLF
+    // normalization, so getAttribute() returns the exact Markdown slice.
+    let mut encoded = String::with_capacity(markdown.len());
+    for character in markdown.chars() {
+        match character {
+            '&' => encoded.push_str("&amp;"),
+            '"' => encoded.push_str("&quot;"),
+            '<' => encoded.push_str("&lt;"),
+            '\r' => encoded.push_str("&#13;"),
+            '\n' => encoded.push_str("&#10;"),
+            character => encoded.push(character),
+        }
+    }
+    encoded
 }
 
 struct HighlightedContainerCode<'a> {
@@ -1074,17 +1319,41 @@ struct HighlightedContainerCode<'a> {
 fn render_body_markdown_events<'a>(
     body: &mut String,
     sources: &[BodyMarkdownSource<'_>],
-    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
-    breaks: bool,
-    footnote_numbers: &BTreeMap<String, usize>,
-    highlighter: &Highlighter,
+    events: impl IntoIterator<Item = BodyMarkdownEvent<'a>>,
+    context: BodyRenderContext<'_>,
 ) -> Result<()> {
+    let events = events.into_iter().collect::<Vec<_>>();
+    let annotations = match context.edit_annotations {
+        EditAnnotations::Off => None,
+        EditAnnotations::On => Some(edit_annotation_plan(sources, &events)),
+    };
     let mut normalized = Vec::new();
     let mut in_html_comment = false;
     let mut highlighted_code: Option<HighlightedContainerCode<'a>> = None;
     let mut consumed_code_languages = vec![0usize; sources.len()];
+    let mut writer_at_fresh_line = true;
 
-    for (event, range) in events {
+    let mut table_context = TableRenderContext::default();
+    for (event_index, render_event) in events.into_iter().enumerate() {
+        let BodyMarkdownEvent {
+            mut event,
+            range,
+            reveal_step,
+        } = render_event;
+        let annotation = annotations
+            .as_ref()
+            .and_then(|annotations| annotations[event_index].as_ref());
+        if let Some(opening) = annotated_markdown_opening_tag(
+            &event,
+            reveal_step,
+            annotation,
+            &table_context,
+            writer_at_fresh_line,
+        ) {
+            event = Event::Html(opening.into());
+        }
+        table_context.observe(&event);
+
         if highlighted_code.is_some() {
             match event {
                 Event::Text(text) => {
@@ -1100,14 +1369,26 @@ fn render_body_markdown_events<'a>(
                         .take()
                         .expect("highlighted code state is open");
                     let highlighted = render_highlighted_code(
-                        highlighter,
+                        context.highlighter,
                         &code.text,
                         &code.language,
                         code.line,
                     )?;
-                    normalized.push(Event::Start(Tag::CodeBlock(code.kind)));
-                    normalized.push(Event::Html(highlighted.into()));
-                    normalized.push(Event::End(TagEnd::CodeBlock));
+                    push_normalized_markdown_event(
+                        &mut normalized,
+                        Event::Start(Tag::CodeBlock(code.kind)),
+                        &mut writer_at_fresh_line,
+                    );
+                    push_normalized_markdown_event(
+                        &mut normalized,
+                        Event::Html(highlighted.into()),
+                        &mut writer_at_fresh_line,
+                    );
+                    push_normalized_markdown_event(
+                        &mut normalized,
+                        Event::End(TagEnd::CodeBlock),
+                        &mut writer_at_fresh_line,
+                    );
                     continue;
                 }
                 _ => {
@@ -1148,20 +1429,31 @@ fn render_body_markdown_events<'a>(
                     ContainerCodeLanguage::Plain => {
                         if let Some(event) = normalize_markdown_event(
                             Event::Start(Tag::CodeBlock(kind)),
-                            breaks,
-                            footnote_numbers,
+                            context.breaks,
+                            context.footnote_numbers,
                             &mut in_html_comment,
                         )? {
-                            normalized.push(event);
+                            push_normalized_markdown_event(
+                                &mut normalized,
+                                event,
+                                &mut writer_at_fresh_line,
+                            );
                         }
                     }
                 }
             }
             event => {
-                if let Some(event) =
-                    normalize_markdown_event(event, breaks, footnote_numbers, &mut in_html_comment)?
-                {
-                    normalized.push(event);
+                if let Some(event) = normalize_markdown_event(
+                    event,
+                    context.breaks,
+                    context.footnote_numbers,
+                    &mut in_html_comment,
+                )? {
+                    push_normalized_markdown_event(
+                        &mut normalized,
+                        event,
+                        &mut writer_at_fresh_line,
+                    );
                 }
             }
         }
@@ -1269,9 +1561,40 @@ fn drop_html_comment_event(event: &Event<'_>, in_html_comment: &mut bool) -> boo
 fn render_heading_inline_fragment(
     fragment: &SourceFragment<ResolvedImagePath>,
     footnote_numbers: &BTreeMap<String, usize>,
+    edit_annotations: EditAnnotations,
 ) -> Result<String> {
     ensure_fragment_matches_contract(Accepts::Inline, fragment)?;
-    render_heading_inline(fragment.markdown(), footnote_numbers)
+    let rendered = render_heading_inline(fragment.markdown(), footnote_numbers)?;
+    if edit_annotations == EditAnnotations::Off {
+        return Ok(rendered);
+    }
+
+    let sources = [BodyMarkdownSource {
+        range: 0..fragment.markdown().len(),
+        fragment: BodyMarkdownFragment::from_source(fragment),
+    }];
+    let events = Parser::new_ext(fragment.markdown(), BODY_MARKDOWN_OPTIONS)
+        .into_offset_iter()
+        .map(|(event, range)| BodyMarkdownEvent {
+            event,
+            range,
+            reveal_step: None,
+        })
+        .collect::<Vec<_>>();
+    let annotation = edit_annotation_plan(&sources, &events)
+        .into_iter()
+        .flatten()
+        .next();
+    let Some(annotation) = annotation else {
+        return Ok(rendered);
+    };
+
+    let mut wrapped = String::from("<span");
+    push_edit_annotation_attributes(&mut wrapped, &annotation);
+    wrapped.push('>');
+    wrapped.push_str(&rendered);
+    wrapped.push_str("</span>");
+    Ok(wrapped)
 }
 
 /// A tagged code block is highlighted at build time into `hl-*` classed
@@ -2575,6 +2898,7 @@ mod tests {
             checked,
             &crate::highlight::Highlighter::defaults(),
             String::new(),
+            EditAnnotations::Off,
         )
         .unwrap()
         .slides()[0]
@@ -3488,9 +3812,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
     }
@@ -3570,9 +3896,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3596,9 +3924,7 @@ mod tests {
                 "slot-body",
                 Accepts::Blocks,
                 &fragments,
-                false,
-                &BTreeMap::new(),
-                &Highlighter::defaults(),
+                off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
             )
             .unwrap_err();
 
@@ -3627,9 +3953,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap_err();
 
@@ -3655,9 +3979,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3686,9 +4012,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3717,9 +4045,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &BTreeMap::new(),
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &BTreeMap::new(),
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3744,9 +4074,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3773,9 +4105,11 @@ mod tests {
         render_footnotes_block(
             &mut body,
             &entries,
-            false,
-            &BTreeMap::new(),
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &BTreeMap::new(),
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3803,9 +4137,11 @@ mod tests {
         render_footnotes_block(
             &mut body,
             &entries,
-            false,
-            &BTreeMap::new(),
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                false,
+                &BTreeMap::new(),
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -3839,9 +4175,11 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            true,
-            &footnote_numbers,
-            &crate::highlight::Highlighter::defaults(),
+            off_body_render_context(
+                true,
+                &footnote_numbers,
+                &crate::highlight::Highlighter::defaults(),
+            ),
         )
         .unwrap();
 
@@ -4093,9 +4431,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &[fragment],
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -4146,9 +4482,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &[fragment],
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -4176,9 +4510,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &[fragment],
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -4208,9 +4540,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &[fragment],
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -4244,9 +4574,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &fragments,
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -4279,9 +4607,7 @@ mod tests {
             "slot-body",
             Accepts::Blocks,
             &[fragment],
-            false,
-            &BTreeMap::new(),
-            &Highlighter::defaults(),
+            off_body_render_context(false, &BTreeMap::new(), &Highlighter::defaults()),
         )
         .unwrap();
 
@@ -5901,6 +6227,364 @@ Paragraph after heading.
         .unwrap()
     }
 
+    fn body_only_layout() -> Layout {
+        parse_layout(
+            "body-only",
+            r#"<section><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
+    fn body_code_layout() -> Layout {
+        parse_layout(
+            "body-code",
+            r#"<section><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
+    fn render_with_edit_annotations(
+        markdown: &str,
+        layout: Layout,
+        edit_annotations: EditAnnotations,
+    ) -> (Deck<Rendered>, Vec<crate::domain::SourceSpan>) {
+        let highlighter = crate::highlight::Highlighter::defaults();
+        let parsed = parse_markdown(markdown, &highlighter).unwrap();
+        let spans = parsed.parsed_slides()[0]
+            .editable_spans()
+            .into_iter()
+            .map(|span| span.source_span())
+            .collect();
+        let checked = check_deck(map_by_convention(parsed, &layout).unwrap()).unwrap();
+        let (resolved, assets) = crate::phase::resolve_image_paths(checked, |request| {
+            panic!(
+                "unexpected image resolver call for {} on slide {}",
+                request.raw.as_str(),
+                request.slide_key.as_str()
+            )
+        })
+        .unwrap();
+        assert!(assets.is_empty());
+        let rendered =
+            render_deck(resolved, &highlighter, String::new(), edit_annotations).unwrap();
+        (rendered, spans)
+    }
+
+    fn span_for_slice(
+        source: &str,
+        spans: &[crate::domain::SourceSpan],
+        expected: &str,
+    ) -> crate::domain::SourceSpan {
+        spans
+            .iter()
+            .copied()
+            .find(|span| &source[span.start..span.end] == expected)
+            .unwrap_or_else(|| panic!("missing editable span for {expected:?}"))
+    }
+
+    fn annotated_tag(tag: &str, span: crate::domain::SourceSpan, markdown: &str) -> String {
+        format!(
+            r#"<{tag} data-peitho-src="{}-{}" data-peitho-md="{}">"#,
+            span.start,
+            span.end,
+            encode_edit_markdown_attribute(markdown)
+        )
+    }
+
+    fn strip_edit_annotation_attributes(html: &str) -> String {
+        let stripped = rewrite_str(
+            html,
+            RewriteStrSettings {
+                element_content_handlers: vec![element!("[data-peitho-src]", |element| {
+                    assert!(
+                        element.get_attribute("data-peitho-md").is_some(),
+                        "data-peitho-src must be paired with data-peitho-md"
+                    );
+                    element.remove_attribute("data-peitho-src");
+                    element.remove_attribute("data-peitho-md");
+                    if element.tag_name().eq_ignore_ascii_case("span") {
+                        element.remove_and_keep_content();
+                    }
+                    Ok(())
+                })],
+                ..RewriteStrSettings::new()
+            },
+        )
+        .expect("annotated slide HTML is valid");
+        assert!(!stripped.contains("data-peitho-src"), "{html}");
+        assert!(!stripped.contains("data-peitho-md"), "{html}");
+        stripped
+    }
+
+    #[test]
+    fn edit_annotations_on_minus_attributes_equals_off() {
+        type LayoutFactory = fn() -> Layout;
+        let cases: &[(&str, &str, LayoutFactory)] = &[
+            (
+                "loose list",
+                "1. loose\n\n   second para\n\n2. loose2",
+                body_only_layout,
+            ),
+            (
+                "revealed loose list",
+                "::: {reveal}\n\n1. loose\n\n   second para\n\n2. loose2\n\n:::",
+                body_only_layout,
+            ),
+            (
+                "list item with fenced code",
+                "- before\n\n  ```rust\n  fn main() {}\n  ```\n\n- after",
+                body_only_layout,
+            ),
+            (
+                "merged adjacent lists",
+                "- a\n\n```rust\nfn routed_elsewhere() {}\n```\n\n- b",
+                body_code_layout,
+            ),
+            (
+                "revealed blockquote",
+                "::: {reveal}\n\n> rq\n\n:::",
+                body_only_layout,
+            ),
+            (
+                "nested lists",
+                "- parent\n  - child\n    - grandchild",
+                body_only_layout,
+            ),
+            (
+                "table with alignments",
+                "| Left | Right |\n| :--- | ---: |\n| a | b |",
+                body_only_layout,
+            ),
+            (
+                "blockquote paragraphs",
+                "> first\n>\n> second",
+                body_only_layout,
+            ),
+            (
+                "slot group",
+                "::: {slot=body}\n\nslot *text*\n\n:::",
+                body_only_layout,
+            ),
+            (
+                "revealed heading",
+                "::: {reveal}\n\n## revealed heading\n\n:::",
+                title_body_layout,
+            ),
+            (
+                "revealed paragraph",
+                "::: {reveal}\n\nrevealed paragraph\n\n:::",
+                body_only_layout,
+            ),
+            (
+                "revealed table",
+                "::: {reveal}\n\n| A | B |\n| :- | -: |\n| 1 | 2 |\n\n:::",
+                body_only_layout,
+            ),
+            ("CJK", "日本語の **文章** です", body_only_layout),
+            ("CRLF", "first\r\nsecond\r\n\r\nthird", body_only_layout),
+        ];
+
+        for (name, markdown, layout) in cases {
+            let (off, _) = render_with_edit_annotations(markdown, layout(), EditAnnotations::Off);
+            let (on, _) = render_with_edit_annotations(markdown, layout(), EditAnnotations::On);
+            let off_html = off.slides()[0].html();
+            let on_without_attributes = strip_edit_annotation_attributes(on.slides()[0].html());
+
+            assert_eq!(on_without_attributes, off_html, "{name}");
+        }
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_paragraphs_atx_setext_and_blockquotes() {
+        let markdown = "::: {slot=body}\n\n# One\n\n## Two\n\n### Three\n\n#### Four\n\n##### Five\n\n###### Six\n\nSetext _heading_\n----------------\n\nPlain *paragraph*.\n\n> quoted *one*\n> quoted two\n\n:::";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        for (tag, source) in [
+            ("h1", "One"),
+            ("h2", "Two"),
+            ("h3", "Three"),
+            ("h4", "Four"),
+            ("h5", "Five"),
+            ("h6", "Six"),
+            ("h2", "Setext _heading_"),
+            ("p", "Plain *paragraph*."),
+            ("p", "quoted *one*\n> quoted two"),
+        ] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(
+                html.contains(&annotated_tag(tag, span, source)),
+                "missing annotation for {source:?}: {html}"
+            );
+        }
+        assert!(html.contains("<blockquote>"), "{html}");
+        assert!(!opening_tag(html, "<blockquote").contains("data-peitho-"));
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_tight_li_but_loose_li_paragraph() {
+        let markdown = "- tight one\n- tight two\n\n1. loose one\n\n2. loose two";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        for source in ["tight one", "tight two"] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(html.contains(&annotated_tag("li", span, source)), "{html}");
+        }
+        for source in ["loose one", "loose two"] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(html.contains(&annotated_tag("p", span, source)), "{html}");
+        }
+        assert_eq!(html.matches("<li data-peitho-src=").count(), 2, "{html}");
+        assert_eq!(html.matches("<p data-peitho-src=").count(), 2, "{html}");
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_nested_items_and_table_cells() {
+        let markdown = "- parent *one*\n  - child\n    - grandchild\n\n| Name | Value |\n| --- | --- |\n| 日本 | **二** |";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        for source in ["parent *one*", "child", "grandchild"] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(html.contains(&annotated_tag("li", span, source)), "{html}");
+        }
+        for (tag, source) in [
+            ("th", "Name"),
+            ("th", "Value"),
+            ("td", "日本"),
+            ("td", "**二**"),
+        ] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(html.contains(&annotated_tag(tag, span, source)), "{html}");
+        }
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_slot_and_reveal_children_without_losing_reveal() {
+        let markdown =
+            "::: {slot=body}\n\nslot *text*\n\n:::\n\n::: {reveal}\n\nreveal **text**\n\n:::";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        let slot_span = span_for_slice(markdown, &spans, "slot *text*");
+        assert!(
+            html.contains(&annotated_tag("p", slot_span, "slot *text*")),
+            "{html}"
+        );
+        let reveal_span = span_for_slice(markdown, &spans, "reveal **text**");
+        let reveal_tag = opening_tag(html, "<p data-reveal-step=");
+        assert!(reveal_tag.contains(r#"data-reveal-step="1""#));
+        assert!(reveal_tag.contains(&format!(
+            r#"data-peitho-src="{}-{}""#,
+            reveal_span.start, reveal_span.end
+        )));
+        assert!(reveal_tag.contains(r#"data-peitho-md="reveal **text**""#));
+    }
+
+    #[test]
+    fn edit_annotations_on_wraps_each_accepts_inline_heading_fragment() {
+        let markdown = "::: {slot=title}\n\n# First *heading*\n\n## Second **heading**\n\n:::";
+        let layout = parse_layout(
+            "multi-title",
+            r#"<section><slot name="title" accepts="inline" arity="1..*"></slot></section>"#,
+        )
+        .unwrap();
+        let (rendered, spans) = render_with_edit_annotations(markdown, layout, EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        assert!(html.contains(r#"<span class="slot-title">"#), "{html}");
+        for source in ["First *heading*", "Second **heading**"] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(
+                html.contains(&format!(
+                    r#"<span data-peitho-src="{}-{}" data-peitho-md="{source}">"#,
+                    span.start, span.end
+                )),
+                "{html}"
+            );
+        }
+        assert_eq!(html.matches("<span data-peitho-src=").count(), 2, "{html}");
+    }
+
+    #[test]
+    fn edit_annotations_escape_markdown_attribute_once() {
+        let markdown = r#"\*literal* A "quote" & **mark** and 1 < 2"#;
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+        let span = spans[0];
+
+        assert_eq!(&markdown[span.start..span.end], markdown);
+        assert!(html.contains(&format!(r#"data-peitho-src="{}-{}""#, span.start, span.end)));
+        assert!(html.contains(
+            r#"data-peitho-md="\*literal* A &quot;quote&quot; &amp; **mark** and 1 &lt; 2""#
+        ));
+        assert!(!html.contains("&amp;quot;"), "{html}");
+        assert!(!html.contains("&amp;amp;"), "{html}");
+        assert!(!html.contains("&amp;lt;"), "{html}");
+    }
+
+    #[test]
+    fn edit_annotations_encode_crlf_and_lf_for_dom_attribute_round_trip() {
+        let markdown = "first\r\nsecond\nthird";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, body_only_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+        let span = spans[0];
+
+        assert!(html.contains(&format!(r#"data-peitho-src="{}-{}""#, span.start, span.end)));
+        assert!(html.contains(r#"data-peitho-md="first&#13;&#10;second&#10;third""#));
+        assert!(!html.contains("data-peitho-md=\"first\r"), "{html:?}");
+        assert!(!html.contains("data-peitho-md=\"first\n"), "{html:?}");
+    }
+
+    #[test]
+    fn edit_annotations_off_emits_no_attributes_or_title_wrapper() {
+        let markdown = "# Title *markup*\n\nBody **markup**.";
+        let (rendered, _) =
+            render_with_edit_annotations(markdown, title_body_layout(), EditAnnotations::Off);
+        let html = rendered.slides()[0].html();
+
+        assert!(!html.contains("data-peitho-src"), "{html}");
+        assert!(!html.contains("data-peitho-md"), "{html}");
+        assert!(
+            html.contains(r#"<span class="slot-title">Title <em>markup</em></span>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains(r#"<span class="slot-title"><span"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_merged_adjacent_lists_by_range() {
+        let markdown = "- a\n\n```rust\nfn routed_elsewhere() {}\n```\n\n- b";
+        let layout = parse_layout(
+            "body-code",
+            r#"<section><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..*"></slot></section>"#,
+        )
+        .unwrap();
+        let (rendered, spans) = render_with_edit_annotations(markdown, layout, EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+
+        for source in ["a", "b"] {
+            let span = span_for_slice(markdown, &spans, source);
+            assert!(html.contains(&annotated_tag("p", span, source)), "{html}");
+        }
+        assert_eq!(
+            html.matches("<li>\n<p data-peitho-src=").count(),
+            2,
+            "{html}"
+        );
+        assert!(!html.contains("<li data-peitho-src="), "{html}");
+    }
+
     fn title_quote_layout() -> Layout {
         parse_layout(
             "title-quote",
@@ -5949,6 +6633,19 @@ Paragraph after heading.
             }
         }
         numbers
+    }
+
+    fn off_body_render_context<'a>(
+        breaks: bool,
+        footnote_numbers: &'a BTreeMap<String, usize>,
+        highlighter: &'a Highlighter,
+    ) -> BodyRenderContext<'a> {
+        BodyRenderContext {
+            breaks,
+            footnote_numbers,
+            highlighter,
+            edit_annotations: EditAnnotations::Off,
+        }
     }
 
     fn checked_deck_with_math_body() -> Deck<Checked> {
@@ -6172,6 +6869,7 @@ Paragraph after heading.
             resolved,
             &crate::highlight::Highlighter::defaults(),
             theme_css.to_owned(),
+            EditAnnotations::Off,
         )
         .unwrap()
     }
@@ -6194,6 +6892,7 @@ Paragraph after heading.
             resolved,
             &crate::highlight::Highlighter::defaults(),
             theme_css.to_owned(),
+            EditAnnotations::Off,
         )
         .unwrap()
     }

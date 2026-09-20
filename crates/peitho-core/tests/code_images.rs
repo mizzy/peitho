@@ -9,7 +9,8 @@ use peitho_core::{
     domain::CodeImageCommand,
     highlight::Highlighter,
     parse_deck_and_transform, parse_frontmatter, parse_layout, render_deck, resolve_image_paths,
-    ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR, EMBEDS_CACHE_DIR,
+    EditAnnotations, ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR,
+    EMBEDS_CACHE_DIR,
 };
 
 struct FakeRunner;
@@ -104,7 +105,13 @@ fn renders_code_image_as_resolved_svg_img() {
         })
     })
     .unwrap();
-    let rendered = render_deck(resolved, &Highlighter::defaults(), String::new()).unwrap();
+    let rendered = render_deck(
+        resolved,
+        &Highlighter::defaults(),
+        String::new(),
+        EditAnnotations::Off,
+    )
+    .unwrap();
     let html = rendered.slides()[0].html();
 
     assert!(html.contains("<img"));
@@ -153,7 +160,13 @@ fn renders_builtin_embed_through_existing_png_image_pipeline() {
     .unwrap();
     assert_eq!(assets.len(), 1);
     let asset_path = assets[0].dist_rel.as_str().to_owned();
-    let rendered = render_deck(resolved, &Highlighter::defaults(), String::new()).unwrap();
+    let rendered = render_deck(
+        resolved,
+        &Highlighter::defaults(),
+        String::new(),
+        EditAnnotations::Off,
+    )
+    .unwrap();
     let html = rendered.slides()[0].html();
 
     assert!(html.contains(&format!(r#"src="{asset_path}""#)));

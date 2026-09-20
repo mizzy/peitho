@@ -1971,6 +1971,28 @@ fn resolve_assets_and_highlighter(
 }
 
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
+    let svg_runner = CliSvgRunner::for_deck(input);
+    build_artifacts_with_services(
+        input,
+        &svg_runner,
+        &CliEmbedRenderer,
+        &CliOEmbedFetcher,
+        peitho_core::EditAnnotations::Off,
+    )
+}
+
+fn build_artifacts_with_services<S, E, F>(
+    input: &Path,
+    svg_runner: &S,
+    embed_renderer: &E,
+    oembed_fetcher: &F,
+    edit_annotations: peitho_core::EditAnnotations,
+) -> miette::Result<BuildArtifacts>
+where
+    S: peitho_core::code_images::SvgRunner,
+    E: peitho_core::code_images::EmbedRenderer,
+    F: peitho_core::code_images::OEmbedFetcher,
+{
     let loaded = load_and_expand_deck_source(input)?;
     let (assets, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)?;
     let layouts = load_layouts(assets.layouts.path())?;
@@ -1979,9 +2001,9 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         &loaded.source,
         loaded.frontmatter.clone(),
         &highlighter,
-        &CliSvgRunner::for_deck(input),
-        &CliEmbedRenderer,
-        &CliOEmbedFetcher,
+        svg_runner,
+        embed_renderer,
+        oembed_fetcher,
         &code_images_cache_dir(input),
         &embeds_cache_dir(input),
     ))?;
@@ -2001,7 +2023,12 @@ fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
         }))?;
     let manifest = peitho_core::build_manifest(&resolved, &image_assets);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
-    let rendered = loaded.translate(peitho_core::render_deck(resolved, &highlighter, theme_css))?;
+    let rendered = loaded.translate(peitho_core::render_deck(
+        resolved,
+        &highlighter,
+        theme_css,
+        edit_annotations,
+    ))?;
 
     Ok(BuildArtifacts {
         slide_count,
@@ -5267,6 +5294,7 @@ mod tests {
     use super::*;
     use assert_cmd::Command as AssertCommand;
     use chrono::TimeZone;
+    use lol_html::{element, rewrite_str, RewriteStrSettings};
     use peitho_core::code_images::BUILTIN_EMBED_PARAMS;
     use std::cell::{Cell, RefCell};
 
@@ -5282,6 +5310,109 @@ contexts:
 "#;
     const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
     const TEST_IMAGE_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#;
+
+    struct DeterministicSvgRunner;
+
+    impl peitho_core::code_images::SvgRunner for DeterministicSvgRunner {
+        fn run(
+            &self,
+            _command: &peitho_core::domain::CodeImageCommand,
+            _stdin: &str,
+        ) -> peitho_core::Result<Vec<u8>> {
+            Ok(br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><text x="1" y="20">fixture</text></svg>"#.to_vec())
+        }
+    }
+
+    struct DeterministicEmbedRenderer;
+
+    impl peitho_core::code_images::EmbedRenderer for DeterministicEmbedRenderer {
+        fn render(
+            &self,
+            _normalized_url: &str,
+            _params: peitho_core::code_images::EmbedRenderParams,
+        ) -> peitho_core::Result<Vec<u8>> {
+            Ok(b"\x89PNG\r\n\x1a\nfixture".to_vec())
+        }
+    }
+
+    struct DeterministicOEmbedFetcher;
+
+    impl peitho_core::code_images::OEmbedFetcher for DeterministicOEmbedFetcher {
+        fn fetch(&self, normalized_url: &str) -> peitho_core::Result<String> {
+            Ok(serde_json::json!({
+                "html": format!(
+                    r#"<blockquote class="twitter-tweet"><p>fixture</p><a href="{normalized_url}">January 1, 2026</a></blockquote>"#
+                ),
+                "author_name": "Fixture",
+                "url": normalized_url,
+            })
+            .to_string())
+        }
+
+        fn fetch_discovery_page(&self, _page_url: &str) -> peitho_core::Result<Vec<u8>> {
+            Ok(br#"<html><head><link rel="alternate" type="application/json+oembed" href="/oembed.json"></head></html>"#.to_vec())
+        }
+
+        fn fetch_discovered_oembed(&self, _endpoint_url: &str) -> peitho_core::Result<Vec<u8>> {
+            Ok(br#"{"type":"link","title":"Fixture","author_name":"Peitho","provider_name":"Fixture Provider"}"#.to_vec())
+        }
+
+        fn fetch_thumbnail(&self, _image_url: &str) -> peitho_core::Result<Vec<u8>> {
+            Ok(b"\x89PNG\r\n\x1a\nfixture-thumbnail".to_vec())
+        }
+    }
+
+    fn deterministic_example_slide_bytes(html: &str) -> Vec<u8> {
+        if !html.contains(r#"class="peitho-math""#) {
+            return html.as_bytes().to_vec();
+        }
+
+        // katex-rs stores generated attributes and declarations in randomly
+        // seeded hash maps. Canonicalize only that generated subtree so every
+        // other byte in each example slide remains pinned verbatim.
+        rewrite_str(
+            html,
+            RewriteStrSettings {
+                element_content_handlers: vec![element!(
+                    ".peitho-math, .peitho-math *",
+                    |element| {
+                        let mut attributes = element
+                            .attributes()
+                            .iter()
+                            .map(|attribute| {
+                                let name = attribute.name_preserve_case();
+                                let mut value = attribute.value();
+                                if name.eq_ignore_ascii_case("style") {
+                                    let mut declarations = value
+                                        .split(';')
+                                        .map(str::trim)
+                                        .filter(|declaration| !declaration.is_empty())
+                                        .collect::<Vec<_>>();
+                                    declarations.sort_unstable();
+                                    value = declarations.join(";");
+                                    if !value.is_empty() {
+                                        value.push(';');
+                                    }
+                                }
+                                (name, value)
+                            })
+                            .collect::<Vec<_>>();
+                        for (name, _) in &attributes {
+                            element.remove_attribute(name);
+                        }
+                        attributes.sort_unstable();
+                        for (name, value) in attributes {
+                            element.set_attribute(&name, &value)?;
+                        }
+                        Ok(())
+                    }
+                )],
+                ..RewriteStrSettings::new()
+            },
+        )
+        .expect("KaTeX snapshot HTML is valid")
+        .into_bytes()
+    }
 
     fn has_arg(args: &[OsString], expected: &str) -> bool {
         args.iter().any(|arg| arg == OsStr::new(expected))
@@ -5693,6 +5824,111 @@ contexts:
 
         assert!(targets.is_relevant_change(Path::new("deck.md")));
         assert!(!targets.is_relevant_change(Path::new("layout.html")));
+    }
+
+    fn render_example_slides(
+        edit_annotations: peitho_core::EditAnnotations,
+    ) -> Vec<(PathBuf, String)> {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let examples_root = repository_root.join("examples");
+        let isolated_root = tempfile::tempdir().unwrap();
+        let mut examples = fs::read_dir(&examples_root)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        examples.sort_by_key(|entry| entry.file_name());
+
+        let mut slides = Vec::new();
+        for example in examples {
+            if !example.file_type().unwrap().is_dir() || !example.path().join("deck.md").is_file() {
+                continue;
+            }
+            let name = example.file_name();
+            let isolated_example = isolated_root.path().join(&name);
+            copy_dir_contents(&example.path(), &isolated_example).unwrap();
+            let copied_cache = isolated_example.join(".peitho");
+            if copied_cache.exists() {
+                fs::remove_dir_all(copied_cache).unwrap();
+            }
+
+            let deck = isolated_example.join("deck.md");
+            let artifacts = build_artifacts_with_services(
+                &deck,
+                &DeterministicSvgRunner,
+                &DeterministicEmbedRenderer,
+                &DeterministicOEmbedFetcher,
+                edit_annotations,
+            )
+            .unwrap_or_else(|err| panic!("failed to build {}: {err:?}", deck.display()));
+            for slide in artifacts.rendered.slides() {
+                slides.push((
+                    PathBuf::from(&name).join(slide.src()),
+                    String::from_utf8(deterministic_example_slide_bytes(slide.html()))
+                        .expect("rendered example slide is UTF-8"),
+                ));
+            }
+        }
+        slides.sort_by(|left, right| left.0.cmp(&right.0));
+        slides
+    }
+
+    fn strip_example_edit_annotations(html: &str) -> String {
+        let stripped = rewrite_str(
+            html,
+            RewriteStrSettings {
+                element_content_handlers: vec![element!("[data-peitho-src]", |element| {
+                    assert!(
+                        element.get_attribute("data-peitho-md").is_some(),
+                        "data-peitho-src must be paired with data-peitho-md"
+                    );
+                    element.remove_attribute("data-peitho-src");
+                    element.remove_attribute("data-peitho-md");
+                    if element.tag_name().eq_ignore_ascii_case("span") {
+                        element.remove_and_keep_content();
+                    }
+                    Ok(())
+                })],
+                ..RewriteStrSettings::new()
+            },
+        )
+        .expect("annotated example slide HTML is valid");
+        assert!(!stripped.contains("data-peitho-src"), "{html}");
+        assert!(!stripped.contains("data-peitho-md"), "{html}");
+        stripped
+    }
+
+    #[test]
+    fn edit_annotations_off_example_slide_hashes() {
+        let slides = render_example_slides(peitho_core::EditAnnotations::Off);
+
+        let mut digest_index = String::new();
+        for (path, html) in slides {
+            let line = format!(
+                "{}  {}\n",
+                short_sha256_hex(html.as_bytes(), 64),
+                path.display()
+            );
+            digest_index.push_str(&line);
+        }
+
+        insta::assert_snapshot!("edit_annotations_off_example_slide_hashes", digest_index);
+    }
+
+    #[test]
+    fn edit_annotations_on_minus_attributes_equals_off_for_examples() {
+        let off = render_example_slides(peitho_core::EditAnnotations::Off);
+        let on = render_example_slides(peitho_core::EditAnnotations::On);
+
+        assert_eq!(on.len(), off.len());
+        for ((on_path, on_html), (off_path, off_html)) in on.iter().zip(&off) {
+            assert_eq!(on_path, off_path);
+            assert_eq!(
+                strip_example_edit_annotations(on_html),
+                *off_html,
+                "{}",
+                off_path.display()
+            );
+        }
     }
 
     #[test]

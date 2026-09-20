@@ -328,8 +328,14 @@ authorized editable spans. Build one annotation plan from the same
 `into_offset_iter()` events that will be rendered. For a candidate block,
 calculate its absolute inline range with
 `fragment_span.start + (event_offset - BodyMarkdownSource.range.start)` and
-emit metadata only when both range and `EditableBlockKind` exactly match an
-existing `EditableSpan`. Slice `data-peitho-md` from the source-backed fragment
+emit metadata only when the range exactly matches an existing `EditableSpan`.
+Authorization is range-only (decided in the Task 1 review, PR #547): joining
+adjacent same-marker list fragments makes the renderer emit a loose-list `<p>`
+for a range the parser recorded as a tight item, so a kind match would silently
+drop those blocks; spans never overlap, so the range alone is the parser's
+authority. `EditableBlockKind` stays on the span for Task 4's postcondition.
+Parser and renderer share one inline-range walker so the two sides cannot
+drift. Slice `data-peitho-md` from the source-backed fragment
 and escape it with one dedicated double-quoted-attribute encoder. Encode `&`,
 `"`, and `<` once, encode carriage return as `&#13;`, and encode line feed as
 `&#10;`; numeric line-ending references prevent the HTML parser from
