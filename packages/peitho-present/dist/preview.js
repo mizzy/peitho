@@ -832,8 +832,10 @@ var PreviewShellController = class {
   flushChain = Promise.resolve(true);
   flushesInFlight = 0;
   transitionSequence = 0;
+  pendingTransitionSettlements = 0;
+  deferredReload = null;
   strip;
-  tileClickGuardCleanups = [];
+  tileListenerCleanups = [];
   fontScopeCleanup = null;
   dimensions = { width: 1280, height: 720 };
   onNavigate = (event) => {
@@ -874,6 +876,13 @@ var PreviewShellController = class {
   };
   onPageHide = () => {
     this.saveState();
+    const edit = this.activeSlideEdit;
+    if (edit !== null) {
+      const text2 = this.slideEditText(edit);
+      if (text2 !== edit.old) {
+        void this.sendSlideEdit(edit, text2, true).catch(() => void 0);
+      }
+    }
     const key = this.notesTextareaKey;
     const text = this.notesTextarea.value;
     void this.doFlush(key, text, true);
@@ -987,6 +996,10 @@ var PreviewShellController = class {
   requestGenerationReload(generation, reload) {
     if (generation === this.generation) return;
     this.saveState();
+    if (this.activeSlideEdit !== null || this.pendingTransitionSettlements > 0) {
+      this.deferredReload = reload;
+      return;
+    }
     reload();
   }
   flushNotes() {
@@ -1060,7 +1073,14 @@ var PreviewShellController = class {
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.win.removeEventListener("resize", this.onResize);
     this.win.removeEventListener("pagehide", this.onPageHide);
-    while (this.tileClickGuardCleanups.length > 0) this.tileClickGuardCleanups.pop()?.();
+    while (this.tileListenerCleanups.length > 0) this.tileListenerCleanups.pop()?.();
+    const edit = this.activeSlideEdit;
+    if (edit !== null) {
+      edit.removeListeners();
+      this.activeSlideEdit = null;
+      this.restoreSlideEdit(edit);
+    }
+    this.deferredReload = null;
     this.fontScopeCleanup?.();
     this.fontScopeCleanup = null;
     this.clearCanvasRootProperties();
@@ -1095,12 +1115,14 @@ var PreviewShellController = class {
     tile.dataset.slideKey = slide.key;
     tile.dataset.slideIndex = String(slide.index);
     const clickGuard = createClickNavigationGuard({ target: tile, window: this.win });
-    this.tileClickGuardCleanups.push(() => clickGuard.destroy());
-    tile.addEventListener("click", (event) => {
+    this.tileListenerCleanups.push(() => clickGuard.destroy());
+    const onTileClick = (event) => {
       if (clickGuard.shouldIgnoreClick(event)) return;
       if (this.tryStartSlideEdit(slide, host, event)) return;
       this.commitTransition(slide.index, "single");
-    });
+    };
+    tile.addEventListener("click", onTileClick);
+    this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
     tile.appendChild(host);
     const tileNumber = this.createSlideNumber(slide);
@@ -1111,7 +1133,9 @@ var PreviewShellController = class {
     thumb.dataset.slideIndex = String(slide.index);
     thumb.setAttribute("role", "button");
     thumb.setAttribute("aria-label", `Slide ${slide.index + 1}`);
-    thumb.addEventListener("click", () => this.setIndex(slide.index));
+    const onThumbClick = () => this.setIndex(slide.index);
+    thumb.addEventListener("click", onThumbClick);
+    this.tileListenerCleanups.push(() => thumb.removeEventListener("click", onThumbClick));
     const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
@@ -1119,7 +1143,7 @@ var PreviewShellController = class {
     return { meta: slide, tile, host, thumb, thumbHost, tileNumber };
   }
   tryStartSlideEdit(slide, host, event) {
-    if (this.activeSlideEdit !== null) return true;
+    if (this.activeSlideEdit !== null || this.pendingTransitionSettlements > 0) return true;
     if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
     const shadow = host.shadowRoot;
     if (shadow === null) return false;
@@ -1167,7 +1191,7 @@ var PreviewShellController = class {
       this.handleSlideEditKeyDown(edit, keyboardEvent);
     };
     const onBlur = () => {
-      void this.commitSlideEdit(edit);
+      this.commitSlideEditAndRelease();
     };
     edit = {
       key: slide.key,
@@ -1218,26 +1242,34 @@ var PreviewShellController = class {
       edit.trailingNewlineSentinel = insertSourceNewline(this.win, edit.editor, this.selectionRangeProvider) || edit.trailingNewlineSentinel;
       return;
     }
-    void this.commitSlideEdit(edit);
+    this.commitSlideEditAndRelease();
   }
   cancelSlideEdit(edit) {
-    if (this.activeSlideEdit !== edit) return;
+    if (!this.closeSlideEdit(edit)) return;
+    this.releaseDeferredReload();
+  }
+  closeSlideEdit(edit) {
+    if (this.activeSlideEdit !== edit) return false;
     edit.removeListeners();
     this.activeSlideEdit = null;
-    if (edit.editor !== edit.target) {
-      edit.editor.replaceWith(...edit.originalNodes);
-    } else {
-      edit.target.replaceChildren(...edit.originalNodes);
-      this.restoreSlideEditorAttributes(edit);
-    }
+    this.restoreSlideEdit(edit);
     this.setSlideEditStatus("");
+    return true;
   }
-  commitSlideEdit(edit) {
-    if (this.activeSlideEdit !== edit) return Promise.resolve(true);
+  commitSlideEditAndRelease() {
+    void this.commitSlideEdit().then((committed) => {
+      if (committed && this.pendingTransitionSettlements === 0) {
+        this.releaseDeferredReload();
+      }
+    });
+  }
+  commitSlideEdit() {
+    const edit = this.activeSlideEdit;
+    if (edit === null) return Promise.resolve(true);
     if (edit.commitPromise !== null) return edit.commitPromise;
     const newText = this.slideEditText(edit);
     if (newText === edit.old) {
-      this.cancelSlideEdit(edit);
+      this.closeSlideEdit(edit);
       return Promise.resolve(true);
     }
     const commit = this.postSlideEdit(edit, newText).finally(() => {
@@ -1249,17 +1281,7 @@ var PreviewShellController = class {
   }
   async postSlideEdit(edit, newText) {
     try {
-      const response = await this.fetcher("/slide-edit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: edit.key,
-          start: edit.start,
-          end: edit.end,
-          old: edit.old,
-          new: newText
-        })
-      });
+      const response = await this.sendSlideEdit(edit, newText, false);
       if (response.ok) {
         if (this.activeSlideEdit === edit) this.finishSlideEdit(edit, newText);
         return true;
@@ -1287,6 +1309,35 @@ var PreviewShellController = class {
     edit.target.removeAttribute("data-peitho-src");
     edit.target.removeAttribute("data-peitho-md");
     this.setSlideEditStatus("");
+  }
+  sendSlideEdit(edit, newText, keepalive) {
+    return this.fetcher("/slide-edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: edit.key,
+        start: edit.start,
+        end: edit.end,
+        old: edit.old,
+        new: newText
+      }),
+      keepalive
+    });
+  }
+  releaseDeferredReload() {
+    const reload = this.deferredReload;
+    if (reload === null) return;
+    this.deferredReload = null;
+    this.saveState();
+    reload();
+  }
+  restoreSlideEdit(edit) {
+    if (edit.editor !== edit.target) {
+      edit.editor.replaceWith(...edit.originalNodes);
+      return;
+    }
+    edit.target.replaceChildren(...edit.originalNodes);
+    this.restoreSlideEditorAttributes(edit);
   }
   slideEditText(edit) {
     const text = edit.editor.textContent ?? "";
@@ -1528,20 +1579,35 @@ var PreviewShellController = class {
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
       this.saveState();
     };
-    if (!needsFlush || this.notesSettled()) {
+    if (this.activeSlideEdit === null && (!needsFlush || this.notesSettled())) {
       commit();
+      this.releaseDeferredReload();
       return;
     }
+    this.pendingTransitionSettlements += 1;
     void (async () => {
-      while (true) {
-        const flushed = await this.flushNotes();
-        if (sequence !== this.transitionSequence || !flushed) return;
-        if (this.notesSettled()) {
-          commit();
+      try {
+        const settled = await this.settleForTransition(sequence);
+        if (sequence !== this.transitionSequence) return;
+        if (!settled) {
+          if (this.activeSlideEdit === null) this.releaseDeferredReload();
           return;
         }
+        commit();
+        this.releaseDeferredReload();
+      } finally {
+        this.pendingTransitionSettlements -= 1;
       }
     })();
+  }
+  async settleForTransition(sequence) {
+    if (!await this.commitSlideEdit()) return false;
+    if (sequence !== this.transitionSequence) return false;
+    while (!this.notesSettled()) {
+      if (!await this.flushNotes()) return false;
+      if (sequence !== this.transitionSequence) return false;
+    }
+    return true;
   }
   notesAreDirty() {
     return this.isDirty(this.notesTextareaKey, this.notesTextarea.value);

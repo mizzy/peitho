@@ -2338,11 +2338,18 @@ pub fn render_preview_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> Strin
 
     async function main() {
       const root = document.getElementById('peitho-preview-root');
+      const cleanups = [];
+      const dispose = () => {
+        while (cleanups.length > 0) cleanups.pop()();
+      };
       try {
-        peitho.installPreviewKeyboard(window);
+        cleanups.push(peitho.installPreviewKeyboard(window));
         const shell = await peitho.mountPreviewShell({ root });
-        peitho.installPreviewReload(shell);
+        cleanups.push(() => shell.destroy());
+        cleanups.push(peitho.installPreviewReload(shell));
+        window.addEventListener('pagehide', dispose, { once: true });
       } catch (error) {
+        dispose();
         showError(error.message);
       }
     }
@@ -5835,6 +5842,33 @@ Paragraph after heading.
         ] {
             assert!(html.contains(r#"<html lang="en">"#));
         }
+    }
+
+    #[test]
+    fn preview_index_bootstrap_cleans_keyboard_when_mount_fails() {
+        let html = render_preview_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        let keyboard = html
+            .find("cleanups.push(peitho.installPreviewKeyboard(window));")
+            .expect("keyboard cleanup is retained");
+        let mount = html
+            .find("const shell = await peitho.mountPreviewShell({ root });")
+            .expect("preview shell is mounted");
+        let failure = html
+            .find("dispose();\n        showError(error.message);")
+            .expect("acquired cleanups run before the mount error is shown");
+        assert!(keyboard < mount);
+        assert!(mount < failure);
+    }
+
+    #[test]
+    fn preview_index_bootstrap_disposes_shell_keyboard_and_reload_handles() {
+        let html = render_preview_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("cleanups.push(peitho.installPreviewKeyboard(window));"));
+        assert!(html.contains("cleanups.push(() => shell.destroy());"));
+        assert!(html.contains("cleanups.push(peitho.installPreviewReload(shell));"));
+        assert!(html.contains("window.addEventListener('pagehide', dispose, { once: true });"));
     }
 
     #[test]
