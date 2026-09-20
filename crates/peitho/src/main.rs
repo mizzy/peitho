@@ -2068,45 +2068,87 @@ pub(crate) fn load_and_expand_deck_source(input: &Path) -> miette::Result<Loaded
     })
 }
 
-fn classify_preview_notes_report(report: miette::Report) -> server::NotesWriteError {
+fn classify_preview_deck_report(report: miette::Report) -> server::DeckWriteError {
     let is_conflict = report.downcast_ref::<DeckDiagnostic>().is_some();
     let message = plain_diagnostic_text(&report);
     if is_conflict {
-        server::NotesWriteError::Conflict(message)
+        server::DeckWriteError::Conflict(message)
     } else {
-        server::NotesWriteError::Io(message)
+        server::DeckWriteError::Io(message)
     }
 }
 
-fn preview_notes_conflict(error: peitho_core::BuildError) -> server::NotesWriteError {
+fn preview_deck_conflict(error: peitho_core::BuildError) -> server::DeckWriteError {
     let report = miette::Report::new(DeckDiagnostic::new(error));
-    server::NotesWriteError::Conflict(plain_diagnostic_text(&report))
+    server::DeckWriteError::Conflict(plain_diagnostic_text(&report))
 }
 
-fn preview_notes_span_conflict(input: &Path, file: &Path, line: usize) -> server::NotesWriteError {
-    preview_notes_conflict(
+#[allow(dead_code)]
+fn preview_deck_drift_conflict() -> server::DeckWriteError {
+    server::DeckWriteError::Conflict("the deck changed on disk; reload and retry".to_owned())
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewOriginRewriteScope {
+    NoteSlide(peitho_core::domain::SourceSpan),
+    EditableBlock(peitho_core::domain::SourceSpan),
+}
+
+impl PreviewOriginRewriteScope {
+    fn source_span(self) -> peitho_core::domain::SourceSpan {
+        match self {
+            Self::NoteSlide(span) | Self::EditableBlock(span) => span,
+        }
+    }
+
+    fn requires_whole_translation(self) -> bool {
+        match self {
+            Self::NoteSlide(_) => false,
+            Self::EditableBlock(_) => true,
+        }
+    }
+}
+
+fn preview_deck_span_conflict(
+    input: &Path,
+    file: &Path,
+    line: usize,
+    scope: PreviewOriginRewriteScope,
+) -> server::DeckWriteError {
+    let (message, help) = match scope {
+        PreviewOriginRewriteScope::NoteSlide(_) => (
+            "this slide cannot be edited from preview",
+            format!("edit the note in {}", file.display()),
+        ),
+        PreviewOriginRewriteScope::EditableBlock(_) => (
+            "this block cannot be edited from preview",
+            format!("edit the block in {}", file.display()),
+        ),
+    };
+    preview_deck_conflict(
         peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Parse,
             Some(line),
-            "this slide cannot be edited from preview",
-            format!("edit the note in {}", file.display()),
+            message,
+            help,
         )
         .with_origin_file(origin_for_display(file, input)),
     )
 }
 
-fn preview_notes_io(
+fn preview_deck_io(
     action: &str,
     path: &Path,
     help: &str,
     err: io::Error,
-) -> server::NotesWriteError {
+) -> server::DeckWriteError {
     let report = miette::miette!(
         help = help.to_owned(),
         "failed to {action} {}\ncaused by: {err}",
         path.display()
     );
-    server::NotesWriteError::Io(plain_diagnostic_text(&report))
+    server::DeckWriteError::Io(plain_diagnostic_text(&report))
 }
 
 fn contains_bare_lf(source: &str) -> bool {
@@ -2127,14 +2169,120 @@ fn convert_bare_lf_to_crlf(source: &str) -> String {
     converted
 }
 
+fn preview_scope_span_conflict(
+    input: &Path,
+    loaded: &LoadedDeckSource,
+    combined_source: &str,
+    scope: PreviewOriginRewriteScope,
+) -> server::DeckWriteError {
+    let requested = scope.source_span();
+    let mut offset = requested.start.min(combined_source.len());
+    while offset > 0 && !combined_source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let combined_line = peitho_core::parser::line_for_offset(combined_source, offset);
+    let (translated_file, translated_line) = loaded.line_map.translate(combined_line);
+    let file = if translated_file.as_os_str().is_empty() {
+        input
+    } else {
+        translated_file.as_path()
+    };
+    preview_deck_span_conflict(input, file, translated_line, scope)
+}
+
+fn write_preview_origin_rewrite(
+    input: &Path,
+    loaded: &LoadedDeckSource,
+    scope: PreviewOriginRewriteScope,
+    before: &str,
+    after: &str,
+) -> Result<(), server::DeckWriteError> {
+    if before == after {
+        return Ok(());
+    }
+
+    let requested = scope.source_span();
+    let rewritten_scope_end = if after.len() >= before.len() {
+        requested.end.checked_add(after.len() - before.len())
+    } else {
+        requested.end.checked_sub(before.len() - after.len())
+    }
+    .ok_or_else(|| preview_scope_span_conflict(input, loaded, before, scope))?;
+    let outside_scope_is_unchanged = before.get(..requested.start) == after.get(..requested.start)
+        && before.get(requested.end..) == after.get(rewritten_scope_end..);
+    if !outside_scope_is_unchanged {
+        return Err(preview_scope_span_conflict(input, loaded, before, scope));
+    }
+
+    let translated = loaded
+        .line_map
+        .translate_span(before, requested)
+        .ok_or_else(|| preview_scope_span_conflict(input, loaded, before, scope))?;
+    if scope.requires_whole_translation() && translated.combined != requested {
+        return Err(preview_deck_span_conflict(
+            input,
+            &translated.file,
+            translated.start.line,
+            scope,
+        ));
+    }
+
+    let origin_path = translated.file.as_path();
+    let mut origin_source = fs::read_to_string(origin_path).map_err(|err| {
+        preview_deck_io("read", origin_path, "make the file readable and retry", err)
+    })?;
+    let range = peitho_core::include::origin_span_to_range(&origin_source, &translated)
+        .ok_or_else(|| {
+            preview_deck_span_conflict(input, origin_path, translated.start.line, scope)
+        })?;
+    let expected_origin = before
+        .get(translated.combined.start..translated.combined.end)
+        .ok_or_else(|| {
+            preview_deck_span_conflict(input, origin_path, translated.start.line, scope)
+        })?;
+    if origin_source.get(range.clone()) != Some(expected_origin) {
+        return Err(preview_deck_span_conflict(
+            input,
+            origin_path,
+            translated.start.line,
+            scope,
+        ));
+    }
+
+    let rewritten_scope = after
+        .get(translated.combined.start..rewritten_scope_end)
+        .ok_or_else(|| {
+            preview_deck_span_conflict(input, origin_path, translated.start.line, scope)
+        })?;
+    let rewritten_scope: Cow<'_, str> =
+        if origin_source.contains("\r\n") && !contains_bare_lf(&origin_source) {
+            Cow::Owned(convert_bare_lf_to_crlf(rewritten_scope))
+        } else {
+            Cow::Borrowed(rewritten_scope)
+        };
+    if origin_source.get(range.clone()) == Some(rewritten_scope.as_ref()) {
+        return Ok(());
+    }
+
+    origin_source.replace_range(range, rewritten_scope.as_ref());
+    server::write_atomic(origin_path, origin_source.as_bytes()).map_err(|err| {
+        preview_deck_io(
+            "write",
+            origin_path,
+            "make the file and its directory writable and retry",
+            err,
+        )
+    })
+}
+
 fn write_preview_note(
     input: &Path,
     key: &SlideKey,
     text: &str,
-) -> Result<(), server::NotesWriteError> {
-    let loaded = load_and_expand_deck_source(input).map_err(classify_preview_notes_report)?;
+) -> Result<(), server::DeckWriteError> {
+    let loaded = load_and_expand_deck_source(input).map_err(classify_preview_deck_report)?;
     let (_, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)
-        .map_err(classify_preview_notes_report)?;
+        .map_err(classify_preview_deck_report)?;
     let combined_source = loaded.source.as_str();
     let parsed = loaded
         .translate(peitho_core::parse_deck(
@@ -2142,14 +2290,14 @@ fn write_preview_note(
             loaded.frontmatter.clone(),
             &highlighter,
         ))
-        .map_err(classify_preview_notes_report)?;
+        .map_err(classify_preview_deck_report)?;
 
     let Some(slide) = parsed
         .parsed_slides()
         .iter()
         .find(|slide| slide.key == *key)
     else {
-        return Err(preview_notes_conflict(peitho_core::BuildError::new(
+        return Err(preview_deck_conflict(peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Parse,
             None,
             format!("slide key '{}' not found in current deck", key.as_str()),
@@ -2165,71 +2313,68 @@ fn write_preview_note(
             text,
             &highlighter,
         ))
-        .map_err(|report| server::NotesWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
-    if rewritten == combined_source {
-        return Ok(());
+        .map_err(|report| server::DeckWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
+
+    write_preview_origin_rewrite(
+        input,
+        &loaded,
+        PreviewOriginRewriteScope::NoteSlide(slide.source_span),
+        combined_source,
+        &rewritten,
+    )
+}
+
+#[allow(dead_code)]
+fn write_preview_slide_edit(
+    input: &Path,
+    key: &SlideKey,
+    start: usize,
+    end: usize,
+    old: &str,
+    new: &str,
+) -> Result<(), server::DeckWriteError> {
+    let loaded = load_and_expand_deck_source(input).map_err(classify_preview_deck_report)?;
+    let (_, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)
+        .map_err(classify_preview_deck_report)?;
+    let combined_source = loaded.source.as_str();
+    let parsed = loaded
+        .translate(peitho_core::parse_deck(
+            combined_source,
+            loaded.frontmatter.clone(),
+            &highlighter,
+        ))
+        .map_err(classify_preview_deck_report)?;
+    let slide = parsed
+        .parsed_slides()
+        .iter()
+        .find(|slide| slide.key == *key)
+        .ok_or_else(preview_deck_drift_conflict)?;
+    let requested = peitho_core::domain::SourceSpan { start, end };
+    let span = slide
+        .editable_spans()
+        .into_iter()
+        .find(|span| span.source_span() == requested)
+        .ok_or_else(preview_deck_drift_conflict)?;
+    if combined_source.get(start..end) != Some(old) {
+        return Err(preview_deck_drift_conflict());
     }
 
-    let span = match loaded
-        .line_map
-        .translate_span(combined_source, slide.source_span)
-    {
-        Some(span) => span,
-        None => {
-            let combined_line =
-                peitho_core::parser::line_for_offset(combined_source, slide.source_span.start);
-            let (origin_path, origin_line) = loaded.line_map.translate(combined_line);
-            return Err(preview_notes_span_conflict(
-                input,
-                &origin_path,
-                origin_line,
-            ));
-        }
-    };
-    let origin_path = &span.file;
-    let mut origin_source = fs::read_to_string(origin_path).map_err(|err| {
-        preview_notes_io("read", origin_path, "make the file readable and retry", err)
-    })?;
-    let Some(range) = peitho_core::include::origin_span_to_range(&origin_source, &span) else {
-        return Err(preview_notes_span_conflict(
-            input,
-            origin_path,
-            span.start.line,
-        ));
-    };
-    if origin_source.get(range.clone())
-        != combined_source.get(span.combined.start..span.combined.end)
-    {
-        return Err(preview_notes_span_conflict(
-            input,
-            origin_path,
-            span.start.line,
-        ));
-    }
-
-    // `rewrite_note` never touches bytes outside `slide.source_span`;
-    // `span.combined.start` skips a clipped leading synthetic byte; trailing synthetic bytes the
-    // rewrite leaves in place are written into the origin on purpose (design record, mapping section).
-    let rewritten_slide_end = slide.source_span.end + rewritten.len() - combined_source.len();
-    let rewritten_slide = &rewritten[span.combined.start..rewritten_slide_end];
-    let rewritten_slide: Cow<'_, str> =
-        if origin_source.contains("\r\n") && !contains_bare_lf(&origin_source) {
-            Cow::Owned(convert_bare_lf_to_crlf(rewritten_slide))
-        } else {
-            Cow::Borrowed(rewritten_slide)
-        };
-    if origin_source.get(range.clone()) == Some(rewritten_slide.as_ref()) {
-        return Ok(());
-    }
-    origin_source.replace_range(range, rewritten_slide.as_ref());
-    server::write_atomic(origin_path, origin_source.as_bytes()).map_err(|err| {
-        preview_notes_io(
-            "write",
-            origin_path,
-            "make the file and its directory writable and retry",
-            err,
-        )
-    })
+    let rewritten = loaded
+        .translate(peitho_core::slide_edit::rewrite_block(
+            combined_source,
+            slide,
+            span,
+            new,
+            &highlighter,
+        ))
+        .map_err(|report| server::DeckWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
+    write_preview_origin_rewrite(
+        input,
+        &loaded,
+        PreviewOriginRewriteScope::EditableBlock(span.source_span()),
+        combined_source,
+        &rewritten,
+    )
 }
 
 fn preview_notes_writer(input: PathBuf) -> server::NotesWriter {
@@ -6095,6 +6240,379 @@ contexts:
         assert!(artifacts.rendered.slides()[0].html().contains("hl-"));
     }
 
+    fn preview_edit_coordinates(
+        deck: &Path,
+        key: &SlideKey,
+        old: &str,
+        occurrence: usize,
+    ) -> (usize, usize) {
+        let loaded = load_and_expand_deck_source(deck).unwrap();
+        let (_, highlighter) = resolve_assets_and_highlighter(deck, &loaded.frontmatter).unwrap();
+        let parsed = loaded
+            .translate(peitho_core::parse_deck(
+                &loaded.source,
+                loaded.frontmatter.clone(),
+                &highlighter,
+            ))
+            .unwrap();
+        let slide = parsed
+            .parsed_slides()
+            .iter()
+            .find(|slide| slide.key == *key)
+            .unwrap();
+        let span = slide
+            .editable_spans()
+            .into_iter()
+            .filter(|span| {
+                let span = span.source_span();
+                loaded.source.get(span.start..span.end) == Some(old)
+            })
+            .nth(occurrence)
+            .unwrap()
+            .source_span();
+        (span.start, span.end)
+    }
+
+    fn assert_preview_deck_drift(result: Result<(), server::DeckWriteError>) {
+        assert_eq!(
+            result,
+            Err(server::DeckWriteError::Conflict(
+                "the deck changed on disk; reload and retry".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_reparses_and_rewrites_the_current_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("current").unwrap();
+        let initial = concat!(
+            "<!-- {\"key\":\"current\"} -->\n",
+            "# Current\n\n",
+            "Edit *this*.\n\n",
+            "Other old\n",
+        );
+        fs::write(&deck, initial).unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "Edit *this*.", 0);
+        let current = initial.replace("Other old", "Other new");
+        fs::write(&deck, &current).unwrap();
+
+        write_preview_slide_edit(
+            &deck,
+            &key,
+            start,
+            end,
+            "Edit *this*.",
+            "Edit **this now**.",
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            current.replace("Edit *this*.", "Edit **this now**.")
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_rejects_missing_key_span_and_old_bytes_as_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("current").unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"current\"} -->\n# Current\n\nOriginal text\n",
+        )
+        .unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "Original text", 0);
+
+        assert_preview_deck_drift(write_preview_slide_edit(
+            &deck,
+            &SlideKey::new("missing").unwrap(),
+            start,
+            end,
+            "Original text",
+            "Replacement",
+        ));
+        assert_preview_deck_drift(write_preview_slide_edit(
+            &deck,
+            &key,
+            start + 1,
+            end,
+            "Original text",
+            "Replacement",
+        ));
+        assert_preview_deck_drift(write_preview_slide_edit(
+            &deck,
+            &key,
+            start,
+            end,
+            "stale text",
+            "Replacement",
+        ));
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "<!-- {\"key\":\"current\"} -->\n# Current\n\nOriginal text\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_uses_range_when_the_same_old_text_occurs_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("repeat").unwrap();
+        fs::write(&deck, "# Repeat\n\nsame old\n\nsame old\n").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "same old", 1);
+
+        write_preview_slide_edit(&deck, &key, start, end, "same old", "second changed").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "# Repeat\n\nsame old\n\nsecond changed\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_maps_structural_refusal_to_unprocessable() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("structural").unwrap();
+        fs::write(&deck, "# Structural\n\nplain text\n").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "plain text", 0);
+
+        let err = write_preview_slide_edit(&deck, &key, start, end, "plain text", "- list item")
+            .unwrap_err();
+
+        let server::DeckWriteError::Unprocessable(message) = err else {
+            panic!("structural refusal must be unprocessable: {err:?}");
+        };
+        assert!(message.contains("inline edit would change the edited slide's block structure"));
+    }
+
+    #[test]
+    fn write_preview_slide_edit_writes_only_the_included_origin_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        let top_source = concat!(
+            "---\n",
+            "time: 1m\n",
+            "---\n",
+            "<!-- {\"include\":\"shared.md\"} -->\n",
+            "---\n",
+            "# Top\n",
+        );
+        fs::write(&deck, top_source).unwrap();
+        fs::write(
+            &included,
+            "<!-- {\"key\":\"shared\"} -->\n# Shared\n\n共有 **本文**\n",
+        )
+        .unwrap();
+        let key = SlideKey::new("shared").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "共有 **本文**", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "共有 **本文**", "共有 **更新**")
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+        assert_eq!(
+            fs::read_to_string(&included).unwrap(),
+            "<!-- {\"key\":\"shared\"} -->\n# Shared\n\n共有 **更新**\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_rejects_a_synthetic_or_mixed_origin_block_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        fs::write(
+            &deck,
+            "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n",
+        )
+        .unwrap();
+        fs::write(&included, "# Included").unwrap();
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+        let before = loaded.source.clone();
+        let included_start = before.find("# Included").unwrap();
+        let synthetic_end = included_start + "# Included\n".len();
+        let mut clipped_after = before.clone();
+        clipped_after.replace_range(
+            included_start + "# ".len()..included_start + "# Included".len(),
+            "Replaced",
+        );
+
+        let clipped = write_preview_origin_rewrite(
+            &deck,
+            &loaded,
+            PreviewOriginRewriteScope::EditableBlock(peitho_core::domain::SourceSpan {
+                start: included_start,
+                end: synthetic_end,
+            }),
+            &before,
+            &clipped_after,
+        )
+        .unwrap_err();
+        let server::DeckWriteError::Conflict(clipped_message) = clipped else {
+            panic!("synthetic clipping must be a conflict: {clipped:?}");
+        };
+        assert!(clipped_message.contains("shared.md"));
+
+        let after_start = before.find("# After").unwrap();
+        let mixed = write_preview_origin_rewrite(
+            &deck,
+            &loaded,
+            PreviewOriginRewriteScope::EditableBlock(peitho_core::domain::SourceSpan {
+                start: included_start,
+                end: after_start + "# After".len(),
+            }),
+            &before,
+            &clipped_after,
+        )
+        .unwrap_err();
+        let server::DeckWriteError::Conflict(mixed_message) = mixed else {
+            panic!("mixed origin span must be a conflict: {mixed:?}");
+        };
+        assert!(mixed_message.contains("shared.md"));
+        assert_eq!(fs::read_to_string(&included).unwrap(), "# Included");
+    }
+
+    #[test]
+    fn write_preview_slide_edit_preserves_a_leading_origin_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("bom").unwrap();
+        fs::write(
+            &deck,
+            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# BOM\n\nbefore\n",
+        )
+        .unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "before", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "before", "after").unwrap();
+
+        assert_eq!(
+            fs::read(&deck).unwrap(),
+            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# BOM\n\nafter\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_preserves_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("crlf").unwrap();
+        fs::write(
+            &deck,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nbefore\r\n",
+        )
+        .unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "before", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "before", "after").unwrap();
+
+        let bytes = fs::read(&deck).unwrap();
+        assert_eq!(
+            bytes,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nafter\r\n"
+        );
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte != b'\n' || (index > 0 && bytes[index - 1] == b'\r')));
+    }
+
+    #[test]
+    fn write_preview_slide_edit_preserves_crlf_for_a_multiline_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("crlf").unwrap();
+        let original = b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nfirst\r\nsecond\r\n";
+        fs::write(&deck, original).unwrap();
+        let old = "first\r\nsecond";
+        let (start, end) = preview_edit_coordinates(&deck, &key, old, 0);
+        fs::create_dir(dir.path().join("deck.md.tmp")).unwrap();
+
+        write_preview_slide_edit(&deck, &key, start, end, old, "first\nsecond").unwrap();
+
+        assert_eq!(fs::read(&deck).unwrap(), original);
+        fs::remove_dir(dir.path().join("deck.md.tmp")).unwrap();
+
+        write_preview_slide_edit(&deck, &key, start, end, old, "first changed\nsecond").unwrap();
+
+        let bytes = fs::read(&deck).unwrap();
+        assert_eq!(
+            bytes,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nfirst changed\r\nsecond\r\n"
+        );
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte != b'\n' || (index > 0 && bytes[index - 1] == b'\r')));
+    }
+
+    #[test]
+    fn write_preview_slide_edit_does_not_run_code_image_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let sentinel = dir.path().join("code-image-command-ran");
+        fs::write(
+            &deck,
+            format!(
+                "---\ncode_images:\n  dot: sh -c 'touch {}'\n---\n<!-- {{\"key\":\"diagram\"}} -->\n# Diagram\n\nSafe paragraph\n\n```dot\ndigraph {{}}\n```\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        let key = SlideKey::new("diagram").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "Safe paragraph", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "Safe paragraph", "Edited safely")
+            .unwrap();
+
+        assert!(fs::read_to_string(&deck).unwrap().contains("Edited safely"));
+        assert!(!sentinel.exists());
+    }
+
+    #[test]
+    fn preview_origin_writer_is_shared_by_note_and_slide_edit_regressions() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("shared-seam").unwrap();
+        fs::write(
+            &deck,
+            concat!(
+                "<!-- {\"key\":\"shared-seam\"} -->\n",
+                "# Shared seam\n\n",
+                "before\n\n",
+                "<!-- old note -->\n",
+            ),
+        )
+        .unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "before", 0);
+
+        write_preview_note(&deck, &key, "new note").unwrap();
+        write_preview_slide_edit(&deck, &key, start, end, "before", "after").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            concat!(
+                "<!-- {\"key\":\"shared-seam\"} -->\n",
+                "# Shared seam\n\n",
+                "after\n\n",
+                "<!-- new note -->\n",
+            )
+        );
+
+        let source =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).unwrap();
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let atomic_needle = ["write_atomic", "(origin_path"].concat();
+        assert_eq!(production.matches(&atomic_needle).count(), 1);
+        let shared_needle = ["write_preview_origin", "_rewrite("].concat();
+        assert_eq!(production.matches(&shared_needle).count(), 3);
+    }
+
     #[test]
     fn preview_notes_writer_reparses_and_rewrites_the_current_deck() {
         let dir = tempfile::tempdir().unwrap();
@@ -6335,7 +6853,7 @@ contexts:
                 &peitho_core::domain::SlideKey::new("broken").unwrap(),
                 "note"
             ),
-            Err(server::NotesWriteError::Conflict(_))
+            Err(server::DeckWriteError::Conflict(_))
         ));
 
         let vanished_dir = tempfile::tempdir().unwrap();
@@ -6356,7 +6874,7 @@ contexts:
             "note",
         )
         .unwrap_err();
-        let server::NotesWriteError::Conflict(message) = missing else {
+        let server::DeckWriteError::Conflict(message) = missing else {
             panic!("missing slide key must be a conflict: {missing:?}");
         };
         assert!(message.contains("slide key 'vanished' not found in current deck"));
@@ -6375,14 +6893,14 @@ contexts:
                 &peitho_core::domain::SlideKey::new("invalid").unwrap(),
                 "cannot --> save"
             ),
-            Err(server::NotesWriteError::Unprocessable(_))
+            Err(server::DeckWriteError::Unprocessable(_))
         ));
         assert!(matches!(
             invalid_writer(
                 &peitho_core::domain::SlideKey::new("invalid").unwrap(),
                 "{looks like settings}"
             ),
-            Err(server::NotesWriteError::Unprocessable(_))
+            Err(server::DeckWriteError::Unprocessable(_))
         ));
 
         let deleted_dir = tempfile::tempdir().unwrap();
@@ -6395,7 +6913,7 @@ contexts:
                 &peitho_core::domain::SlideKey::new("deleted").unwrap(),
                 "note"
             ),
-            Err(server::NotesWriteError::Io(_))
+            Err(server::DeckWriteError::Io(_))
         ));
 
         let unwritable_dir = tempfile::tempdir().unwrap();
@@ -6412,7 +6930,7 @@ contexts:
             "new note",
         )
         .unwrap_err();
-        let server::NotesWriteError::Io(message) = write_error else {
+        let server::DeckWriteError::Io(message) = write_error else {
             panic!("origin write failure must be I/O: {write_error:?}");
         };
         assert!(message.contains("make the file and its directory writable and retry"));

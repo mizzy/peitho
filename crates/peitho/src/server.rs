@@ -430,10 +430,10 @@ pub struct PresentServer {
 }
 
 pub type NotesWriter =
-    Box<dyn FnMut(&SlideKey, &str) -> Result<(), NotesWriteError> + Send + 'static>;
+    Box<dyn FnMut(&SlideKey, &str) -> Result<(), DeckWriteError> + Send + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NotesWriteError {
+pub enum DeckWriteError {
     Conflict(String),
     Unprocessable(String),
     Io(String),
@@ -1204,9 +1204,9 @@ impl PresentServer {
                 }
                 Err(err) => {
                     let (status, message) = match err {
-                        NotesWriteError::Conflict(message) => (409, message),
-                        NotesWriteError::Unprocessable(message) => (422, message),
-                        NotesWriteError::Io(message) => {
+                        DeckWriteError::Conflict(message) => (409, message),
+                        DeckWriteError::Unprocessable(message) => (422, message),
+                        DeckWriteError::Io(message) => {
                             eprintln!("warning: failed to write speaker note: {message}");
                             (500, message)
                         }
@@ -4189,7 +4189,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
     #[test]
     fn notes_route_maps_conflict_to_409() {
         let server = notes_server(Box::new(|_, _| {
-            Err(NotesWriteError::Conflict("note target changed".to_owned()))
+            Err(DeckWriteError::Conflict("note target changed".to_owned()))
         }));
 
         let conflict = json_http_request(
@@ -4208,7 +4208,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         const MESSAGE: &str = "line 3: speaker note cannot contain '-->'\n  = help: remove or rewrite '-->' because it closes the HTML comment";
 
         let server = notes_server(Box::new(|_, _| {
-            Err(NotesWriteError::Unprocessable(MESSAGE.to_owned()))
+            Err(DeckWriteError::Unprocessable(MESSAGE.to_owned()))
         }));
 
         let unprocessable = json_http_request(
@@ -4228,7 +4228,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
     #[test]
     fn notes_route_maps_io_to_500() {
         let server = notes_server(Box::new(|_, _| {
-            Err(NotesWriteError::Io("failed to write deck.md".to_owned()))
+            Err(DeckWriteError::Io("failed to write deck.md".to_owned()))
         }));
 
         let io_failure = json_http_request(
