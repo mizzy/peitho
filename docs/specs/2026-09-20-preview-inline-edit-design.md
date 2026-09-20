@@ -155,8 +155,11 @@ Reparse old and new; require all of:
 
 Consequences, all by construction rather than by special cases: emptying a
 block, typing `- ` / `# ` / a blank line that creates a new block, a stray
-`---`, `-->`, or a `:::` fence are all refused because the kind sequence, span
-count, slide count, or notes change.
+`---`, a note comment, or a `:::` fence are all refused because the kind sequence, span
+count, slide count, or notes change. (Corrected during implementation: a bare
+`-->` is harmless paragraph text and is accepted. The implemented postcondition
+is also stricter than this list — span text and each fragment's block-level
+event sequence are compared too; see the plan's Task 4 note.)
 
 ### 4. Rebuild failures in the page
 
