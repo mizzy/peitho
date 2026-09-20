@@ -155,6 +155,64 @@ function previewFetchFixture(
   };
 }
 
+const inlineEditSlideHtml: Record<string, string> = {
+  "slides/000-intro.html": `
+    <section>
+      <h1><span class="slot-title"><span id="editable-heading" data-peitho-src="40-67" data-peitho-md="A &quot;quote&quot; &amp; **mark**">A &quot;quote&quot; &amp; <strong>mark</strong></span></span></h1>
+      <p id="editable-paragraph" data-peitho-src="120-143" data-peitho-md="Peitho is a *fast* tool">Peitho is a <em id="paragraph-emphasis">fast</em> tool</p>
+      <ul><li id="editable-tight-item" data-peitho-src="200-212" data-peitho-md="parent *one*">parent <em id="tight-emphasis">one</em><ul id="nested-list"><li>child</li></ul></li></ul>
+      <p id="editable-link" data-peitho-src="240-279" data-peitho-md="[Open docs](https://example.com)"><a id="external-link" href="https://example.com" target="_blank">Open docs</a></p>
+      <p id="editable-crlf" data-peitho-src="300-313" data-peitho-md="first&#13;&#10;second">first<br>second</p>
+    </section>
+  `,
+  "slides/001-middle.html": `
+    <section><p id="middle-editable" data-peitho-src="400-406" data-peitho-md="Middle">Middle</p></section>
+  `,
+  "slides/002-end.html": `
+    <section><p id="end-editable" data-peitho-src="500-503" data-peitho-md="End">End</p></section>
+  `
+};
+
+type InlineEditFetchFixture = PreviewFetchFixture & {
+  slideEditPosts(): Array<[string, RequestInit]>;
+  resolveSlideEditPost(response: Response): void;
+  rejectSlideEditPost(error: unknown): void;
+};
+
+function inlineEditFetchFixture(): InlineEditFetchFixture {
+  const base = previewFetchFixture();
+  const posts: Array<[string, RequestInit]> = [];
+  const settlers: Array<{
+    resolve(response: Response): void;
+    reject(error: unknown): void;
+  }> = [];
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/slide-edit") {
+      posts.push([url, init ?? {}]);
+      return new Promise<Response>((resolve, reject) => settlers.push({ resolve, reject }));
+    }
+    const slideHtml = inlineEditSlideHtml[url];
+    if (slideHtml !== undefined) return okText(slideHtml);
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  return {
+    ...base,
+    fetcher,
+    slideEditPosts: () => posts,
+    resolveSlideEditPost(response: Response): void {
+      const settler = settlers.shift();
+      if (settler === undefined) throw new Error("No pending /slide-edit request");
+      settler.resolve(response);
+    },
+    rejectSlideEditPost(error: unknown): void {
+      const settler = settlers.shift();
+      if (settler === undefined) throw new Error("No pending /slide-edit request");
+      settler.reject(error);
+    }
+  };
+}
+
 function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
   return previewFetchFixture(deck, css).fetcher;
 }
@@ -195,6 +253,91 @@ async function mountForTest(root: HTMLElement, bus: EventTarget = window): Promi
   });
   shells.push(shell);
   return shell;
+}
+
+async function mountInlineEditForTest(options: {
+  mode?: "single" | "grid";
+  index?: number;
+  bus?: EventTarget;
+  fixture?: InlineEditFetchFixture;
+  selectionRangeProvider?: (editor: HTMLElement) => {
+    range: Range;
+    select(range: Range): void;
+  } | null;
+} = {}): Promise<{
+  root: HTMLElement;
+  shell: PreviewShell;
+  fixture: InlineEditFetchFixture;
+  bus: EventTarget;
+}> {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const mode = options.mode ?? "single";
+  const index = options.index ?? 0;
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode, index }));
+  const fixture = options.fixture ?? inlineEditFetchFixture();
+  const bus = options.bus ?? window;
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    selectionRangeProvider: options.selectionRangeProvider,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  return { root, shell, fixture, bus };
+}
+
+function slideShadow(root: HTMLElement, key: string, thumbnail = false): ShadowRoot {
+  const className = thumbnail ? "peitho-preview-thumb-slide" : "peitho-preview-slide";
+  const host = root.querySelector<HTMLElement>(`.${className}[data-slide-key="${key}"]`);
+  if (host?.shadowRoot === null || host?.shadowRoot === undefined) {
+    throw new Error(`Missing ${className} shadow root for ${key}`);
+  }
+  return host.shadowRoot;
+}
+
+function dispatchShadowClick(target: Element): MouseEvent {
+  const event = new MouseEvent("click", {
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function injectedEditorRange(start: number | "end", end = start): {
+  provider(editor: HTMLElement): { range: Range; select(range: Range): void };
+  selected(): Range | null;
+} {
+  let selected: Range | null = null;
+  return {
+    provider(editor: HTMLElement) {
+      const text = editor.firstChild;
+      if (!(text instanceof Text)) throw new Error("Expected one editor text node");
+      const range = editor.ownerDocument.createRange();
+      const startOffset = start === "end" ? text.length : start;
+      const endOffset = end === "end" ? text.length : end;
+      range.setStart(text, startOffset);
+      range.setEnd(text, endOffset);
+      return {
+        range,
+        select(nextRange: Range): void {
+          selected = nextRange.cloneRange();
+        }
+      };
+    },
+    selected: () => selected
+  };
+}
+
+function expectSameNodes(actual: NodeListOf<ChildNode>, expected: Node[]): void {
+  expect(actual).toHaveLength(expected.length);
+  Array.from(actual).forEach((node, index) => expect(node).toBe(expected[index]));
 }
 
 function mockChannel() {
@@ -2676,4 +2819,521 @@ it("centres the restored slide on first layout, then steps with nearest", async 
   } finally {
     HTMLElement.prototype.scrollIntoView = original;
   }
+});
+
+it("inline_edit_click_uses_composed_path_inside_current_slide_shadow_root", async () => {
+  const { root } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const emphasis = shadow.querySelector<HTMLElement>("#paragraph-emphasis")!;
+
+  dispatchShadowClick(emphasis);
+
+  expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(paragraph.textContent).toBe("Peitho is a *fast* tool");
+});
+
+it("inline_edit_grid_tile_thumbnail_and_non_current_roots_do_not_start", async () => {
+  const { root, shell } = await mountInlineEditForTest({ mode: "grid" });
+  const introStage = slideShadow(root, "intro");
+  const gridParagraph = introStage.querySelector<HTMLElement>("#editable-paragraph")!;
+
+  dispatchShadowClick(gridParagraph);
+  expect(shell.mode).toBe("single");
+  expect(gridParagraph.hasAttribute("contenteditable")).toBe(false);
+
+  const thumbnailParagraph = slideShadow(root, "intro", true).querySelector<HTMLElement>(
+    "#editable-paragraph"
+  )!;
+  dispatchShadowClick(thumbnailParagraph);
+  expect(thumbnailParagraph.hasAttribute("contenteditable")).toBe(false);
+
+  const nonCurrent = slideShadow(root, "middle").querySelector<HTMLElement>("#middle-editable")!;
+  dispatchShadowClick(nonCurrent);
+  expect(nonCurrent.hasAttribute("contenteditable")).toBe(false);
+});
+
+it("inline_edit_link_click_keeps_browser_behavior", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const link = shadow.querySelector<HTMLAnchorElement>("#external-link")!;
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-link")!;
+
+  const click = dispatchShadowClick(link);
+
+  expect(click.defaultPrevented).toBe(false);
+  expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+});
+
+it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () => {
+  const { root } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const heading = shadow.querySelector<HTMLElement>("#editable-heading")!;
+
+  dispatchShadowClick(heading.querySelector("strong")!);
+
+  expect(heading.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(heading.textContent).toBe('A "quote" & **mark**');
+  expect(heading.style.outline).not.toBe("");
+  expect(heading.parentElement?.classList.contains("slot-title")).toBe(true);
+});
+
+it("inline_edit_tight_list_wraps_only_leading_inline_nodes", async () => {
+  const { root } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const item = shadow.querySelector<HTMLLIElement>("#editable-tight-item")!;
+  const emphasis = shadow.querySelector<HTMLElement>("#tight-emphasis")!;
+  const nested = shadow.querySelector<HTMLUListElement>("#nested-list")!;
+  const nestedChild = nested.firstElementChild;
+
+  dispatchShadowClick(emphasis);
+
+  const editor = item.firstElementChild as HTMLElement;
+  expect(item.hasAttribute("contenteditable")).toBe(false);
+  expect(editor).toBeInstanceOf(HTMLSpanElement);
+  expect(editor.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(editor.textContent).toBe("parent *one*");
+  expect(editor.nextSibling).toBe(nested);
+  expect(item.lastChild).toBe(nested);
+  expect(nested.firstElementChild).toBe(nestedChild);
+});
+
+it("inline_edit_escape_restores_rendered_nodes_without_posting", async () => {
+  const bus = new EventTarget();
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:overviewrequest", (event) => {
+    overviewRequests.push((event as CustomEvent).detail);
+  });
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const { root, shell, fixture } = await mountInlineEditForTest({ bus });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const item = shadow.querySelector<HTMLElement>("#editable-tight-item")!;
+  const heading = shadow.querySelector<HTMLElement>("#editable-heading")!;
+  const cases = [
+    {
+      target: paragraph,
+      click: shadow.querySelector<HTMLElement>("#paragraph-emphasis")!,
+      editor: () => paragraph
+    },
+    {
+      target: item,
+      click: shadow.querySelector<HTMLElement>("#tight-emphasis")!,
+      editor: () => item.firstElementChild as HTMLElement
+    },
+    {
+      target: heading,
+      click: heading.querySelector<HTMLElement>("strong")!,
+      editor: () => heading
+    }
+  ];
+
+  for (const testCase of cases) {
+    const originalNodes = Array.from(testCase.target.childNodes);
+    dispatchShadowClick(testCase.click);
+    const editor = testCase.editor();
+    editor.textContent = "changed";
+    const escape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    });
+    editor.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(true);
+    expect(testCase.target.hasAttribute("contenteditable")).toBe(false);
+    expectSameNodes(testCase.target.childNodes, originalNodes);
+  }
+
+  expect(overviewRequests).toEqual([]);
+  expect(shell.mode).toBe("single");
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+});
+
+it("inline_edit_shift_enter_inserts_one_source_newline", async () => {
+  const injected = injectedEditorRange(6, 9);
+  const { root, fixture } = await mountInlineEditForTest({
+    selectionRangeProvider: injected.provider
+  });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  const enter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    shiftKey: true,
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  paragraph.dispatchEvent(enter);
+
+  expect(enter.defaultPrevented).toBe(true);
+  expect(paragraph.textContent).toBe("Peitho\n a *fast* tool");
+  const caret = injected.selected()!;
+  expect(caret.collapsed).toBe(true);
+  const beforeCaret = document.createRange();
+  beforeCaret.selectNodeContents(paragraph);
+  beforeCaret.setEnd(caret.startContainer, caret.startOffset);
+  expect(beforeCaret.toString()).toBe("Peitho\n");
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+});
+
+it("inline_edit_shift_enter_at_end_uses_and_omits_one_trailing_sentinel", async () => {
+  const injected = injectedEditorRange("end");
+  const { root, fixture } = await mountInlineEditForTest({
+    selectionRangeProvider: injected.provider
+  });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const old = "Peitho is a *fast* tool";
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+
+  expect(paragraph.textContent).toBe(`${old}\n\n`);
+  const caret = injected.selected()!;
+  const beforeCaret = document.createRange();
+  beforeCaret.selectNodeContents(paragraph);
+  beforeCaret.setEnd(caret.startContainer, caret.startOffset);
+  expect(beforeCaret.toString()).toBe(`${old}\n`);
+  const afterCaret = document.createRange();
+  afterCaret.selectNodeContents(paragraph);
+  afterCaret.setStart(caret.startContainer, caret.startOffset);
+  expect(afterCaret.toString()).toBe("\n");
+
+  caret.insertNode(document.createTextNode("Q"));
+  expect(paragraph.textContent).toBe(`${old}\nQ\n`);
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.slideEditPosts()[0][1].body as string).new).toBe(`${old}\nQ`);
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(paragraph.textContent).toBe(`${old}\nQ`);
+});
+
+it("inline_edit_trailing_sentinel_is_ignored_by_the_unchanged_check", async () => {
+  const injected = injectedEditorRange("end");
+  const { root, fixture } = await mountInlineEditForTest({
+    selectionRangeProvider: injected.provider
+  });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const originalNodes = Array.from(paragraph.childNodes);
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  const caret = injected.selected()!;
+  const backspace = document.createRange();
+  backspace.setStart(caret.startContainer, caret.startOffset - 1);
+  backspace.setEnd(caret.startContainer, caret.startOffset);
+  backspace.deleteContents();
+  expect(paragraph.textContent).toBe("Peitho is a *fast* tool\n");
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+  expectSameNodes(paragraph.childNodes, originalNodes);
+});
+
+it("inline_edit_shift_enter_without_an_editor_range_appends_one_newline", async () => {
+  const { root, fixture } = await mountInlineEditForTest({
+    selectionRangeProvider: () => null
+  });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+
+  expect(paragraph.textContent).toBe("Peitho is a *fast* tool\n");
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+});
+
+it("inline_edit_enter_and_blur_post_the_exact_request_once", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+  paragraph.textContent = "Peitho is a **very fast** tool";
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  paragraph.dispatchEvent(new FocusEvent("blur"));
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+  expect(Number(paragraph.style.opacity)).toBeLessThan(1);
+  expect(paragraph.style.outline).not.toBe("");
+  expect(fixture.slideEditPosts()[0][0]).toBe("/slide-edit");
+  expect(fixture.slideEditPosts()[0][1]).toMatchObject({
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  expect(JSON.parse(fixture.slideEditPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    start: 120,
+    end: 143,
+    old: "Peitho is a *fast* tool",
+    new: "Peitho is a **very fast** tool"
+  });
+
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(paragraph.textContent).toBe("Peitho is a **very fast** tool");
+  dispatchShadowClick(paragraph);
+  expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+});
+
+it("inline_edit_keys_are_ignored_while_the_save_is_in_flight", async () => {
+  const bus = new EventTarget();
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:overviewrequest", (event) => {
+    overviewRequests.push((event as CustomEvent).detail);
+  });
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const { root, fixture } = await mountInlineEditForTest({ bus });
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+  paragraph.textContent = "pending source edit";
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+
+  const escape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  paragraph.dispatchEvent(escape);
+  const shiftEnter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    shiftKey: true,
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  paragraph.dispatchEvent(shiftEnter);
+
+  expect(escape.defaultPrevented).toBe(true);
+  expect(shiftEnter.defaultPrevented).toBe(true);
+  expect(overviewRequests).toEqual([]);
+  expect(paragraph.textContent).toBe("pending source edit");
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+  expect(fixture.slideEditPosts()).toHaveLength(1);
+
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(paragraph.textContent).toBe("pending source edit");
+  expect(paragraph.hasAttribute("data-peitho-src")).toBe(false);
+  expect(fixture.slideEditPosts()).toHaveLength(1);
+});
+
+it("inline_edit_ime_composition_and_keycode_229_do_not_commit", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+  paragraph.textContent = "composition in progress";
+
+  const composing = new KeyboardEvent("keydown", {
+    key: "Enter",
+    isComposing: true,
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  paragraph.dispatchEvent(composing);
+  const safariComposition = new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  Object.defineProperty(safariComposition, "keyCode", { value: 229 });
+  paragraph.dispatchEvent(safariComposition);
+
+  expect(composing.defaultPrevented).toBe(false);
+  expect(safariComposition.defaultPrevented).toBe(false);
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+  expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
+});
+
+it("inline_edit_crlf_attribute_round_trips_exact_old_bytes", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-crlf")!;
+  expect(paragraph.getAttribute("data-peitho-md")).toBe("first\r\nsecond");
+  dispatchShadowClick(paragraph);
+  paragraph.textContent = "first\r\nupdated";
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.slideEditPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    start: 300,
+    end: 313,
+    old: "first\r\nsecond",
+    new: "first\r\nupdated"
+  });
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+});
+
+it("inline_edit_failed_save_stays_open_and_reports_json_error", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+  paragraph.textContent = "bad edit";
+  paragraph.dispatchEvent(new FocusEvent("blur"));
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+  expect(Number(paragraph.style.opacity)).toBeLessThan(1);
+  fixture.resolveSlideEditPost({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: "slide edit refused" })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("slide edit refused"));
+  expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(paragraph.style.opacity).toBe("");
+  expect(paragraph.style.outline).not.toBe("");
+  expect(shadow.activeElement).toBe(paragraph);
+
+  note.value = "saved note";
+  note.dispatchEvent(new FocusEvent("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe("saved note"));
+  expect(status.textContent).toBe("slide edit refused");
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(2));
+  fixture.resolveSlideEditPost({ ok: false, status: 500, text: async () => "{}" } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("slide edit failed (HTTP 500)"));
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(3));
+  fixture.rejectSlideEditPost(new Error("offline"));
+  await vi.waitFor(() =>
+    expect(status.textContent).toBe("failed to save slide edit: Error: offline")
+  );
+
+  note.value = "bad note";
+  note.dispatchEvent(new FocusEvent("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(2));
+  fixture.resolveNotesPost({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ error: "note save refused" })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toContain("note save refused"));
+
+  paragraph.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(4));
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(status.textContent).toBe("note save refused");
+});
+
+it("inline_edit_unchanged_close_restores_without_posting", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const originalNodes = Array.from(paragraph.childNodes);
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  paragraph.dispatchEvent(new FocusEvent("blur"));
+
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(Array.from(paragraph.childNodes)).toEqual(originalNodes);
+  expect(fixture.slideEditPosts()).toHaveLength(0);
 });
