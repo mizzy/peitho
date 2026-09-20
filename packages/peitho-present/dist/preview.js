@@ -655,10 +655,12 @@ function installPreviewReload(shell, channelFactory = serverSyncChannelFactory()
   const channel = channelFactory("peitho-sync");
   channel.onmessage = (event) => {
     if (isSessionChangedSyncMessage(event.data)) return;
-    if (!isGenerationSyncMessage(event.data)) return;
-    if (event.data.generation === shell.generation) return;
-    shell.saveState();
-    reload();
+    if (isBuildErrorSyncMessage(event.data)) {
+      shell.setBuildError(event.data.buildError);
+    }
+    if (isGenerationSyncMessage(event.data)) {
+      shell.requestGenerationReload(event.data.generation, reload);
+    }
   };
   return () => {
     channel.onmessage = null;
@@ -688,6 +690,7 @@ var PreviewShellController = class {
   notesTextarea;
   notesStatus;
   notesPositionText;
+  buildErrorBanner;
   notesTextareaKey = null;
   swallowEnterRepeat = false;
   flushChain = Promise.resolve(true);
@@ -766,6 +769,7 @@ var PreviewShellController = class {
     this.notesPositionText = this.notesPanel.querySelector(
       '[data-peitho-preview="position"]'
     );
+    this.buildErrorBanner = this.createBuildErrorBanner();
     this.strip = this.createStrip();
     this.notesTextarea.addEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.addEventListener("blur", this.onNotesBlur);
@@ -776,7 +780,9 @@ var PreviewShellController = class {
   }
   async load() {
     try {
-      this.generation = await this.fetchGeneration();
+      const initialSyncState = await this.fetchInitialSyncState();
+      this.generation = initialSyncState.generation;
+      this.setBuildError(initialSyncState.buildError);
       const manifest = await this.fetchJson("manifest.json");
       this.notes = await this.fetchJson("notes.json");
       this.dimensions = {
@@ -806,6 +812,7 @@ var PreviewShellController = class {
       }
       this.root.appendChild(this.notesPanel);
       this.root.appendChild(this.strip);
+      this.root.appendChild(this.buildErrorBanner);
       const restored = this.restoredState;
       const restoredIndex = restored === null ? this.clampIndex(initialSlideIndex(pending.map((view) => view.meta)) ?? 0) : this.clampIndex(restored.index);
       this.currentIndex = restoredIndex;
@@ -835,6 +842,15 @@ var PreviewShellController = class {
   navigate(to) {
     if (!this.isLoaded()) return;
     this.navigateToTarget(to);
+  }
+  setBuildError(error) {
+    this.buildErrorBanner.textContent = error ?? "";
+    this.buildErrorBanner.hidden = error === null;
+  }
+  requestGenerationReload(generation, reload) {
+    if (generation === this.generation) return;
+    this.saveState();
+    reload();
   }
   flushNotes() {
     const key = this.notesTextareaKey;
@@ -931,13 +947,16 @@ var PreviewShellController = class {
     if (!response.ok) throw new Error(`Failed to load ${url}: ${response.status}`);
     return response;
   }
-  async fetchGeneration() {
+  async fetchInitialSyncState() {
     const response = await this.fetchOk(this.syncUrl);
     const body = await response.json();
-    if (typeof body.generation !== "number") {
+    if (!isGenerationSyncMessage(body)) {
       throw new Error("Invalid peitho sync generation");
     }
-    return body.generation;
+    if (!isBuildErrorSyncMessage(body)) {
+      throw new Error("Invalid peitho sync build error");
+    }
+    return { generation: body.generation, buildError: body.buildError };
   }
   createSlideView(slide, html, css) {
     const tile = this.doc.createElement("div");
@@ -1021,6 +1040,29 @@ var PreviewShellController = class {
     style.borderRight = "1px solid rgba(255,255,255,0.16)";
     style.background = "#15181e";
     return strip;
+  }
+  createBuildErrorBanner() {
+    const banner = this.doc.createElement("div");
+    banner.dataset.peithoPreview = "build-error";
+    banner.setAttribute("role", "alert");
+    banner.hidden = true;
+    const style = banner.style;
+    style.position = "fixed";
+    style.left = "0";
+    style.right = "0";
+    style.top = "0";
+    style.maxHeight = "40vh";
+    style.boxSizing = "border-box";
+    style.overflowY = "auto";
+    style.zIndex = "2147483647";
+    style.padding = "12px 18px";
+    style.borderBottom = "2px solid #ef4444";
+    style.background = "#450a0a";
+    style.color = "#fee2e2";
+    style.font = "14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    style.whiteSpace = "pre-wrap";
+    style.overflowWrap = "anywhere";
+    return banner;
   }
   createNotesPanel() {
     const panel = this.doc.createElement("aside");

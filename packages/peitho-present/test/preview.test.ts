@@ -1459,6 +1459,101 @@ it("generation changes save preview state before reloading", async () => {
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
+it("build_error_message_renders_in_fixed_preformatted_banner", async () => {
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, new EventTarget());
+  const channel = mockChannel();
+  const reload = vi.fn();
+  cleanups.push(installPreviewReload(shell, () => channel, reload));
+
+  channel.onmessage?.({ data: { buildError: "broken build\nhelp: fix the deck" } });
+
+  const banner = root.querySelector<HTMLElement>('[data-peitho-preview="build-error"]')!;
+  expect(root.querySelectorAll('[data-peitho-preview="build-error"]')).toHaveLength(1);
+  expect(banner.hidden).toBe(false);
+  expect(banner.textContent).toBe("broken build\nhelp: fix the deck");
+  expect(banner.style.position).toBe("fixed");
+  expect(banner.style.maxHeight).toBe("40vh");
+  expect(banner.style.overflowY).toBe("auto");
+  expect(banner.style.whiteSpace).toBe("pre-wrap");
+  expect(Number(banner.style.zIndex)).toBeGreaterThan(1000);
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it("build_error_uses_text_content_and_cannot_inject_html", async () => {
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, new EventTarget());
+  const channel = mockChannel();
+  cleanups.push(installPreviewReload(shell, () => channel, vi.fn()));
+
+  channel.onmessage?.({ data: { buildError: "<b>broken</b>\nline 2" } });
+
+  const banner = root.querySelector<HTMLElement>('[data-peitho-preview="build-error"]')!;
+  expect(banner.textContent).toBe("<b>broken</b>\nline 2");
+  expect(banner.querySelector("b")).toBeNull();
+});
+
+it("null_build_error_hides_and_clears_banner", async () => {
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, new EventTarget());
+  const channel = mockChannel();
+  cleanups.push(installPreviewReload(shell, () => channel, vi.fn()));
+
+  channel.onmessage?.({ data: { buildError: "broken build" } });
+  channel.onmessage?.({ data: { buildError: null } });
+
+  const banner = root.querySelector<HTMLElement>('[data-peitho-preview="build-error"]')!;
+  expect(banner.hidden).toBe(true);
+  expect(banner.textContent).toBe("");
+  expect(banner.style.display).toBe("");
+});
+
+it("build_error_does_not_replace_or_reload_last_good_slides", async () => {
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, new EventTarget());
+  const lastGoodSlide = root.querySelector<HTMLElement>('[data-slide-key="intro"]')!;
+  const channel = mockChannel();
+  const reload = vi.fn();
+  cleanups.push(installPreviewReload(shell, () => channel, reload));
+
+  channel.onmessage?.({ data: { buildError: "layout selector no longer matches" } });
+
+  expect(root.contains(lastGoodSlide)).toBe(true);
+  expect(root.querySelectorAll(".peitho-preview-slide")).toHaveLength(manifest.slideCount);
+  expect(shell.manifest?.title).toBe(manifest.title);
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it("initial_sync_build_error_is_rendered_after_mount", async () => {
+  const root = document.createElement("main");
+  const fixture = previewFetchFixture();
+  const fetcherMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "/sync") {
+      return Promise.resolve(
+        okJson({ seq: 3, message: null, generation: 7, buildError: "initial failure" })
+      );
+    }
+    return fixture.fetcher(input, init);
+  });
+  const fetcher = fetcherMock as unknown as typeof fetch;
+
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  const banner = root.querySelector<HTMLElement>('[data-peitho-preview="build-error"]')!;
+  expect(shell.generation).toBe(7);
+  expect(banner.hidden).toBe(false);
+  expect(banner.textContent).toBe("initial failure");
+  expect(fetcherMock.mock.calls.filter(([input]) => String(input) === "/sync")).toHaveLength(1);
+});
+
 it("renders_an_editable_notes_textarea_with_placeholder_and_status", async () => {
   const root = document.createElement("main");
   const bus = new EventTarget();

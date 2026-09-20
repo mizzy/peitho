@@ -9,6 +9,7 @@ import { hasChordModifier } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
+  isBuildErrorSyncMessage,
   isGenerationSyncMessage,
   isSessionChangedSyncMessage,
   serverSyncChannelFactory,
@@ -28,6 +29,8 @@ export type PreviewShell = {
   mode: PreviewMode;
   generation: number;
   navigate(to: PreviewNavigateTarget): void;
+  setBuildError(error: string | null): void;
+  requestGenerationReload(generation: number, reload: () => void): void;
   saveState(): void;
   destroy(): void;
 };
@@ -56,6 +59,11 @@ type PreviewSlideView = {
 type CanvasDimensions = {
   width: number;
   height: number;
+};
+
+type InitialSyncState = {
+  generation: number;
+  buildError: string | null;
 };
 
 type PreviewDraft = {
@@ -191,17 +199,19 @@ export async function mountPreviewShell(options: PreviewShellOptions): Promise<P
 }
 
 export function installPreviewReload(
-  shell: Pick<PreviewShell, "generation" | "saveState">,
+  shell: Pick<PreviewShell, "setBuildError" | "requestGenerationReload">,
   channelFactory: SyncChannelFactory = serverSyncChannelFactory(),
   reload: () => void = () => window.location.reload()
 ): () => void {
   const channel = channelFactory("peitho-sync");
   channel.onmessage = (event: { data: unknown }): void => {
     if (isSessionChangedSyncMessage(event.data)) return;
-    if (!isGenerationSyncMessage(event.data)) return;
-    if (event.data.generation === shell.generation) return;
-    shell.saveState();
-    reload();
+    if (isBuildErrorSyncMessage(event.data)) {
+      shell.setBuildError(event.data.buildError);
+    }
+    if (isGenerationSyncMessage(event.data)) {
+      shell.requestGenerationReload(event.data.generation, reload);
+    }
   };
   return () => {
     channel.onmessage = null;
@@ -232,6 +242,7 @@ class PreviewShellController implements PreviewShell {
   private readonly notesTextarea: HTMLTextAreaElement;
   private readonly notesStatus: HTMLSpanElement;
   private readonly notesPositionText: HTMLSpanElement;
+  private readonly buildErrorBanner: HTMLElement;
   private notesTextareaKey: string | null = null;
   private swallowEnterRepeat = false;
   private flushChain: Promise<boolean> = Promise.resolve(true);
@@ -311,6 +322,7 @@ class PreviewShellController implements PreviewShell {
     this.notesPositionText = this.notesPanel.querySelector<HTMLSpanElement>(
       '[data-peitho-preview="position"]'
     )!;
+    this.buildErrorBanner = this.createBuildErrorBanner();
     this.strip = this.createStrip();
     this.notesTextarea.addEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.addEventListener("blur", this.onNotesBlur);
@@ -322,7 +334,9 @@ class PreviewShellController implements PreviewShell {
 
   async load(): Promise<void> {
     try {
-      this.generation = await this.fetchGeneration();
+      const initialSyncState = await this.fetchInitialSyncState();
+      this.generation = initialSyncState.generation;
+      this.setBuildError(initialSyncState.buildError);
       const manifest = await this.fetchJson<Manifest>("manifest.json");
       this.notes = await this.fetchJson<Notes>("notes.json");
       this.dimensions = {
@@ -354,6 +368,7 @@ class PreviewShellController implements PreviewShell {
       }
       this.root.appendChild(this.notesPanel);
       this.root.appendChild(this.strip);
+      this.root.appendChild(this.buildErrorBanner);
       const restored = this.restoredState;
       const restoredIndex =
         restored === null
@@ -388,6 +403,17 @@ class PreviewShellController implements PreviewShell {
   navigate(to: PreviewNavigateTarget): void {
     if (!this.isLoaded()) return;
     this.navigateToTarget(to);
+  }
+
+  setBuildError(error: string | null): void {
+    this.buildErrorBanner.textContent = error ?? "";
+    this.buildErrorBanner.hidden = error === null;
+  }
+
+  requestGenerationReload(generation: number, reload: () => void): void {
+    if (generation === this.generation) return;
+    this.saveState();
+    reload();
   }
 
   private flushNotes(): Promise<boolean> {
@@ -499,13 +525,16 @@ class PreviewShellController implements PreviewShell {
     return response;
   }
 
-  private async fetchGeneration(): Promise<number> {
+  private async fetchInitialSyncState(): Promise<InitialSyncState> {
     const response = await this.fetchOk(this.syncUrl);
-    const body = (await response.json()) as { generation?: unknown };
-    if (typeof body.generation !== "number") {
+    const body: unknown = await response.json();
+    if (!isGenerationSyncMessage(body)) {
       throw new Error("Invalid peitho sync generation");
     }
-    return body.generation;
+    if (!isBuildErrorSyncMessage(body)) {
+      throw new Error("Invalid peitho sync build error");
+    }
+    return { generation: body.generation, buildError: body.buildError };
   }
 
   private createSlideView(slide: ManifestSlide, html: string, css: string): PreviewSlideView {
@@ -600,6 +629,30 @@ class PreviewShellController implements PreviewShell {
     style.borderRight = "1px solid rgba(255,255,255,0.16)";
     style.background = "#15181e";
     return strip;
+  }
+
+  private createBuildErrorBanner(): HTMLElement {
+    const banner = this.doc.createElement("div");
+    banner.dataset.peithoPreview = "build-error";
+    banner.setAttribute("role", "alert");
+    banner.hidden = true;
+    const style = banner.style;
+    style.position = "fixed";
+    style.left = "0";
+    style.right = "0";
+    style.top = "0";
+    style.maxHeight = "40vh";
+    style.boxSizing = "border-box";
+    style.overflowY = "auto";
+    style.zIndex = "2147483647";
+    style.padding = "12px 18px";
+    style.borderBottom = "2px solid #ef4444";
+    style.background = "#450a0a";
+    style.color = "#fee2e2";
+    style.font = "14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    style.whiteSpace = "pre-wrap";
+    style.overflowWrap = "anywhere";
+    return banner;
   }
 
   private createNotesPanel(): HTMLElement {
