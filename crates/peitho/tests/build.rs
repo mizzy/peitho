@@ -62,6 +62,30 @@ fn build_writes_index_html_and_css() {
 }
 
 #[test]
+fn build_distribution_omits_preview_edit_annotations() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, "# Intro\n\nEditable **body**.\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let slide = fs::read_to_string(out.join("slides/000-intro.html")).unwrap();
+    for forbidden in ["data-peitho-src", "data-peitho-md"] {
+        assert!(!slide.contains(forbidden), "{forbidden} found in {slide}");
+    }
+}
+
+#[test]
 fn build_emits_highlighted_code_inside_body_list() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

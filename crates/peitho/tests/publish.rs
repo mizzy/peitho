@@ -131,6 +131,195 @@ fn publish_rejects_remote_presentation_only_file() {
 }
 
 #[test]
+fn publish_rejects_preview_edit_source_span_attribute() {
+    assert_publish_rejects_preview_edit_annotation("data-peitho-src", "1-4");
+}
+
+#[test]
+fn publish_rejects_preview_edit_markdown_attribute() {
+    assert_publish_rejects_preview_edit_annotation("data-peitho-md", "raw");
+}
+
+fn assert_publish_rejects_preview_edit_annotation(attribute: &str, value: &str) {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let slide = "slides/000-arch-1.html";
+    write_valid_dist(&dist);
+    fs::write(
+        dist.join(slide),
+        format!(r#"<section data-slide-key="arch-1"><p {attribute}="{value}">body</p></section>"#),
+    )
+    .unwrap();
+
+    assert_publish_rejects_annotation_at(&dist, attribute, slide);
+}
+
+fn assert_publish_rejects_annotation_at(dist: &Path, attribute: &str, relative: &str) {
+    let probe = dist.parent().unwrap().join("publish-command-ran");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(dist)
+        .args(["--", "sh", "-c", "printf invoked > \"$1\"", "peitho-test"])
+        .arg(&probe)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(attribute))
+        .stderr(predicate::str::contains(relative));
+
+    assert!(!probe.exists(), "publish command ran despite contamination");
+}
+
+#[cfg(unix)]
+#[test]
+fn publish_rejects_preview_edit_attribute_in_symlinked_html_file() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(
+        dir.path().join("outside.html"),
+        r#"<p data-peitho-src="1-4">body</p>"#,
+    )
+    .unwrap();
+    symlink("../outside.html", dist.join("extra.html")).unwrap();
+
+    assert_publish_rejects_annotation_at(&dist, "data-peitho-src", "extra.html");
+}
+
+#[cfg(unix)]
+#[test]
+fn publish_rejects_broken_html_symlink_and_names_the_relative_entry() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let probe = dir.path().join("publish-command-ran");
+    write_valid_dist(&dist);
+    symlink("../missing.html", dist.join("broken.html")).unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "sh", "-c", "printf invoked > \"$1\"", "peitho-test"])
+        .arg(&probe)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to inspect distribution entry broken.html",
+        ))
+        .stderr(predicate::str::contains(
+            "help: remove the unreadable entry or run `peitho build` again",
+        ));
+
+    assert!(
+        !probe.exists(),
+        "publish command ran despite unreadable entry"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn publish_rejects_preview_edit_attribute_in_symlinked_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let outside = dir.path().join("outdir");
+    write_valid_dist(&dist);
+    fs::create_dir(&outside).unwrap();
+    fs::write(
+        outside.join("annotated.html"),
+        r#"<p data-peitho-md="raw">body</p>"#,
+    )
+    .unwrap();
+    symlink(".", outside.join("a-loop")).unwrap();
+    symlink("../outdir", dist.join("more")).unwrap();
+
+    assert_publish_rejects_annotation_at(&dist, "data-peitho-md", "more/annotated.html");
+}
+
+#[test]
+fn publish_rejects_preview_edit_attribute_in_ascii_case_insensitive_html_extension() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(dist.join("x.HTML"), r#"<p data-peitho-src="1-4">body</p>"#).unwrap();
+
+    assert_publish_rejects_annotation_at(&dist, "data-peitho-src", "x.HTML");
+}
+
+#[test]
+fn publish_accepts_slide_text_mentioning_preview_edit_attribute_names() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(
+        dist.join("slides/000-arch-1.html"),
+        concat!(
+            r#"<section data-slide-key="arch-1">"#,
+            "<p>Attributes data-peitho-src and data-peitho-md are preview-only.</p>",
+            "<pre><code>&lt;p data-peitho-src=&quot;1-4&quot; ",
+            "data-peitho-md=&quot;raw&quot;&gt;&lt;/p&gt;</code></pre>",
+            "</section>"
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn publish_rejects_non_utf8_html_and_names_the_relative_file() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let slide = "slides/000-arch-1.html";
+    write_valid_dist(&dist);
+    fs::write(dist.join(slide), b"<section>\xff</section>").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to read distribution HTML as UTF-8",
+        ))
+        .stderr(predicate::str::contains(slide));
+}
+
+#[test]
+fn publish_rejects_unparseable_html_with_rebuild_help_and_relative_file() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    let slide = "slides/000-arch-1.html";
+    write_valid_dist(&dist);
+    fs::write(dist.join(slide), "<select><xmp><script>").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not be parsed as HTML"))
+        .stderr(predicate::str::contains(slide))
+        .stderr(predicate::str::contains("help: run `peitho build` again"));
+}
+
+#[test]
 fn publish_accepts_math_build_distribution_with_katex_fonts() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

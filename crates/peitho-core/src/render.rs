@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error, fmt::Write as _, ops::Range};
+use std::{cell::Cell, collections::BTreeMap, error::Error, fmt::Write as _, ops::Range};
 
 use html_escape::{encode_double_quoted_attribute, encode_text};
 use lol_html::{
@@ -26,6 +26,8 @@ use crate::{
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
+const EDIT_SOURCE_SPAN_ATTRIBUTE: &str = "data-peitho-src";
+const EDIT_MARKDOWN_ATTRIBUTE: &str = "data-peitho-md";
 
 pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES
     .union(Options::ENABLE_STRIKETHROUGH)
@@ -1285,11 +1287,50 @@ fn push_normalized_markdown_event<'a>(
 
 fn push_edit_annotation_attributes(html: &mut String, annotation: &EditAnnotation) {
     html.push_str(&format!(
-        r#" data-peitho-src="{}-{}" data-peitho-md="{}""#,
+        r#" {EDIT_SOURCE_SPAN_ATTRIBUTE}="{}-{}" {EDIT_MARKDOWN_ATTRIBUTE}="{}""#,
         annotation.source_span.start,
         annotation.source_span.end,
         encode_edit_markdown_attribute(&annotation.markdown)
     ));
+}
+
+pub fn find_edit_annotation_attribute(html: &str) -> Result<Option<&'static str>> {
+    let found: Cell<Option<&'static str>> = Cell::new(None);
+    let source_span_selector = format!("[{EDIT_SOURCE_SPAN_ATTRIBUTE}]");
+    let markdown_selector = format!("[{EDIT_MARKDOWN_ATTRIBUTE}]");
+
+    rewrite_str(
+        html,
+        RewriteStrSettings {
+            element_content_handlers: vec![
+                element!(source_span_selector.as_str(), |_| {
+                    if found.get().is_none() {
+                        found.set(Some(EDIT_SOURCE_SPAN_ATTRIBUTE));
+                    }
+                    Ok(())
+                }),
+                element!(markdown_selector.as_str(), |_| {
+                    if found.get().is_none() {
+                        found.set(Some(EDIT_MARKDOWN_ATTRIBUTE));
+                    }
+                    Ok(())
+                }),
+            ],
+            ..RewriteStrSettings::new()
+        },
+    )
+    .map_err(edit_annotation_detection_error)?;
+
+    Ok(found.get())
+}
+
+fn edit_annotation_detection_error(err: RewritingError) -> BuildError {
+    BuildError::new(
+        ErrorKind::Layout,
+        None,
+        format!("internal render error: edit annotation detection failed: {err}"),
+        "report this issue with the HTML that triggered it",
+    )
 }
 
 fn encode_edit_markdown_attribute(markdown: &str) -> String {
@@ -6314,6 +6355,42 @@ Paragraph after heading.
         assert!(!stripped.contains("data-peitho-src"), "{html}");
         assert!(!stripped.contains("data-peitho-md"), "{html}");
         stripped
+    }
+
+    #[test]
+    fn find_edit_annotation_attribute_detects_nested_attribute_and_returns_first_hit() {
+        let html = concat!(
+            "<section><div><p data-peitho-md=\"raw\">first</p></div>",
+            "<p data-peitho-src=\"1-4\">second</p></section>"
+        );
+
+        assert_eq!(
+            find_edit_annotation_attribute(html).unwrap(),
+            Some("data-peitho-md")
+        );
+    }
+
+    #[test]
+    fn find_edit_annotation_attribute_ignores_names_in_text_and_escaped_content() {
+        let html = concat!(
+            "<p>Attributes data-peitho-src and data-peitho-md are preview-only.</p>",
+            "<pre><code>&lt;p data-peitho-src=&quot;1-4&quot; ",
+            "data-peitho-md=&quot;raw&quot;&gt;&lt;/p&gt;</code></pre>"
+        );
+
+        assert_eq!(find_edit_annotation_attribute(html).unwrap(), None);
+    }
+
+    #[test]
+    fn find_edit_annotation_attribute_propagates_html_rewrite_failure() {
+        let err = find_edit_annotation_attribute("<select><xmp><script>").unwrap_err();
+
+        assert!(
+            err.message
+                .starts_with("internal render error: edit annotation detection failed:"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
