@@ -23,6 +23,7 @@ pub mod present_config;
 pub mod rehearsal;
 pub mod render;
 pub mod slide_edit;
+pub mod sync;
 pub mod theme;
 
 pub const CODE_IMAGES_CACHE_DIR: &str = ".peitho/code-images-cache";

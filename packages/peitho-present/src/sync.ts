@@ -1,3 +1,5 @@
+import type { SyncResponse } from "../../../bindings/SyncResponse";
+import type { SyncTimerSnapshot } from "../../../bindings/SyncTimerSnapshot";
 import { swapRoute } from "./swap";
 
 // The rehearsal server grace period must remain longer than this client-side cap.
@@ -8,7 +10,7 @@ export type BeforeCloseDetail = {
 };
 
 export type TimerSyncState = { running: boolean; elapsedMs: number };
-export type TimerSyncSnapshot = TimerSyncState & { atMs: number };
+export type TimerSyncSnapshot = SyncTimerSnapshot;
 export type TimerSyncMessage = { timer: TimerSyncState };
 export type TimerReplaySyncMessage = { timer: TimerSyncSnapshot; nowMs: number };
 export type SyncedSyncMessage = { synced: true };
@@ -43,18 +45,6 @@ export type SyncBridgeHooks = {
   pathname?: () => string;
   navigate?: (url: string) => void;
   adoptTimerState?: (state: TimerSyncState) => void;
-};
-
-type ServerSyncPollResponse = {
-  seq: number;
-  message: unknown;
-  index?: unknown;
-  step?: unknown;
-  swapped?: unknown;
-  generation?: unknown;
-  session?: unknown;
-  timer?: unknown;
-  nowMs?: unknown;
 };
 
 type BufferedTimerReplay = {
@@ -122,8 +112,17 @@ export function isGenerationSyncMessage(value: unknown): value is { generation: 
   );
 }
 
+export function isBuildErrorSyncMessage(
+  value: unknown
+): value is { buildError: string | null } {
+  return (
+    isRecord(value) &&
+    (typeof value.buildError === "string" || value.buildError === null)
+  );
+}
+
 function serverIndexReplayMessage(
-  value: Partial<ServerSyncPollResponse>
+  value: Partial<SyncResponse>
 ): IndexSyncMessage | null {
   if (!isFiniteNumber(value.index)) return null;
   return {
@@ -192,11 +191,14 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
     };
 
     const deliverReplayState = (
-      body: Partial<ServerSyncPollResponse>,
+      body: Partial<SyncResponse>,
       options: { skipAbsoluteState?: boolean; deferTimerReplay?: boolean } = {}
     ): void => {
       const skipAbsoluteState = options.skipAbsoluteState === true;
       const responseSeq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : 0;
+      if (isBuildErrorSyncMessage(body)) {
+        onmessage?.({ data: { buildError: body.buildError } });
+      }
       if (isTimerReplaySyncMessage(body)) {
         if (skipAbsoluteState) {
           bufferedTimerReplay = null;
@@ -238,7 +240,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
           await delay();
           return false;
         }
-        const body = (await response.json()) as Partial<ServerSyncPollResponse>;
+        const body = (await response.json()) as Partial<SyncResponse>;
         if (typeof body.seq !== "number") {
           console.error("Invalid peitho sync handshake");
           await delay();
@@ -291,7 +293,7 @@ export function serverSyncChannelFactory(options: ServerSyncOptions = {}): SyncC
             await delay();
             continue;
           }
-          const body = (await response.json()) as Partial<ServerSyncPollResponse>;
+          const body = (await response.json()) as Partial<SyncResponse>;
           if (typeof body.seq !== "number" || !("message" in body)) {
             console.error("Invalid peitho server sync message");
             await delay();
@@ -496,6 +498,9 @@ export function installSyncBridge(
       return;
     }
     if (isGenerationSyncMessage(data)) {
+      return;
+    }
+    if (isBuildErrorSyncMessage(data)) {
       return;
     }
     if (isSessionChangedSyncMessage(data)) {

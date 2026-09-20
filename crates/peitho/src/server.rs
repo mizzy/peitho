@@ -15,8 +15,10 @@ use std::{
 
 use chrono::{Local, NaiveDateTime};
 use peitho_core::{
-    domain::SlideKey, rehearsal_record_json, RehearsalAudio, RehearsalRecord, RehearsalRecordV2,
-    RehearsalSection, RehearsalSnapshot,
+    domain::SlideKey,
+    rehearsal_record_json,
+    sync::{SyncResponse, SyncTimerSnapshot},
+    RehearsalAudio, RehearsalRecord, RehearsalRecordV2, RehearsalSection, RehearsalSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,7 +94,8 @@ struct SyncState {
     index: Option<usize>,
     step: Option<usize>,
     swapped: bool,
-    timer: Option<TimerSyncState>,
+    timer: Option<SyncTimerSnapshot>,
+    build_error: Option<String>,
     generation: u64,
     session: String,
 }
@@ -106,18 +109,11 @@ impl Default for SyncState {
             step: None,
             swapped: false,
             timer: None,
+            build_error: None,
             generation: 0,
             session: new_sync_session(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TimerSyncState {
-    running: bool,
-    elapsed_ms: u64,
-    at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +128,8 @@ struct SyncSnapshot {
     index: Option<usize>,
     step: Option<usize>,
     swapped: bool,
-    timer: Option<TimerSyncState>,
+    timer: Option<SyncTimerSnapshot>,
+    build_error: Option<String>,
     generation: u64,
     session: String,
 }
@@ -148,11 +145,11 @@ impl SyncHub {
             }
             SyncMessage::Swap(message) => state.swapped = message.swapped,
             SyncMessage::Timer(message) => {
-                state.timer = Some(TimerSyncState {
-                    running: message.timer.running,
-                    elapsed_ms: message.timer.elapsed_ms,
-                    at_ms: server_clock_ms(),
-                });
+                state.timer = Some(SyncTimerSnapshot::new(
+                    message.timer.running,
+                    message.timer.elapsed_ms,
+                    server_clock_ms(),
+                ));
             }
             SyncMessage::Close(_) => {}
         }
@@ -164,9 +161,21 @@ impl SyncHub {
         seq
     }
 
+    fn report_build_error(&self, error: String) -> u64 {
+        let (lock, cvar) = &*self.state;
+        let mut state = lock.lock().expect("sync hub mutex");
+        state.build_error = Some(error);
+        state.seq += 1;
+        state.latest = None;
+        let seq = state.seq;
+        cvar.notify_all();
+        seq
+    }
+
     fn broadcast_reload(&self) -> u64 {
         let (lock, cvar) = &*self.state;
         let mut state = lock.lock().expect("sync hub mutex");
+        state.build_error = None;
         state.generation += 1;
         state.seq += 1;
         state.latest = None;
@@ -191,6 +200,7 @@ impl SyncHub {
                 step: state.step,
                 swapped: state.swapped,
                 timer: state.timer,
+                build_error: state.build_error.clone(),
                 generation: state.generation,
                 session: state.session.clone(),
             },
@@ -207,6 +217,7 @@ impl SyncHub {
             step: state.step,
             swapped: state.swapped,
             timer: state.timer,
+            build_error: state.build_error.clone(),
             generation: state.generation,
             session: state.session.clone(),
         }
@@ -915,6 +926,10 @@ impl PresentServer {
         self.sync.broadcast_reload()
     }
 
+    pub fn report_build_error(&self, error: String) -> u64 {
+        self.sync.report_build_error(error)
+    }
+
     pub fn generation(&self) -> u64 {
         self.sync.snapshot().generation
     }
@@ -1535,33 +1550,20 @@ fn pointer_get(url: &str) -> Option<PointerGet> {
 }
 
 fn sync_response_body(snapshot: SyncSnapshot, message: Option<&str>) -> String {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct SyncResponseBody {
-        seq: u64,
-        message: Option<Value>,
-        index: Option<usize>,
-        step: Option<usize>,
-        swapped: bool,
-        generation: u64,
-        session: String,
-        timer: Option<TimerSyncState>,
-        now_ms: u64,
-    }
-
     let message = message
         .map(|message| serde_json::from_str(message).expect("sync message is serialized JSON"));
-    serde_json::to_string(&SyncResponseBody {
-        seq: snapshot.seq,
+    serde_json::to_string(&SyncResponse::new(
+        snapshot.seq,
         message,
-        index: snapshot.index,
-        step: snapshot.step,
-        swapped: snapshot.swapped,
-        generation: snapshot.generation,
-        session: snapshot.session,
-        timer: snapshot.timer,
-        now_ms: server_clock_ms(),
-    })
+        snapshot.index,
+        snapshot.step,
+        snapshot.swapped,
+        snapshot.generation,
+        snapshot.session,
+        snapshot.timer,
+        server_clock_ms(),
+        snapshot.build_error,
+    ))
     .expect("sync response serializes")
 }
 
@@ -2537,6 +2539,7 @@ mod tests {
                     step: Some(0),
                     swapped: false,
                     timer: None,
+                    build_error: None,
                     generation: 0,
                     session
                 },
@@ -2564,6 +2567,7 @@ mod tests {
                     step: Some(3),
                     swapped: false,
                     timer: None,
+                    build_error: None,
                     generation: 0,
                     session
                 },
@@ -2589,10 +2593,10 @@ mod tests {
         assert_eq!(
             poll.snapshot
                 .timer
-                .map(|timer| (timer.running, timer.elapsed_ms)),
+                .map(|timer| (timer.running(), timer.elapsed_ms())),
             Some((true, 12_345))
         );
-        assert!(poll.snapshot.timer.unwrap().at_ms <= server_clock_ms());
+        assert!(poll.snapshot.timer.unwrap().at_ms() <= server_clock_ms());
         assert_eq!(
             poll.message,
             Some(r#"{"timer":{"running":true,"elapsedMs":12345}}"#.to_owned())
@@ -2600,7 +2604,7 @@ mod tests {
         assert_eq!(
             hub.snapshot()
                 .timer
-                .map(|timer| (timer.running, timer.elapsed_ms)),
+                .map(|timer| (timer.running(), timer.elapsed_ms())),
             Some((true, 12_345))
         );
     }
@@ -2627,7 +2631,7 @@ mod tests {
         assert_eq!(
             poll.snapshot
                 .timer
-                .map(|timer| (timer.running, timer.elapsed_ms)),
+                .map(|timer| (timer.running(), timer.elapsed_ms())),
             Some((false, 4_000))
         );
         assert_eq!(
@@ -2653,6 +2657,7 @@ mod tests {
                     step: None,
                     swapped: false,
                     timer: None,
+                    build_error: None,
                     generation: 1,
                     session: session.clone()
                 },
@@ -2667,10 +2672,59 @@ mod tests {
                 step: None,
                 swapped: false,
                 timer: None,
+                build_error: None,
                 generation: 1,
                 session
             }
         );
+    }
+
+    #[test]
+    fn sync_hub_build_error_wakes_waiting_poller_without_bumping_generation() {
+        let hub = SyncHub::default();
+        let waiting_hub = hub.clone();
+        let waiter = thread::spawn(move || waiting_hub.wait_after(0, Duration::from_secs(1)));
+
+        let seq = hub.report_build_error("layout selector no longer matches".to_owned());
+        let poll = waiter.join().unwrap().expect("build error wakes poller");
+
+        assert_eq!(seq, 1);
+        assert_eq!(poll.snapshot.seq, 1);
+        assert_eq!(poll.snapshot.generation, 0);
+        assert_eq!(
+            poll.snapshot.build_error.as_deref(),
+            Some("layout selector no longer matches")
+        );
+        assert_eq!(poll.message, None);
+    }
+
+    #[test]
+    fn sync_hub_successful_reload_clears_build_error_and_bumps_generation_atomically() {
+        let hub = SyncHub::default();
+        hub.report_build_error("broken build".to_owned());
+
+        let seq = hub.broadcast_reload();
+        let snapshot = hub.snapshot();
+
+        assert_eq!(seq, 2);
+        assert_eq!(snapshot.seq, 2);
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.build_error, None);
+        let poll = hub.wait_after(1, Duration::from_secs(1)).unwrap();
+        assert_eq!(poll.snapshot, snapshot);
+        assert_eq!(poll.message, None);
+    }
+
+    #[test]
+    fn sync_hub_regular_messages_preserve_build_error() {
+        let hub = SyncHub::default();
+        hub.report_build_error("broken build".to_owned());
+
+        hub.broadcast_sync_message(&SyncMessage::Index(SyncIndexMessage { index: 2, step: 1 }));
+
+        let snapshot = hub.snapshot();
+        assert_eq!(snapshot.generation, 0);
+        assert_eq!(snapshot.build_error.as_deref(), Some("broken build"));
     }
 
     #[test]
@@ -2795,11 +2849,8 @@ mod tests {
                 index: Some(2),
                 step: Some(1),
                 swapped: true,
-                timer: Some(TimerSyncState {
-                    running: true,
-                    elapsed_ms: 12_000,
-                    at_ms: 98_000,
-                }),
+                timer: Some(SyncTimerSnapshot::new(true, 12_000, 98_000)),
+                build_error: None,
                 generation: 9,
                 session: "session-a".to_owned(),
             },
@@ -2820,6 +2871,32 @@ mod tests {
     }
 
     #[test]
+    fn sync_response_body_always_includes_build_error() {
+        let response = |build_error| {
+            sync_response_body(
+                SyncSnapshot {
+                    seq: 4,
+                    index: Some(2),
+                    step: Some(1),
+                    swapped: true,
+                    timer: None,
+                    build_error,
+                    generation: 9,
+                    session: "session-a".to_owned(),
+                },
+                None,
+            )
+        };
+
+        let without_error: Value = serde_json::from_str(&response(None)).unwrap();
+        let with_error: Value =
+            serde_json::from_str(&response(Some("broken build".to_owned()))).unwrap();
+
+        assert_eq!(without_error["buildError"], Value::Null);
+        assert_eq!(with_error["buildError"], "broken build");
+    }
+
+    #[test]
     fn sync_response_body_includes_step() {
         let body = sync_response_body(
             SyncSnapshot {
@@ -2828,6 +2905,7 @@ mod tests {
                 step: Some(1),
                 swapped: false,
                 timer: None,
+                build_error: None,
                 generation: 0,
                 session: "session-a".to_owned(),
             },
@@ -2848,6 +2926,7 @@ mod tests {
                 step: None,
                 swapped: false,
                 timer: None,
+                build_error: None,
                 generation: 0,
                 session: "session-body".to_owned(),
             },
@@ -2867,6 +2946,7 @@ mod tests {
                 step: Some(0),
                 swapped: false,
                 timer: None,
+                build_error: None,
                 generation: 0,
                 session: "session-a".to_owned(),
             },
@@ -4788,6 +4868,22 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
 
         let response = http_request(&server, "POST", "/sync", r#"{"index":2}"#);
+
+        assert_eq!(response.status, 400);
+        assert_eq!(response.body, "invalid sync body\n");
+    }
+
+    #[test]
+    fn sync_endpoint_rejects_build_error_post_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+
+        let response = http_request(
+            &server,
+            "POST",
+            "/sync",
+            r#"{"index":2,"step":0,"buildError":"broken build"}"#,
+        );
 
         assert_eq!(response.status, 400);
         assert_eq!(response.body, "invalid sync body\n");
