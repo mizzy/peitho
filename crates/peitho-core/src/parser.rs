@@ -3592,15 +3592,12 @@ struct EditableInlineCapture {
 }
 
 impl EditableInlineCapture {
-    fn record(&mut self, markdown: &str, range: Range<usize>) {
+    fn record(&mut self, range: Range<usize>, inline_start: &impl Fn(usize) -> usize) {
         if range.is_empty() {
             return;
         }
-        let start = if self.start.is_none()
-            && range.start > 0
-            && markdown.as_bytes()[range.start - 1] == b'\\'
-        {
-            range.start - 1
+        let start = if self.start.is_none() {
+            inline_start(range.start)
         } else {
             range.start
         };
@@ -3625,36 +3622,40 @@ impl EditableInlineCapture {
 #[derive(Debug)]
 enum EditableEventFrame {
     Candidate {
+        opening_event: usize,
         kind: EditableBlockKind,
         inline: EditableInlineCapture,
     },
     Item {
+        opening_event: usize,
         inline: EditableInlineCapture,
         accepting_inline: bool,
     },
     Other,
 }
 
-#[derive(Debug)]
-struct LocalEditableSpan {
-    source: Range<usize>,
-    kind: EditableBlockKind,
+/// Includes a leading backslash that pulldown-cmark excludes from its first
+/// inline event range after consuming the escape.
+pub(crate) fn editable_inline_start(markdown: &str, event_start: usize) -> usize {
+    if event_start > 0 && markdown.as_bytes()[event_start - 1] == b'\\' {
+        event_start - 1
+    } else {
+        event_start
+    }
 }
 
 fn finish_leading_item_inline(
     frames: &mut [EditableEventFrame],
-    spans: &mut Vec<LocalEditableSpan>,
+    spans: &mut Vec<(usize, EditableBlockKind, Range<usize>)>,
 ) {
     match frames.last_mut() {
         Some(EditableEventFrame::Item {
+            opening_event,
             inline,
             accepting_inline,
         }) if *accepting_inline => {
             if let Some(source) = inline.take() {
-                spans.push(LocalEditableSpan {
-                    source,
-                    kind: EditableBlockKind::TightListItem,
-                });
+                spans.push((*opening_event, EditableBlockKind::TightListItem, source));
             }
             *accepting_inline = false;
         }
@@ -3667,7 +3668,7 @@ fn finish_leading_item_inline(
 
 fn begin_editable_event_frame(
     frames: &mut Vec<EditableEventFrame>,
-    spans: &mut Vec<LocalEditableSpan>,
+    spans: &mut Vec<(usize, EditableBlockKind, Range<usize>)>,
     frame: EditableEventFrame,
 ) {
     finish_leading_item_inline(frames, spans);
@@ -3676,15 +3677,18 @@ fn begin_editable_event_frame(
 
 fn record_editable_inline_event(
     frames: &mut [EditableEventFrame],
-    markdown: &str,
     range: Range<usize>,
+    inline_start: &impl Fn(usize) -> usize,
 ) {
     match frames.last_mut() {
-        Some(EditableEventFrame::Candidate { inline, .. }) => inline.record(markdown, range),
+        Some(EditableEventFrame::Candidate { inline, .. }) => {
+            inline.record(range, inline_start);
+        }
         Some(EditableEventFrame::Item {
             inline,
             accepting_inline: true,
-        }) => inline.record(markdown, range),
+            ..
+        }) => inline.record(range, inline_start),
         Some(EditableEventFrame::Item {
             accepting_inline: false,
             ..
@@ -3700,6 +3704,7 @@ fn poison_editable_inline_capture(frames: &mut [EditableEventFrame]) {
         Some(EditableEventFrame::Item {
             inline,
             accepting_inline: true,
+            ..
         }) => inline.poison(),
         Some(EditableEventFrame::Item {
             accepting_inline: false,
@@ -3712,19 +3717,27 @@ fn poison_editable_inline_capture(frames: &mut [EditableEventFrame]) {
 
 fn end_editable_candidate(
     frames: &mut Vec<EditableEventFrame>,
-    spans: &mut Vec<LocalEditableSpan>,
+    spans: &mut Vec<(usize, EditableBlockKind, Range<usize>)>,
     expected_kind: EditableBlockKind,
 ) {
-    let Some(EditableEventFrame::Candidate { kind, mut inline }) = frames.pop() else {
+    let Some(EditableEventFrame::Candidate {
+        opening_event,
+        kind,
+        mut inline,
+    }) = frames.pop()
+    else {
         unreachable!("candidate end must close a candidate frame");
     };
     debug_assert_eq!(kind, expected_kind);
     if let Some(source) = inline.take() {
-        spans.push(LocalEditableSpan { source, kind });
+        spans.push((opening_event, kind, source));
     }
 }
 
-fn end_editable_item(frames: &mut Vec<EditableEventFrame>, spans: &mut Vec<LocalEditableSpan>) {
+fn end_editable_item(
+    frames: &mut Vec<EditableEventFrame>,
+    spans: &mut Vec<(usize, EditableBlockKind, Range<usize>)>,
+) {
     finish_leading_item_inline(frames, spans);
     let Some(EditableEventFrame::Item { .. }) = frames.pop() else {
         unreachable!("item end must close an item frame");
@@ -3737,17 +3750,26 @@ fn end_other_editable_event_frame(frames: &mut Vec<EditableEventFrame>) {
     };
 }
 
-fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
+/// Returns each editable block's opening-event index, parser-authorized kind,
+/// and first-through-last inline range in event-stream coordinates.
+pub(crate) fn editable_inline_ranges<'event, 'source>(
+    events: impl Iterator<Item = (&'event Event<'source>, Range<usize>)>,
+    inline_start: impl Fn(usize) -> usize,
+) -> Vec<(usize, EditableBlockKind, Range<usize>)>
+where
+    'source: 'event,
+{
     let mut frames = Vec::new();
     let mut spans = Vec::new();
 
-    for (event, range) in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).into_offset_iter() {
+    for (event_index, (event, range)) in events.enumerate() {
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => begin_editable_event_frame(
                     &mut frames,
                     &mut spans,
                     EditableEventFrame::Candidate {
+                        opening_event: event_index,
                         kind: EditableBlockKind::Paragraph,
                         inline: EditableInlineCapture::default(),
                     },
@@ -3756,6 +3778,7 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
                     &mut frames,
                     &mut spans,
                     EditableEventFrame::Candidate {
+                        opening_event: event_index,
                         kind: EditableBlockKind::Heading,
                         inline: EditableInlineCapture::default(),
                     },
@@ -3764,6 +3787,7 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
                     &mut frames,
                     &mut spans,
                     EditableEventFrame::Candidate {
+                        opening_event: event_index,
                         kind: EditableBlockKind::TableCell,
                         inline: EditableInlineCapture::default(),
                     },
@@ -3772,6 +3796,7 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
                     &mut frames,
                     &mut spans,
                     EditableEventFrame::Item {
+                        opening_event: event_index,
                         inline: EditableInlineCapture::default(),
                         accepting_inline: true,
                     },
@@ -3795,7 +3820,7 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
                 | Tag::Strikethrough
                 | Tag::Link { .. }
                 | Tag::Superscript
-                | Tag::Subscript => record_editable_inline_event(&mut frames, markdown, range),
+                | Tag::Subscript => record_editable_inline_event(&mut frames, range, &inline_start),
                 // Images poison the containing editable block.
                 Tag::Image { .. } => poison_editable_inline_capture(&mut frames),
             },
@@ -3827,7 +3852,9 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
                 | TagEnd::Strikethrough
                 | TagEnd::Link
                 | TagEnd::Superscript
-                | TagEnd::Subscript => record_editable_inline_event(&mut frames, markdown, range),
+                | TagEnd::Subscript => {
+                    record_editable_inline_event(&mut frames, range, &inline_start)
+                }
                 // Images poison the containing editable block.
                 TagEnd::Image => poison_editable_inline_capture(&mut frames),
             },
@@ -3836,7 +3863,7 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
             | Event::InlineMath(_)
             | Event::FootnoteReference(_)
             | Event::SoftBreak
-            | Event::HardBreak => record_editable_inline_event(&mut frames, markdown, range),
+            | Event::HardBreak => record_editable_inline_event(&mut frames, range, &inline_start),
             Event::InlineHtml(_) => poison_editable_inline_capture(&mut frames),
             Event::DisplayMath(_) | Event::Html(_) | Event::Rule | Event::TaskListMarker(_) => {}
         }
@@ -3844,6 +3871,25 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
 
     debug_assert!(frames.is_empty());
     spans
+}
+
+#[derive(Debug)]
+struct LocalEditableSpan {
+    source: Range<usize>,
+    kind: EditableBlockKind,
+}
+
+fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
+    let events = Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS)
+        .into_offset_iter()
+        .collect::<Vec<_>>();
+    editable_inline_ranges(
+        events.iter().map(|(event, range)| (event, range.clone())),
+        |event_start| editable_inline_start(markdown, event_start),
+    )
+    .into_iter()
+    .map(|(_, kind, source)| LocalEditableSpan { source, kind })
+    .collect()
 }
 
 fn with_source_provenance(

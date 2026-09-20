@@ -771,6 +771,7 @@ impl EditableSpan {
         self.source
     }
 
+    // Task 4's edit postcondition consumes the parser-authorized block kind.
     #[allow(dead_code)]
     pub(crate) fn kind(self) -> EditableBlockKind {
         self.kind

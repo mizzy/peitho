@@ -1892,6 +1892,7 @@ dependencies = [
  "clap_complete",
  "if-addrs",
  "insta",
+ "lol_html",
  "miette",
  "notify",
  "notify-debouncer-mini",

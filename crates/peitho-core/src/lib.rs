@@ -61,7 +61,7 @@ pub use rehearsal::{
 pub use render::{
     render_deck, render_distribution_index, render_lint_document, render_pdf_document,
     render_present_index, render_presenter_index, render_preview_error_index, render_preview_index,
-    render_remote_index,
+    render_remote_index, EditAnnotations,
 };
 pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 
@@ -69,7 +69,12 @@ pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 /// use peitho_core::*;
 ///
 /// fn raw_checked_deck_cannot_render(deck: Deck<Checked<RawImagePath>>) {
-///     let _ = render_deck(deck, &highlight::Highlighter::defaults(), String::new());
+///     let _ = render_deck(
+///         deck,
+///         &highlight::Highlighter::defaults(),
+///         String::new(),
+///         EditAnnotations::Off,
+///     );
 /// }
 /// ```
 pub fn render_deck_requires_resolved_image_paths() {}
