@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
+    ops::Range,
     path::PathBuf,
 };
 
@@ -12,8 +13,9 @@ use serde::Deserialize;
 use crate::{
     domain::{
         AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, ContainerCodeLanguage,
-        EmbedMode, EmbedOptions, ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath,
-        Resolution, RevealSpan, SlideKey, SlotName, SourceFragment, SourceSpan,
+        EditableBlockKind, EditableSpan, EmbedMode, EmbedOptions, ExplicitSlot, FootnoteEntry,
+        FragmentKind, RawImagePath, Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
+        SourceSpan,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -1989,7 +1991,12 @@ fn push_paragraph_run(
     let Some((first_line, _)) = nonblank_line_range(source, start, end) else {
         return false;
     };
-    let fragment = SourceFragment::paragraph(first_line, source_slice(source, start, end));
+    let (markdown, fragment_span) = source_slice_with_span(source, start, end);
+    let fragment = with_source_provenance(
+        source,
+        SourceFragment::paragraph(first_line, markdown),
+        fragment_span,
+    );
     push_fragment(fragments, div_stack, fragment);
     true
 }
@@ -2154,13 +2161,14 @@ fn close_container(
     }
 
     let line = line_for_offset(source, open.start);
-    let markdown = source_slice(source, open.start, event_end);
+    let (markdown, fragment_span) = source_slice_with_span(source, open.start, event_end);
     let fragment = match open.kind {
         ContainerKind::List => SourceFragment::list(line, markdown),
         ContainerKind::Blockquote => SourceFragment::blockquote(line, markdown),
         ContainerKind::Table => SourceFragment::table(line, markdown),
     }
     .with_container_code_languages(open.code_languages);
+    let fragment = with_source_provenance(source, fragment, fragment_span);
     Ok(Some((open.start, fragment)))
 }
 
@@ -2562,11 +2570,17 @@ fn parse_slide(
                     let Some(OpenBlock::Heading { level, start, text }) = block.take() else {
                         unreachable!();
                     };
-                    let fragment = SourceFragment::heading(
-                        line_for_offset(source, start),
-                        level,
-                        source_slice(source, start, global_end),
-                        text.trim(),
+                    let (markdown, fragment_span) =
+                        source_slice_with_span(source, start, global_end);
+                    let fragment = with_source_provenance(
+                        source,
+                        SourceFragment::heading(
+                            line_for_offset(source, start),
+                            level,
+                            markdown,
+                            text.trim(),
+                        ),
+                        fragment_span,
                     );
                     if let Err(err) = push_checked_fragment(
                         source,
@@ -2652,9 +2666,12 @@ fn parse_slide(
 
                     let fragment = match inline {
                         ParagraphInline::Empty | ParagraphInline::Text => {
-                            SourceFragment::paragraph(
-                                paragraph_line,
-                                source_slice(source, start, global_end),
+                            let (markdown, fragment_span) =
+                                source_slice_with_span(source, start, global_end);
+                            with_source_provenance(
+                                source,
+                                SourceFragment::paragraph(paragraph_line, markdown),
+                                fragment_span,
                             )
                         }
                         ParagraphInline::Image {
@@ -3553,6 +3570,306 @@ fn source_slice(source: &str, start: usize, end: usize) -> String {
     source[start..end].trim().to_owned()
 }
 
+fn source_slice_with_span(source: &str, start: usize, end: usize) -> (String, SourceSpan) {
+    let raw = &source[start..end];
+    let markdown = raw.trim();
+    let leading_bytes = raw.len() - raw.trim_start().len();
+    let span_start = start + leading_bytes;
+    (
+        markdown.to_owned(),
+        SourceSpan {
+            start: span_start,
+            end: span_start + markdown.len(),
+        },
+    )
+}
+
+#[derive(Debug, Default)]
+struct EditableInlineCapture {
+    start: Option<usize>,
+    end: usize,
+    poisoned: bool,
+}
+
+impl EditableInlineCapture {
+    fn record(&mut self, markdown: &str, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        let start = if self.start.is_none()
+            && range.start > 0
+            && markdown.as_bytes()[range.start - 1] == b'\\'
+        {
+            range.start - 1
+        } else {
+            range.start
+        };
+        self.start.get_or_insert(start);
+        self.end = range.end;
+    }
+
+    fn poison(&mut self) {
+        self.poisoned = true;
+    }
+
+    fn take(&mut self) -> Option<Range<usize>> {
+        if self.poisoned {
+            return None;
+        }
+        let start = self.start.take()?;
+        let end = std::mem::take(&mut self.end);
+        (start < end).then_some(start..end)
+    }
+}
+
+#[derive(Debug)]
+enum EditableEventFrame {
+    Candidate {
+        kind: EditableBlockKind,
+        inline: EditableInlineCapture,
+    },
+    Item {
+        inline: EditableInlineCapture,
+        accepting_inline: bool,
+    },
+    Other,
+}
+
+#[derive(Debug)]
+struct LocalEditableSpan {
+    source: Range<usize>,
+    kind: EditableBlockKind,
+}
+
+fn finish_leading_item_inline(
+    frames: &mut [EditableEventFrame],
+    spans: &mut Vec<LocalEditableSpan>,
+) {
+    match frames.last_mut() {
+        Some(EditableEventFrame::Item {
+            inline,
+            accepting_inline,
+        }) if *accepting_inline => {
+            if let Some(source) = inline.take() {
+                spans.push(LocalEditableSpan {
+                    source,
+                    kind: EditableBlockKind::TightListItem,
+                });
+            }
+            *accepting_inline = false;
+        }
+        Some(EditableEventFrame::Item { .. })
+        | Some(EditableEventFrame::Candidate { .. })
+        | Some(EditableEventFrame::Other)
+        | None => {}
+    }
+}
+
+fn begin_editable_event_frame(
+    frames: &mut Vec<EditableEventFrame>,
+    spans: &mut Vec<LocalEditableSpan>,
+    frame: EditableEventFrame,
+) {
+    finish_leading_item_inline(frames, spans);
+    frames.push(frame);
+}
+
+fn record_editable_inline_event(
+    frames: &mut [EditableEventFrame],
+    markdown: &str,
+    range: Range<usize>,
+) {
+    match frames.last_mut() {
+        Some(EditableEventFrame::Candidate { inline, .. }) => inline.record(markdown, range),
+        Some(EditableEventFrame::Item {
+            inline,
+            accepting_inline: true,
+        }) => inline.record(markdown, range),
+        Some(EditableEventFrame::Item {
+            accepting_inline: false,
+            ..
+        })
+        | Some(EditableEventFrame::Other)
+        | None => {}
+    }
+}
+
+fn poison_editable_inline_capture(frames: &mut [EditableEventFrame]) {
+    match frames.last_mut() {
+        Some(EditableEventFrame::Candidate { inline, .. }) => inline.poison(),
+        Some(EditableEventFrame::Item {
+            inline,
+            accepting_inline: true,
+        }) => inline.poison(),
+        Some(EditableEventFrame::Item {
+            accepting_inline: false,
+            ..
+        })
+        | Some(EditableEventFrame::Other)
+        | None => {}
+    }
+}
+
+fn end_editable_candidate(
+    frames: &mut Vec<EditableEventFrame>,
+    spans: &mut Vec<LocalEditableSpan>,
+    expected_kind: EditableBlockKind,
+) {
+    let Some(EditableEventFrame::Candidate { kind, mut inline }) = frames.pop() else {
+        unreachable!("candidate end must close a candidate frame");
+    };
+    debug_assert_eq!(kind, expected_kind);
+    if let Some(source) = inline.take() {
+        spans.push(LocalEditableSpan { source, kind });
+    }
+}
+
+fn end_editable_item(frames: &mut Vec<EditableEventFrame>, spans: &mut Vec<LocalEditableSpan>) {
+    finish_leading_item_inline(frames, spans);
+    let Some(EditableEventFrame::Item { .. }) = frames.pop() else {
+        unreachable!("item end must close an item frame");
+    };
+}
+
+fn end_other_editable_event_frame(frames: &mut Vec<EditableEventFrame>) {
+    let Some(EditableEventFrame::Other) = frames.pop() else {
+        unreachable!("block end must close a non-editable frame");
+    };
+}
+
+fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
+    let mut frames = Vec::new();
+    let mut spans = Vec::new();
+
+    for (event, range) in Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => begin_editable_event_frame(
+                    &mut frames,
+                    &mut spans,
+                    EditableEventFrame::Candidate {
+                        kind: EditableBlockKind::Paragraph,
+                        inline: EditableInlineCapture::default(),
+                    },
+                ),
+                Tag::Heading { .. } => begin_editable_event_frame(
+                    &mut frames,
+                    &mut spans,
+                    EditableEventFrame::Candidate {
+                        kind: EditableBlockKind::Heading,
+                        inline: EditableInlineCapture::default(),
+                    },
+                ),
+                Tag::TableCell => begin_editable_event_frame(
+                    &mut frames,
+                    &mut spans,
+                    EditableEventFrame::Candidate {
+                        kind: EditableBlockKind::TableCell,
+                        inline: EditableInlineCapture::default(),
+                    },
+                ),
+                Tag::Item => begin_editable_event_frame(
+                    &mut frames,
+                    &mut spans,
+                    EditableEventFrame::Item {
+                        inline: EditableInlineCapture::default(),
+                        accepting_inline: true,
+                    },
+                ),
+                Tag::BlockQuote(_)
+                | Tag::CodeBlock(_)
+                | Tag::HtmlBlock
+                | Tag::List(_)
+                | Tag::FootnoteDefinition(_)
+                | Tag::Table(_)
+                | Tag::TableHead
+                | Tag::TableRow
+                | Tag::MetadataBlock(_)
+                | Tag::DefinitionList
+                | Tag::DefinitionListTitle
+                | Tag::DefinitionListDefinition => {
+                    begin_editable_event_frame(&mut frames, &mut spans, EditableEventFrame::Other)
+                }
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Superscript
+                | Tag::Subscript => record_editable_inline_event(&mut frames, markdown, range),
+                // Images poison the containing editable block.
+                Tag::Image { .. } => poison_editable_inline_capture(&mut frames),
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph => {
+                    end_editable_candidate(&mut frames, &mut spans, EditableBlockKind::Paragraph)
+                }
+                TagEnd::Heading(_) => {
+                    end_editable_candidate(&mut frames, &mut spans, EditableBlockKind::Heading)
+                }
+                TagEnd::TableCell => {
+                    end_editable_candidate(&mut frames, &mut spans, EditableBlockKind::TableCell)
+                }
+                TagEnd::Item => end_editable_item(&mut frames, &mut spans),
+                TagEnd::BlockQuote(_)
+                | TagEnd::CodeBlock
+                | TagEnd::HtmlBlock
+                | TagEnd::List(_)
+                | TagEnd::FootnoteDefinition
+                | TagEnd::Table
+                | TagEnd::TableHead
+                | TagEnd::TableRow
+                | TagEnd::MetadataBlock(_)
+                | TagEnd::DefinitionList
+                | TagEnd::DefinitionListTitle
+                | TagEnd::DefinitionListDefinition => end_other_editable_event_frame(&mut frames),
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Superscript
+                | TagEnd::Subscript => record_editable_inline_event(&mut frames, markdown, range),
+                // Images poison the containing editable block.
+                TagEnd::Image => poison_editable_inline_capture(&mut frames),
+            },
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::InlineMath(_)
+            | Event::FootnoteReference(_)
+            | Event::SoftBreak
+            | Event::HardBreak => record_editable_inline_event(&mut frames, markdown, range),
+            Event::InlineHtml(_) => poison_editable_inline_capture(&mut frames),
+            Event::DisplayMath(_) | Event::Html(_) | Event::Rule | Event::TaskListMarker(_) => {}
+        }
+    }
+
+    debug_assert!(frames.is_empty());
+    spans
+}
+
+fn with_source_provenance(
+    combined: &str,
+    fragment: SourceFragment,
+    fragment_span: SourceSpan,
+) -> SourceFragment {
+    if combined.get(fragment_span.start..fragment_span.end) != Some(fragment.markdown()) {
+        return fragment;
+    }
+
+    let editable_spans = editable_spans_for_markdown(fragment.markdown())
+        .into_iter()
+        .map(|local| {
+            EditableSpan::new(
+                SourceSpan {
+                    start: fragment_span.start + local.source.start,
+                    end: fragment_span.start + local.source.end,
+                },
+                local.kind,
+            )
+        })
+        .collect();
+    fragment.with_source_provenance(fragment_span, editable_spans)
+}
+
 fn unsupported_construct(line: usize, name: &str) -> BuildError {
     BuildError::new(
         ErrorKind::Parse,
@@ -3723,11 +4040,14 @@ fn derive_key_from_fragments(fragments: &[SourceFragment], index: usize) -> Slid
 mod tests {
     use super::*;
     use crate::{
-        domain::{AspectRatio, EmbedMode, EmbedOptions, FragmentKind, RevealSpan, SourceSpan},
+        domain::{
+            AspectRatio, EditableSpan, EmbedMode, EmbedOptions, FragmentKind, RevealSpan,
+            SourceSpan,
+        },
         error::ErrorKind,
         phase::{KeySource, PageNumberFormat},
     };
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     fn parse_markdown(
         source: &str,
@@ -3735,6 +4055,430 @@ mod tests {
     ) -> Result<Deck<Parsed>> {
         let frontmatter = parse_frontmatter(source)?;
         super::parse_markdown(source, frontmatter, highlighter)
+    }
+
+    fn collect_source_fragments<'a, S>(
+        fragments: &'a [SourceFragment<S>],
+        collected: &mut Vec<&'a SourceFragment<S>>,
+    ) {
+        for fragment in fragments {
+            collected.push(fragment);
+            if let FragmentKind::SlotGroup { children, .. } = fragment.kind() {
+                collect_source_fragments(children, collected);
+            }
+        }
+    }
+
+    fn collect_fragment_editable_spans<S>(fragments: &[SourceFragment<S>]) -> Vec<EditableSpan> {
+        let mut all_fragments = Vec::new();
+        collect_source_fragments(fragments, &mut all_fragments);
+        let mut spans = all_fragments
+            .into_iter()
+            .flat_map(|fragment| fragment.editable_spans().iter().copied())
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|span| {
+            let source = span.source_span();
+            (source.start, source.end)
+        });
+        spans
+    }
+
+    #[test]
+    fn editable_spans_are_verbatim_renderer_inputs_in_all_supported_contexts() {
+        let cases: &[(&str, &str, &[&str], &[EditableBlockKind])] = &[
+            (
+                "paragraph",
+                "Plain *paragraph* with `code` and [link](https://example.com).",
+                &["Plain *paragraph* with `code` and [link](https://example.com)."],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "paragraph leading escape",
+                r"\*not em\* tail",
+                &[r"\*not em\* tail"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "paragraph doubled leading backslash",
+                r"\\*x*",
+                &[r"\\*x*"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "paragraph trailing escaped character",
+                r"tail \*",
+                &[r"tail \*"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "paragraph trailing entity",
+                "tail &amp;",
+                &["tail &amp;"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "ATX heading",
+                "## ATX **heading** ##",
+                &["ATX **heading**"],
+                &[EditableBlockKind::Heading],
+            ),
+            (
+                "heading leading escape",
+                r"# \# hash",
+                &[r"\# hash"],
+                &[EditableBlockKind::Heading],
+            ),
+            (
+                "setext heading",
+                "Setext _heading_\n----------------",
+                &["Setext _heading_"],
+                &[EditableBlockKind::Heading],
+            ),
+            (
+                "tight and nested list",
+                "- parent *one*\n  - child\n    - grandchild",
+                &["parent *one*", "child", "grandchild"],
+                &[
+                    EditableBlockKind::TightListItem,
+                    EditableBlockKind::TightListItem,
+                    EditableBlockKind::TightListItem,
+                ],
+            ),
+            (
+                "tight item leading escape",
+                r"- \*item",
+                &[r"\*item"],
+                &[EditableBlockKind::TightListItem],
+            ),
+            (
+                "loose list",
+                "- loose a\n\n- loose b",
+                &["loose a", "loose b"],
+                &[EditableBlockKind::Paragraph, EditableBlockKind::Paragraph],
+            ),
+            (
+                "table",
+                "| Name | Value |\n| --- | --- |\n| 日本 | **二** |",
+                &["Name", "Value", "日本", "**二**"],
+                &[
+                    EditableBlockKind::TableCell,
+                    EditableBlockKind::TableCell,
+                    EditableBlockKind::TableCell,
+                    EditableBlockKind::TableCell,
+                ],
+            ),
+            (
+                "table cell leading escape",
+                "| \\*a |\n| --- |",
+                &[r"\*a"],
+                &[EditableBlockKind::TableCell],
+            ),
+            (
+                "blockquote",
+                "> quoted *one*\n> quoted two",
+                &["quoted *one*\n> quoted two"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "explicit slot child",
+                "::: {slot=body}\n\nslot *text*\n\n:::",
+                &["slot *text*"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "reveal child",
+                "::: {reveal}\n\nreveal **text**\n\n:::",
+                &["reveal **text**"],
+                &[EditableBlockKind::Paragraph],
+            ),
+            (
+                "CJK paragraph",
+                "日本語の **文章** です",
+                &["日本語の **文章** です"],
+                &[EditableBlockKind::Paragraph],
+            ),
+        ];
+        let highlighter = crate::highlight::Highlighter::defaults();
+
+        for (case_name, combined, expected, expected_kinds) in cases {
+            let deck = parse_markdown(combined, &highlighter).unwrap();
+            let slide = &deck.parsed_slides()[0];
+            let mut fragments = Vec::new();
+            collect_source_fragments(&slide.fragments, &mut fragments);
+            let mut actual = Vec::new();
+            let mut actual_kinds = Vec::new();
+
+            for fragment in fragments {
+                if let Some(fragment_span) = fragment.source_span() {
+                    assert_eq!(
+                        combined.get(fragment_span.start..fragment_span.end),
+                        Some(fragment.markdown()),
+                        "{case_name}"
+                    );
+                    for editable in fragment.editable_spans() {
+                        let span = editable.source_span();
+                        let local = span.start - fragment_span.start;
+                        let renderer_markdown =
+                            &fragment.markdown()[local..local + (span.end - span.start)];
+                        assert_eq!(
+                            &combined[span.start..span.end],
+                            renderer_markdown,
+                            "{case_name}"
+                        );
+                        actual.push(&combined[span.start..span.end]);
+                        actual_kinds.push(editable.kind());
+                    }
+                } else {
+                    assert!(fragment.editable_spans().is_empty(), "{case_name}");
+                }
+            }
+
+            assert_eq!(actual, *expected, "{case_name}");
+            assert_eq!(actual_kinds, *expected_kinds, "{case_name}");
+        }
+    }
+
+    #[test]
+    fn included_editable_span_uses_combined_source_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck_path = dir.path().join("deck.md");
+        let shared_path = dir.path().join("shared.md");
+        let top_source = "\u{feff}---\nlang: ja\n---\n<!-- {\"include\":\"shared.md\"} -->\n";
+        let shared_source = "共有 **本文**\n";
+        fs::write(&deck_path, top_source).unwrap();
+        fs::write(&shared_path, shared_source).unwrap();
+        let frontmatter = parse_frontmatter(top_source).unwrap();
+        let expanded =
+            crate::include::expand_includes(top_source, frontmatter.body_start(), &deck_path)
+                .unwrap();
+        let parsed =
+            parse_markdown(&expanded.source, &crate::highlight::Highlighter::defaults()).unwrap();
+        let spans = parsed.parsed_slides()[0].editable_spans();
+
+        assert!(!expanded.source.starts_with('\u{feff}'));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| {
+                    let span = span.source_span();
+                    &expanded.source[span.start..span.end]
+                })
+                .collect::<Vec<_>>(),
+            ["共有 **本文**"]
+        );
+        for editable in spans {
+            let span = editable.source_span();
+            assert_eq!(span.start, expanded.source.find("共有 **本文**").unwrap());
+            let origin = expanded
+                .line_map
+                .translate_span(&expanded.source, span)
+                .unwrap();
+            assert_eq!(origin.file, shared_path);
+            assert_eq!(origin.combined, span);
+            assert_eq!(
+                origin.file.file_name().and_then(|name| name.to_str()),
+                Some("shared.md")
+            );
+        }
+    }
+
+    #[test]
+    fn image_event_poisons_only_its_editable_block() {
+        let markdown = "- ![alt](x.png) tail\n- ok";
+        let spans = editable_spans_for_markdown(markdown);
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| &markdown[span.source.clone()])
+                .collect::<Vec<_>>(),
+            ["ok"]
+        );
+    }
+
+    #[test]
+    fn non_verbatim_or_non_text_fragments_have_no_editable_span() {
+        let highlighter = crate::highlight::Highlighter::defaults();
+
+        let code = parse_markdown("```rust\nfn main() {}\n```", &highlighter).unwrap();
+        assert!(code.parsed_slides()[0].editable_spans().is_empty());
+        assert!(code.parsed_slides()[0].fragments[0]
+            .editable_spans()
+            .is_empty());
+
+        let image = parse_markdown("![x](x.png)", &highlighter).unwrap();
+        let image_fragment = &image.parsed_slides()[0].fragments[0];
+        assert!(matches!(image_fragment.kind(), FragmentKind::Image { .. }));
+        assert!(image_fragment.editable_spans().is_empty());
+        assert!(parse_markdown("# T\n\nprefix ![x](x.png)", &highlighter).is_err());
+
+        let footnotes = parse_markdown("Body[^note].\n\n[^note]: Footnote.", &highlighter).unwrap();
+        let footnotes_fragment = footnotes.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Footnotes { .. }))
+            .unwrap();
+        assert!(footnotes_fragment.editable_spans().is_empty());
+        assert_eq!(footnotes_fragment.source_span(), None);
+
+        let settings_source = "<!-- {\"key\":\"fixed\"} -->\n\nBody";
+        let settings = parse_markdown(settings_source, &highlighter).unwrap();
+        let settings_spans = settings.parsed_slides()[0].editable_spans();
+        assert_eq!(settings.parsed_slides()[0].fragments.len(), 1);
+        assert_eq!(
+            settings_spans
+                .iter()
+                .map(|span| {
+                    let span = span.source_span();
+                    &settings_source[span.start..span.end]
+                })
+                .collect::<Vec<_>>(),
+            ["Body"]
+        );
+
+        let inline_note_cases: &[(&str, &str, &[&str])] = &[
+            ("heading edge comment", "# Title <!-- n -->", &[]),
+            ("paragraph edge comment", "Body <!-- n -->", &[]),
+            (
+                "blockquote paragraph edge comment",
+                "> Quote <!-- n -->",
+                &[],
+            ),
+            (
+                "tight item edge comment keeps child",
+                "- parent <!-- n -->\n  - child",
+                &["child"],
+            ),
+            (
+                "table cell edge comment keeps sibling",
+                "| a <!-- n --> | b |\n| --- | --- |",
+                &["b"],
+            ),
+            ("paragraph interior comment", "x <!-- note --> y", &[]),
+        ];
+        for (case_name, source, expected) in inline_note_cases {
+            let parsed = parse_markdown(source, &highlighter).unwrap();
+            let actual = parsed.parsed_slides()[0]
+                .editable_spans()
+                .iter()
+                .map(|span| {
+                    let span = span.source_span();
+                    &source[span.start..span.end]
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(actual, *expected, "{case_name}");
+        }
+
+        let empty = parse_markdown("#", &highlighter).unwrap();
+        assert!(empty.parsed_slides()[0].editable_spans().is_empty());
+
+        let grouped =
+            parse_markdown("::: {slot=body}\n\nslot *text*\n\n:::", &highlighter).unwrap();
+        let group = grouped.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. }))
+            .unwrap();
+        assert_eq!(group.source_span(), None);
+        assert!(group.editable_spans().is_empty());
+        let FragmentKind::SlotGroup { children, .. } = group.kind() else {
+            panic!("expected slot group");
+        };
+        assert_eq!(children[0].editable_spans().len(), 1);
+    }
+
+    #[test]
+    fn editable_spans_survive_parsed_mapped_and_checked() {
+        let source = concat!(
+            "# Source *title*\n\n",
+            "Paragraph with `code`.\n\n",
+            "- list *item*\n\n",
+            "| A | B |\n| - | - |\n| C | D |\n\n",
+            "::: {slot=aside}\n\n",
+            "Aside **content**.\n\n",
+            ":::\n\n",
+            "After the explicit slot.\n\n",
+            "---\n\n",
+            "# Image *slide*\n\n",
+            "![Diagram](images/diagram.png)",
+        );
+        let parsed = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap();
+        let first_slide_spans = parsed.parsed_slides()[0].editable_spans();
+        assert!(first_slide_spans
+            .windows(2)
+            .all(|pair| { pair[0].source_span().start < pair[1].source_span().start }));
+        let mut parsed_spans = parsed
+            .parsed_slides()
+            .iter()
+            .flat_map(|slide| slide.editable_spans())
+            .collect::<Vec<_>>();
+        parsed_spans.sort_by_key(|span| span.source_span().start);
+        let group = parsed.parsed_slides()[0]
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::SlotGroup { .. }))
+            .unwrap();
+        let group_spans = collect_fragment_editable_spans(std::slice::from_ref(group));
+        assert_eq!(group_spans.len(), 1);
+        let copied_group: SourceFragment = group
+            .clone()
+            .try_map_image_src(Ok::<_, std::convert::Infallible>)
+            .unwrap();
+        assert_eq!(
+            collect_fragment_editable_spans(std::slice::from_ref(&copied_group)),
+            group_spans
+        );
+        let layout = crate::layout::parse_layout(
+            "editable",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="aside" accepts="blocks" arity="0..*"></slot><slot name="hero" accepts="image" arity="0..1"></slot></section>"#,
+        )
+        .unwrap();
+
+        let mapped = crate::mapping::map_by_convention(parsed, &layout).unwrap();
+        let mut mapped_spans = mapped
+            .mapped_slides()
+            .iter()
+            .flat_map(|slide| slide.slots.values())
+            .flat_map(|slot| collect_fragment_editable_spans(slot.fragments()))
+            .collect::<Vec<_>>();
+        mapped_spans.sort_by_key(|span| span.source_span().start);
+        assert_eq!(mapped_spans, parsed_spans);
+
+        let checked = crate::check::check_deck(mapped).unwrap();
+        let mut checked_spans = checked
+            .checked_slides()
+            .iter()
+            .flat_map(|slide| slide.slots().values())
+            .flat_map(|slot| collect_fragment_editable_spans(slot.fragments()))
+            .collect::<Vec<_>>();
+        checked_spans.sort_by_key(|span| span.source_span().start);
+        assert_eq!(checked_spans, parsed_spans);
+
+        let mut image_resolutions = 0;
+        let (resolved, assets) = crate::phase::resolve_image_paths(checked, |request| {
+            image_resolutions += 1;
+            assert_eq!(request.raw.as_str(), "images/diagram.png");
+            Ok(crate::domain::ResolvedImageAsset {
+                source_abs: PathBuf::from("/deck/images/diagram.png"),
+                dist_rel: crate::domain::ResolvedImagePath::from_hashed_asset(
+                    "0123456789abcdef",
+                    "diagram.png",
+                )
+                .unwrap(),
+            })
+        })
+        .unwrap();
+        let mut resolved_spans = resolved
+            .checked_slides()
+            .iter()
+            .flat_map(|slide| slide.slots().values())
+            .flat_map(|slot| collect_fragment_editable_spans(slot.fragments()))
+            .collect::<Vec<_>>();
+        resolved_spans.sort_by_key(|span| span.source_span().start);
+        assert_eq!(resolved_spans, parsed_spans);
+        assert_eq!(image_resolutions, 1);
+        assert_eq!(assets.len(), 1);
     }
 
     #[test]

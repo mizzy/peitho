@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     domain::{
-        AspectRatio, CodeImagesConfig, RawImagePath, RenderedSlide, Resolution, ResolvedImageAsset,
-        ResolvedImagePath, SlideKey, SlotContract, SlotName, SourceFragment, SourceSpan,
+        AspectRatio, CodeImagesConfig, EditableSpan, FragmentKind, RawImagePath, RenderedSlide,
+        Resolution, ResolvedImageAsset, ResolvedImagePath, SlideKey, SlotContract, SlotName,
+        SourceFragment, SourceSpan,
     },
     error::{BuildError, Result},
     layout::Layout,
@@ -487,6 +488,25 @@ pub struct ParsedSlide {
     pub page_number_hidden: bool,
     pub notes: Option<String>,
     pub note_spans: Vec<SourceSpan>,
+}
+
+impl ParsedSlide {
+    /// Return every parser-authorized editable span in source order, recursing
+    /// into `SlotGroup` children.
+    pub fn editable_spans(&self) -> Vec<EditableSpan> {
+        fn collect(fragments: &[SourceFragment], spans: &mut Vec<EditableSpan>) {
+            for fragment in fragments {
+                spans.extend_from_slice(fragment.editable_spans());
+                if let FragmentKind::SlotGroup { children, .. } = fragment.kind() {
+                    collect(children, spans);
+                }
+            }
+        }
+
+        let mut spans = Vec::new();
+        collect(&self.fragments, &mut spans);
+        spans
+    }
 }
 
 #[derive(Debug, Clone)]

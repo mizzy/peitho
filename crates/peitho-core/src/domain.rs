@@ -740,6 +740,43 @@ pub struct SourceSpan {
     pub end: usize,
 }
 
+/// The parser-authorized block kind for an editable span.
+///
+/// `pub(crate)` so only the parser can classify a span: editability is parser
+/// evidence, and consumers must not infer it from rendered fragments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditableBlockKind {
+    Paragraph,
+    Heading,
+    TightListItem,
+    TableCell,
+}
+
+/// A parser-authorized inline Markdown range in the combined deck source.
+///
+/// The fields are private and the crate-visible constructor is reserved for
+/// the parser, so consumers can inspect these ranges but cannot fabricate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditableSpan {
+    source: SourceSpan,
+    kind: EditableBlockKind,
+}
+
+impl EditableSpan {
+    pub(crate) fn new(source: SourceSpan, kind: EditableBlockKind) -> Self {
+        Self { source, kind }
+    }
+
+    pub fn source_span(self) -> SourceSpan {
+        self.source
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn kind(self) -> EditableBlockKind {
+        self.kind
+    }
+}
+
 /// Reveal step coverage for one source fragment.
 ///
 /// `start` is the 1-based reveal step where this fragment begins. `len` is
@@ -816,6 +853,8 @@ impl<S> fmt::Display for FragmentKind<S> {
 pub struct SourceFragment<S = RawImagePath> {
     line: usize,
     kind: FragmentKind<S>,
+    source_span: Option<SourceSpan>,
+    editable_spans: Vec<EditableSpan>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
     container_code_languages: Vec<ContainerCodeLanguage>,
@@ -836,6 +875,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Heading { level },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -851,6 +892,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Paragraph,
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -866,6 +909,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::List,
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -881,6 +926,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Blockquote,
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -896,6 +943,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Table,
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -912,6 +961,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Code,
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -932,6 +983,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Math { html: html.into() },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -951,6 +1004,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::EmbedCard { html: html.into() },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -966,6 +1021,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::Footnotes { entries },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -985,6 +1042,8 @@ impl SourceFragment<RawImagePath> {
         Self {
             line,
             kind: FragmentKind::SlotGroup { name, children },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -998,6 +1057,20 @@ impl SourceFragment<RawImagePath> {
 
     pub(crate) fn with_reveal_span(mut self, span: RevealSpan) -> Self {
         self.reveal_span = Some(span);
+        self
+    }
+
+    /// Attach parser-authorized source provenance to a fragment.
+    ///
+    /// `pub(crate)` so only the parser can produce it: source and editable
+    /// spans are valid only after verification against the combined Markdown.
+    pub(crate) fn with_source_provenance(
+        mut self,
+        source_span: SourceSpan,
+        editable_spans: Vec<EditableSpan>,
+    ) -> Self {
+        self.source_span = Some(source_span);
+        self.editable_spans = editable_spans;
         self
     }
 
@@ -1041,6 +1114,8 @@ impl<S> SourceFragment<S> {
                 alt: alt.into(),
                 src,
             },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -1073,6 +1148,8 @@ impl<S> SourceFragment<S> {
                 provider_html,
                 permalink_attr: permalink_attr.into(),
             },
+            source_span: None,
+            editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
             container_code_languages: Vec::new(),
@@ -1101,6 +1178,8 @@ impl<S> SourceFragment<S> {
         let SourceFragment {
             line,
             kind,
+            source_span,
+            editable_spans,
             reveal_span,
             emphasis,
             container_code_languages,
@@ -1154,6 +1233,8 @@ impl<S> SourceFragment<S> {
         Ok(SourceFragment {
             line,
             kind,
+            source_span,
+            editable_spans,
             reveal_span,
             emphasis,
             container_code_languages,
@@ -1171,6 +1252,14 @@ impl<S> SourceFragment<S> {
 
     pub fn kind(&self) -> &FragmentKind<S> {
         &self.kind
+    }
+
+    pub fn source_span(&self) -> Option<SourceSpan> {
+        self.source_span
+    }
+
+    pub fn editable_spans(&self) -> &[EditableSpan] {
+        &self.editable_spans
     }
 
     pub fn reveal_span(&self) -> Option<RevealSpan> {
