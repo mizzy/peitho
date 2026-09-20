@@ -918,6 +918,8 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
     "shell.js",
     "remote.js",
 ];
+const PUBLISH_CONTAMINATION_HELP: &str =
+    "remove presentation artifacts or run `peitho build` again";
 
 fn main() {
     if let Err(err) = run() {
@@ -1971,13 +1973,24 @@ fn resolve_assets_and_highlighter(
 }
 
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
+    build_cli_artifacts(input, peitho_core::EditAnnotations::Off)
+}
+
+fn build_preview_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
+    build_cli_artifacts(input, peitho_core::EditAnnotations::On)
+}
+
+fn build_cli_artifacts(
+    input: &Path,
+    edit_annotations: peitho_core::EditAnnotations,
+) -> miette::Result<BuildArtifacts> {
     let svg_runner = CliSvgRunner::for_deck(input);
     build_artifacts_with_services(
         input,
         &svg_runner,
         &CliEmbedRenderer,
         &CliOEmbedFetcher,
-        peitho_core::EditAnnotations::Off,
+        edit_annotations,
     )
 }
 
@@ -3584,6 +3597,7 @@ fn validate_publish_dist(dist: &Path) -> miette::Result<PublishDistribution> {
     require_dist_file(dist, "peitho.css")?;
     require_slides_dir_with_files(dist)?;
     reject_presentation_only_files(dist)?;
+    reject_preview_edit_annotations(dist)?;
 
     read_publish_manifest(dist)?;
     let canonical = fs::canonicalize(dist).map_err(|err| {
@@ -3600,13 +3614,101 @@ fn validate_publish_dist(dist: &Path) -> miette::Result<PublishDistribution> {
 fn reject_presentation_only_files(dist: &Path) -> miette::Result<()> {
     for file in PRESENTATION_ONLY_DIST_FILES {
         if dist.join(file).exists() {
-            return Err(miette::miette!(
-                help = "remove presentation artifacts or run `peitho build` again",
+            return Err(publish_contamination_error(format!(
                 "distribution contains presentation-only file: {file}"
-            ));
+            )));
         }
     }
     Ok(())
+}
+
+fn publish_contamination_error(message: String) -> miette::Report {
+    miette::miette!(help = PUBLISH_CONTAMINATION_HELP, "{message}")
+}
+
+fn reject_preview_edit_annotations(dist: &Path) -> miette::Result<()> {
+    let mut visited_dirs = HashSet::new();
+    reject_preview_edit_annotations_in_dir(dist, dist, &mut visited_dirs)
+}
+
+fn reject_preview_edit_annotations_in_dir(
+    dist: &Path,
+    dir: &Path,
+    visited_dirs: &mut HashSet<PathBuf>,
+) -> miette::Result<()> {
+    let canonical_dir =
+        fs::canonicalize(dir).map_err(|err| publish_entry_inspection_error(dist, dir, err))?;
+    if !visited_dirs.insert(canonical_dir) {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(dir)
+        .map_err(|err| publish_entry_inspection_error(dist, dir, err))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|err| publish_entry_inspection_error(dist, dir, err))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata =
+            fs::metadata(&path).map_err(|err| publish_entry_inspection_error(dist, &path, err))?;
+        if metadata.is_dir() {
+            reject_preview_edit_annotations_in_dir(dist, &path, visited_dirs)?;
+            continue;
+        }
+        let is_html = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
+        if !metadata.is_file() || !is_html {
+            continue;
+        }
+
+        let relative = path.strip_prefix(dist).map_err(|err| {
+            miette::miette!(
+                "failed to identify distribution file {}\ncaused by: {err}",
+                path.display()
+            )
+        })?;
+        let html = fs::read_to_string(&path).map_err(|err| {
+            miette::miette!(
+                help = "ensure every HTML file under dist/ is UTF-8 or run `peitho build` again",
+                "failed to read distribution HTML as UTF-8: {}\ncaused by: {err}",
+                relative.display()
+            )
+        })?;
+        let attribute = peitho_core::find_edit_annotation_attribute(&html).map_err(|err| {
+            let message = err.message;
+            miette::miette!(
+                help = "run `peitho build` again",
+                "distribution file could not be parsed as HTML: {}\ncaused by: {}",
+                relative.display(),
+                message
+            )
+        })?;
+        if let Some(attribute) = attribute {
+            return Err(publish_contamination_error(format!(
+                "distribution contains preview-only attribute {attribute}: {}",
+                relative.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn publish_entry_inspection_error(dist: &Path, path: &Path, err: std::io::Error) -> miette::Report {
+    let relative = path.strip_prefix(dist).unwrap_or(path);
+    let relative = if relative.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        relative
+    };
+    miette::miette!(
+        help = "remove the unreadable entry or run `peitho build` again",
+        "failed to inspect distribution entry {}\ncaused by: {err}",
+        relative.display()
+    )
 }
 
 fn latest_rehearsal_record(
@@ -4827,7 +4929,7 @@ fn emit_initial_preview_root(
     cache: &Path,
     stderr: &mut dyn Write,
 ) -> miette::Result<PathBuf> {
-    match build_artifacts(input) {
+    match build_preview_artifacts(input) {
         Ok(artifacts) => {
             let root = emit_preview_cache_generation(cache, 0, &artifacts)?;
             prune_preview_cache_generations(cache, 0)?;
@@ -4850,7 +4952,7 @@ fn rebuild_preview_once_for_watch(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> miette::Result<()> {
-    match build_artifacts(input).and_then(|artifacts| {
+    match build_preview_artifacts(input).and_then(|artifacts| {
         let generation = server.generation() + 1;
         let slide_count = artifacts.slide_count;
         let root = emit_preview_cache_generation(cache, generation, &artifacts)?;
@@ -6881,6 +6983,40 @@ contexts:
             .contains("built 1 slide(s)"));
         assert!(fixture.options.out.join("manifest.json").exists());
         assert!(fixture.options.out.join("slides/000-intro.html").exists());
+    }
+
+    #[test]
+    fn build_watch_distribution_omits_preview_edit_annotations() {
+        let fixture = WatchFixture::new("# Intro\n\nBefore rebuild.\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut watcher = RecordingWatchController::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
+        let slide_path = fixture.options.out.join("slides/000-intro.html");
+        assert!(fs::read_to_string(&slide_path)
+            .unwrap()
+            .contains("Before rebuild."));
+
+        fs::write(&fixture.options.input, "# Intro\n\nAfter rebuild.\n").unwrap();
+        handle_watch_paths_with_rebuild(
+            &mut state,
+            &mut watcher,
+            std::slice::from_ref(&fixture.options.input),
+            &mut stdout,
+            &mut stderr,
+            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        )
+        .unwrap();
+
+        let slide = fs::read_to_string(slide_path).unwrap();
+        assert!(slide.contains("After rebuild."), "{slide}");
+        assert!(!slide.contains("Before rebuild."), "{slide}");
+        for forbidden in ["data-peitho-src", "data-peitho-md"] {
+            assert!(!slide.contains(forbidden), "{forbidden} found in {slide}");
+        }
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -9092,6 +9228,40 @@ contexts:
     }
 
     #[test]
+    fn non_preview_rendered_documents_omit_preview_edit_annotations() {
+        let fixture = WatchFixture::new("# Intro\n\nEditable **body**.\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let present_cache = fixture._dir.path().join("present-cache");
+        let pdf_workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_present_cache(&present_cache, &artifacts, None, false, false).unwrap();
+        emit_pdf_workspace(&pdf_workspace, &artifacts).unwrap();
+
+        let documents = [
+            (
+                "present cache slide",
+                fs::read_to_string(present_cache.join("slides/000-intro.html")).unwrap(),
+            ),
+            (
+                "PDF HTML",
+                fs::read_to_string(pdf_workspace.join("pdf.html")).unwrap(),
+            ),
+            (
+                "lint HTML",
+                peitho_core::render_lint_document(&artifacts.rendered),
+            ),
+        ];
+        for (name, document) in documents {
+            for forbidden in ["data-peitho-src", "data-peitho-md"] {
+                assert!(
+                    !document.contains(forbidden),
+                    "{forbidden} found in {name}: {document}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn emit_pdf_workspace_writes_katex_fonts_for_math_deck() {
         let fixture = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -11132,6 +11302,25 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
     }
 
     #[test]
+    fn preview_cache_slide_fragments_contain_edit_annotations() {
+        let fixture = WatchFixture::new("# Intro\n\nEditable **body**.\n");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let mut stderr = Vec::new();
+
+        let root = emit_initial_preview_root(&fixture.options.input, &cache, &mut stderr).unwrap();
+
+        assert_eq!(root, cache.join("build-0"));
+        assert!(stderr.is_empty());
+        let slide = fs::read_to_string(root.join("slides/000-intro.html")).unwrap();
+        for annotation in ["data-peitho-src", "data-peitho-md"] {
+            assert!(
+                slide.contains(annotation),
+                "{annotation} missing from {slide}"
+            );
+        }
+    }
+
+    #[test]
     fn preview_cache_generation_writes_katex_fonts_for_math_deck() {
         let fixture = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -11166,7 +11355,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
     #[test]
     fn preview_watch_rebuild_success_swaps_broadcasts_and_prunes() {
-        let fixture = WatchFixture::new("# Intro\n");
+        let fixture = WatchFixture::new("# Intro\n\nEditable **body**.\n");
         let cache = fixture._dir.path().join(".peitho/preview-cache");
         let old_root = cache.join("build-0");
         let previous_root = cache.join("build-1");
@@ -11199,6 +11388,13 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         assert!(!old_root.exists());
         assert!(previous_root.is_dir());
         assert!(current_root.is_dir());
+        let slide = fs::read_to_string(current_root.join("slides/000-intro.html")).unwrap();
+        for annotation in ["data-peitho-src", "data-peitho-md"] {
+            assert!(
+                slide.contains(annotation),
+                "{annotation} missing from {slide}"
+            );
+        }
         assert!(String::from_utf8(stdout)
             .unwrap()
             .contains("rebuilt 1 slide(s)"));

@@ -432,6 +432,14 @@ every regular `.html` file under `dist/` as bytes, reject either exact ASCII
 needle, and report the relative file and offending attribute. Run this after
 the required-file checks and before invoking the user's publish command.
 
+As implemented (Task 3 review): the scan detects the real HTML attribute with
+lol_html (`peitho_core::find_edit_annotation_attribute`, next to the emitter so
+the attribute names have one owner) rather than a byte needle, because a deck
+may legitimately show the attribute names as text. It follows symlinks (with a
+canonical-directory visited set), matches `.html`/`.htm` case-insensitively, and
+fails naming the entry when one cannot be inspected. The shared CLI wrapper is
+`build_cli_artifacts(input, edit_annotations)`.
+
 **Verification.**
 
 ```sh

@@ -59,9 +59,9 @@ pub use rehearsal::{
     RehearsalSection, RehearsalSlideEntry, RehearsalSnapshot,
 };
 pub use render::{
-    render_deck, render_distribution_index, render_lint_document, render_pdf_document,
-    render_present_index, render_presenter_index, render_preview_error_index, render_preview_index,
-    render_remote_index, EditAnnotations,
+    find_edit_annotation_attribute, render_deck, render_distribution_index, render_lint_document,
+    render_pdf_document, render_present_index, render_presenter_index, render_preview_error_index,
+    render_preview_index, render_remote_index, EditAnnotations,
 };
 pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 
