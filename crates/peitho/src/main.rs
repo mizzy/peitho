@@ -5059,6 +5059,7 @@ trait PreviewReloadTarget {
     fn generation(&self) -> u64;
     fn swap_root(&self, root: PathBuf);
     fn broadcast_reload(&self) -> u64;
+    fn report_build_error(&self, error: String) -> u64;
 }
 
 impl PreviewReloadTarget for server::PresentServer {
@@ -5072,6 +5073,10 @@ impl PreviewReloadTarget for server::PresentServer {
 
     fn broadcast_reload(&self) -> u64 {
         server::PresentServer::broadcast_reload(self)
+    }
+
+    fn report_build_error(&self, error: String) -> u64 {
+        server::PresentServer::report_build_error(self, error)
     }
 }
 
@@ -5124,6 +5129,7 @@ fn rebuild_preview_once_for_watch(
         Err(err) => {
             writeln!(stderr, "build failed:\n{}", render_diagnostic(&err)).into_diagnostic()?;
             stderr.flush().into_diagnostic()?;
+            server.report_build_error(plain_diagnostic_text(&err));
         }
     }
 
@@ -12019,12 +12025,17 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
     }
 
     #[test]
-    fn preview_watch_rebuild_failure_keeps_existing_root_and_generation() {
+    fn preview_watch_rebuild_failure_keeps_root_generation_and_reports_build_error() {
         let fixture =
             WatchFixture::new("# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
         let cache = fixture._dir.path().join(".peitho/preview-cache");
         let existing_root = cache.join("build-4");
         fs::create_dir_all(&existing_root).unwrap();
+        fs::write(existing_root.join("last-good.txt"), "last good generation").unwrap();
+        let expected_diagnostic = match build_preview_artifacts(&fixture.options.input) {
+            Ok(_) => panic!("fixture must fail to build"),
+            Err(error) => plain_diagnostic_text(&error),
+        };
         let server = RecordingPreviewReloadTarget::new(4);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -12039,8 +12050,19 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         .unwrap();
 
         assert_eq!(server.generation(), 4);
-        assert!(server.events.borrow().is_empty());
+        assert_eq!(
+            &*server.events.borrow(),
+            &[PreviewReloadEvent::BuildError(expected_diagnostic.clone())]
+        );
+        assert_eq!(
+            server.build_error.borrow().as_deref(),
+            Some(expected_diagnostic.as_str())
+        );
         assert!(existing_root.is_dir());
+        assert_eq!(
+            fs::read_to_string(existing_root.join("last-good.txt")).unwrap(),
+            "last good generation"
+        );
         assert!(!cache.join("build-5").exists());
         assert!(stdout.is_empty());
         let stderr = String::from_utf8(stderr).unwrap();
@@ -12049,6 +12071,45 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             stderr.contains("slot 'code' got 2 item(s)"),
             "actual stderr: {stderr}"
         );
+    }
+
+    #[test]
+    fn preview_watch_success_after_failure_swaps_broadcasts_and_clears_error() {
+        let fixture = WatchFixture::new("# Intro\n\nRecovered body.\n");
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+        let previous_root = cache.join("build-4");
+        fs::create_dir_all(&previous_root).unwrap();
+        let server = RecordingPreviewReloadTarget::with_build_error(4, "previous failure");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_preview_once_for_watch(
+            &fixture.options.input,
+            &cache,
+            &server,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        let current_root = cache.join("build-5");
+        assert_eq!(
+            &*server.events.borrow(),
+            &[
+                PreviewReloadEvent::Swap(current_root.clone()),
+                PreviewReloadEvent::Broadcast
+            ]
+        );
+        assert_eq!(server.generation(), 5);
+        assert_eq!(*server.build_error.borrow(), None);
+        assert!(current_root.join("index.html").is_file());
+        assert!(current_root.join("manifest.json").is_file());
+        assert!(current_root.join("slides/000-intro.html").is_file());
+        assert!(previous_root.is_dir());
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("rebuilt 1 slide(s)"));
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -12912,10 +12973,13 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
     enum PreviewReloadEvent {
         Swap(PathBuf),
         Broadcast,
+        BuildError(String),
     }
 
     struct RecordingPreviewReloadTarget {
         generation: Cell<u64>,
+        build_error: RefCell<Option<String>>,
+        active_root: RefCell<Option<PathBuf>>,
         events: RefCell<Vec<PreviewReloadEvent>>,
     }
 
@@ -12923,6 +12987,17 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         fn new(generation: u64) -> Self {
             Self {
                 generation: Cell::new(generation),
+                build_error: RefCell::new(None),
+                active_root: RefCell::new(None),
+                events: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn with_build_error(generation: u64, error: &str) -> Self {
+            Self {
+                generation: Cell::new(generation),
+                build_error: RefCell::new(Some(error.to_owned())),
+                active_root: RefCell::new(None),
                 events: RefCell::new(Vec::new()),
             }
         }
@@ -12934,16 +13009,31 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         }
 
         fn swap_root(&self, root: PathBuf) {
+            *self.active_root.borrow_mut() = Some(root.clone());
             self.events
                 .borrow_mut()
                 .push(PreviewReloadEvent::Swap(root));
         }
 
         fn broadcast_reload(&self) -> u64 {
+            let active_root = self.active_root.borrow();
+            let root = active_root.as_ref().expect("root swapped before broadcast");
+            assert!(root.join("index.html").is_file());
+            assert!(root.join("manifest.json").is_file());
+            assert!(root.join("slides").is_dir());
             let generation = self.generation.get() + 1;
             self.generation.set(generation);
+            *self.build_error.borrow_mut() = None;
             self.events.borrow_mut().push(PreviewReloadEvent::Broadcast);
             generation
+        }
+
+        fn report_build_error(&self, error: String) -> u64 {
+            *self.build_error.borrow_mut() = Some(error.clone());
+            self.events
+                .borrow_mut()
+                .push(PreviewReloadEvent::BuildError(error));
+            self.generation.get()
         }
     }
 
