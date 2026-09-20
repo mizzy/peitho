@@ -570,10 +570,150 @@ var PREVIEW_STRIP_WIDTH = 200;
 var STRIP_PADDING = 12;
 var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
+var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
+  "BLOCKQUOTE",
+  "DIV",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "OL",
+  "P",
+  "PRE",
+  "TABLE",
+  "UL"
+]);
 function isPreviewDraft(value) {
   if (typeof value !== "object" || value === null) return false;
   const draft = value;
   return typeof draft.key === "string" && (draft.text === void 0 || typeof draft.text === "string") && typeof draft.selectionStart === "number" && Number.isFinite(draft.selectionStart) && draft.selectionStart >= 0 && typeof draft.selectionEnd === "number" && Number.isFinite(draft.selectionEnd) && draft.selectionEnd >= 0 && typeof draft.focused === "boolean";
+}
+async function readErrorResponse(response) {
+  const body = await response.text();
+  try {
+    const error = JSON.parse(body).error;
+    return { body, jsonError: typeof error === "string" ? error : null };
+  } catch {
+    return { body, jsonError: null };
+  }
+}
+function parseEditableSourceRange(value) {
+  const match = /^(\d+)-(\d+)$/.exec(value);
+  if (match === null) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) return null;
+  return { start, end };
+}
+function isNestedListItemBlock(node) {
+  return node instanceof Element && NESTED_LIST_ITEM_BLOCKS.has(node.tagName);
+}
+function placeCaretAtEnd(win, editor) {
+  const selection = win.getSelection();
+  if (selection === null) return;
+  const range = editor.ownerDocument.createRange();
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+function selectionBelongsToEditor(range, editor) {
+  const container = range.commonAncestorContainer;
+  return container === editor || editor.contains(container);
+}
+function selectionRange(selection, editor) {
+  if (selection === null || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!selectionBelongsToEditor(range, editor)) return null;
+  return {
+    range,
+    select(nextRange) {
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+  };
+}
+function rangeFromStaticRange(editor, source) {
+  try {
+    const range = editor.ownerDocument.createRange();
+    range.setStart(source.startContainer, source.startOffset);
+    range.setEnd(source.endContainer, source.endOffset);
+    return selectionBelongsToEditor(range, editor) ? range : null;
+  } catch {
+    return null;
+  }
+}
+function defaultSelectionRangeProvider(editor) {
+  const documentSelection = editor.ownerDocument.getSelection();
+  const root = editor.getRootNode();
+  if (documentSelection !== null && root instanceof ShadowRoot && typeof documentSelection.getComposedRanges === "function") {
+    try {
+      for (const source of documentSelection.getComposedRanges({ shadowRoots: [root] })) {
+        const range = rangeFromStaticRange(editor, source);
+        if (range !== null) {
+          return {
+            range,
+            select(nextRange) {
+              documentSelection.removeAllRanges();
+              documentSelection.addRange(nextRange);
+            }
+          };
+        }
+      }
+    } catch {
+    }
+  }
+  if (root instanceof ShadowRoot) {
+    const rootSelection = root.getSelection?.();
+    const selected = selectionRange(rootSelection ?? null, editor);
+    if (selected !== null) return selected;
+  }
+  return selectionRange(documentSelection, editor);
+}
+function rangeEndsAtTextEnd(range, editor) {
+  try {
+    const trailing = editor.ownerDocument.createRange();
+    trailing.selectNodeContents(editor);
+    trailing.setStart(range.endContainer, range.endOffset);
+    return trailing.toString() === "";
+  } catch {
+    return false;
+  }
+}
+function insertSourceNewline(win, editor, rangeProvider) {
+  const selected = rangeProvider(editor);
+  if (selected === null || !selectionBelongsToEditor(selected.range, editor)) {
+    editor.append("\n");
+    placeCaretAtEnd(win, editor);
+    return false;
+  }
+  const range = selected.range;
+  range.deleteContents();
+  range.collapse(true);
+  const addSentinel = rangeEndsAtTextEnd(range, editor) && !(editor.textContent ?? "").endsWith("\n");
+  const newline = editor.ownerDocument.createTextNode(addSentinel ? "\n\n" : "\n");
+  range.insertNode(newline);
+  if (addSentinel) range.setStart(newline, 1);
+  else range.setStartAfter(newline);
+  range.collapse(true);
+  selected.select(range);
+  return addSentinel;
+}
+function isComposingKey(event) {
+  return event.isComposing || event.keyCode === 229;
+}
+function isEditableTarget(event) {
+  const target = event.composedPath()[0];
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const editable = target.closest("[contenteditable]");
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
 }
 function previewGridColumnCount(rootWidth) {
   const columns = Math.floor(
@@ -592,13 +732,6 @@ var previewNavigationKeyMap = /* @__PURE__ */ new Map([
   ["End", "last"]
 ]);
 var verticalPreviewNavigationTargets = /* @__PURE__ */ new Set(["up", "down"]);
-function isComposingKey(event) {
-  return event.isComposing || event.keyCode === 229;
-}
-function isEditableTarget(event) {
-  const target = event.composedPath()[0];
-  return target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLElement && target.isContentEditable;
-}
 function installPreviewKeyboard(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event) || isComposingKey(event)) return;
@@ -683,14 +816,17 @@ var PreviewShellController = class {
   storage;
   syncUrl;
   viewport;
+  selectionRangeProvider;
   restoredState;
   slides = [];
   notes = { version: 1, notes: {} };
   notesPanel;
   notesTextarea;
   notesStatus;
+  panelStatuses = /* @__PURE__ */ new Map();
   notesPositionText;
   buildErrorBanner;
+  activeSlideEdit = null;
   notesTextareaKey = null;
   swallowEnterRepeat = false;
   flushChain = Promise.resolve(true);
@@ -753,6 +889,7 @@ var PreviewShellController = class {
     this.storage = options.storage ?? this.win.sessionStorage;
     this.syncUrl = options.syncUrl ?? "/sync";
     this.viewport = options.viewport;
+    this.selectionRangeProvider = options.selectionRangeProvider ?? defaultSelectionRangeProvider;
     this.restoredState = this.readState();
     this.root.classList.add("peitho-preview-root");
     const rootPosition = this.win.getComputedStyle(this.root).position;
@@ -885,14 +1022,8 @@ var PreviewShellController = class {
         this.setNotesStatus("");
         return true;
       }
-      const body = await response.text();
-      let message = body;
-      try {
-        const error = JSON.parse(body).error;
-        if (typeof error === "string") message = error;
-      } catch {
-      }
-      this.setNotesStatus(message);
+      const error = await readErrorResponse(response);
+      this.setNotesStatus(error.jsonError ?? error.body);
     } catch (error) {
       this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
@@ -967,6 +1098,7 @@ var PreviewShellController = class {
     this.tileClickGuardCleanups.push(() => clickGuard.destroy());
     tile.addEventListener("click", (event) => {
       if (clickGuard.shouldIgnoreClick(event)) return;
+      if (this.tryStartSlideEdit(slide, host, event)) return;
       this.commitTransition(slide.index, "single");
     });
     const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
@@ -985,6 +1117,197 @@ var PreviewShellController = class {
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
     return { meta: slide, tile, host, thumb, thumbHost, tileNumber };
+  }
+  tryStartSlideEdit(slide, host, event) {
+    if (this.activeSlideEdit !== null) return true;
+    if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
+    const shadow = host.shadowRoot;
+    if (shadow === null) return false;
+    const path = event.composedPath();
+    const boundary = path.indexOf(shadow);
+    if (boundary <= 0) return false;
+    let target = null;
+    for (let index = 0; index < boundary; index += 1) {
+      const candidate = path[index];
+      if (candidate instanceof HTMLElement && candidate.hasAttribute("data-peitho-src") && candidate.hasAttribute("data-peitho-md")) {
+        target = candidate;
+        break;
+      }
+    }
+    if (target === null || target.getRootNode() !== shadow) return false;
+    const encodedRange = target.getAttribute("data-peitho-src");
+    const old = target.getAttribute("data-peitho-md");
+    if (encodedRange === null || old === null) return false;
+    const sourceRange = parseEditableSourceRange(encodedRange);
+    if (sourceRange === null) return false;
+    let editor = target;
+    let originalNodes;
+    if (target.tagName === "LI") {
+      const children = Array.from(target.childNodes);
+      const nestedBlockIndex = children.findIndex(isNestedListItemBlock);
+      const inlineEnd = nestedBlockIndex < 0 ? children.length : nestedBlockIndex;
+      originalNodes = children.slice(0, inlineEnd);
+      const insertionPoint = children[inlineEnd] ?? null;
+      editor = this.doc.createElement("span");
+      for (const node of originalNodes) target.removeChild(node);
+      target.insertBefore(editor, insertionPoint);
+    } else {
+      originalNodes = Array.from(target.childNodes);
+      target.replaceChildren();
+    }
+    const originalContenteditable = editor.getAttribute("contenteditable");
+    const originalStyle = editor.getAttribute("style");
+    editor.textContent = old;
+    editor.setAttribute("contenteditable", "plaintext-only");
+    editor.style.outline = INLINE_EDIT_OUTLINE;
+    editor.style.outlineOffset = "2px";
+    const editableStyle = editor.getAttribute("style");
+    let edit;
+    const onKeyDown = (keyboardEvent) => {
+      this.handleSlideEditKeyDown(edit, keyboardEvent);
+    };
+    const onBlur = () => {
+      void this.commitSlideEdit(edit);
+    };
+    edit = {
+      key: slide.key,
+      start: sourceRange.start,
+      end: sourceRange.end,
+      old,
+      target,
+      editor,
+      originalNodes,
+      originalContenteditable,
+      originalStyle,
+      editableStyle,
+      trailingNewlineSentinel: false,
+      commitPromise: null,
+      removeListeners: () => {
+        editor.removeEventListener("keydown", onKeyDown);
+        editor.removeEventListener("blur", onBlur);
+      }
+    };
+    editor.addEventListener("keydown", onKeyDown);
+    editor.addEventListener("blur", onBlur);
+    this.activeSlideEdit = edit;
+    this.setSlideEditStatus("");
+    editor.focus({ preventScroll: true });
+    placeCaretAtEnd(this.win, editor);
+    return true;
+  }
+  handleSlideEditKeyDown(edit, event) {
+    if (this.activeSlideEdit !== edit) return;
+    if (edit.commitPromise !== null) {
+      if (event.key === "Escape" || event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (hasChordModifier(event) || isComposingKey(event)) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.cancelSlideEdit(edit);
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.shiftKey) {
+      edit.trailingNewlineSentinel = insertSourceNewline(this.win, edit.editor, this.selectionRangeProvider) || edit.trailingNewlineSentinel;
+      return;
+    }
+    void this.commitSlideEdit(edit);
+  }
+  cancelSlideEdit(edit) {
+    if (this.activeSlideEdit !== edit) return;
+    edit.removeListeners();
+    this.activeSlideEdit = null;
+    if (edit.editor !== edit.target) {
+      edit.editor.replaceWith(...edit.originalNodes);
+    } else {
+      edit.target.replaceChildren(...edit.originalNodes);
+      this.restoreSlideEditorAttributes(edit);
+    }
+    this.setSlideEditStatus("");
+  }
+  commitSlideEdit(edit) {
+    if (this.activeSlideEdit !== edit) return Promise.resolve(true);
+    if (edit.commitPromise !== null) return edit.commitPromise;
+    const newText = this.slideEditText(edit);
+    if (newText === edit.old) {
+      this.cancelSlideEdit(edit);
+      return Promise.resolve(true);
+    }
+    const commit = this.postSlideEdit(edit, newText).finally(() => {
+      edit.commitPromise = null;
+    });
+    edit.commitPromise = commit;
+    this.lockSlideEdit(edit);
+    return commit;
+  }
+  async postSlideEdit(edit, newText) {
+    try {
+      const response = await this.fetcher("/slide-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: edit.key,
+          start: edit.start,
+          end: edit.end,
+          old: edit.old,
+          new: newText
+        })
+      });
+      if (response.ok) {
+        if (this.activeSlideEdit === edit) this.finishSlideEdit(edit, newText);
+        return true;
+      }
+      const error = await readErrorResponse(response);
+      if (this.activeSlideEdit === edit) {
+        this.setSlideEditStatus(
+          error.jsonError ?? `slide edit failed (HTTP ${response.status})`
+        );
+        this.unlockSlideEdit(edit);
+      }
+    } catch (error) {
+      if (this.activeSlideEdit === edit) {
+        this.setSlideEditStatus(`failed to save slide edit: ${String(error)}`);
+        this.unlockSlideEdit(edit);
+      }
+    }
+    return false;
+  }
+  finishSlideEdit(edit, newText) {
+    edit.removeListeners();
+    this.activeSlideEdit = null;
+    edit.editor.textContent = newText;
+    this.restoreSlideEditorAttributes(edit);
+    edit.target.removeAttribute("data-peitho-src");
+    edit.target.removeAttribute("data-peitho-md");
+    this.setSlideEditStatus("");
+  }
+  slideEditText(edit) {
+    const text = edit.editor.textContent ?? "";
+    if (edit.trailingNewlineSentinel && text.endsWith("\n")) return text.slice(0, -1);
+    return text;
+  }
+  lockSlideEdit(edit) {
+    edit.editor.setAttribute("contenteditable", "false");
+    edit.editor.style.opacity = "0.65";
+  }
+  unlockSlideEdit(edit) {
+    edit.editor.setAttribute("contenteditable", "plaintext-only");
+    if (edit.editableStyle === null) edit.editor.removeAttribute("style");
+    else edit.editor.setAttribute("style", edit.editableStyle);
+    edit.editor.focus({ preventScroll: true });
+  }
+  restoreSlideEditorAttributes(edit) {
+    if (edit.originalContenteditable === null) edit.editor.removeAttribute("contenteditable");
+    else edit.editor.setAttribute("contenteditable", edit.originalContenteditable);
+    if (edit.originalStyle === null) edit.editor.removeAttribute("style");
+    else edit.editor.setAttribute("style", edit.originalStyle);
   }
   createSlideNumber(slide) {
     const badge = this.doc.createElement("span");
@@ -1120,14 +1443,22 @@ var PreviewShellController = class {
     panel.appendChild(textarea);
     return panel;
   }
-  /**
-   * The only writer of the notes status. A save failure is the one thing in preview the
-   * author must not miss (the server may be gone), so a non-empty status turns the whole
-   * notes panel into the alert: red chip plus a red panel border.
-   */
   setNotesStatus(message) {
-    this.notesStatus.textContent = message;
-    const failed = message !== "";
+    this.setPanelStatus("notes", message);
+  }
+  setSlideEditStatus(message) {
+    this.setPanelStatus("slide-edit", message);
+  }
+  /**
+   * Save channels clear only their own status so one successful write cannot hide an
+   * unrelated failure. Any remaining failure keeps the entire panel visibly alerting.
+   */
+  setPanelStatus(source, message) {
+    if (message === "") this.panelStatuses.delete(source);
+    else this.panelStatuses.set(source, message);
+    const combined = ["notes", "slide-edit"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
+    this.notesStatus.textContent = combined;
+    const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
     this.notesStatus.style.padding = failed ? "2px 10px" : "";
