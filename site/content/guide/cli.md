@@ -112,8 +112,10 @@ of truth; Peitho never converts rendered HTML back to Markdown.
 It is meant for the small fixes — a typo, a reworded sentence — that are not
 worth a trip to the editor. The clicked block shows exactly what is in the
 file (`Peitho is a *fast* tool`), so inline syntax such as `**bold**`,
-`` `code` ``, links, and footnote references can be added, changed, and
-removed. The save writes that text back into the deck, the ordinary rebuild
+`` `code` ``, and links can be added, changed, and removed. A footnote
+reference is editable text too, but the deck must still build: removing the
+last reference to a footnote, or referencing one that has no definition, is
+refused with the parser's own message. The save writes that text back into the deck, the ordinary rebuild
 runs, and the preview reloads on the same slide.
 
 - **Where it works.** The single-slide view, on the current slide only. The
@@ -131,7 +133,7 @@ runs, and the preview reloads on the same slide.
   syntax of that one block. Anything that would change the slide's structure
   is refused with the reason and the edit stays open: emptying the block,
   starting it with a list or heading marker, a blank line that would split
-  it, a slide separator, a `:::` fence, a note comment, a `|` that would add
+  it, a newline inside a heading or a table cell, a slide separator, a `:::` fence, a note comment, a `|` that would add
   a table cell, or leading spaces that would re-nest a list. Make structural
   changes in your editor.
 - **A failed save blocks the way out.** The reason appears next to the
@@ -159,8 +161,8 @@ runs, and the preview reloads on the same slide.
 
 Not editable, by design: code blocks, generated `code_images` output
 (diagrams, math, embeds), images, footnote definitions, raw HTML, page
-settings and frontmatter, a block that contains a speaker-note comment (edit
-the note in the notes panel), and anything that comes from the layout HTML
+settings and frontmatter, any block that contains a speaker-note comment
+(edit the note in the notes panel) or other inline HTML, and anything that comes from the layout HTML
 rather than the Markdown. Inline editing exists only in `peitho preview`;
 `peitho present`, `peitho build`, and `dist/` never see it.
 
