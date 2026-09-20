@@ -3634,6 +3634,59 @@ enum EditableEventFrame {
     Other,
 }
 
+fn is_block_end(end: &TagEnd) -> bool {
+    match end {
+        TagEnd::Paragraph
+        | TagEnd::Heading(_)
+        | TagEnd::BlockQuote(_)
+        | TagEnd::CodeBlock
+        | TagEnd::HtmlBlock
+        | TagEnd::List(_)
+        | TagEnd::Item
+        | TagEnd::FootnoteDefinition
+        | TagEnd::DefinitionList
+        | TagEnd::DefinitionListTitle
+        | TagEnd::DefinitionListDefinition
+        | TagEnd::Table
+        | TagEnd::TableHead
+        | TagEnd::TableRow
+        | TagEnd::TableCell
+        | TagEnd::MetadataBlock(_) => true,
+        TagEnd::Emphasis
+        | TagEnd::Strong
+        | TagEnd::Strikethrough
+        | TagEnd::Superscript
+        | TagEnd::Subscript
+        | TagEnd::Link
+        | TagEnd::Image => false,
+    }
+}
+
+fn is_block_event(event: &Event<'_>) -> bool {
+    match event {
+        Event::Start(tag) => is_block_end(&tag.to_end()),
+        Event::End(end) => is_block_end(end),
+        Event::DisplayMath(_) | Event::Rule => true,
+        Event::Text(_)
+        | Event::Code(_)
+        | Event::InlineMath(_)
+        | Event::Html(_)
+        | Event::InlineHtml(_)
+        | Event::FootnoteReference(_)
+        | Event::SoftBreak
+        | Event::HardBreak
+        | Event::TaskListMarker(_) => false,
+    }
+}
+
+fn blocks(markdown: &str) -> impl Iterator<Item = Event<'_>> {
+    Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).filter(is_block_event)
+}
+
+pub(crate) fn same_block_skeleton(before: &str, after: &str) -> bool {
+    blocks(before).eq(blocks(after))
+}
+
 /// Includes a leading backslash that pulldown-cmark excludes from its first
 /// inline event range after consuming the escape.
 pub(crate) fn editable_inline_start(markdown: &str, event_start: usize) -> usize {

@@ -32,11 +32,7 @@ pub fn rewrite_note(
     text: &str,
     highlighter: &Highlighter,
 ) -> Result<String> {
-    let (source, had_bom) = if let Some(source) = source.strip_prefix('\u{feff}') {
-        (source, true)
-    } else {
-        (source, false)
-    };
+    let (source, had_bom) = strip_bom(source);
     if !spans_match_source(source, slide, notes) {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -126,7 +122,15 @@ fn spans_match_source(source: &str, slide: SourceSpan, notes: &[SourceSpan]) -> 
     })
 }
 
-fn restore_bom(source: String, had_bom: bool) -> String {
+pub(crate) fn strip_bom(source: &str) -> (&str, bool) {
+    if let Some(source) = source.strip_prefix('\u{feff}') {
+        (source, true)
+    } else {
+        (source, false)
+    }
+}
+
+pub(crate) fn restore_bom(source: String, had_bom: bool) -> String {
     if had_bom {
         ["\u{feff}", source.as_str()].concat()
     } else {
@@ -218,7 +222,7 @@ fn terminator_line_ending(source: &str, terminator: &Range<usize>) -> &'static s
     }
 }
 
-fn normalized_note_text(text: &str) -> String {
+pub(crate) fn normalized_note_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
@@ -275,9 +279,8 @@ fn preserves_deck(
     }
 
     for (index, (before, after)) in before_slides.iter().zip(after_slides).enumerate() {
-        if std::mem::discriminant(&before.key_source) != std::mem::discriminant(&after.key_source)
-            || before.layout_request.as_ref().map(|request| &request.name)
-                != after.layout_request.as_ref().map(|request| &request.name)
+        if !before.key_source.same_kind_as(&after.key_source)
+            || before.layout_request_name() != after.layout_request_name()
             || before.skip != after.skip
             || before.page_number_hidden != after.page_number_hidden
             || (index != before_target && before.notes != after.notes)
