@@ -8,6 +8,7 @@ import {
 import type { PresentShell } from "../src/index";
 import {
   BEFORE_CLOSE_TIMEOUT_MS,
+  isBuildErrorSyncMessage,
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
@@ -87,6 +88,12 @@ function mockChannel() {
 }
 
 it("exports strict sync message guards", () => {
+  expect(isBuildErrorSyncMessage({ buildError: null })).toBe(true);
+  expect(isBuildErrorSyncMessage({ buildError: "broken build" })).toBe(true);
+  expect(isBuildErrorSyncMessage({})).toBe(false);
+  expect(isBuildErrorSyncMessage({ buildError: undefined })).toBe(false);
+  expect(isBuildErrorSyncMessage({ buildError: 1 })).toBe(false);
+
   expect(isCloseSyncMessage({ close: true })).toBe(true);
   expect(isCloseSyncMessage({ close: false })).toBe(false);
 
@@ -392,6 +399,64 @@ it("server sync channel forwards generation replay values", async () => {
   );
 
   channel.close();
+});
+
+it("server sync channel forwards build error state before generation on every JSON GET", async () => {
+  const fetcher = vi.fn((url: string) => {
+    if (url === "/sync") {
+      return Promise.resolve(
+        okJson({
+          seq: 4,
+          message: null,
+          index: null,
+          step: null,
+          swapped: false,
+          generation: 8,
+          session: "session-a",
+          timer: null,
+          nowMs: 100,
+          buildError: "broken build"
+        })
+      );
+    }
+    if (url === "/sync?seq=4") {
+      return Promise.resolve(
+        okJson({
+          seq: 5,
+          message: null,
+          index: null,
+          step: null,
+          swapped: false,
+          generation: 9,
+          session: "session-a",
+          timer: null,
+          nowMs: 200,
+          buildError: null
+        })
+      );
+    }
+    if (url === "/sync?seq=5") return new Promise<Response>(() => undefined);
+    throw new Error(`unexpected sync url: ${url}`);
+  }) as typeof fetch;
+  const channel = serverSyncChannelFactory({ fetcher })("peitho-sync");
+  const received: unknown[] = [];
+  channel.onmessage = (event) => received.push(event.data);
+
+  try {
+    await vi.waitFor(() =>
+      expect(received).toEqual([
+        { buildError: "broken build" },
+        { swapped: false },
+        { generation: 8 },
+        { synced: true },
+        { buildError: null },
+        { swapped: false },
+        { generation: 9 }
+      ])
+    );
+  } finally {
+    channel.close();
+  }
 });
 
 it("server sync channel re-handshakes after a poll network error", async () => {
@@ -1246,6 +1311,18 @@ it("ignores generation sync messages on the present sync bridge", () => {
   cleanups.push(cleanup);
 
   channel.onmessage?.({ data: { generation: 3 } });
+
+  expect(error).not.toHaveBeenCalled();
+});
+
+it("ignores build error sync messages on the present sync bridge", () => {
+  const channel = mockChannel();
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const cleanup = installSyncBridge(window, () => channel);
+  cleanups.push(cleanup);
+
+  channel.onmessage?.({ data: { buildError: "broken build" } });
+  channel.onmessage?.({ data: { buildError: null } });
 
   expect(error).not.toHaveBeenCalled();
 });

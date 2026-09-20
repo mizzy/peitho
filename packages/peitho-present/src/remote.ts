@@ -11,6 +11,7 @@ import {
 import { initialSlideIndex } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 import {
+  isBuildErrorSyncMessage,
   isCloseSyncMessage,
   isGenerationSyncMessage,
   isIndexSyncMessage,
@@ -563,6 +564,7 @@ export function installRemoteSyncBridge(options: RemoteSyncBridgeOptions): () =>
     if (
       isSwappedSyncMessage(data) ||
       isGenerationSyncMessage(data) ||
+      isBuildErrorSyncMessage(data) ||
       isTimerSyncMessage(data)
     ) {
       return;

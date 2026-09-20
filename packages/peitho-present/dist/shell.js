@@ -2550,6 +2550,9 @@ function isTimerReplaySyncMessage(value) {
 function isGenerationSyncMessage(value) {
   return isRecord2(value) && typeof value.generation === "number" && Number.isFinite(value.generation);
 }
+function isBuildErrorSyncMessage(value) {
+  return isRecord2(value) && (typeof value.buildError === "string" || value.buildError === null);
+}
 function serverIndexReplayMessage(value) {
   if (!isFiniteNumber(value.index)) return null;
   return {
@@ -2615,6 +2618,9 @@ function serverSyncChannelFactory(options = {}) {
     const deliverReplayState = (body, options2 = {}) => {
       const skipAbsoluteState = options2.skipAbsoluteState === true;
       const responseSeq = typeof body.seq === "number" && Number.isFinite(body.seq) ? body.seq : 0;
+      if (isBuildErrorSyncMessage(body)) {
+        onmessage?.({ data: { buildError: body.buildError } });
+      }
       if (isTimerReplaySyncMessage(body)) {
         if (skipAbsoluteState) {
           bufferedTimerReplay = null;
@@ -2894,6 +2900,9 @@ function installSyncBridge(win = window, channelFactory = defaultChannelFactory,
       return;
     }
     if (isGenerationSyncMessage(data)) {
+      return;
+    }
+    if (isBuildErrorSyncMessage(data)) {
       return;
     }
     if (isSessionChangedSyncMessage(data)) {

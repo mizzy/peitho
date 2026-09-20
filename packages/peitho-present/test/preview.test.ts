@@ -129,7 +129,9 @@ function previewFetchFixture(
         notesPostSettlers.push({ resolve, reject })
       );
     }
-    if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
+    if (url === "/sync") {
+      return okJson({ seq: 0, message: null, generation: 0, buildError: null });
+    }
     if (url === "manifest.json") return okJson(deck);
     if (url === "notes.json") return okJson(loadedNotes);
     if (url === "peitho.css") return okText(css);
@@ -1290,7 +1292,7 @@ it("ignores preview commands while content is still loading without clobbering s
 
   expect(sessionStorage.getItem("peitho:preview-state")).toBe(saved);
 
-  resolveSync(okJson({ seq: 0, message: null, generation: 0 }));
+  resolveSync(okJson({ seq: 0, message: null, generation: 0, buildError: null }));
   const shell = await mounted;
   shells.push(shell);
 
@@ -1362,7 +1364,9 @@ it("handshakes sync generation before fetching preview content", async () => {
   const calls: string[] = [];
   const fetcher = vi.fn(async (url: string) => {
     calls.push(url);
-    if (url === "/sync") return okJson({ seq: 7, message: null, generation: 4 });
+    if (url === "/sync") {
+      return okJson({ seq: 7, message: null, generation: 4, buildError: null });
+    }
     if (url === "manifest.json") return okJson(manifest);
     if (url === "notes.json") return okJson(notes);
     if (url === "peitho.css") return okText(cssText);
@@ -1392,7 +1396,11 @@ it("fetches preview slide fragments in parallel", async () => {
   const requestedSlides: string[] = [];
   const slideResponses = new Map<string, (response: Response) => void>();
   const fetcher = vi.fn((url: string) => {
-    if (url === "/sync") return Promise.resolve(okJson({ seq: 0, message: null, generation: 0 }));
+    if (url === "/sync") {
+      return Promise.resolve(
+        okJson({ seq: 0, message: null, generation: 0, buildError: null })
+      );
+    }
     if (url === "manifest.json") return Promise.resolve(okJson(manifest));
     if (url === "notes.json") return Promise.resolve(okJson(notes));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
@@ -1964,7 +1972,9 @@ it("pagehide_before_load_keeps_the_stored_state", async () => {
   const root = document.createElement("main");
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === "/sync") return okJson({ seq: 0, message: null, generation: 0 });
+    if (url === "/sync") {
+      return okJson({ seq: 0, message: null, generation: 0, buildError: null });
+    }
     if (url === "manifest.json") throw new Error("manifest unavailable");
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   });

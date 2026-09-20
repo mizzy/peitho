@@ -1043,6 +1043,7 @@ it("remote controller reloads on session change while ended", async () => {
 });
 
 it("remote controller does not reload on ordinary sync messages", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
   const reload = vi.fn();
   const { channel } = await mountRemoteForTest(
     manifestWithSlides([{ key: "intro" }, { key: "end" }]),
@@ -1053,12 +1054,15 @@ it("remote controller does not reload on ordinary sync messages", async () => {
   channel.deliver({ index: 1, step: 0 });
   channel.deliver({ swapped: true });
   channel.deliver({ generation: 2 });
+  channel.deliver({ buildError: "broken build" });
+  channel.deliver({ buildError: null });
   channel.deliver({
     timer: { running: true, elapsedMs: 1_000, atMs: 1_000 },
     nowMs: 1_000
   });
 
   expect(reload).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
 });
 
 it("remote controller keeps the sync channel open after ended so it can re-handshake", async () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
 import type { PresentConfig } from "../../../bindings/PresentConfig";
+import type { SyncResponse } from "../../../bindings/SyncResponse";
+import type { SyncTimerSnapshot } from "../../../bindings/SyncTimerSnapshot";
 import {
   calculateCanvasFit,
   fallbackFeatures,
@@ -27,6 +29,25 @@ import type {
 } from "../src/index";
 
 describe("generated manifest contract", () => {
+  it("uses the Rust-generated sync response type shape", () => {
+    const timer: SyncTimerSnapshot = { running: true, elapsedMs: 1_000, atMs: 5_000 };
+    const response: SyncResponse = {
+      seq: 7,
+      message: { index: 2, step: 1 },
+      index: 2,
+      step: 1,
+      swapped: false,
+      generation: 3,
+      session: "session-a",
+      timer,
+      nowMs: 5_500,
+      buildError: null
+    };
+
+    expect(response.timer).toBe(timer);
+    expect(response.buildError).toBeNull();
+  });
+
   it("uses the Rust-generated Manifest type shape", () => {
     const manifest: Manifest = {
       version: 1,
