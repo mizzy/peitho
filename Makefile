@@ -16,7 +16,7 @@ WRANGLER ?= npx -y wrangler
 
 .PHONY: help minimal lightning-talk code-walkthrough code-images keynote peitho-tour shell \
 	minimal-windowed lightning-talk-windowed code-walkthrough-windowed code-images-windowed keynote-windowed \
-	peitho-tour-windowed docs-sources demo-site demo-screenshots og-cards deploy-demo screenshots
+	peitho-tour-windowed docs-sources demo-site demo-screenshots demo-videos og-cards deploy-demo screenshots
 
 help:
 	@echo "サンプルの動作確認ターゲット:"
@@ -106,6 +106,11 @@ demo-screenshots:
 
 og-cards:
 	node scripts/render-og-cards.mjs
+
+# Re-records the committed guide videos (site/static/guide-videos/); run by hand after a UI change.
+demo-videos:
+	cargo build -q -p peitho
+	node scripts/record-demo-videos.mjs
 
 deploy-demo: demo-site
 	$(WRANGLER) pages deploy $(DEMO_OUT) --project-name peitho --branch main

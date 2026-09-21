@@ -397,7 +397,8 @@ ol {
   min-width: 0;
 }
 
-.doc-body img {
+.doc-body img,
+.doc-body video {
   display: block;
   max-width: 100%;
   height: auto;

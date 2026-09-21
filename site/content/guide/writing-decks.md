@@ -149,6 +149,8 @@ child block is one step; a list contributes one step per top-level item, and
 nested items appear with their parent. Multiple reveal groups on the same slide
 number continuously.
 
+[Watch reveal steps advance in peitho present](/guide-videos/reveal-demo.mp4)
+
 ````markdown
 # Launch plan
 
@@ -258,6 +260,8 @@ from a build error into highlighted code — see the
 Point at specific lines of a code block — "the line I'm talking about right
 now". This is separate from syntax highlighting: highlighting colors code by
 what it *is*, emphasis marks where you are in the talk.
+
+[Watch stepped line emphasis move through a function in peitho present](/guide-videos/emphasis-demo.mp4)
 
 Write the lines in braces after the language tag:
 
