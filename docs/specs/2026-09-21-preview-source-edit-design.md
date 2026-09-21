@@ -61,8 +61,9 @@ the text compared at save time can never come from two implementations:
 /// comment and every note comment removed, then leading/trailing blank lines
 /// trimmed. Line endings normalized to LF.
 ///
-/// Refuses (like `rewrite_note`'s span check) when the slide's spans do not
-/// belong to `source`, so a `ParsedSlide` from another parse is an error in
+/// Refuses when the slide contains a lone CR (see Edge cases), and (like
+/// `rewrite_note`'s span check) when the slide's spans do not belong to
+/// `source`, so a `ParsedSlide` from another parse is an error in
 /// the caller, never a slicing panic in a server request thread.
 pub fn slide_body(source: &str, slide: &ParsedSlide) -> Result<String>;
 
@@ -102,16 +103,27 @@ pub struct SlideBodyRewrite { pub source: String, pub key: SlideKey, pub body: S
 
 ```
 <original leading blank run>
-<settings comment, verbatim bytes>      (if any) + blank line
-<new body, edge blank lines trimmed>
-<blank line> + <canonical note comment> (if the slide has notes)
+<the non-empty parts, joined by exactly one blank line:
+   settings comment (verbatim bytes), new body (edge blank lines trimmed),
+   canonical note comment>
+<one blank line, only when more source follows and the trailing run has none>
 <original trailing blank run>
 ```
 
-using the slide's existing line ending and `notes_edit::canonical_comment` for
-the note (text = the fresh parse's `notes`, so multiple comments join exactly
+Two properties of this form were found by review and fuzzing and are pinned by
+tests. It is **idempotent**: joining only non-empty parts means a slide whose
+body is empty does not gain blank lines on every save. And it is **safe before
+a tight separator**: a deck written `# A\n---\n# B` keeps no blank line before
+`---`, so a new last body line would touch the separator and become a setext
+heading that merges two slides; the canonical form therefore guarantees a
+blank line before a following separator (the last slide at EOF is untouched).
+
+The form uses the slide's existing line ending and
+`notes_edit::canonical_comment` for the note (text = the fresh parse's `notes`, so multiple comments join exactly
 as the parser joined them). Keeping the original edge blank runs means the
-changed bytes stay interior to the span — the same profile as a note rewrite,
+changed bytes stay inside the span and never reach past its preserved edges
+(the one added line ending before a tight separator sits directly before the
+preserved trailing run) — the same profile as a note rewrite,
 which is what lets included slides translate (§3).
 
 ### 2. Postcondition: refusals fall out of one comparison
@@ -122,11 +134,16 @@ when:
 
 - it parses (else 422 with the parser's message and line);
 - slide count and `settings().sections()` are unchanged;
-- every non-target slide passes `slide_edit::compare_non_target_slide` (key,
-  key-source kind, layout request, skip, page-number flag, notes) — lifted to
-  a shared `pub(crate)` location, not copied;
+- every non-target slide passes the shared `compare_non_target_slide` (key,
+  key-source kind, layout request, skip, page-number flag, notes). It lives
+  once, in `slide_source`, and `rewrite_block` and `rewrite_note`'s
+  `preserves_deck` consume the same function;
 - the target's layout request, `skip`, `page_number_hidden`, and `notes` are
-  unchanged;
+  unchanged (shared `compare_target_slide`);
+- the target's settings comment is byte-identical and still present or still
+  absent. The rewrite re-emits it verbatim, so this holds by construction
+  today; it is compared anyway because it needs no list of fields to keep in
+  sync when a page setting is added;
 - the key rule: the target key may change only when both key sources are
   `Derived` (same rule as `rewrite_block`, shared, not copied);
 - `slide_body(candidate, target_after)? == normalized new body` (the
@@ -140,7 +157,7 @@ What this refuses without any dedicated code:
 | a non-JSON `<!-- comment -->` | target notes changed |
 | a JSON settings comment | "duplicate page settings comment" parse error, or settings changed |
 | an unclosed code fence that swallows the note comment / next slide | notes changed / slide count |
-| only whitespace | slide count (blank ranges are not slides) or body round-trip |
+| only whitespace | slide count when nothing else is left in the slide; with a settings comment or note left the parser still sees a slide, so the empty body is written and the build decides whether a body-less slide is valid |
 | an unknown code language, bad `::: {slot=}` / `::: {reveal}` / emphasis spec | parse error |
 
 Fragment shape, editable spans, and reveal step count are deliberately *not*
@@ -190,11 +207,17 @@ unit outcome and keep their current empty-success bodies byte-identical.
 ### 4. Body text reaches the browser through the preview cache only
 
 Each preview generation directory gains `sources.json`
-(`{"version":1,"sources":{"<key>":"<body>"}}`, Rust-owned type exported with
+(`{"version":1,"sources":{"<key>":"<body>"},"unavailable":{}}`, Rust-owned type exported with
 ts-rs like `Notes`), written in `emit_preview_cache_generation` only — not the
 present cache. `"sources.json"` joins `PRESENTATION_ONLY_DIST_FILES`, so
 publish rejects it under `dist/`. The bodies are computed by `slide_body` from
-the same parse that produced the generation. Every build computes the map
+the same parse that produced the generation. A slide whose `slide_body` is refused (a lone CR in the slide; two comments on
+one line, Issue #584) must not fail a build that succeeds today, and must not
+be dropped silently either: the file carries a second map,
+`"unavailable":{"<key>":"<reason>"}`, holding the refusal's message and help.
+Pressing `e` on such a slide shows that reason through the `slide-source`
+status channel. A span mismatch from the same parse would be a peitho bug, and
+this is where it would surface instead of hiding. Every build computes the map
 (it is a cheap string pass) and only the preview emitter writes it, so there
 is no "preview artifacts without sources" state to handle.
 
@@ -278,6 +301,39 @@ is no "preview artifacts without sources" state to handle.
   author sees is the body that is saved; note saves have the same effect
   (Issue #582).
 - Empty comments (`<!-- -->`) carry no span and stay in the body verbatim.
+- **Line endings**: LF and CRLF are supported. A deck whose source contains a
+  lone CR anywhere is refused by both `slide_body` and `rewrite_slide_body` with an
+  explicit "bare CR line endings" reason. Supporting it was tried and measured
+  during Task 3: in lone-CR text pulldown does not end an HTML comment block
+  at the `-->` line (the block runs to the next `\n` or EOF), so note and
+  settings spans swallow following lines and no canonical form round-trips.
+  The check is deck-wide on purpose: a per-slide check missed a lone CR ending
+  the separator line just before the slide (the line helpers walk back past
+  the span start) and a CR tail swallowed by an unclosed fence in the new
+  body, both of which surfaced as misleading refusals.
+  Because `slide_body` can therefore refuse a slide of a deck that builds,
+  `sources.json` emission (§4) must not fail the build on a refusal: the slide
+  is simply absent from the map and `e` reports that it cannot be edited from
+  preview.
+- **Known tradeoff**: moving an inline note out of a heading line can change a
+  *derived* key (`Tail <!-- n -->\nSetext\n===` derives `tail-setext`; after
+  the note moves, the trailing space is gone and the key is `tailsetext`). The
+  key rule allows derived-to-derived changes, the response carries the new
+  key, and a keyed CSS override that names the old key fails the rebuild
+  visibly.
+- **Known limitation**: a slide that has a note and whose body ends in an
+  unclosed code fence cannot be saved from the source editor, even unchanged:
+  the canonical note lands inside the open fence, the reparse sees the notes
+  change, and the save is refused. Closing the fence fixes it.
+- **Known limitation**: a note comment that is the *sole content* of a list
+  item or blockquote line leaves the bare marker in the body
+  (`text\n- <!-- n -->` shows `text\n- `). What the author sees is what is
+  saved, and `text\n- ` is a setext heading; the author sees the stray marker
+  in the editor and can remove it. Identity saves never happen (unchanged text
+  is not posted).
+- **Known limitation**: two comments on one line are collected by the parser
+  as one note whose text contains `-->` (Issue #584); such a slide is refused,
+  as it already is for note saves.
 - **Known tradeoff**: the shell's source map is refreshed by a generation
   reload or by its own source save. An *inline* edit or an external editor
   change followed by a failed rebuild leaves it stale, so `e` answers the

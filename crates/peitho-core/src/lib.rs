@@ -22,6 +22,7 @@ mod plain;
 pub mod present_config;
 pub mod rehearsal;
 pub mod render;
+pub(crate) mod slide_compare;
 pub mod slide_edit;
 pub mod slide_source;
 pub mod sync;

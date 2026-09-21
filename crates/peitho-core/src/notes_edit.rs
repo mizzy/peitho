@@ -8,6 +8,7 @@ use crate::{
         is_page_settings_body, line_for_offset, page_settings_comment_body, parse_frontmatter,
         parse_markdown,
     },
+    slide_compare::{compare_all, compare_except_notes},
 };
 use std::ops::Range;
 
@@ -289,10 +290,6 @@ fn preserves_deck(
     let after_slides = after.parsed_slides();
     if before_slides.len() != after_slides.len()
         || before.settings().sections() != after.settings().sections()
-        || !before_slides
-            .iter()
-            .zip(after_slides)
-            .all(|(before, after)| before.key == after.key)
     {
         return false;
     }
@@ -314,12 +311,12 @@ fn preserves_deck(
     }
 
     for (index, (before, after)) in before_slides.iter().zip(after_slides).enumerate() {
-        if !before.key_source.same_kind_as(&after.key_source)
-            || before.layout_request_name() != after.layout_request_name()
-            || before.skip != after.skip
-            || before.page_number_hidden != after.page_number_hidden
-            || (index != before_target && before.notes != after.notes)
-        {
+        let matches = if index == before_target {
+            compare_except_notes(before, after).is_ok()
+        } else {
+            compare_all(before, after).is_ok()
+        };
+        if !matches {
             return false;
         }
     }
@@ -440,7 +437,7 @@ fn append_comment(source: &str, slide: SourceSpan, comment: &str, line_ending: &
     .concat()
 }
 
-fn last_nonblank_line_end(source: &str, slide: SourceSpan) -> Option<usize> {
+pub(crate) fn last_nonblank_line_end(source: &str, slide: SourceSpan) -> Option<usize> {
     let body = &source[slide.start..slide.end];
     let kept = body.trim_end().len();
     (kept > 0).then(|| {
