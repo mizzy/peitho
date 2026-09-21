@@ -131,6 +131,29 @@ fn publish_rejects_remote_presentation_only_file() {
 }
 
 #[test]
+fn publish_rejects_slide_sources_file() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(
+        dist.join("sources.json"),
+        r#"{"version":1,"sources":{},"unavailable":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "distribution contains presentation-only file: sources.json",
+        ));
+}
+
+#[test]
 fn publish_rejects_preview_edit_source_span_attribute() {
     assert_publish_rejects_preview_edit_annotation("data-peitho-src", "1-4");
 }

@@ -851,6 +851,7 @@ fn build_still_writes_distribution_after_pipeline_refactor() {
     assert!(out.join("slides/000-arch-1.html").exists());
     assert!(!out.join("present.html").exists());
     assert!(!out.join("notes.json").exists());
+    assert!(!out.join("sources.json").exists());
 }
 
 #[test]
