@@ -916,6 +916,7 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
     "presenter.html",
     "remote.html",
     "notes.json",
+    "sources.json",
     "shell.js",
     "remote.js",
 ];
@@ -10872,6 +10873,17 @@ contexts:
     }
 
     #[test]
+    fn emit_pdf_workspace_omits_sources_json() {
+        let fixture = WatchFixture::new("# Export\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_pdf_workspace(&workspace, &artifacts).unwrap();
+
+        assert!(!workspace.join("sources.json").exists());
+    }
+
+    #[test]
     fn non_preview_rendered_documents_omit_preview_edit_annotations() {
         let fixture = WatchFixture::new("# Intro\n\nEditable **body**.\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -11928,6 +11940,16 @@ exec sleep 30
         emit_present_cache(&fixture.options.out, &artifacts, None, false, false).unwrap();
 
         assert!(!fixture.options.out.join("rehearsal.json").exists());
+    }
+
+    #[test]
+    fn emit_present_cache_omits_sources_json() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+
+        emit_present_cache(&fixture.options.out, &artifacts, None, false, false).unwrap();
+
+        assert!(!fixture.options.out.join("sources.json").exists());
     }
 
     #[test]

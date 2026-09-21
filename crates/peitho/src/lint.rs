@@ -862,6 +862,19 @@ mod tests {
     }
 
     #[test]
+    fn emit_lint_workspace_omits_sources_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let workspace = dir.path().join("lint-workspace");
+        fs::write(&deck, "# Intro\n").unwrap();
+        let artifacts = crate::build_artifacts(&deck).unwrap();
+
+        emit_lint_workspace(&workspace, &artifacts).unwrap();
+
+        assert!(!workspace.join("sources.json").exists());
+    }
+
+    #[test]
     fn lint_measurement_chunks_reassemble_base64_json_and_validate_slide_count() {
         let payload = encoded(
             r#"[{"slide":1,"contentWidth":1280.4,"contentHeight":762.49,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":18.0,"minFontSample":"Tiny text"}]"#,

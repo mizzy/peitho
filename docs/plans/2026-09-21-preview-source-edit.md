@@ -949,6 +949,7 @@ body source and reject accidental copies in `dist/`.
 **Files.**
 
 - `crates/peitho/src/main.rs`
+- `crates/peitho/src/lint.rs` (negative test for the lint workspace emitter)
 - `crates/peitho/tests/build.rs`
 - `crates/peitho/tests/publish.rs`
 
@@ -993,6 +994,8 @@ published output.
 cargo test -p peitho --test build build_still_writes_distribution_after_pipeline_refactor
 cargo test -p peitho --test publish publish_rejects_slide_sources_file
 cargo test -p peitho --bin peitho emit_present_cache_omits_sources_json
+cargo test -p peitho --bin peitho emit_pdf_workspace_omits_sources_json
+cargo test -p peitho --bin peitho emit_lint_workspace_omits_sources_json
 ```
 
 ### Task group 5: Shell request, editor, and closed coordination state
