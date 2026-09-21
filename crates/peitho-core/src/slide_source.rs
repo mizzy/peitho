@@ -147,20 +147,37 @@ pub fn rewrite_slide_body(
     let normalized_body = normalize_body(new_body);
     let line_ending = source_line_ending(source, fresh_target.source_span);
     let (leading, trailing) = edge_blank_runs(source, fresh_target.source_span)?;
+    let settings_body_spacing = if normalized_body.is_empty() {
+        None
+    } else {
+        preserved_settings_body_spacing(source, fresh_target)
+    };
     let mut replacement = source[leading].to_owned();
-    let mut interior = Vec::new();
+    if let Some(spacing) = settings_body_spacing {
+        replacement.push_str(spacing.indentation);
+    }
+    let canonical_separator = [line_ending, line_ending].concat();
+    let mut interior = String::new();
     if let Some(settings_span) = fresh_target.settings_span {
-        interior.push(
-            strip_one_line_ending(&source[settings_span.start..settings_span.end]).to_owned(),
-        );
+        interior.push_str(strip_one_line_ending(
+            &source[settings_span.start..settings_span.end],
+        ));
     }
     if !normalized_body.is_empty() {
-        interior.push(normalized_body.replace('\n', line_ending));
+        if !interior.is_empty() {
+            let separator = settings_body_spacing
+                .map_or(canonical_separator.as_str(), |spacing| spacing.separator);
+            interior.push_str(separator);
+        }
+        interior.push_str(&normalized_body.replace('\n', line_ending));
     }
     if let Some(notes) = fresh_target.notes.as_deref() {
-        interior.push(canonical_comment(notes, line_ending));
+        if !interior.is_empty() {
+            interior.push_str(&canonical_separator);
+        }
+        interior.push_str(&canonical_comment(notes, line_ending));
     }
-    replacement.push_str(&interior.join(&[line_ending, line_ending].concat()));
+    replacement.push_str(&interior);
     let trailing = &source[trailing];
     if fresh_target.source_span.end < source.len() && matches!(trailing, "" | "\n" | "\r\n") {
         replacement.push_str(line_ending);
@@ -285,6 +302,99 @@ fn strip_one_line_ending(value: &str) -> &str {
         .unwrap_or(value)
 }
 
+#[derive(Clone, Copy)]
+struct PreservedSettingsBodySpacing<'a> {
+    indentation: &'a str,
+    separator: &'a str,
+}
+
+/// Returns the original indentation and separator for a whole-line settings
+/// comment when every intervening source line is Markdown-blank.
+///
+/// The returned separator includes the settings line terminator because the
+/// settings bytes added to the canonical interior omit that terminator.
+fn preserved_settings_body_spacing<'a>(
+    source: &'a str,
+    slide: &ParsedSlide,
+) -> Option<PreservedSettingsBodySpacing<'a>> {
+    let settings = slide.settings_span?;
+    let settings_source = &source[settings.start..settings.end];
+    let terminator_start = if settings_source.ends_with("\r\n") {
+        settings.end - 2
+    } else if settings_source.ends_with('\n') {
+        settings.end - 1
+    } else {
+        return None;
+    };
+    // Defensive: a terminated settings span is an HTML block only at indent 0-3.
+    let settings_line_start = source[..settings.start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let indentation = &source[settings_line_start..settings.start];
+    if !is_ascii_blank(indentation)
+        || slide
+            .note_spans
+            .iter()
+            .any(|note| note.start < settings.start)
+    {
+        return None;
+    }
+
+    let body_line_start = first_body_line_start(source, slide, settings.end)?;
+    Some(PreservedSettingsBodySpacing {
+        indentation,
+        separator: &source[terminator_start..body_line_start],
+    })
+}
+
+fn first_body_line_start(
+    source: &str,
+    slide: &ParsedSlide,
+    mut line_start: usize,
+) -> Option<usize> {
+    while line_start < slide.source_span.end {
+        let line_end = source[line_start..slide.source_span.end]
+            .find('\n')
+            .map_or(slide.source_span.end, |newline| line_start + newline + 1);
+        let line = line_start..line_end;
+        if is_ascii_blank(&source[line.clone()]) {
+            line_start = line_end;
+            continue;
+        }
+        return line_has_body_content(source, line, &slide.note_spans).then_some(line_start);
+    }
+    None
+}
+
+fn line_has_body_content(source: &str, line: Range<usize>, notes: &[SourceSpan]) -> bool {
+    let mut body = String::new();
+    let mut cursor = line.start;
+    for note in notes {
+        if note.end <= line.start {
+            continue;
+        }
+        if note.start >= line.end {
+            break;
+        }
+
+        let outside_end = note.start.max(line.start).min(line.end);
+        if cursor < outside_end {
+            body.push_str(&source[cursor..outside_end]);
+        }
+        cursor = cursor.max(note.end.min(line.end));
+    }
+    if cursor < line.end {
+        body.push_str(&source[cursor..line.end]);
+    }
+    !normalize_body(&body).is_empty()
+}
+
+fn is_ascii_blank(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
 fn refusal(message: impl Into<String>) -> BuildError {
     BuildError::new(ErrorKind::Parse, None, message, SLIDE_BODY_EDIT_HELP)
 }
@@ -382,6 +492,77 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_slide_body_preserves_safe_settings_body_spacing() {
+        let cases = [
+            (
+                "tight",
+                "<!-- {\"key\":\"fixed\"} -->\n# Old\n",
+                "<!-- {\"key\":\"fixed\"} -->\n# New\n",
+            ),
+            (
+                "one-blank-line",
+                "<!-- {\"key\":\"fixed\"} -->\n\n# Old\n",
+                "<!-- {\"key\":\"fixed\"} -->\n\n# New\n",
+            ),
+            (
+                "two-blank-lines",
+                "<!-- {\"key\":\"fixed\"} -->\n\n\n# Old\n",
+                "<!-- {\"key\":\"fixed\"} -->\n\n\n# New\n",
+            ),
+            (
+                "indented-comment",
+                "   <!-- {\"key\":\"fixed\"} -->\n# Old\n",
+                "   <!-- {\"key\":\"fixed\"} -->\n# New\n",
+            ),
+            (
+                "crlf",
+                "<!-- {\"key\":\"fixed\"} -->\r\n\r\n\r\n# Old\r\n",
+                "<!-- {\"key\":\"fixed\"} -->\r\n\r\n\r\n# New\r\n",
+            ),
+        ];
+        let highlighter = Highlighter::defaults();
+
+        for (name, source, expected) in cases {
+            let deck = parse_source(source, &highlighter).unwrap();
+            let rewritten =
+                rewrite_slide_body(source, &deck.parsed_slides()[0], "# New", &highlighter)
+                    .unwrap();
+
+            assert_eq!(rewritten.source, expected, "{name}: source");
+        }
+    }
+
+    #[test]
+    fn rewrite_slide_body_canonicalizes_non_ascii_whitespace_settings_gaps() {
+        let cases = [
+            ("ideographic-space", "\u{3000}"),
+            ("non-breaking-space", "\u{00a0}"),
+        ];
+        let highlighter = Highlighter::defaults();
+        let expected_refusal = BuildError::new(
+            ErrorKind::Parse,
+            None,
+            "slide body edit did not round-trip through the Markdown parser",
+            "the Markdown parser reads the saved text differently from what was typed, typically because of an unclosed code fence or HTML block; close it and retry",
+        );
+
+        for (name, whitespace) in cases {
+            let source = format!("<!-- {{\"key\":\"fixed\"}} -->\n{whitespace}\n# Title\n\nBody\n");
+            let deck = parse_source(&source, &highlighter).unwrap();
+            let target = &deck.parsed_slides()[0];
+
+            let rewritten = rewrite_slide_body(&source, target, "# New", &highlighter).unwrap();
+            assert_eq!(
+                rewritten.source, "<!-- {\"key\":\"fixed\"} -->\n\n# New\n",
+                "{name}: canonical separator"
+            );
+
+            let error = rewrite_slide_body(&source, target, "---", &highlighter).unwrap_err();
+            assert_eq!(error, expected_refusal, "{name}: refusal");
+        }
+    }
+
+    #[test]
     fn rewrite_slide_body_accepts_structural_changes_and_preserves_source_conventions() {
         struct Case {
             name: &'static str,
@@ -430,7 +611,7 @@ mod tests {
                 source: "---\ntime: 1m\n---\n<!-- {\"key\":\"fixed\",\"section\":\"Only\",\"time\":\"1m\"} -->\n# Old\n",
                 slide_index: 0,
                 new_body: "# New\n\n- item",
-                expected_source: "---\ntime: 1m\n---\n<!-- {\"key\":\"fixed\",\"section\":\"Only\",\"time\":\"1m\"} -->\n\n# New\n\n- item\n",
+                expected_source: "---\ntime: 1m\n---\n<!-- {\"key\":\"fixed\",\"section\":\"Only\",\"time\":\"1m\"} -->\n# New\n\n- item\n",
                 expected_key: "fixed",
             },
             Case {
@@ -454,7 +635,7 @@ mod tests {
                 source: "   <!-- {\"key\":\"a\"} -->\n# Old\n",
                 slide_index: 0,
                 new_body: "# New",
-                expected_source: "<!-- {\"key\":\"a\"} -->\n\n# New\n",
+                expected_source: "   <!-- {\"key\":\"a\"} -->\n# New\n",
                 expected_key: "a",
             },
             Case {
@@ -462,7 +643,7 @@ mod tests {
                 source: "<!-- {\"key\":\"a\"} -->   \n# Old\n",
                 slide_index: 0,
                 new_body: "# New",
-                expected_source: "<!-- {\"key\":\"a\"} -->   \n\n# New\n",
+                expected_source: "<!-- {\"key\":\"a\"} -->   \n# New\n",
                 expected_key: "a",
             },
             Case {
@@ -753,7 +934,7 @@ mod tests {
                 slide_index: 1,
                 body: "<!-- {\"layout\":\"cover\"} -->\n# New",
                 expected_message: "duplicate page settings comment",
-                expected_line: Some(7),
+                expected_line: Some(6),
                 expected_help: None,
             },
             Case {
@@ -773,7 +954,7 @@ mod tests {
                 slide_index: 1,
                 body: "# New\n\n```not-installed\nx\n```",
                 expected_message: "unknown code language 'not-installed'",
-                expected_line: Some(9),
+                expected_line: Some(8),
                 expected_help: None,
             },
             Case {
@@ -782,7 +963,7 @@ mod tests {
                 slide_index: 1,
                 body: "::: {slot=}\ntext\n:::",
                 expected_message: "explicit slot fence attribute needs a slot name",
-                expected_line: Some(7),
+                expected_line: Some(6),
                 expected_help: None,
             },
             Case {
@@ -791,7 +972,7 @@ mod tests {
                 slide_index: 1,
                 body: "::: {reveal=yes}\ntext\n:::",
                 expected_message: "reveal fence values are reserved for future syntax",
-                expected_line: Some(7),
+                expected_line: Some(6),
                 expected_help: None,
             },
             Case {
@@ -800,7 +981,7 @@ mod tests {
                 slide_index: 1,
                 body: "```rust {0}\nx\n```",
                 expected_message: "code line numbers start at 1",
-                expected_line: Some(7),
+                expected_line: Some(6),
                 expected_help: None,
             },
             // Focused decks reach outcomes that the shared metadata fixture cannot isolate.
@@ -958,6 +1139,16 @@ mod tests {
                 expected_body: "",
                 expected_source: Some("<!-- note -->\n\n---\n\n# B\n"),
             },
+            Case {
+                name: "empty-body-discards-settings-body-gap",
+                source: "<!-- {\"key\":\"a\"} -->\n\n\n# T\n\n<!-- note -->\n\n---\n\n# B\n",
+                slide_index: 0,
+                body: " \n\t\n",
+                expected_body: "",
+                expected_source: Some(
+                    "<!-- {\"key\":\"a\"} -->\n\n<!-- note -->\n\n---\n\n# B\n",
+                ),
+            },
         ];
         let highlighter = Highlighter::defaults();
 
@@ -974,6 +1165,22 @@ mod tests {
             assert_eq!(rewritten.body, case.expected_body, "{}: body", case.name);
             if let Some(expected_source) = case.expected_source {
                 assert_eq!(rewritten.source, expected_source, "{}: source", case.name);
+            }
+            if case.expected_body.is_empty() {
+                let reparsed = parse_source(&rewritten.source, &highlighter).unwrap();
+                let second = rewrite_slide_body(
+                    &rewritten.source,
+                    &reparsed.parsed_slides()[case.slide_index],
+                    &rewritten.body,
+                    &highlighter,
+                )
+                .unwrap();
+
+                assert_eq!(
+                    second.source, rewritten.source,
+                    "{}: idempotence",
+                    case.name
+                );
             }
         }
     }
@@ -1004,23 +1211,68 @@ mod tests {
                     "<!-- {\"key\":\"appendix\",\"skip\":true} -->\n",
                     "# Appendix\n",
                 ),
+                false,
             ),
             (
                 "bom-and-crlf",
                 "\u{feff}<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nBody\r\n<!-- crlf note -->\r\n",
+                false,
             ),
             (
                 "tight-separators",
                 "# Tight A\n---\n# Tight B\n---\n# Tight C",
+                false,
             ),
-            ("tight-crlf-separators", "# A\r\n---\r\n# B\r\n"),
+            ("tight-crlf-separators", "# A\r\n---\r\n# B\r\n", false),
             (
                 "last-slide-with-newline",
                 "# First\n\n---\n\n# Last with newline\n",
+                false,
             ),
             (
                 "last-slide-without-newline",
                 "# First\n\n---\n\n# Last without newline",
+                false,
+            ),
+            (
+                "identity-tight-settings",
+                "<!-- {\"key\":\"tight\"} -->\n# Tight\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-one-blank-line-settings",
+                "<!-- {\"key\":\"one\"} -->\n\n# One\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-two-blank-lines-settings",
+                "<!-- {\"key\":\"two\"} -->\n\n\n# Two\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-indented-settings",
+                "   <!-- {\"key\":\"indented\"} -->\n# Indented\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-crlf-settings",
+                "<!-- {\"key\":\"crlf-identity\"} -->\r\n# CRLF\r\n\r\n<!-- note -->\r\n",
+                true,
+            ),
+            (
+                "identity-bom-settings",
+                "\u{feff}<!-- {\"key\":\"bom\"} -->\n# BOM\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-settings-on-non-first-slide",
+                "# First\n\n---\n\n<!-- {\"key\":\"second\"} -->\n# Second\n\n<!-- note -->\n",
+                true,
+            ),
+            (
+                "identity-settings-on-last-slide-at-eof",
+                "# First\n\n---\n\n<!-- {\"key\":\"last\"} -->\n# Last",
+                true,
             ),
         ];
         let highlighter = Highlighter::defaults();
@@ -1028,7 +1280,7 @@ mod tests {
         // The corpus contains none of the three documented limitations: an
         // unclosed fence on a slide with notes, a note as the sole content of
         // a list item or blockquote line, and two comments on one line.
-        for (case, source) in corpus {
+        for (case, source, expect_byte_identity) in corpus {
             let before = parse_source(source, &highlighter).unwrap();
 
             for target_index in 0..before.parsed_slides().len() {
@@ -1041,6 +1293,13 @@ mod tests {
                 )
                 .unwrap();
                 let after = parse_source(&first.source, &highlighter).unwrap();
+
+                if expect_byte_identity {
+                    assert_eq!(
+                        first.source, source,
+                        "{case}/{target_index}: identity rewrite bytes"
+                    );
+                }
 
                 assert_eq!(
                     after.settings().sections(),

@@ -6583,7 +6583,7 @@ contexts:
         assert_eq!(body, new_body);
         assert_eq!(
             fs::read_to_string(&deck).unwrap(),
-            "<!-- {\"key\":\"arity\",\"layout\":\"strict\"} -->\n\n# Arity\n\nOne\n\nTwo\n"
+            "<!-- {\"key\":\"arity\",\"layout\":\"strict\"} -->\n# Arity\n\nOne\n\nTwo\n"
         );
         let build_error = match build_artifacts(&deck) {
             Ok(_) => panic!("the saved body must still fail the layout arity check"),
@@ -6616,7 +6616,7 @@ contexts:
         assert_eq!(body, new_body);
         assert_eq!(
             fs::read_to_string(&deck).unwrap(),
-            "<!-- {\"key\":\"skipped\",\"skip\":true} -->\n\n# Revised\n\nBody\n"
+            "<!-- {\"key\":\"skipped\",\"skip\":true} -->\n# Revised\n\nBody\n"
         );
     }
 
@@ -6656,7 +6656,7 @@ contexts:
         assert_eq!(body, "# New");
         assert_eq!(
             fs::read(&deck).unwrap(),
-            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n\n# New\n"
+            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# New\n"
         );
     }
 
@@ -6683,7 +6683,7 @@ contexts:
         let bytes = fs::read(&deck).unwrap();
         assert_eq!(
             bytes,
-            b"<!-- {\"key\":\"crlf\"} -->\r\n\r\n# CRLF\r\n\r\nafter\r\n"
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nafter\r\n"
         );
         assert!(bytes
             .iter()
@@ -7520,7 +7520,6 @@ contexts:
             fs::read_to_string(&deck).unwrap(),
             concat!(
                 "<!-- {\"key\":\"shared-seam\"} -->\n",
-                "\n",
                 "# Shared seam\n\n",
                 "after\n\n- added\n\n",
                 "<!-- new note -->\n",

@@ -103,13 +103,23 @@ pub struct SlideBodyRewrite { pub source: String, pub key: SlideKey, pub body: S
 
 ```
 <original leading blank run>
-<the non-empty parts, joined by exactly one blank line:
-   settings comment (verbatim bytes), new body (edge blank lines trimmed),
-   canonical note comment>
+<the non-empty settings comment, body, and canonical note, in that order:
+   settings → body preserves the original separator, and the settings line
+   keeps its own indentation, when the settings span is a whole line, no note
+   preceded it, and every intervening line is blank in the Markdown sense
+   (only space, tab, CR, LF); every other adjacent pair is joined by exactly
+   one blank line>
 <one blank line, only when more source follows and the trailing run has none>
 <original trailing blank run>
 ```
 
+The preserved separator is the settings line terminator plus its following
+blank-line run, verbatim (Issue #591: the examples write the comment tight
+against the heading, and a canonical blank line there was pure churn). A gap
+line holding only Unicode whitespace such as U+3000 or U+00A0 is a paragraph
+to the parser, not a blank line, so such a gap falls back to the canonical
+separator. An empty body consumes no preserved separator, so
+settings-to-note remains one blank line and settings-only output does not grow.
 Two properties of this form were found by review and fuzzing and are pinned by
 tests. It is **idempotent**: joining only non-empty parts means a slide whose
 body is empty does not gain blank lines on every save. And it is **safe before
