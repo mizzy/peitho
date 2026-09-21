@@ -550,6 +550,12 @@ mod tests {
             let rewritten = rewrite_slide_body(&source, target, &body, &highlighter).unwrap();
             assert_eq!(rewritten.source, source, "{name}: identity source");
 
+            let rewritten = rewrite_slide_body(&source, target, "# New", &highlighter).unwrap();
+            assert_eq!(
+                rewritten.source, "<!-- {\"key\":\"fixed\"} -->\n# New\n",
+                "{name}: replacement source"
+            );
+
             let error = rewrite_slide_body(&source, target, "---", &highlighter).unwrap_err();
             assert_eq!(error, expected_refusal, "{name}: refusal");
         }

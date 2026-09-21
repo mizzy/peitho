@@ -58,8 +58,8 @@ the text compared at save time can never come from two implementations:
 
 ```rust
 /// The slide's body: `source[slide.source_span]` with the page settings
-/// comment and every note comment removed, then leading/trailing blank lines
-/// trimmed. Line endings normalized to LF.
+/// comment and every note comment removed, then leading/trailing
+/// Markdown-blank lines (only space, tab, CR, LF) trimmed. Line endings normalized to LF.
 ///
 /// Refuses when the deck contains a lone CR (see Edge cases), and (like
 /// `rewrite_note`'s span check) when the slide's spans do not belong to
@@ -115,10 +115,12 @@ pub struct SlideBodyRewrite { pub source: String, pub key: SlideKey, pub body: S
 
 The preserved separator is the settings line terminator plus its following
 blank-line run, verbatim (Issue #591: the examples write the comment tight
-against the heading, and a canonical blank line there was pure churn). A gap
-line holding only Unicode whitespace such as U+3000 or U+00A0 is a paragraph
-to the parser, not a blank line, so such a gap falls back to the canonical
-separator. An empty body consumes no preserved separator, so
+against the heading, and a canonical blank line there was pure churn). A line
+holding only Unicode whitespace such as U+3000 or U+00A0 (or a form feed or
+vertical tab) is a paragraph to the parser, not a blank line, so it ends the
+gap: it is the first line of the body, shown in the editor and written back
+verbatim, and the preserved separator is only the blank-line run before it
+(Issue #587). An empty body consumes no preserved separator, so
 settings-to-note remains one blank line and settings-only output does not grow.
 Two properties of this form were found by review and fuzzing and are pinned by
 tests. It is **idempotent**: joining only non-empty parts means a slide whose

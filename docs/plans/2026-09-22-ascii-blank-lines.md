@@ -78,3 +78,20 @@ passed, while 63 server tests across the peitho library, binary, and `present`
 integration target failed at socket setup only. No ignored or Chrome tests were
 run. `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all --check`, and `git diff --exit-code bindings/` pass.
+
+## Residual inside comment spans (accepted)
+
+Whether a span is "just a comment" is still decided with Unicode trimming, in
+the parser (`page_settings_comment_body`, `raw.trim()`) and in
+`spans_match_source::comment_span` (`raw.trim_end()`), identically on `main`.
+Unicode whitespace that pulldown puts *inside* a note's HTML-block span is
+therefore replaced together with the comment: `<!-- note -->\u{3000}` loses
+the trailing U+3000 on a note save, exactly as ASCII trailing spaces do. Nothing
+visible is lost on LF/CRLF decks. The guard and the parser must agree, so
+changing one without the other would make the guard refuse decks that parse;
+it belongs with Issue #595's decision about the parser.
+
+A body consisting only of U+3000 on a slide with no settings comment or note is
+now refused for slide count (the parser drops such a slide, Issue #595) instead
+of being normalized to an empty body; the refusal is loud and names the cause.
+
