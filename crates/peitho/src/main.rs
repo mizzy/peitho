@@ -44,6 +44,7 @@ struct BuildArtifacts {
     slide_count: usize,
     rendered: peitho_core::Deck<peitho_core::Rendered>,
     manifest_json: String,
+    slide_sources_json: String,
     image_assets: Vec<peitho_core::ResolvedImageAsset>,
     fonts_source: Option<PathBuf>,
 }
@@ -2020,6 +2021,9 @@ where
         &code_images_cache_dir(input),
         &embeds_cache_dir(input),
     ))?;
+    let slide_sources_json = core(peitho_core::slide_sources_json(
+        &peitho_core::SlideSources::from_slides(&loaded.source, parsed.parsed_slides()),
+    ))?;
     let mapped = loaded.translate(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = loaded.translate(peitho_core::check_deck(mapped))?;
     let slide_count = checked.slide_count();
@@ -2047,6 +2051,7 @@ where
         slide_count,
         rendered,
         manifest_json,
+        slide_sources_json,
         image_assets,
         fonts_source: assets.fonts.path().map(Path::to_path_buf),
     })
@@ -5383,6 +5388,11 @@ fn emit_preview_cache_generation(
         &artifacts.manifest_json,
     )
     .into_diagnostic()?;
+    fs::write(
+        generation_dir.join("sources.json"),
+        &artifacts.slide_sources_json,
+    )
+    .into_diagnostic()?;
     write_notes_json(&generation_dir, artifacts)?;
     fs::write(
         generation_dir.join("index.html"),
@@ -6537,7 +6547,7 @@ contexts:
         };
         assert!(message.contains("slide body edit would change the deck's slide count"));
         assert!(message.contains(
-            "a `---` line in the body splits the slide, and removing all content removes it"
+            "remove any `---` separator, close any unclosed code fence, or keep some body content when the slide has no settings comment or note, then retry"
         ));
         assert_eq!(fs::read_to_string(&deck).unwrap(), source);
     }
@@ -12905,7 +12915,9 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
     #[test]
     fn emit_preview_cache_writes_preview_only_files_in_generation_dir() {
-        let fixture = WatchFixture::new("# Intro\n\n<!-- speaker note -->\n");
+        let fixture = WatchFixture::new(
+            "<!-- {\"key\":\"intro\"} -->\n# Intro\n\nBody\n\n<!-- first note -->\n\n<!-- second note -->\n",
+        );
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
         let cache = fixture._dir.path().join(".peitho/preview-cache");
 
@@ -12919,7 +12931,13 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         assert!(generation_dir.join("slides/000-intro.html").is_file());
         assert!(fs::read_to_string(generation_dir.join("notes.json"))
             .unwrap()
-            .contains("speaker note"));
+            .contains("first note\\n\\nsecond note"));
+        let sources: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(generation_dir.join("sources.json")).unwrap())
+                .unwrap();
+        assert_eq!(sources["version"], 1);
+        assert_eq!(sources["sources"]["intro"], "# Intro\n\nBody");
+        assert_eq!(sources["unavailable"], serde_json::json!({}));
         assert!(!generation_dir.join("present.html").exists());
         assert!(!generation_dir.join("presenter.html").exists());
         assert!(!generation_dir.join("present.json").exists());
@@ -12933,6 +12951,110 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         assert!(index.contains("mountPreviewShell"));
         assert!(index.contains("installPreviewKeyboard"));
         assert!(index.contains("installPreviewReload"));
+
+        let unavailable_fixture = WatchFixture::new(
+            "<!-- {\"key\":\"first\"} -->\n# First\n\nBody\rTail\n\n---\n\n<!-- {\"key\":\"second\"} -->\n# Second\n",
+        );
+        let unavailable_artifacts = build_artifacts(&unavailable_fixture.options.input).unwrap();
+        let unavailable_cache = unavailable_fixture
+            ._dir
+            .path()
+            .join(".peitho/preview-cache");
+
+        let unavailable_generation =
+            emit_preview_cache_generation(&unavailable_cache, 0, &unavailable_artifacts).unwrap();
+
+        let unavailable: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(unavailable_generation.join("sources.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unavailable["sources"], serde_json::json!({}));
+        let unavailable = unavailable["unavailable"].as_object().unwrap();
+        assert_eq!(unavailable.len(), 2);
+        for key in ["first", "second"] {
+            let reason = unavailable[key].as_str().unwrap();
+            assert!(reason.contains("bare CR"), "{key}: {reason}");
+            assert!(reason.contains("LF or CRLF"), "{key}: {reason}");
+        }
+        assert!(unavailable_generation
+            .join("slides/000-first.html")
+            .is_file());
+        assert!(unavailable_generation
+            .join("slides/001-second.html")
+            .is_file());
+    }
+
+    #[test]
+    fn build_artifacts_compute_slide_sources_for_both_annotation_modes() {
+        let fixture = WatchFixture::new(
+            "<!-- {\"key\":\"first\"} -->\n# First\n\nBody\rTail\n\n---\n\n<!-- {\"key\":\"second\"} -->\n# Second\n",
+        );
+        let off = build_artifacts_with_services(
+            &fixture.options.input,
+            &DeterministicSvgRunner,
+            &DeterministicEmbedRenderer,
+            &DeterministicOEmbedFetcher,
+            peitho_core::EditAnnotations::Off,
+        )
+        .unwrap();
+        let on = build_artifacts_with_services(
+            &fixture.options.input,
+            &DeterministicSvgRunner,
+            &DeterministicEmbedRenderer,
+            &DeterministicOEmbedFetcher,
+            peitho_core::EditAnnotations::On,
+        )
+        .unwrap();
+
+        assert_eq!(off.slide_sources_json, on.slide_sources_json);
+    }
+
+    #[test]
+    fn slide_sources_keys_match_manifest_for_includes_draft_and_skip() {
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            dir.path().join("included.md"),
+            "<!-- {\"key\":\"included\"} -->\n# Included\n",
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"intro\"} -->\n# Intro\n\n---\n\n<!-- {\"include\":\"included.md\"} -->\n\n---\n\n<!-- {\"key\":\"draft\",\"draft\":true} -->\n# Draft\n\n---\n\n<!-- {\"key\":\"skipped\",\"skip\":true} -->\n# Skipped\n",
+        )
+        .unwrap();
+        let artifacts = build_artifacts(&deck).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&artifacts.manifest_json).unwrap();
+        let sources: serde_json::Value =
+            serde_json::from_str(&artifacts.slide_sources_json).unwrap();
+        let manifest_keys = manifest["slides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|slide| slide["key"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        let source_keys = sources["sources"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .chain(sources["unavailable"].as_object().unwrap().keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(source_keys, manifest_keys);
+        assert_eq!(sources["unavailable"], serde_json::json!({}));
+        assert_eq!(sources["sources"]["included"], "# Included");
+        assert_eq!(sources["sources"]["skipped"], "# Skipped");
+        assert_eq!(
+            manifest_keys,
+            BTreeSet::from([
+                "included".to_owned(),
+                "intro".to_owned(),
+                "skipped".to_owned(),
+            ])
+        );
     }
 
     #[test]

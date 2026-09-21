@@ -61,7 +61,7 @@ the text compared at save time can never come from two implementations:
 /// comment and every note comment removed, then leading/trailing blank lines
 /// trimmed. Line endings normalized to LF.
 ///
-/// Refuses when the slide contains a lone CR (see Edge cases), and (like
+/// Refuses when the deck contains a lone CR (see Edge cases), and (like
 /// `rewrite_note`'s span check) when the slide's spans do not belong to
 /// `source`, so a `ParsedSlide` from another parse is an error in
 /// the caller, never a slicing panic in a server request thread.
@@ -238,8 +238,8 @@ Each preview generation directory gains `sources.json`
 ts-rs like `Notes`), written in `emit_preview_cache_generation` only — not the
 present cache. `"sources.json"` joins `PRESENTATION_ONLY_DIST_FILES`, so
 publish rejects it under `dist/`. The bodies are computed by `slide_body` from
-the same parse that produced the generation. A slide whose `slide_body` is refused (a lone CR in the slide; two comments on
-one line, Issue #584) must not fail a build that succeeds today, and must not
+the same parse that produced the generation. A slide whose `slide_body` is refused (today only the deck-wide lone-CR
+refusal, so in practice all slides of such a deck) must not fail a build that succeeds today, and must not
 be dropped silently either: the file carries a second map,
 `"unavailable":{"<key>":"<reason>"}`, holding the refusal's message and help.
 Pressing `e` on such a slide shows that reason through the `slide-source`
@@ -363,8 +363,11 @@ is no "preview artifacts without sources" state to handle.
   in the editor and can remove it. Identity saves never happen (unchanged text
   is not posted).
 - **Known limitation**: two comments on one line are collected by the parser
-  as one note whose text contains `-->` (Issue #584); such a slide is refused,
-  as it already is for note saves.
+  as one note whose text contains `-->` (Issue #584). `slide_body` accepts such
+  a slide, so the editor opens, but a save is refused: the canonical note would
+  contain `-->` and the reparse sees different notes. A *note* save on the same
+  slide succeeds (it replaces the block with one clean comment — pinned
+  behaviour), after which the source editor works too.
 - **Known tradeoff**: the shell's source map is refreshed by a generation
   reload or by its own source save. An *inline* edit or an external editor
   change followed by a failed rebuild leaves it stale, so `e` answers the
