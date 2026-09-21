@@ -413,6 +413,7 @@ stabilizes after one pass.
 **Files.**
 
 - `crates/peitho-core/src/slide_source.rs`
+- `crates/peitho-core/src/slide_compare.rs`
 
 **Test (Red).** Add one table-driven
 `rewrite_slide_body_refusals_fall_out_of_reparse` test with these rows:
@@ -422,17 +423,41 @@ stabilizes after one pass.
 | separator | `# New\n\n---\n\n# Extra` | slide count |
 | plaintext comment | `# New\n\n<!-- stolen note -->` | target notes |
 | JSON comment | `<!-- {"layout":"cover"} -->\n# New` | duplicate settings parse error or changed settings |
+| settings added to settings-free deck | `<!-- {"skip":false} -->\n# T` | changed settings comment |
 | unclosed fence | `` # New\n\n```rust\nlet x = 1; `` | notes or slide count |
-| whitespace | ` \n\t\n` | accepted and idempotent when settings or notes keep the slide parseable; otherwise slide count |
+| whitespace with metadata | ` \n\t\n` | accepted and idempotent when settings or notes keep the slide parseable |
+| whitespace removes one of three slides | ` \n\t\n` | slide count |
+| whitespace removes the only slide | ` \n\t\n` | `deck has no slides` parser error |
 | unknown language | `` # New\n\n```not-installed\nx\n``` `` | parse error |
 | bad slot | `::: {slot=}\ntext\n:::` | parse error |
 | bad reveal | `::: {reveal=yes}\ntext\n:::` | parse error |
 | bad emphasis | `` ```rust {0}\nx\n``` `` | parse error |
 
-Run every row against the same three-slide deck whose target has page settings
-and a speaker note, so separators, swallowed notes, and swallowed following
-slides are observable. The test calls only `rewrite_slide_body`; it must not
-invoke a pre-validator.
+Run the original rows against the same three-slide deck whose target has page
+settings and a speaker note, so separators, swallowed notes, and swallowed
+following slides are observable. Add measured refusal rows for the body
+round-trip comparison, changed sections, another slide's notes, and an explicit
+target key, using focused decks where needed to reach each comparison. The test
+calls only `rewrite_slide_body`; it must not invoke a pre-validator. Every
+refused row goes through one `assert_refusal_cause` helper that checks its exact
+expected message and `expected_line`. Structural postcondition refusals are
+unnumbered, numbered parser diagnostics carry their measured combined-source
+line, and the deck-wide `deck has no slides` parser error is unnumbered. This
+helper pins the observed causes; it is not a mechanical special-casing detector.
+
+Add acceptance rows for a separator inside a code fence, a comment inside a
+code fence, a comment inside inline code, and an empty body retained by settings
+or notes. Keep those counterexamples on the same shared metadata fixture as the
+original refusal rows. These accepted inputs defeat naive input-pattern
+prechecks. The refusal causes, counterexample acceptances, and review of the
+production path together guarantee that there is no input-specific
+pre-validation.
+
+Add `rewrite_slide_body_refuses_submitted_leading_bom` for a submitted single
+BOM and for submitted double BOMs on both LF and BOM-prefixed decks. The
+settings-comment cases are panic regressions and must return ordinary structural
+refusals; the case without settings pins the round-trip refusal behavior.
+
 Add `rewrite_slide_body_is_parse_identity_preserving_and_idempotent`, which for
 a corpus containing settings, scattered/inline notes, CRLF, BOM, explicit and
 derived keys asserts: rewriting with `slide_body(before).unwrap()` preserves
@@ -451,7 +476,13 @@ return the accepted `(SlideKey, String)` from `target_after` rather than `()`;
 `SlideBodyRewrite` without another parse. Return the parser's line/message for
 parse failures and a structural `BuildError` for a failed comparison. Do not
 inspect `new_body` for separators, comments, fences, whitespace, languages,
-slots, reveal syntax, or emphasis syntax.
+slots, reveal syntax, or emphasis syntax; pin real refusal causes, keep the
+counterexample acceptance rows, and verify this constraint in review.
+
+Before parsing or validating the completed candidate, remove every leading
+U+FEFF so it is in the same BOM-free coordinate space as parser spans and
+validation slices. Restore exactly the original deck's BOM, if any, only when
+building the accepted `SlideBodyRewrite.source`.
 
 **Verification.**
 

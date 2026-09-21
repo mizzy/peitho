@@ -108,17 +108,21 @@ pub fn rewrite_slide_body(
         fresh_target.source_span.start..fresh_target.source_span.end,
         &replacement,
     );
+    // The parser strips leading BOMs, so span slicing and `restore_bom` require none here.
+    let candidate = candidate.trim_start_matches('\u{feff}').to_owned();
     let after = parse_source(&candidate, highlighter)?;
-    validate_rewrite(source, &before, &candidate, &after, target_index)?;
-    let target_after = &after.parsed_slides()[target_index];
-    let body = slide_body(&candidate, target_after)?;
-    if body != normalized_body {
-        return Err(round_trip_refusal());
-    }
+    let (key, body) = validate_reparsed_slide_body(
+        source,
+        &before,
+        &candidate,
+        &after,
+        target_index,
+        &normalized_body,
+    )?;
 
     Ok(SlideBodyRewrite {
         source: restore_bom(candidate, had_bom),
-        key: target_after.key.clone(),
+        key,
         body,
     })
 }
@@ -128,13 +132,14 @@ fn parse_source(source: &str, highlighter: &Highlighter) -> Result<Deck<Parsed>>
     parse_markdown(source, frontmatter, highlighter)
 }
 
-fn validate_rewrite(
+fn validate_reparsed_slide_body(
     before_source: &str,
     before: &Deck<Parsed>,
     after_source: &str,
     after: &Deck<Parsed>,
     target_index: usize,
-) -> Result<()> {
+    expected_body: &str,
+) -> Result<(SlideKey, String)> {
     let before_slides = before.parsed_slides();
     let after_slides = after.parsed_slides();
     if before_slides.len() != after_slides.len() {
@@ -180,8 +185,12 @@ fn validate_rewrite(
             "slide body edit would change the edited slide's settings comment",
         ));
     }
+    let body = slide_body(after_source, after_target)?;
+    if body != expected_body {
+        return Err(round_trip_refusal());
+    }
 
-    Ok(())
+    Ok((after_target.key.clone(), body))
 }
 
 fn edge_blank_runs(source: &str, slide: SourceSpan) -> Result<(Range<usize>, Range<usize>)> {
@@ -275,16 +284,16 @@ fn normalize_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        edge_blank_runs, parse_source, rewrite_slide_body, round_trip_refusal, slide_body,
-        validate_rewrite,
+        edge_blank_runs, parse_source, rewrite_slide_body, slide_body, validate_reparsed_slide_body,
     };
     use crate::{
         domain::{SlideKey, SourceSpan},
-        error::ErrorKind,
+        error::{BuildError, ErrorKind},
         highlight::Highlighter,
         notes_edit::strip_bom,
-        slide_compare::{compare_except_key, SlideDifference},
     };
+
+    const TARGET_WITH_METADATA_SOURCE: &str = "# First\n\n---\n\n<!-- {\"key\":\"target\",\"layout\":\"cover\"} -->\n# Old\n\n<!-- speaker note -->\n\n---\n\n# Last\n";
 
     #[test]
     fn rewrite_slide_body_canonicalizes_settings_body_and_one_note() {
@@ -508,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_slide_body_adds_blank_line_before_tight_separator_and_is_idempotent() {
+    fn rewrite_slide_body_adds_blank_line_before_tight_separator() {
         let source = "# A\n---\n# B\n";
         let highlighter = Highlighter::defaults();
         let deck = parse_source(source, &highlighter).unwrap();
@@ -526,24 +535,12 @@ mod tests {
         assert_eq!(rewritten.body, "# A\n\ntext");
         let deck = parse_source(&rewritten.source, &highlighter).unwrap();
         assert_eq!(deck.parsed_slides().len(), 2);
-
-        let repeated = rewrite_slide_body(
-            &rewritten.source,
-            &deck.parsed_slides()[0],
-            "# A\n\ntext",
-            &highlighter,
-        )
-        .unwrap();
-
-        assert_eq!(repeated.source, rewritten.source);
-        assert_eq!(repeated.body, rewritten.body);
     }
 
     #[test]
-    fn rewrite_slide_body_blank_line_rule_preserves_existing_spacing_and_last_slide_eof() {
+    fn rewrite_slide_body_blank_line_rule_preserves_existing_spacing_and_final_newline() {
         let cases = [
             ("existing-blank-line", "# A\n\n---\n# B\n", 0, "# A"),
-            ("last-slide-no-newline", "# A\n\n---\n\n# B", 1, "# B"),
             ("last-slide-with-newline", "# A\n\n---\n\n# B\n", 1, "# B"),
         ];
         let highlighter = Highlighter::defaults();
@@ -599,75 +596,464 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_slide_body_accepts_empty_body_with_metadata_and_is_idempotent() {
+    fn rewrite_slide_body_refuses_submitted_leading_bom() {
         let cases = [
+            // Behavior-only case: pins the ordinary refusal without a settings comment.
             (
-                "settings",
-                "<!-- {\"key\":\"a\"} -->\n# T\n\n---\n\n# B\n",
-                "<!-- {\"key\":\"a\"} -->\n\n---\n\n# B\n",
+                "without-settings",
+                "# T\n\n---\n\n# B\n",
+                "\u{feff}\n# T",
+                "slide body edit did not round-trip through the Markdown parser",
+            ),
+            // Before the candidate BOM strip this sliced inside the BOM and panicked.
+            (
+                "with-settings",
+                "# T\n\n---\n\n# B\n",
+                "\u{feff}\n<!-- {\"skip\":false} -->\n# T",
+                "slide body edit would change the edited slide's settings comment",
             ),
             (
-                "note",
-                "# T\n<!-- note -->\n\n---\n\n# B\n",
-                "<!-- note -->\n\n---\n\n# B\n",
+                "double-bom-lf-deck",
+                "# T\n\n---\n\n# B\n",
+                "\u{feff}\u{feff}\n<!-- {\"skip\":false} -->\n# T",
+                "slide body edit would change the edited slide's settings comment",
+            ),
+            (
+                "double-bom-bom-deck",
+                "\u{feff}# T\n\n---\n\n# B\n",
+                "\u{feff}\u{feff}\n<!-- {\"skip\":false} -->\n# T",
+                "slide body edit would change the edited slide's settings comment",
             ),
         ];
         let highlighter = Highlighter::defaults();
 
-        for (name, source, expected) in cases {
+        for (case, source, body, expected_message) in cases {
             let deck = parse_source(source, &highlighter).unwrap();
-            let rewritten =
-                rewrite_slide_body(source, &deck.parsed_slides()[0], " \n\t\n", &highlighter)
-                    .unwrap();
+            let error = rewrite_slide_body(source, &deck.parsed_slides()[0], body, &highlighter)
+                .unwrap_err();
 
-            assert_eq!(rewritten.source, expected, "{name}: first source");
-            assert_eq!(rewritten.body, "", "{name}: first body");
-            let deck = parse_source(&rewritten.source, &highlighter).unwrap();
-            let repeated = rewrite_slide_body(
-                &rewritten.source,
-                &deck.parsed_slides()[0],
-                " \n\t\n",
+            assert_eq!(error.kind, ErrorKind::Parse, "{case}: kind");
+            assert_eq!(error.message, expected_message, "{case}: message");
+        }
+    }
+
+    // Pins each observed refusal's exact message and source line.
+    fn assert_refusal_cause(
+        case: &str,
+        error: &BuildError,
+        expected_message: &str,
+        expected_line: Option<usize>,
+    ) {
+        assert_eq!(error.kind, ErrorKind::Parse, "{case}: kind");
+        assert_eq!(error.message, expected_message, "{case}: message");
+        assert_eq!(error.line, expected_line, "{case}: line");
+    }
+
+    #[test]
+    fn rewrite_slide_body_refusals_fall_out_of_reparse() {
+        struct Case {
+            name: &'static str,
+            source: &'static str,
+            slide_index: usize,
+            body: &'static str,
+            expected_message: &'static str,
+            expected_line: Option<usize>,
+            expected_help: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "separator",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n---\n\n# Extra",
+                expected_message: "slide body edit would change the deck's slide count",
+                expected_line: None,
+                expected_help: None,
+            },
+            Case {
+                name: "plaintext-comment",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n<!-- stolen note -->",
+                expected_message: "slide body edit would change the edited slide's notes",
+                expected_line: None,
+                expected_help: None,
+            },
+            Case {
+                name: "json-comment",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "<!-- {\"layout\":\"cover\"} -->\n# New",
+                expected_message: "duplicate page settings comment",
+                expected_line: Some(7),
+                expected_help: None,
+            },
+            Case {
+                name: "unclosed-fence",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n```rust\nlet x = 1;",
+                expected_message: "slide body edit would change the deck's slide count",
+                expected_line: None,
+                expected_help: None,
+            },
+            Case {
+                name: "unknown-language",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n```not-installed\nx\n```",
+                expected_message: "unknown code language 'not-installed'",
+                expected_line: Some(9),
+                expected_help: None,
+            },
+            Case {
+                name: "bad-slot",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "::: {slot=}\ntext\n:::",
+                expected_message: "explicit slot fence attribute needs a slot name",
+                expected_line: Some(7),
+                expected_help: None,
+            },
+            Case {
+                name: "bad-reveal",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "::: {reveal=yes}\ntext\n:::",
+                expected_message: "reveal fence values are reserved for future syntax",
+                expected_line: Some(7),
+                expected_help: None,
+            },
+            Case {
+                name: "bad-emphasis",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "```rust {0}\nx\n```",
+                expected_message: "code line numbers start at 1",
+                expected_line: Some(7),
+                expected_help: None,
+            },
+            // Focused decks reach outcomes that the shared metadata fixture cannot isolate.
+            // The thematic break splits the slide, drops an empty half, preserves count, and changes text.
+            Case {
+                name: "body-round-trip",
+                source: "# Tight A\n---\n# Tight B\n---\n# Tight C",
+                slide_index: 0,
+                body: "***\n- a\n",
+                expected_message: "slide body edit did not round-trip through the Markdown parser",
+                expected_line: None,
+                expected_help: Some(
+                    "the Markdown parser reads the saved text differently from what was typed, typically because of an unclosed code fence or HTML block; close it and retry",
+                ),
+            },
+            // The split adds a slide; the comment swallows the next, preserving count before sections.
+            Case {
+                name: "sections",
+                source: "<!-- {\"section\":\"One\",\"time\":\"1m\"} -->\n# A\n\n---\n\n<!-- {\"section\":\"Two\",\"time\":\"1m\"} -->\n# B\n\n---\n\n# C\n",
+                slide_index: 0,
+                body: "# A\n\n---\n\n<!--",
+                expected_message: "slide body edit would change the deck's sections",
+                expected_line: None,
+                expected_help: None,
+            },
+            // The split adds a slide; the comment swallows the next, preserving count before notes.
+            Case {
+                name: "another-slide-notes",
+                source: "# A\n\n---\n\n<!-- note -->\n# B\n\n---\n\n# C\n",
+                slide_index: 0,
+                body: "# A\n\n---\n\n<!--",
+                expected_message: "slide body edit would change another slide's notes",
+                expected_line: None,
+                expected_help: None,
+            },
+            Case {
+                name: "explicit-key",
+                source: "# T\n\n---\n\n# B\n",
+                slide_index: 0,
+                body: "<!-- {\"key\":\"other\"} -->\n# T",
+                expected_message: "slide body edit would change an explicit key on the edited slide",
+                expected_line: None,
+                expected_help: None,
+            },
+            Case {
+                name: "settings-presence",
+                source: "# T\n\n---\n\n# B\n",
+                slide_index: 0,
+                body: "<!-- {\"skip\":false} -->\n# T",
+                expected_message: "slide body edit would change the edited slide's settings comment",
+                expected_line: None,
+                expected_help: None,
+            },
+            // Other slides remain, so the postcondition observes the emptied target disappearing.
+            Case {
+                name: "whitespace-removes-one-of-three-slides",
+                source: "# A\n\n---\n\n# T\n\n---\n\n# B\n",
+                slide_index: 1,
+                body: " \n\t\n",
+                expected_message: "slide body edit would change the deck's slide count",
+                expected_line: None,
+                expected_help: Some(
+                    "a `---` line in the body splits the slide, and removing all content removes it; take the separator out or keep some content, then retry",
+                ),
+            },
+            // Emptying the only body leaves no slide for the parser to return.
+            Case {
+                name: "whitespace-removes-only-slide",
+                source: "# T\n",
+                slide_index: 0,
+                body: " \n\t\n",
+                expected_message: "deck has no slides",
+                expected_line: None,
+                expected_help: None,
+            },
+        ];
+        let highlighter = Highlighter::defaults();
+
+        for case in cases {
+            let deck = parse_source(case.source, &highlighter).unwrap();
+            let error = rewrite_slide_body(
+                case.source,
+                &deck.parsed_slides()[case.slide_index],
+                case.body,
                 &highlighter,
             )
-            .unwrap();
+            .unwrap_err();
 
-            assert_eq!(repeated.source, rewritten.source, "{name}: repeated source");
-            assert_eq!(repeated.body, "", "{name}: repeated body");
+            assert_refusal_cause(case.name, &error, case.expected_message, case.expected_line);
+            if let Some(expected_help) = case.expected_help {
+                assert_eq!(error.help, expected_help, "{}: help", case.name);
+            }
         }
     }
 
     #[test]
-    fn rewrite_slide_body_refuses_empty_body_when_slide_disappears() {
-        let source = "# A\n\n---\n\n# T\n\n---\n\n# B\n";
+    fn rewrite_slide_body_accepts_bodies_without_naive_input_prechecks() {
+        struct Case {
+            name: &'static str,
+            source: &'static str,
+            slide_index: usize,
+            body: &'static str,
+            expected_body: &'static str,
+            expected_source: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "whitespace-with-settings-and-note",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: " \n\t\n",
+                expected_body: "",
+                expected_source: Some(
+                    "# First\n\n---\n\n<!-- {\"key\":\"target\",\"layout\":\"cover\"} -->\n\n<!-- speaker note -->\n\n---\n\n# Last\n",
+                ),
+            },
+            Case {
+                name: "separator-inside-code-fence",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n```text\n---\n```",
+                expected_body: "# New\n\n```text\n---\n```",
+                expected_source: None,
+            },
+            Case {
+                name: "comment-inside-code-fence",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n```text\n<!-- not a note -->\n```",
+                expected_body: "# New\n\n```text\n<!-- not a note -->\n```",
+                expected_source: None,
+            },
+            Case {
+                name: "comment-inside-inline-code",
+                source: TARGET_WITH_METADATA_SOURCE,
+                slide_index: 1,
+                body: "# New\n\n`<!-- x -->`",
+                expected_body: "# New\n\n`<!-- x -->`",
+                expected_source: None,
+            },
+            Case {
+                name: "settings-only-empty-body",
+                source: "<!-- {\"key\":\"a\"} -->\n# T\n\n---\n\n# B\n",
+                slide_index: 0,
+                body: " \n\t\n",
+                expected_body: "",
+                expected_source: Some("<!-- {\"key\":\"a\"} -->\n\n---\n\n# B\n"),
+            },
+            Case {
+                name: "note-only-empty-body",
+                source: "# T\n<!-- note -->\n\n---\n\n# B\n",
+                slide_index: 0,
+                body: " \n\t\n",
+                expected_body: "",
+                expected_source: Some("<!-- note -->\n\n---\n\n# B\n"),
+            },
+        ];
         let highlighter = Highlighter::defaults();
-        let deck = parse_source(source, &highlighter).unwrap();
 
-        let error = rewrite_slide_body(source, &deck.parsed_slides()[1], " \n\t\n", &highlighter)
-            .unwrap_err();
+        for case in cases {
+            let deck = parse_source(case.source, &highlighter).unwrap();
+            let rewritten = rewrite_slide_body(
+                case.source,
+                &deck.parsed_slides()[case.slide_index],
+                case.body,
+                &highlighter,
+            )
+            .unwrap();
 
-        assert_eq!(error.kind, ErrorKind::Parse);
-        assert_eq!(
-            error.message,
-            "slide body edit would change the deck's slide count"
-        );
-        assert_eq!(
-            error.help,
-            "a `---` line in the body splits the slide, and removing all content removes it; take the separator out or keep some content, then retry"
-        );
+            assert_eq!(rewritten.body, case.expected_body, "{}: body", case.name);
+            if let Some(expected_source) = case.expected_source {
+                assert_eq!(rewritten.source, expected_source, "{}: source", case.name);
+            }
+        }
     }
 
     #[test]
-    fn round_trip_refusal_has_actionable_help() {
-        let error = round_trip_refusal();
+    fn rewrite_slide_body_is_parse_identity_preserving_and_idempotent() {
+        let corpus = [
+            (
+                "settings-sections-notes-and-flags",
+                concat!(
+                    "---\n",
+                    "time: 2m\n",
+                    "page_numbers: current\n",
+                    "---\n",
+                    "<!-- {\"key\":\"intro\",\"layout\":\"cover\",\"section\":\"Opening\",\"time\":\"1m\"} -->\n",
+                    "<!-- before -->\n",
+                    "# Intro\n\n",
+                    "Text <!-- inline --> tail\n\n",
+                    "<!-- after -->\n\n",
+                    "---\n\n",
+                    "<!-- {\"section\":\"Closing\",\"time\":\"1m\",\"page_number\":false} -->\n",
+                    "# Closing\n\n",
+                    "::: {reveal}\n\n",
+                    "- one\n",
+                    "- two\n\n",
+                    ":::\n\n",
+                    "---\n\n",
+                    "<!-- {\"key\":\"appendix\",\"skip\":true} -->\n",
+                    "# Appendix\n",
+                ),
+            ),
+            (
+                "bom-and-crlf",
+                "\u{feff}<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nBody\r\n<!-- crlf note -->\r\n",
+            ),
+            (
+                "tight-separators",
+                "# Tight A\n---\n# Tight B\n---\n# Tight C",
+            ),
+            ("tight-crlf-separators", "# A\r\n---\r\n# B\r\n"),
+            (
+                "last-slide-with-newline",
+                "# First\n\n---\n\n# Last with newline\n",
+            ),
+            (
+                "last-slide-without-newline",
+                "# First\n\n---\n\n# Last without newline",
+            ),
+        ];
+        let highlighter = Highlighter::defaults();
 
-        assert_eq!(
-            error.message,
-            "slide body edit did not round-trip through the Markdown parser"
-        );
-        assert_eq!(
-            error.help,
-            "the Markdown parser reads the saved text differently from what was typed, typically because of an unclosed code fence or HTML block; close it and retry"
-        );
+        // The corpus contains none of the three documented limitations: an
+        // unclosed fence on a slide with notes, a note as the sole content of
+        // a list item or blockquote line, and two comments on one line.
+        for (case, source) in corpus {
+            let before = parse_source(source, &highlighter).unwrap();
+
+            for target_index in 0..before.parsed_slides().len() {
+                let body = slide_body(source, &before.parsed_slides()[target_index]).unwrap();
+                let first = rewrite_slide_body(
+                    source,
+                    &before.parsed_slides()[target_index],
+                    &body,
+                    &highlighter,
+                )
+                .unwrap();
+                let after = parse_source(&first.source, &highlighter).unwrap();
+
+                assert_eq!(
+                    after.settings().sections(),
+                    before.settings().sections(),
+                    "{case}/{target_index}: sections"
+                );
+                assert_eq!(
+                    after.parsed_slides().len(),
+                    before.parsed_slides().len(),
+                    "{case}/{target_index}: slide count"
+                );
+                for (slide_index, (before_slide, after_slide)) in before
+                    .parsed_slides()
+                    .iter()
+                    .zip(after.parsed_slides())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        after_slide.index, before_slide.index,
+                        "{case}/{target_index}/{slide_index}: index"
+                    );
+                    assert_eq!(
+                        after_slide.source_index, before_slide.source_index,
+                        "{case}/{target_index}/{slide_index}: source index"
+                    );
+                    assert_eq!(
+                        after_slide.key, before_slide.key,
+                        "{case}/{target_index}/{slide_index}: key"
+                    );
+                    assert!(
+                        after_slide
+                            .key_source
+                            .same_kind_as(&before_slide.key_source),
+                        "{case}/{target_index}/{slide_index}: key source kind"
+                    );
+                    assert_eq!(
+                        after_slide.layout_request_name(),
+                        before_slide.layout_request_name(),
+                        "{case}/{target_index}/{slide_index}: layout"
+                    );
+                    assert_eq!(
+                        after_slide.skip, before_slide.skip,
+                        "{case}/{target_index}/{slide_index}: skip"
+                    );
+                    assert_eq!(
+                        after_slide.page_number_hidden, before_slide.page_number_hidden,
+                        "{case}/{target_index}/{slide_index}: page number"
+                    );
+                    assert_eq!(
+                        after_slide.notes, before_slide.notes,
+                        "{case}/{target_index}/{slide_index}: notes"
+                    );
+                    assert_eq!(
+                        after_slide.step_count, before_slide.step_count,
+                        "{case}/{target_index}/{slide_index}: step count"
+                    );
+                    assert_eq!(
+                        slide_body(&first.source, after_slide).unwrap(),
+                        slide_body(source, before_slide).unwrap(),
+                        "{case}/{target_index}/{slide_index}: body"
+                    );
+                }
+
+                let target_after = &after.parsed_slides()[target_index];
+                assert_eq!(
+                    first.key, target_after.key,
+                    "{case}/{target_index}: result key"
+                );
+                assert_eq!(
+                    first.body,
+                    slide_body(&first.source, target_after).unwrap(),
+                    "{case}/{target_index}: result body"
+                );
+                let second =
+                    rewrite_slide_body(&first.source, target_after, &first.body, &highlighter)
+                        .unwrap();
+
+                assert_eq!(second.source, first.source, "{case}/{target_index}: source");
+                assert_eq!(second.key, first.key, "{case}/{target_index}: key");
+                assert_eq!(second.body, first.body, "{case}/{target_index}: body");
+            }
+        }
     }
 
     #[test]
@@ -702,6 +1088,7 @@ mod tests {
     fn slide_body_and_rewrite_slide_body_refuse_bare_cr_anywhere_in_the_deck() {
         let cases = [
             ("target", "# T\r\rtext\r", 0, "# T\n\ntext"),
+            ("inside-replaced-part", "# bare\rcr\n", 0, "\\"),
             (
                 "separator-before-target",
                 "# A\n\n---\r<!-- n -->\n# B\n",
@@ -739,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn slide_body_rewrite_preserves_crlf() {
+    fn slide_body_normalizes_crlf() {
         let source = "# T\r\n\r\ntext\r\n";
         let body = "# T\n\ntext";
         let highlighter = Highlighter::defaults();
@@ -747,10 +1134,6 @@ mod tests {
         let target = &deck.parsed_slides()[0];
 
         assert_eq!(slide_body(source, target).unwrap(), body);
-        let rewritten = rewrite_slide_body(source, target, body, &highlighter).unwrap();
-
-        assert_eq!(rewritten.source, source);
-        assert_eq!(rewritten.body, body);
     }
 
     #[test]
@@ -772,50 +1155,28 @@ mod tests {
     }
 
     #[test]
-    fn shared_comparison_reports_notes_before_layout_request() {
+    fn validate_reparsed_slide_body_rejects_changed_target_settings_comment_bytes() {
         let highlighter = Highlighter::defaults();
-        let before = parse_source("# T\n<!-- before -->\n", &highlighter).unwrap();
-        let after = parse_source(
-            "<!-- {\"layout\":\"cover\"} -->\n# T\n<!-- after -->\n",
-            &highlighter,
+        let before_source = "<!-- {\"key\":\"fixed\"} -->\n# Title\n";
+        let after_source = "<!-- { \"key\": \"fixed\" } -->\n# Title\n";
+        let before = parse_source(before_source, &highlighter).unwrap();
+        let after = parse_source(after_source, &highlighter).unwrap();
+
+        let error = validate_reparsed_slide_body(
+            before_source,
+            &before,
+            after_source,
+            &after,
+            0,
+            "# Title",
         )
-        .unwrap();
+        .unwrap_err();
 
+        assert_eq!(error.kind, ErrorKind::Parse);
         assert_eq!(
-            compare_except_key(&before.parsed_slides()[0], &after.parsed_slides()[0]),
-            Err(SlideDifference::Notes)
+            error.message,
+            "slide body edit would change the edited slide's settings comment"
         );
-    }
-
-    #[test]
-    fn validate_rewrite_rejects_changed_target_settings_comment_bytes_or_presence() {
-        let highlighter = Highlighter::defaults();
-        let cases = [
-            (
-                "bytes",
-                "<!-- {\"key\":\"fixed\"} -->\n# Title\n",
-                "<!-- { \"key\": \"fixed\" } -->\n# Title\n",
-            ),
-            (
-                "presence",
-                "# Title\n",
-                "<!-- {\"key\":\"title\"} -->\n# Title\n",
-            ),
-        ];
-
-        for (name, before_source, after_source) in cases {
-            let before = parse_source(before_source, &highlighter).unwrap();
-            let after = parse_source(after_source, &highlighter).unwrap();
-
-            let error =
-                validate_rewrite(before_source, &before, after_source, &after, 0).unwrap_err();
-
-            assert_eq!(error.kind, ErrorKind::Parse, "{name}: kind");
-            assert_eq!(
-                error.message, "slide body edit would change the edited slide's settings comment",
-                "{name}: message"
-            );
-        }
     }
 
     #[test]
