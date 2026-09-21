@@ -94,4 +94,3 @@ it belongs with Issue #595's decision about the parser.
 A body consisting only of U+3000 on a slide with no settings comment or note is
 now refused for slide count (the parser drops such a slide, Issue #595) instead
 of being normalized to an empty body; the refusal is loud and names the cause.
-
