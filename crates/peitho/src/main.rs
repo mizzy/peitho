@@ -7066,6 +7066,66 @@ contexts:
     }
 
     #[test]
+    fn write_preview_origin_rewrite_rejects_a_changed_clipped_slide_head() {
+        let top_source = concat!(
+            "---\n",
+            "time: 1m\n",
+            "---\n",
+            "<!-- {\"include\":\"included.md\"} -->\n\n",
+            "---\n\n",
+            "# Top\n",
+        );
+        let included_source = "# Included first\n";
+        let (_dir, deck, included, top_source) = include_deck_fixture(top_source, included_source);
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+        let (_, highlighter) = resolve_assets_and_highlighter(&deck, &loaded.frontmatter).unwrap();
+        let parsed = loaded
+            .translate(peitho_core::parse_deck(
+                &loaded.source,
+                loaded.frontmatter.clone(),
+                &highlighter,
+            ))
+            .unwrap();
+        let slide = parsed
+            .parsed_slides()
+            .iter()
+            .find(|slide| slide.key.as_str() == "included-first")
+            .unwrap();
+        let requested = slide.source_span;
+        let translated = loaded
+            .line_map
+            .translate_span(&loaded.source, requested)
+            .unwrap();
+        assert!(translated.combined.start > requested.start);
+        assert_eq!(
+            &loaded.source[requested.start..translated.combined.start],
+            "\n"
+        );
+        let before = loaded.source.clone();
+        let mut after = before.clone();
+        after.replace_range(requested.start..translated.combined.start, "x");
+        assert_eq!(before.get(..requested.start), after.get(..requested.start));
+        assert_eq!(before.get(requested.end..), after.get(requested.end..));
+
+        let err = write_preview_origin_rewrite(
+            &deck,
+            &loaded,
+            PreviewOriginRewriteScope::Slide(requested),
+            &before,
+            &after,
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Conflict(message) = err else {
+            panic!("a changed clipped slide head must be a conflict: {err:?}");
+        };
+        assert!(message.contains("this slide cannot be edited from preview"));
+        assert!(message.contains("included.md"));
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(fs::read(&included).unwrap(), included_source.as_bytes());
+    }
+
+    #[test]
     fn write_preview_origin_rewrite_rejects_a_mixed_origin_slide_scope() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
