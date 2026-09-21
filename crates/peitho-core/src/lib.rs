@@ -67,6 +67,7 @@ pub use render::{
     render_pdf_document, render_present_index, render_presenter_index, render_preview_error_index,
     render_preview_index, render_remote_index, EditAnnotations,
 };
+pub use slide_source::{slide_sources_json, SlideSources};
 pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 
 /// ```compile_fail

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Manifest } from "../../../bindings/Manifest";
 import type { PresentConfig } from "../../../bindings/PresentConfig";
+import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncResponse } from "../../../bindings/SyncResponse";
 import type { SyncTimerSnapshot } from "../../../bindings/SyncTimerSnapshot";
 import {
@@ -29,6 +30,16 @@ import type {
 } from "../src/index";
 
 describe("generated manifest contract", () => {
+  it("uses the Rust-generated slide sources type shape", () => {
+    const sources: SlideSources = {
+      version: 1,
+      sources: { intro: "# Title" },
+      unavailable: {}
+    };
+
+    expect(sources.sources.intro).toBe("# Title");
+  });
+
   it("uses the Rust-generated sync response type shape", () => {
     const timer: SyncTimerSnapshot = { running: true, elapsedMs: 1_000, atMs: 5_000 };
     const response: SyncResponse = {

@@ -821,7 +821,8 @@ save-time drift guard.
 
 **Files.**
 
-- `crates/peitho-core/src/slide_source.rs`
+- `crates/peitho-core/src/slide_source.rs` (including `slide_count_refusal()`
+  help wording)
 - `crates/peitho-core/src/lib.rs`
 - `crates/peitho/src/main.rs`
 - `bindings/SlideSources.ts`
@@ -846,14 +847,22 @@ Extend `emit_preview_cache_writes_preview_only_files_in_generation_dir` to
 parse `sources.json` and assert the body excludes its settings comment and all
 note comments. A core map test includes a skipped slide and a draft slide and
 asserts the skipped key is present while the parser-dropped draft key is
-absent. Add an Issue #584 deck with two comments on one line; assert the
-refused slide is absent from `sources`, its key is present in `unavailable`
-with both the refusal message and help, and map generation succeeds rather
-than failing the build or dropping the refusal silently. Add
+absent. The include/draft/skip integration fixture also asserts that
+`unavailable` is empty and pins the included and post-include body bytes, so
+using the unexpanded top-level file cannot satisfy the key-set assertion by
+misclassifying slides. Add a deck containing a lone CR; assert `sources` is
+empty, every surviving slide key is present in `unavailable` with the bare-CR
+message and help, and both the build and preview emission succeed. At unit
+level, call `from_slides` with one genuine slide and one foreign `ParsedSlide`
+parsed from a different source; assert the genuine key is in `sources`, the
+foreign key is in `unavailable` with the span-mismatch reason, and each key is
+in exactly one map. Add an Issue #584 deck with two comments on one line;
+assert its slide is in `sources`, `unavailable` is empty, and the stored body's
+exact bytes match `slide_body`. Add
 `build_artifacts_compute_slide_sources_for_both_annotation_modes`, building the
-same deck once with `EditAnnotations::Off` and once with
+same lone-CR deck once with `EditAnnotations::Off` and once with
 `EditAnnotations::On`, and assert both non-optional
-`artifacts.slide_sources_json` strings equal the same expected JSON. Add a
+`artifacts.slide_sources_json` strings are equal. Add a
 TypeScript compile fixture:
 
 ```ts
@@ -866,6 +875,11 @@ const sources: SlideSources = {
 };
 expect(sources.sources.intro).toBe("# Title");
 ```
+
+Update the tests that pin `slide_count_refusal()`'s help. Its one-sentence
+guidance must cover all measured causes: a `---` line in the body, an unclosed
+code fence swallowing the next separator, and emptying a slide when it has no
+settings comment or note.
 
 **Implementation (Green).** Define and export:
 
@@ -895,9 +909,12 @@ pub fn slide_sources_json(sources: &SlideSources) -> Result<String>;
 successful bodies into `sources`; for each refusal it inserts the key and
 `BuildError::to_string()` into `unavailable`, preserving both the message and
 help. A refused slide must not fail a build that otherwise succeeds and must
-never disappear silently. The JSON shape is always
-`{"version":1,"sources":{…},"unavailable":{…}}`. Task 11 surfaces the
-recorded reason when the author requests source editing. In
+never disappear silently. The only refusal produced by a real parsed deck
+today is the deck-wide bare-CR refusal, so in practice every surviving slide
+of such a deck is unavailable; the per-slide match also preserves an honest
+partition if a parsed slide does not belong to the supplied source. The JSON
+shape is always `{"version":1,"sources":{…},"unavailable":{…}}`. Task 11
+surfaces the recorded reason when the author requests source editing. In
 `build_artifacts_with_services`, construct the map from `loaded.source` and
 the same Parsed deck immediately before mapping consumes it. Add
 `slide_sources_json: String` to `BuildArtifacts` and populate it on every build,
@@ -906,6 +923,12 @@ independent of `EditAnnotations`. Write that string only inside
 `unwrap`, `expect`, or missing-source branch. Present-cache, ordinary-build,
 PDF, lint, and publish emitters never write it. Generate and commit
 `bindings/SlideSources.ts` through the ts-rs export test.
+
+Fold the `slide_count_refusal()` wording fix into this task: tell the author to
+remove a `---` separator, close an unclosed code fence, or keep body content
+when the slide has neither a settings comment nor a note. The older wording
+omitted the fence case and overstated when removing all content removes a
+slide.
 
 **Verification.**
 
@@ -1140,9 +1163,10 @@ is ignored in grid, while a transition settles, and while either edit kind is
 open; it opens only the current single-mode slide; source-open blocks inline-
 click start and an inline edit blocks source-open; the textarea replaces the
 fitted stage and resize updates its frame; Escape restores the stale rendered
-host. When the current slide is listed in `sources.unavailable`, assert that no
-editor opens and the `slide-source` status channel shows that recorded reason,
-including its actionable help. For a first draft whose
+host. Using the recorded deck-wide bare-CR refusal as the
+`sources.unavailable` fixture, assert that no editor opens and the
+`slide-source` status channel shows that recorded reason, including its
+actionable help. For a first draft whose
 TypeScript-normalized text is `"# Typed"`, return
 `{key:"renamed",body:"# Server canonical"}`. Assert the map moves from the old
 key to `renamed`, stores the response body verbatim, the source target uses

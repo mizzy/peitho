@@ -4,6 +4,7 @@ use crate::{
     domain::{SlideKey, SourceSpan},
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
+    json::pretty_json,
     notes_edit::{
         canonical_comment, last_nonblank_line_end, normalized_note_text, remove_comment_spans,
         restore_bom, source_line_ending, spans_match_source, strip_bom,
@@ -12,7 +13,8 @@ use crate::{
     phase::{Deck, Parsed, ParsedSlide},
     slide_compare::{compare_all, compare_except_key, target_key_change_allowed},
 };
-use std::ops::Range;
+use serde::Serialize;
+use std::{collections::BTreeMap, ops::Range};
 
 const SLIDE_BODY_EDIT_HELP: &str =
     "keep page settings, speaker notes, and the rest of the deck unchanged, then retry";
@@ -23,6 +25,68 @@ pub struct SlideBodyRewrite {
     pub source: String,
     pub key: SlideKey,
     pub body: String,
+}
+
+/// Preview-cache body sources for every surviving parsed slide.
+///
+/// Each slide key appears in exactly one of `sources` or `unavailable`. Draft
+/// slides are absent because parsing removes them, while skipped slides remain.
+/// This map is computed on every build but written only to the preview cache.
+#[cfg_attr(any(test, feature = "ts-bindings"), derive(ts_rs::TS))]
+#[cfg_attr(
+    any(test, feature = "ts-bindings"),
+    ts(export, export_to = "../../bindings/")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlideSources {
+    version: u8,
+    #[cfg_attr(
+        any(test, feature = "ts-bindings"),
+        ts(type = "Record<string, string>")
+    )]
+    sources: BTreeMap<SlideKey, String>,
+    #[cfg_attr(
+        any(test, feature = "ts-bindings"),
+        ts(type = "Record<string, string>")
+    )]
+    unavailable: BTreeMap<SlideKey, String>,
+}
+
+impl SlideSources {
+    /// Extracts each body or records that slide's refusal.
+    ///
+    /// An `unavailable` value is the refusal's `Display` text
+    /// (`message\n  = help: …`). These extraction refusals have no line number.
+    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Self {
+        let mut sources = BTreeMap::new();
+        let mut unavailable = BTreeMap::new();
+        for slide in slides {
+            match slide_body(source, slide) {
+                Ok(body) => {
+                    sources.insert(slide.key.clone(), body);
+                }
+                Err(error) => {
+                    unavailable.insert(slide.key.clone(), error.to_string());
+                }
+            }
+        }
+        Self {
+            version: 1,
+            sources,
+            unavailable,
+        }
+    }
+}
+
+/// Serializes the build's slide-source partition.
+///
+/// Every build computes this JSON, but only preview-cache generation writes it.
+pub fn slide_sources_json(sources: &SlideSources) -> Result<String> {
+    pretty_json(
+        sources,
+        "slide sources",
+        "keep slide source fields serializable",
+    )
 }
 
 /// Returns a slide's body Markdown without page settings or speaker notes.
@@ -239,7 +303,7 @@ fn slide_count_refusal() -> BuildError {
         ErrorKind::Parse,
         None,
         "slide body edit would change the deck's slide count",
-        "a `---` line in the body splits the slide, and removing all content removes it; take the separator out or keep some content, then retry",
+        "remove any `---` separator, close any unclosed code fence, or keep some body content when the slide has no settings comment or note, then retry",
     )
 }
 
@@ -284,7 +348,8 @@ fn normalize_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        edge_blank_runs, parse_source, rewrite_slide_body, slide_body, validate_reparsed_slide_body,
+        edge_blank_runs, parse_source, rewrite_slide_body, slide_body, slide_sources_json,
+        validate_reparsed_slide_body, SlideSources,
     };
     use crate::{
         domain::{SlideKey, SourceSpan},
@@ -292,6 +357,8 @@ mod tests {
         highlight::Highlighter,
         notes_edit::strip_bom,
     };
+    use std::{fs, path::Path};
+    use ts_rs::{Config, TS};
 
     const TARGET_WITH_METADATA_SOURCE: &str = "# First\n\n---\n\n<!-- {\"key\":\"target\",\"layout\":\"cover\"} -->\n# Old\n\n<!-- speaker note -->\n\n---\n\n# Last\n";
 
@@ -696,7 +763,9 @@ mod tests {
                 body: "# New\n\n```rust\nlet x = 1;",
                 expected_message: "slide body edit would change the deck's slide count",
                 expected_line: None,
-                expected_help: None,
+                expected_help: Some(
+                    "remove any `---` separator, close any unclosed code fence, or keep some body content when the slide has no settings comment or note, then retry",
+                ),
             },
             Case {
                 name: "unknown-language",
@@ -794,7 +863,7 @@ mod tests {
                 expected_message: "slide body edit would change the deck's slide count",
                 expected_line: None,
                 expected_help: Some(
-                    "a `---` line in the body splits the slide, and removing all content removes it; take the separator out or keep some content, then retry",
+                    "remove any `---` separator, close any unclosed code fence, or keep some body content when the slide has no settings comment or note, then retry",
                 ),
             },
             // Emptying the only body leaves no slide for the parser to return.
@@ -1440,5 +1509,111 @@ mod tests {
             );
             assert_eq!(error.help, "reload the preview and retry", "{name}: help");
         }
+    }
+
+    #[test]
+    fn slide_sources_json_uses_slide_body_for_every_editable_surviving_slide() {
+        let source = "<!-- {\"key\":\"intro\"} -->\n# Title\n\nBody\n\n<!-- first note -->\n\n<!-- second note -->\n";
+        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+
+        assert_eq!(
+            slide_sources_json(&sources).unwrap(),
+            "{\n  \"version\": 1,\n  \"sources\": {\n    \"intro\": \"# Title\\n\\nBody\"\n  },\n  \"unavailable\": {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn slide_sources_include_skipped_slides_and_exclude_drafts() {
+        let source = "<!-- {\"key\":\"intro\"} -->\n# Intro\n\n---\n\n<!-- {\"key\":\"draft\",\"draft\":true} -->\n# Draft\n\n---\n\n<!-- {\"key\":\"skipped\",\"skip\":true} -->\n# Skipped\n";
+        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+
+        assert_eq!(
+            sources
+                .sources
+                .keys()
+                .map(SlideKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["intro", "skipped"]
+        );
+        assert!(sources.unavailable.is_empty());
+    }
+
+    #[test]
+    fn slide_sources_record_every_slide_as_unavailable_for_bare_cr_deck() {
+        let source = "<!-- {\"key\":\"first\"} -->\n# First\n\nBody\rTail\n\n---\n\n<!-- {\"key\":\"second\"} -->\n# Second\n";
+        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        let expected_reason = "bare CR line endings are not supported by preview editing\n  = help: convert the deck to LF or CRLF line endings, then reload the preview";
+
+        assert!(sources.sources.is_empty());
+        assert_eq!(
+            sources
+                .unavailable
+                .iter()
+                .map(|(key, reason)| (key.as_str(), reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("first", expected_reason), ("second", expected_reason),]
+        );
+    }
+
+    #[test]
+    fn slide_sources_partition_genuine_and_foreign_slides_exactly_once() {
+        let source = "<!-- {\"key\":\"genuine\"} -->\n# Genuine\n";
+        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let foreign_source =
+            "<!-- {\"key\":\"foreign\"} -->\n# Foreign\n\nBody that extends beyond the genuine source\n";
+        let foreign_deck = parse_source(foreign_source, &Highlighter::defaults()).unwrap();
+        let slides = vec![
+            deck.parsed_slides()[0].clone(),
+            foreign_deck.parsed_slides()[0].clone(),
+        ];
+
+        let sources = SlideSources::from_slides(source, &slides);
+        let genuine = SlideKey::new("genuine").unwrap();
+        let foreign = SlideKey::new("foreign").unwrap();
+
+        assert_eq!(
+            sources.sources.get(&genuine).map(String::as_str),
+            Some("# Genuine")
+        );
+        assert_eq!(
+            sources.unavailable.get(&foreign).map(String::as_str),
+            Some(
+                "slide body spans do not match the deck source\n  = help: reload the preview and retry"
+            )
+        );
+        for slide in &slides {
+            assert_ne!(
+                sources.sources.contains_key(&slide.key),
+                sources.unavailable.contains_key(&slide.key)
+            );
+        }
+    }
+
+    #[test]
+    fn slide_sources_include_issue_584_slide_with_measured_body() {
+        let source =
+            "<!-- {\"key\":\"issue-584\"} -->\n# Accepted\n\n<!-- first --> <!-- second -->\n";
+        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let slide = &deck.parsed_slides()[0];
+        let body = slide_body(source, slide).unwrap();
+        assert_eq!(body.as_bytes(), b"# Accepted");
+
+        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        assert_eq!(sources.sources.get(&slide.key), Some(&body));
+        assert!(sources.unavailable.is_empty());
+    }
+
+    #[test]
+    fn exports_slide_sources_binding_as_keyed_record() {
+        let cfg = Config::from_env();
+        SlideSources::export_all(&cfg).unwrap();
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/SlideSources.ts");
+        let ts = fs::read_to_string(path).unwrap();
+        assert!(ts.contains("sources: Record<string, string>"));
+        assert!(ts.contains("unavailable: Record<string, string>"));
     }
 }
