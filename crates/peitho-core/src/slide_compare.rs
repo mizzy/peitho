@@ -86,3 +86,36 @@ pub(crate) fn compare_all(
 pub(crate) fn target_key_change_allowed(before: &ParsedSlide, after: &ParsedSlide) -> bool {
     before.key == after.key || (before.key_source.is_derived() && after.key_source.is_derived())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{compare_except_key, SlideDifference};
+    use crate::{
+        highlight::Highlighter,
+        parser::{parse_frontmatter, parse_markdown},
+    };
+
+    #[test]
+    fn comparison_reports_notes_before_layout_request() {
+        let highlighter = Highlighter::defaults();
+        let before_source = "# T\n<!-- before -->\n";
+        let after_source = "<!-- {\"layout\":\"cover\"} -->\n# T\n<!-- after -->\n";
+        let before = parse_markdown(
+            before_source,
+            parse_frontmatter(before_source).unwrap(),
+            &highlighter,
+        )
+        .unwrap();
+        let after = parse_markdown(
+            after_source,
+            parse_frontmatter(after_source).unwrap(),
+            &highlighter,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compare_except_key(&before.parsed_slides()[0], &after.parsed_slides()[0]),
+            Err(SlideDifference::Notes)
+        );
+    }
+}
