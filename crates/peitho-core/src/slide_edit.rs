@@ -7,6 +7,7 @@ use crate::{
     notes_edit::{normalized_note_text, restore_bom, strip_bom},
     parser::{line_for_offset, parse_frontmatter, parse_markdown, same_block_skeleton},
     phase::{Deck, Parsed, ParsedSlide},
+    slide_compare::{compare_all, compare_except_key, target_key_change_allowed},
 };
 
 const STRUCTURAL_EDIT_HELP: &str =
@@ -107,7 +108,7 @@ fn safe_line_for_offset(source: &str, requested: usize) -> usize {
     line_for_offset(source, offset)
 }
 
-fn refusal(line: Option<usize>, message: &'static str) -> BuildError {
+fn refusal(line: Option<usize>, message: impl Into<String>) -> BuildError {
     BuildError::new(ErrorKind::Parse, line, message, STRUCTURAL_EDIT_HELP)
 }
 
@@ -136,7 +137,7 @@ fn preserves_deck_for_block_edit(
     }
     for (index, (before_slide, after_slide)) in before_slides.iter().zip(after_slides).enumerate() {
         if index == target_index {
-            compare_target_slide(
+            compare_target_slide_for_block_edit(
                 before_source,
                 before_slide,
                 after_source,
@@ -145,54 +146,29 @@ fn preserves_deck_for_block_edit(
                 replacement,
             )?;
         } else {
-            compare_non_target_slide(before_slide, after_slide)?;
+            compare_non_target_slide_for_block_edit(before_slide, after_slide)?;
         }
     }
 
     Ok(())
 }
 
-fn compare_non_target_slide(before: &ParsedSlide, after: &ParsedSlide) -> Result<()> {
-    if before.key != after.key {
-        return Err(refusal(
+fn compare_non_target_slide_for_block_edit(
+    before: &ParsedSlide,
+    after: &ParsedSlide,
+) -> Result<()> {
+    compare_all(before, after).map_err(|difference| {
+        refusal(
             None,
-            "inline edit would change another slide's key",
-        ));
-    }
-    if !before.key_source.same_kind_as(&after.key_source) {
-        return Err(refusal(
-            None,
-            "inline edit would change another slide's key source",
-        ));
-    }
-    if before.layout_request_name() != after.layout_request_name() {
-        return Err(refusal(
-            None,
-            "inline edit would change another slide's layout request",
-        ));
-    }
-    if before.skip != after.skip {
-        return Err(refusal(
-            None,
-            "inline edit would change another slide's skip flag",
-        ));
-    }
-    if before.page_number_hidden != after.page_number_hidden {
-        return Err(refusal(
-            None,
-            "inline edit would change another slide's page-number flag",
-        ));
-    }
-    if before.notes != after.notes {
-        return Err(refusal(
-            None,
-            "inline edit would change another slide's notes",
-        ));
-    }
-    Ok(())
+            format!(
+                "inline edit would change another slide's {}",
+                difference.noun_phrase()
+            ),
+        )
+    })
 }
 
-fn compare_target_slide(
+fn compare_target_slide_for_block_edit(
     before_source: &str,
     before: &ParsedSlide,
     after_source: &str,
@@ -200,28 +176,13 @@ fn compare_target_slide(
     edited_span_index: usize,
     replacement: &str,
 ) -> Result<()> {
-    if before.notes != after.notes {
+    if let Err(difference) = compare_except_key(before, after) {
         return Err(refusal(
             None,
-            "inline edit would change the edited slide's notes",
-        ));
-    }
-    if before.layout_request_name() != after.layout_request_name() {
-        return Err(refusal(
-            None,
-            "inline edit would change the edited slide's layout request",
-        ));
-    }
-    if before.skip != after.skip {
-        return Err(refusal(
-            None,
-            "inline edit would change the edited slide's skip flag",
-        ));
-    }
-    if before.page_number_hidden != after.page_number_hidden {
-        return Err(refusal(
-            None,
-            "inline edit would change the edited slide's page-number flag",
+            format!(
+                "inline edit would change the edited slide's {}",
+                difference.noun_phrase()
+            ),
         ));
     }
     let mut block_skeletons_match = true;
@@ -272,8 +233,7 @@ fn compare_target_slide(
             "inline edit would change the edited slide's reveal step count",
         ));
     }
-    if before.key != after.key && !(before.key_source.is_derived() && after.key_source.is_derived())
-    {
+    if !target_key_change_allowed(before, after) {
         return Err(refusal(
             None,
             "inline edit would change an explicit key on the edited slide",

@@ -13,8 +13,9 @@ Branch: `preview-source-edit`
 | Modify | `crates/peitho-core/src/parser.rs` | Capture `settings_span` and pass it out of `process_html_chunk`. | `phase.rs::ParsedSlide`. | 1 |
 | Modify | `crates/peitho-core/src/mapping.rs` | Keep direct `ParsedSlide` test fixtures compiling without propagating the parse-only span. | Task 1 field addition. | 1 |
 | Modify | `crates/peitho-core/src/code_images.rs` | Keep direct `ParsedSlide` test fixtures compiling without transforming source bookkeeping. | Task 1 field addition. | 1 |
-| Modify | `crates/peitho-core/src/notes_edit.rs` | Expose the existing source-text helpers inside the crate. | Existing note rewrite semantics. | 2 |
-| Modify | `crates/peitho-core/src/slide_edit.rs` | Expose one non-target comparison and one derived-key rule to both edit modes. | Existing inline-edit postcondition. | 3 |
+| Modify | `crates/peitho-core/src/notes_edit.rs` | Expose the existing source-text helpers and consume the shared slide comparisons. | Existing note rewrite semantics. | 2-3 |
+| Modify | `crates/peitho-core/src/slide_edit.rs` | Consume the neutral shared slide comparisons and derived-key rule. | Existing inline-edit postcondition. | 3 |
+| Create | `crates/peitho-core/src/slide_compare.rs` | Own the one shared set of parsed-slide comparisons and difference names. | Existing inline-edit and note-edit postconditions. | 3 |
 | Create | `crates/peitho-core/src/slide_source.rs` | Own core whole-slide source semantics, the accepted rewrite identity, and the serialized contract. | Tasks 1-3 parser and shared helpers. | 2-4, 7 |
 | Modify | `crates/peitho-core/src/lib.rs` | Publish the slide-source API and serialized contract. | `slide_source.rs`. | 2, 7 |
 | Modify | `crates/peitho/src/main.rs` | Orchestrate whole-slide preview I/O across the origin and cache seams. | Tasks 2-7 core/server contracts. | 5-8 |
@@ -241,7 +242,10 @@ the accepted source, key, and body from the candidate reparse itself.
 **Files.**
 
 - `crates/peitho-core/src/slide_source.rs`
+- `crates/peitho-core/src/slide_compare.rs`
 - `crates/peitho-core/src/slide_edit.rs`
+- `crates/peitho-core/src/notes_edit.rs` (consume the shared comparisons and
+  expose the existing trailing-line helper)
 
 **Test (Red).** Add
 `rewrite_slide_body_canonicalizes_settings_body_and_one_note` with this source
@@ -251,8 +255,7 @@ and exact output:
 let source = "\n<!-- {\"key\":\"fixed\"} -->\n\n<!-- note one -->\n\n# Old\n\nTail <!-- note two -->\n\n";
 let expected = "\n<!-- {\"key\":\"fixed\"} -->\n\n# New\n\n- one\n\n<!--\nnote one\n\nnote two\n-->\n\n";
 let highlighter = Highlighter::defaults();
-let frontmatter = parse_frontmatter(source).unwrap();
-let deck = parse_deck(source, frontmatter, &highlighter).unwrap();
+let deck = parse_source(source, &highlighter).unwrap();
 let rewritten = rewrite_slide_body(
     source,
     &deck.parsed_slides()[0],
@@ -274,6 +277,12 @@ one note comment that precedes the settings comment, pure CRLF output, leading
 BOM preservation, and a configured `code_images` language whose external
 renderer must not run. In the derived-heading row, assert all three returned
 fields: the rewritten source, the new derived key, and the post-save body.
+Add rows proving that `slide_body` and `rewrite_slide_body` refuse when the
+BOM-stripped deck contains a bare CR anywhere, with the exact conversion help;
+include a bare CR in the target, in another slide, on the separator line just
+before the target, and in a tail swallowed by a submitted unclosed fence. LF
+and CRLF identity rewrites remain byte-identical, while submitted bare CR is
+normalized to LF.
 
 **Implementation (Green).** Implement the authoritative signature:
 
@@ -292,30 +301,47 @@ pub fn rewrite_slide_body(
 ) -> Result<SlideBodyRewrite>;
 ```
 
-Call `strip_bom`, then fresh-parse with `parse_frontmatter` plus parse-only
-`parse_markdown`, validate the supplied target against the slide at its index,
-retain the original edge blank runs, and build the interior as verbatim settings
-comment, one blank line, normalized/edge-trimmed body, one blank line, and
-`canonical_comment(fresh.notes)` when notes exist. Define those runs by byte
-range, once: the leading run is `source_span.start..first_nonblank_line.start`;
-the trailing run is `last_nonblank_line.content_end..source_span.end`. The line
-content end is immediately before its `\r\n`, `\n`, or `\r`, after any spaces
-or tabs on that non-blank line. Its line terminator is therefore the first
-bytes of the trailing run, followed by any whitespace-only lines. For the
-canonical fixture above the leading run is `"\n"` and the trailing run is
-`"\n\n"`, so the exact expected output preserves both.
+Call `strip_bom`, perform the deck-wide bare-CR refusal, then fresh-parse with
+`parse_frontmatter` plus parse-only `parse_markdown`. Find the supplied target
+by exact `source_span`, compare its key, source index, settings span, and note
+spans against that fresh slide, retain the original edge blank runs, and build
+the interior from the non-empty
+parts only: the verbatim settings comment, normalized/edge-trimmed body, and
+`canonical_comment(fresh.notes)`. Join those parts with exactly one blank line.
+Define those runs by byte range, once: the leading run is
+`source_span.start..first_nonblank_line.start`; the trailing run is
+`last_nonblank_line.content_end..source_span.end`. The line content end is
+immediately before its `\r\n` or `\n`, after any spaces or tabs on that
+non-blank line. Its line terminator is therefore the first bytes of the
+trailing run, followed by any whitespace-only lines. When more source follows
+the slide and the trailing run contains no blank line (it is empty or only the
+last line's terminator), emit one extra slide line ending before the trailing
+run. This makes a blank line before the following separator part of the
+canonical form without growing an existing blank run. For the canonical
+fixture above the leading run is `"\n"` and the trailing run is `"\n\n"`, so
+the exact expected output preserves both.
 
 The settings span follows the parser convention pinned in Task 1 and includes
-its terminal line ending. Strip only that one terminal `\r\n`, `\n`, or `\r`
-before adding canonical separators. Use the slide's existing line ending and
+its terminal line ending. Strip only that one terminal `\r\n` or `\n` before
+adding canonical separators. Use the slide's existing line ending and
 `restore_bom` for `SlideBodyRewrite.source`. Target validation compares key,
 source index, source span, settings span, and note spans with the fresh slide
-before any splice.
+before any splice. A mismatch refuses with help to reload the preview and
+retry, rather than suggesting that the stale request can succeed unchanged.
+
+Before either public function parses spans, removes comments, or splices
+source, scan the whole BOM-stripped deck and refuse when any `\r` is not
+followed by `\n`. Both use the same refusal: `bare CR line endings are not
+supported by preview editing`, with help to convert the deck to LF or CRLF and
+reload. This check is deliberately deck-wide because separator bytes can fall
+outside a target span and malformed submitted Markdown can change which tail
+bytes belong to the reparsed target. Submitted body text is still normalized
+to LF, including submitted bare CR characters.
 
 Lift, rather than copy, the comparison logic from `slide_edit.rs`:
 
 ```rust
-pub(crate) enum NonTargetSlideDifference {
+pub(crate) enum SlideDifference {
     Key,
     KeySourceKind,
     LayoutRequest,
@@ -324,10 +350,20 @@ pub(crate) enum NonTargetSlideDifference {
     Notes,
 }
 
-pub(crate) fn compare_non_target_slide(
+pub(crate) fn compare_except_key(
     before: &ParsedSlide,
     after: &ParsedSlide,
-) -> std::result::Result<(), NonTargetSlideDifference>;
+) -> std::result::Result<(), SlideDifference>;
+
+pub(crate) fn compare_except_notes(
+    before: &ParsedSlide,
+    after: &ParsedSlide,
+) -> std::result::Result<(), SlideDifference>;
+
+pub(crate) fn compare_all(
+    before: &ParsedSlide,
+    after: &ParsedSlide,
+) -> std::result::Result<(), SlideDifference>;
 
 pub(crate) fn target_key_change_allowed(
     before: &ParsedSlide,
@@ -335,11 +371,20 @@ pub(crate) fn target_key_change_allowed(
 ) -> bool;
 ```
 
-`target_key_change_allowed` returns `before.key == after.key` or both
-`key_source` values are `Derived`; there is no second spelling of that rule.
-Make `rewrite_block` consume those same helpers. The slide-source validator
-checks slide count, `settings().sections()`, every non-target slide, target
-layout/skip/page-number/notes, the shared key rule, and
+Keep the comparison helpers, difference enum, and diagnostic noun phrases in
+the neutral `slide_compare.rs` module. The layout request, skip flag, and
+page-number flag are compared in one internal core. `compare_except_key`
+compares notes first, preserving `rewrite_block`'s existing diagnostic order,
+then layout and flags. `compare_except_notes` compares key, key-source kind,
+layout, and flags. `compare_all` adds notes to `compare_except_notes`. Note
+saves use `compare_except_notes` for their target and `compare_all` for every
+other slide. `target_key_change_allowed`
+returns `before.key == after.key` or both `key_source` values are `Derived`;
+there is no second spelling of that rule. Make `rewrite_block` consume those
+same helpers. The slide-source validator checks slide count,
+`settings().sections()`, every non-target slide, target
+layout/skip/page-number/notes, byte-identical target settings-comment text and
+matching settings-comment presence, the shared key rule, and
 `slide_body(candidate, target_after)? == normalized_new_body`. It must not
 compare fragment shape, editable spans, or reveal step count.
 
@@ -355,7 +400,7 @@ identity.
 cargo test -p peitho-core rewrite_slide_body_canonicalizes_settings_body_and_one_note
 cargo test -p peitho-core rewrite_slide_body_accepts_structural_changes_and_preserves_source_conventions
 cargo test -p peitho-core rewrite_block
-test "$(rg -n '^pub\(crate\) fn compare_non_target_slide' crates/peitho-core/src | wc -l | tr -d ' ')" -eq 1
+test "$(rg -n '^pub\(crate\) fn compare_all' crates/peitho-core/src | wc -l | tr -d ' ')" -eq 1
 test "$(rg -n '^pub\(crate\) fn target_key_change_allowed' crates/peitho-core/src | wc -l | tr -d ' ')" -eq 1
 ```
 
@@ -378,7 +423,7 @@ stabilizes after one pass.
 | plaintext comment | `# New\n\n<!-- stolen note -->` | target notes |
 | JSON comment | `<!-- {"layout":"cover"} -->\n# New` | duplicate settings parse error or changed settings |
 | unclosed fence | `` # New\n\n```rust\nlet x = 1; `` | notes or slide count |
-| whitespace | ` \n\t\n` | slide count or body round-trip |
+| whitespace | ` \n\t\n` | accepted and idempotent when settings or notes keep the slide parseable; otherwise slide count |
 | unknown language | `` # New\n\n```not-installed\nx\n``` `` | parse error |
 | bad slot | `::: {slot=}\ntext\n:::` | parse error |
 | bad reveal | `::: {reveal=yes}\ntext\n:::` | parse error |
@@ -664,9 +709,9 @@ cargo test -p peitho --bin peitho preview_deck_writer
 
 #### Task 7: Generate `SlideSources` and emit it from the generation parse
 
-**Goal.** Deliver every surviving slide's normalized body to preview with a
-Rust-owned contract, using the same `slide_body` function as the save-time
-drift guard.
+**Goal.** Deliver every editable surviving slide's normalized body to preview
+with a Rust-owned contract, using the same `slide_body` function as the
+save-time drift guard.
 
 **Files.**
 
@@ -677,24 +722,28 @@ drift guard.
 - `packages/peitho-present/test/generated.test.ts`
 
 **Test (Red).** Add
-`slide_sources_json_uses_slide_body_for_every_surviving_slide` and
+`slide_sources_json_uses_slide_body_for_every_editable_surviving_slide` and
 `exports_slide_sources_binding_as_keyed_record` for deterministic JSON and
 binding export:
 
 ```rust
-let sources = SlideSources::from_slides(source, deck.parsed_slides()).unwrap();
+let sources = SlideSources::from_slides(source, deck.parsed_slides());
 assert_eq!(
     slide_sources_json(&sources).unwrap(),
-    "{\n  \"version\": 1,\n  \"sources\": {\n    \"intro\": \"# Title\\n\\nBody\"\n  }\n}\n"
+    "{\n  \"version\": 1,\n  \"sources\": {\n    \"intro\": \"# Title\\n\\nBody\"\n  },\n  \"unavailable\": {}\n}\n"
 );
 assert!(generated_binding.contains("sources: Record<string, string>"));
+assert!(generated_binding.contains("unavailable: Record<string, string>"));
 ```
 
 Extend `emit_preview_cache_writes_preview_only_files_in_generation_dir` to
 parse `sources.json` and assert the body excludes its settings comment and all
 note comments. A core map test includes a skipped slide and a draft slide and
 asserts the skipped key is present while the parser-dropped draft key is
-absent. Add
+absent. Add an Issue #584 deck with two comments on one line; assert the
+refused slide is absent from `sources`, its key is present in `unavailable`
+with both the refusal message and help, and map generation succeeds rather
+than failing the build or dropping the refusal silently. Add
 `build_artifacts_compute_slide_sources_for_both_annotation_modes`, building the
 same deck once with `EditAnnotations::Off` and once with
 `EditAnnotations::On`, and assert both non-optional
@@ -704,7 +753,11 @@ TypeScript compile fixture:
 ```ts
 import type { SlideSources } from "../../../bindings/SlideSources";
 
-const sources: SlideSources = { version: 1, sources: { intro: "# Title" } };
+const sources: SlideSources = {
+  version: 1,
+  sources: { intro: "# Title" },
+  unavailable: {},
+};
 expect(sources.sources.intro).toBe("# Title");
 ```
 
@@ -721,17 +774,24 @@ pub struct SlideSources {
     version: u8,
     #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "Record<string, string>"))]
     sources: BTreeMap<SlideKey, String>,
+    #[cfg_attr(any(test, feature = "ts-bindings"), ts(type = "Record<string, string>"))]
+    unavailable: BTreeMap<SlideKey, String>,
 }
 
 impl SlideSources {
-    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Result<Self>;
+    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Self;
 }
 
 pub fn slide_sources_json(sources: &SlideSources) -> Result<String>;
 ```
 
-`from_slides` calls `slide_body` for every surviving parsed slide and
-propagates any source/span mismatch. In
+`from_slides` calls `slide_body` for every surviving parsed slide. It inserts
+successful bodies into `sources`; for each refusal it inserts the key and
+`BuildError::to_string()` into `unavailable`, preserving both the message and
+help. A refused slide must not fail a build that otherwise succeeds and must
+never disappear silently. The JSON shape is always
+`{"version":1,"sources":{…},"unavailable":{…}}`. Task 11 surfaces the
+recorded reason when the author requests source editing. In
 `build_artifacts_with_services`, construct the map from `loaded.source` and
 the same Parsed deck immediately before mapping consumes it. Add
 `slide_sources_json: String` to `BuildArtifacts` and populate it on every build,
@@ -774,7 +834,11 @@ fn publish_rejects_slide_sources_file() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");
     write_valid_dist(&dist);
-    fs::write(dist.join("sources.json"), r#"{"version":1,"sources":{}}"#).unwrap();
+    fs::write(
+        dist.join("sources.json"),
+        r#"{"version":1,"sources":{},"unavailable":{}}"#,
+    )
+    .unwrap();
 
     Command::cargo_bin("peitho")
         .unwrap()
@@ -828,7 +892,7 @@ non-2xx `sources.json` leaves the shell in its existing load-error state.
 **Implementation (Green).** Import the generated `SlideSources` type, store:
 
 ```ts
-private sources: SlideSources = { version: 1, sources: {} };
+private sources: SlideSources = { version: 1, sources: {}, unavailable: {} };
 ```
 
 Give `PreviewFetchFixture` a cloned `SlideSources` value and a
@@ -970,7 +1034,10 @@ is ignored in grid, while a transition settles, and while either edit kind is
 open; it opens only the current single-mode slide; source-open blocks inline-
 click start and an inline edit blocks source-open; the textarea replaces the
 fitted stage and resize updates its frame; Escape restores the stale rendered
-host. For a first draft whose TypeScript-normalized text is `"# Typed"`, return
+host. When the current slide is listed in `sources.unavailable`, assert that no
+editor opens and the `slide-source` status channel shows that recorded reason,
+including its actionable help. For a first draft whose
+TypeScript-normalized text is `"# Typed"`, return
 `{key:"renamed",body:"# Server canonical"}`. Assert the map moves from the old
 key to `renamed`, stores the response body verbatim, the source target uses
 `renamed`, and a second `e` opens with `"# Server canonical"`. Change that
@@ -996,9 +1063,12 @@ private isEditOpen(): boolean {
 Add `sourceKey: string` to `PreviewSlideView`, initialized from `meta.key`, and
 listen for `peitho:sourceeditrequest` in the controller. Every former generic
 `activeSlideEdit !== null` guard must call `isEditOpen()`; inline-only code
-narrows the union by `kind`. Opening obtains `sources.sources[view.sourceKey]`
-and delegates to `openPreviewSourceEdit`. On keyed success, delete the old map
-entry, write `sources.sources[result.key] = result.body`, and set
+narrows the union by `kind`. Opening first checks
+`sources.unavailable[view.sourceKey]` and reports that recorded reason through
+the `slide-source` status channel while leaving the rendered host in place.
+Otherwise it obtains `sources.sources[view.sourceKey]` and delegates to
+`openPreviewSourceEdit`. On keyed success, delete the old map entry, write
+`sources.sources[result.key] = result.body`, and set
 `view.sourceKey = result.key`; `result.body` is the unmodified server response,
 not a locally normalized draft. Deliberately leave `view.meta.key`, the notes
 map, and rendered HTML unchanged. Add `"slide-source"` to `PanelStatusSource`
