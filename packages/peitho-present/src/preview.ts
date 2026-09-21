@@ -7,6 +7,7 @@ import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
 import { hasChordModifier, isComposingKey } from "./keyboard";
+import { readErrorResponse } from "./previewHttp";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
@@ -169,19 +170,6 @@ function isPreviewDraft(value: unknown): value is PreviewDraft {
     draft.selectionEnd >= 0 &&
     typeof draft.focused === "boolean"
   );
-}
-
-async function readErrorResponse(response: Response): Promise<{
-  body: string;
-  jsonError: string | null;
-}> {
-  const body = await response.text();
-  try {
-    const error = (JSON.parse(body) as { error?: unknown }).error;
-    return { body, jsonError: typeof error === "string" ? error : null };
-  } catch {
-    return { body, jsonError: null };
-  }
 }
 
 function parseEditableSourceRange(value: string): { start: number; end: number } | null {
@@ -690,8 +678,7 @@ class PreviewShellController implements PreviewShell {
         return true;
       }
 
-      const error = await readErrorResponse(response);
-      this.setNotesStatus(error.jsonError ?? error.body);
+      this.setNotesStatus(await readErrorResponse(response));
     } catch (error) {
       this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
@@ -975,11 +962,9 @@ class PreviewShellController implements PreviewShell {
         return true;
       }
 
-      const error = await readErrorResponse(response);
+      const error = await readErrorResponse(response, "slide edit");
       if (this.activeSlideEdit === edit) {
-        this.setSlideEditStatus(
-          error.jsonError ?? `slide edit failed (HTTP ${response.status})`
-        );
+        this.setSlideEditStatus(error);
         this.unlockSlideEdit(edit);
       }
     } catch (error) {

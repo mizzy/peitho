@@ -295,6 +295,17 @@ function isComposingKey(event) {
   return event.isComposing || event.keyCode === 229;
 }
 
+// src/previewHttp.ts
+async function readErrorResponse(response, fallbackLabel) {
+  const body = await response.text();
+  try {
+    const error = JSON.parse(body).error;
+    if (typeof error === "string") return error;
+  } catch {
+  }
+  return fallbackLabel === void 0 ? body : `${fallbackLabel} failed (HTTP ${response.status})`;
+}
+
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
   let index = from + direction;
@@ -601,15 +612,6 @@ function isPreviewDraft(value) {
   if (typeof value !== "object" || value === null) return false;
   const draft = value;
   return typeof draft.key === "string" && (draft.text === void 0 || typeof draft.text === "string") && typeof draft.selectionStart === "number" && Number.isFinite(draft.selectionStart) && draft.selectionStart >= 0 && typeof draft.selectionEnd === "number" && Number.isFinite(draft.selectionEnd) && draft.selectionEnd >= 0 && typeof draft.focused === "boolean";
-}
-async function readErrorResponse(response) {
-  const body = await response.text();
-  try {
-    const error = JSON.parse(body).error;
-    return { body, jsonError: typeof error === "string" ? error : null };
-  } catch {
-    return { body, jsonError: null };
-  }
 }
 function parseEditableSourceRange(value) {
   const match = /^(\d+)-(\d+)$/.exec(value);
@@ -1052,8 +1054,7 @@ var PreviewShellController = class {
         this.setNotesStatus("");
         return true;
       }
-      const error = await readErrorResponse(response);
-      this.setNotesStatus(error.jsonError ?? error.body);
+      this.setNotesStatus(await readErrorResponse(response));
     } catch (error) {
       this.setNotesStatus(error instanceof Error ? error.message : String(error));
     }
@@ -1303,11 +1304,9 @@ var PreviewShellController = class {
         if (this.activeSlideEdit === edit) this.finishSlideEdit(edit, newText);
         return true;
       }
-      const error = await readErrorResponse(response);
+      const error = await readErrorResponse(response, "slide edit");
       if (this.activeSlideEdit === edit) {
-        this.setSlideEditStatus(
-          error.jsonError ?? `slide edit failed (HTTP ${response.status})`
-        );
+        this.setSlideEditStatus(error);
         this.unlockSlideEdit(edit);
       }
     } catch (error) {
