@@ -501,6 +501,7 @@ pub struct ParsedSlide {
     pub step_count: usize,
     pub page_number_hidden: bool,
     pub notes: Option<String>,
+    pub settings_span: Option<SourceSpan>,
     pub note_spans: Vec<SourceSpan>,
 }
 
@@ -1209,6 +1210,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                settings_span: None,
                 note_spans: Vec::new(),
             }],
         );
