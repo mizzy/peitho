@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Records the scripted demo videos committed under site/static/guide-videos/:
+// Records the scripted demo videos committed under site/static/guide-videos/
+// (mp4, for the docs site) and docs/images/ (GIF, for the README — GitHub does
+// not play repo mp4s):
 //   preview-demo    `peitho preview`: grid, single mode, note editing, inline slide editing
 //   reveal-demo     `peitho present`: incremental reveal steps
 //   emphasis-demo   `peitho present`: stepped code line emphasis
@@ -15,6 +17,11 @@ import { chromium } from "playwright";
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PEITHO = join(ROOT, "target", "debug", "peitho");
 const OUT_DIR = join(ROOT, "site", "static", "guide-videos");
+const GIF_DIR = join(ROOT, "docs", "images");
+// 880px ≈ the README column; 8fps + 64 colors + dropped duplicate frames keeps the tour near 1 MB.
+const GIF_FILTER =
+  "fps=8,scale=880:-1:flags=lanczos,mpdecimate,split[a][b];" +
+  "[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle";
 const PORT = 8766;
 const ORIGIN = `http://localhost:${PORT}`;
 const VIEWPORT = { width: 1600, height: 900 };
@@ -129,13 +136,13 @@ async function presentTour(page, slides) {
 }
 
 const VIDEOS = {
-  "preview-demo": { deck: "peitho-tour", command: "preview", tour: previewTour },
-  "reveal-demo": { deck: "incremental-reveal", command: "present", tour: (page) => presentTour(page, 2) },
+  "preview-demo": { deck: "peitho-tour", command: "preview", tour: previewTour, readme: true },
+  "reveal-demo": { deck: "incremental-reveal", command: "present", tour: (page) => presentTour(page, 2), readme: true },
   "emphasis-demo": { deck: "code-emphasis", command: "present", tour: (page) => presentTour(page, 2) },
 };
 
 async function record(name) {
-  const { deck, command, tour } = VIDEOS[name];
+  const { deck, command, tour, readme } = VIDEOS[name];
   const out = join(OUT_DIR, `${name}.mp4`);
   const work = await mkdtemp(join(tmpdir(), "peitho-preview-demo-"));
   const deckDir = join(work, "deck");
@@ -169,6 +176,11 @@ async function record(name) {
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", "-movflags", "+faststart", out,
     ]);
     console.log(`recorded ${out}`);
+    if (readme) {
+      const gif = join(GIF_DIR, `${name}.gif`);
+      execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-i", out, "-vf", GIF_FILTER, "-vsync", "vfr", gif]);
+      console.log(`recorded ${gif}`);
+    }
   } finally {
     if (browser) await browser.close();
     server.kill();

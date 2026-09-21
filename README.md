@@ -79,7 +79,7 @@ Press `o` to flip between the single-slide view and a tile overview of the whole
 
 Type into the notes panel and the note autosaves on blur, slide changes, and page exit, written back into the deck's Markdown as the slide's `<!-- ... -->` comment (or into the file the slide is included from). While typing, only PageUp and PageDown change slides, and `Esc` leaves the panel before a second `Esc` opens the overview. The [CLI guide](https://peitho.gosu.ke/guide/cli/#editing-speaker-notes-in-preview) spells out exactly what a save writes.
 
-▶ [Watch a 35-second tour of the preview loop](https://peitho.gosu.ke/guide-videos/preview-demo.mp4): overview, single-slide view, editing a speaker note, and editing slide text in place.
+![A tour of peitho preview: the overview grid, the single-slide view, typing a speaker note, and editing a list item and a heading in place as Markdown](docs/images/preview-demo.gif)
 
 Thumbnails and overview tiles carry their slide number in the bottom-left corner:
 
@@ -169,7 +169,9 @@ Unclosed or nested blocks, unknown slot names, and contract violations inside th
 
 ### Incremental reveal
 
-Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. Content outside reveal groups is always visible; each direct child block is one step, lists reveal one top-level item per step with nested items attached to their parent, and multiple groups on a slide keep numbering continuously. `peitho preview`, PDF export, lint, and published output show the final state. `{reveal=value}`, empty groups, unclosed fences, nested fences, and multi-attribute fences are line-numbered build errors. ▶ [Watch reveal steps in `peitho present`](https://peitho.gosu.ke/guide-videos/reveal-demo.mp4).
+Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. Content outside reveal groups is always visible; each direct child block is one step, lists reveal one top-level item per step with nested items attached to their parent, and multiple groups on a slide keep numbering continuously. `peitho preview`, PDF export, lint, and published output show the final state. `{reveal=value}`, empty groups, unclosed fences, nested fences, and multi-attribute fences are line-numbered build errors.
+
+![Reveal steps advancing one at a time in peitho present](docs/images/reveal-demo.gif)
 
 ### Diagrams as code
 

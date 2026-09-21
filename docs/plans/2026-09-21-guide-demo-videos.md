@@ -30,8 +30,11 @@ them from the README.
   an inline `<video controls muted playsinline preload="metadata">` with
   `regex_replace` at build time. No JavaScript on the site, and `peitho docs`
   prints a labeled absolute link.
-- **README**: GitHub does not play repo-relative mp4s, so the README links to
-  the deployed files on peitho.gosu.ke (live after the first `main` deploy).
+- **README**: GitHub does not play repo-relative mp4s (only hand-uploaded
+  `user-attachments` URLs), so the script also converts the videos the README uses (`readme: true`) to GIFs
+  under `docs/images/` and the README embeds those (author decision: embed, do
+  not link). 880px wide, 8fps, 64 colors, duplicate frames dropped — about
+  1.3 MB for the 36-second preview tour, text still legible.
 
 ## Videos
 
