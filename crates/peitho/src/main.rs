@@ -2423,7 +2423,6 @@ fn write_preview_slide_edit(
     )
 }
 
-#[allow(dead_code)]
 fn write_preview_slide_source(
     input: &Path,
     key: &SlideKey,
@@ -2474,17 +2473,35 @@ fn write_preview_slide_source(
     Ok((key, body))
 }
 
-fn preview_deck_writer(input: PathBuf) -> server::DeckWriter {
-    Box::new(move |request| match request {
-        server::DeckWrite::Note { key, text } => write_preview_note(&input, &key, &text),
-        server::DeckWrite::SlideEdit {
+struct PreviewDeckWriter {
+    input: PathBuf,
+}
+
+impl server::DeckWriter for PreviewDeckWriter {
+    fn note(&mut self, key: SlideKey, text: String) -> Result<(), server::DeckWriteError> {
+        write_preview_note(&self.input, &key, &text)
+    }
+
+    fn slide_edit(&mut self, edit: server::SlideEditWrite) -> Result<(), server::DeckWriteError> {
+        let server::SlideEditWrite {
             key,
             start,
             end,
             old,
             new,
-        } => write_preview_slide_edit(&input, &key, start, end, &old, &new),
-    })
+        } = edit;
+        write_preview_slide_edit(&self.input, &key, start, end, &old, &new)
+    }
+
+    fn slide_source(
+        &mut self,
+        key: SlideKey,
+        old: String,
+        new: String,
+    ) -> Result<server::SlideSourceSaved, server::DeckWriteError> {
+        write_preview_slide_source(&self.input, &key, &old, &new)
+            .map(|(key, body)| server::SlideSourceSaved { key, body })
+    }
 }
 
 fn read_deck_source(input: &Path) -> miette::Result<String> {
@@ -5092,8 +5109,11 @@ fn preview(options: PreviewOptions) -> miette::Result<()> {
         emit_initial_preview_root(&options.input, &cache, &mut std::io::stderr())
     })?;
 
-    let server = server::PresentServer::bind(root, options.port, "index.html")?
-        .with_deck_writer(preview_deck_writer(options.input.clone()));
+    let server = server::PresentServer::bind(root, options.port, "index.html")?.with_deck_writer(
+        PreviewDeckWriter {
+            input: options.input.clone(),
+        },
+    );
     let url = server.preview_url();
     let _watch = spawn_preview_watch(watch, cache, server.clone());
     println!("serving preview at {url}");
@@ -6437,14 +6457,11 @@ contexts:
     }
 
     fn dispatch_preview_note(
-        writer: &mut server::DeckWriter,
+        writer: &mut dyn server::DeckWriter,
         key: SlideKey,
         text: &str,
     ) -> Result<(), server::DeckWriteError> {
-        writer(server::DeckWrite::Note {
-            key,
-            text: text.to_owned(),
-        })
+        writer.note(key, text.to_owned())
     }
 
     #[test]
@@ -7534,20 +7551,21 @@ contexts:
         )
         .unwrap();
         let (start, end) = preview_edit_coordinates(&deck, &key, "before", 0);
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
-        writer(server::DeckWrite::Note {
-            key: key.clone(),
-            text: "new note".to_owned(),
-        })
-        .unwrap();
-        writer(server::DeckWrite::SlideEdit {
-            key,
-            start,
-            end,
-            old: "before".to_owned(),
-            new: "after".to_owned(),
-        })
+        server::DeckWriter::note(&mut writer, key.clone(), "new note".to_owned()).unwrap();
+        server::DeckWriter::slide_edit(
+            &mut writer,
+            server::SlideEditWrite {
+                key,
+                start,
+                end,
+                old: "before".to_owned(),
+                new: "after".to_owned(),
+            },
+        )
         .unwrap();
 
         assert_eq!(
@@ -7560,6 +7578,103 @@ contexts:
             )
         );
         assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+    }
+
+    #[test]
+    fn preview_deck_writer_serves_slide_source_route_end_to_end() {
+        use std::net::{Shutdown, TcpStream};
+
+        fn post(server: &server::PresentServer, body: &str) -> (u16, String) {
+            let addr = server.addr();
+            let server_for_request = server.clone();
+            let handle = thread::spawn(move || server_for_request.handle_one());
+            let mut stream = TcpStream::connect(addr).unwrap();
+            let request = format!(
+                "POST /slide-source HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(request.as_bytes()).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).unwrap();
+            handle.join().unwrap();
+            let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+            let status = head
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse()
+                .unwrap();
+            (status, body.to_owned())
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            concat!(
+                "<!-- {\"key\":\"editable\"} -->\n",
+                "\n",
+                "# Old\n\n",
+                "Body\n\n",
+                "<!-- note -->\n",
+            ),
+        )
+        .unwrap();
+        let server = server::PresentServer::bind(PathBuf::new(), 0, "present.html")
+            .unwrap()
+            .with_deck_writer(PreviewDeckWriter {
+                input: deck.clone(),
+            });
+
+        let saved = post(
+            &server,
+            r##"{"key":"editable","old":"# Old\n\nBody","new":"# New\n\nBody with a list\n\n- one"}"##,
+        );
+        assert_eq!(saved.0, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved.1).unwrap(),
+            serde_json::json!({
+                "key": "editable",
+                "body": "# New\n\nBody with a list\n\n- one",
+            }),
+        );
+        let rewritten = concat!(
+            "<!-- {\"key\":\"editable\"} -->\n",
+            "\n",
+            "# New\n\n",
+            "Body with a list\n\n",
+            "- one\n\n",
+            "<!-- note -->\n",
+        );
+        assert_eq!(fs::read_to_string(&deck).unwrap(), rewritten);
+
+        let stale = post(
+            &server,
+            r##"{"key":"editable","old":"# Old\n\nBody","new":"# Stale"}"##,
+        );
+        assert_eq!(stale.0, 409);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stale.1).unwrap(),
+            serde_json::json!({"error": "the deck changed on disk; reload and retry"}),
+        );
+        assert_eq!(fs::read_to_string(&deck).unwrap(), rewritten);
+
+        let structural = post(
+            &server,
+            r##"{"key":"editable","old":"# New\n\nBody with a list\n\n- one","new":"---"}"##,
+        );
+        let structural_json: serde_json::Value = serde_json::from_str(&structural.1).unwrap();
+        assert_eq!(structural.0, 422);
+        assert!(structural_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("slide body edit would change the deck's slide count"));
+        assert_eq!(fs::read_to_string(&deck).unwrap(), rewritten);
     }
 
     #[test]
@@ -7579,7 +7694,9 @@ contexts:
             ),
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
         let current_source = concat!(
             "<!-- {\"key\":\"one\"} -->\r\n",
             "# One\r\n\r\n",
@@ -7634,7 +7751,9 @@ contexts:
             ),
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut writer,
@@ -7679,7 +7798,9 @@ contexts:
             b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# BOM\n\n<!-- old note -->\n",
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut writer,
@@ -7709,7 +7830,9 @@ contexts:
             ),
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut writer,
@@ -7747,7 +7870,9 @@ contexts:
             ),
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut writer,
@@ -7807,7 +7932,7 @@ contexts:
         let broken_dir = tempfile::tempdir().unwrap();
         let broken_deck = broken_dir.path().join("deck.md");
         fs::write(&broken_deck, "---\ntime: [\n---\n# Broken\n").unwrap();
-        let mut broken_writer = preview_deck_writer(broken_deck);
+        let mut broken_writer = PreviewDeckWriter { input: broken_deck };
         assert!(matches!(
             dispatch_preview_note(
                 &mut broken_writer,
@@ -7824,7 +7949,9 @@ contexts:
             "<!-- {\"key\":\"vanished\"} -->\n# Before\n",
         )
         .unwrap();
-        let mut vanished_writer = preview_deck_writer(vanished_deck.clone());
+        let mut vanished_writer = PreviewDeckWriter {
+            input: vanished_deck.clone(),
+        };
         fs::write(
             &vanished_deck,
             "<!-- {\"key\":\"replacement\"} -->\n# After\n",
@@ -7849,7 +7976,9 @@ contexts:
             "<!-- {\"key\":\"invalid\"} -->\n# Invalid\n\n<!-- old note -->\n",
         )
         .unwrap();
-        let mut invalid_writer = preview_deck_writer(invalid_deck);
+        let mut invalid_writer = PreviewDeckWriter {
+            input: invalid_deck,
+        };
         assert!(matches!(
             dispatch_preview_note(
                 &mut invalid_writer,
@@ -7870,7 +7999,9 @@ contexts:
         let deleted_dir = tempfile::tempdir().unwrap();
         let deleted_deck = deleted_dir.path().join("deck.md");
         fs::write(&deleted_deck, "# Deleted\n").unwrap();
-        let mut deleted_writer = preview_deck_writer(deleted_deck.clone());
+        let mut deleted_writer = PreviewDeckWriter {
+            input: deleted_deck.clone(),
+        };
         fs::remove_file(&deleted_deck).unwrap();
         assert!(matches!(
             dispatch_preview_note(
@@ -7889,7 +8020,9 @@ contexts:
         )
         .unwrap();
         fs::create_dir(unwritable_dir.path().join("deck.md.tmp")).unwrap();
-        let mut unwritable_writer = preview_deck_writer(unwritable_deck);
+        let mut unwritable_writer = PreviewDeckWriter {
+            input: unwritable_deck,
+        };
         let write_error = dispatch_preview_note(
             &mut unwritable_writer,
             peitho_core::domain::SlideKey::new("unwritable").unwrap(),
@@ -7911,7 +8044,9 @@ contexts:
             b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\n<!-- old note -->\r\n",
         )
         .unwrap();
-        let mut writer = preview_deck_writer(deck.clone());
+        let mut writer = PreviewDeckWriter {
+            input: deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut writer,
@@ -7928,7 +8063,9 @@ contexts:
         let mixed_deck = dir.path().join("mixed.md");
         let mixed_source = "<!-- {\"key\":\"a\"} -->\r\n# A\n\n<!-- old -->\n---\n# B\n";
         fs::write(&mixed_deck, mixed_source).unwrap();
-        let mut mixed_writer = preview_deck_writer(mixed_deck.clone());
+        let mut mixed_writer = PreviewDeckWriter {
+            input: mixed_deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut mixed_writer,
@@ -7948,7 +8085,9 @@ contexts:
             b"<!-- {\"key\":\"a\"} -->\r\n# A\r\n---\r\n# B",
         )
         .unwrap();
-        let mut unterminated_writer = preview_deck_writer(unterminated_deck.clone());
+        let mut unterminated_writer = PreviewDeckWriter {
+            input: unterminated_deck.clone(),
+        };
 
         dispatch_preview_note(
             &mut unterminated_writer,

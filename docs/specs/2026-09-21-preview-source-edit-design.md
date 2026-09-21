@@ -170,10 +170,18 @@ they are written, fail the watch rebuild, and surface through the existing
 
 Request `{key, old, new}` (`application/json`, `deny_unknown_fields`).
 
-- `DeckWrite::SlideSource { key, old, new }` joins the closed enum; one route
-  arm and one `DeckWriteRoute` entry. 404 without a `DeckWriter` (present),
-  content-type and body checks, and the 409/422/500 mapping come from the
-  shared handler unchanged.
+- One route arm and one `DeckWriteRoute` entry. 404 without a `DeckWriter`
+  (present), content-type and body checks, the single mutex, and the
+  409/422/500 mapping come from the shared handler unchanged.
+- **Request and response are paired by type** (reshaped during Task 6 after
+  review): the closure-plus-`DeckWrite`-enum writer became
+  `trait DeckWriter { note(..) -> Result<()>; slide_edit(..) -> Result<()>;
+  slide_source(..) -> Result<SlideSourceSaved> }`. `DeckWriteRoute` parses the
+  request, selects the call, and serializes that call's own result in one
+  place, so `/slide-source` cannot answer `{"saved":true}` and a note save
+  cannot answer `{key, body}`. With a separate outcome enum the pairing held
+  only because every writer remembered to return the matching variant — a test
+  writer in the first version already did not.
 - `write_preview_slide_source`: `load_and_expand_deck_source` → `parse_deck`
   → find the slide by `SlideKey` (gone → 409) → **drift guard**
   `slide_body(combined, slide)? == old` (a `slide_body` refusal cannot come
@@ -219,9 +227,9 @@ commonly passes parse but fails check (one bullet too many for the layout).
 The rebuild fails, the generation does not bump, the page keeps the last good
 generation — and the author's next move is `e` again to fix it. If the edit
 also changed a derived key, a second POST under the old key would be "key
-gone" with no in-page way out. `DeckWriter` therefore returns
-`Result<DeckWriteOutcome, DeckWriteError>`; `Note` and `SlideEdit` return the
-unit outcome and keep their current empty-success bodies byte-identical.
+gone" with no in-page way out. `DeckWriter::slide_source` therefore
+returns `SlideSourceSaved { key, body }`; `note` and `slide_edit` return `()`
+and keep their current `{"saved":true}` bodies byte-identical.
 
 ### 4. Body text reaches the browser through the preview cache only
 
@@ -286,8 +294,8 @@ is no "preview artifacts without sources" state to handle.
 - `crates/peitho-core/src/slide_source.rs` (new), `parser.rs` /`phase.rs`
   (`settings_span`), `notes_edit.rs` and `slide_edit.rs` (lift shared helpers
   to `pub(crate)`), a `SlideSources` contract type + `bindings/`
-- `crates/peitho/src/server.rs` (`DeckWrite::SlideSource`, route,
-  `DeckWriteOutcome`), `main.rs` (`write_preview_slide_source`, scope rename,
+- `crates/peitho/src/server.rs` (`DeckWriter` trait, `SlideSourceSaved`,
+  route), `main.rs` (`write_preview_slide_source`, scope rename,
   `sources.json` emission, contamination list)
 - `packages/peitho-present/src/preview.ts`, `previewSourceEdit.ts` (new),
   rebuilt `dist/preview.js`

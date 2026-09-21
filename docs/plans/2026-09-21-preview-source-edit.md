@@ -674,11 +674,13 @@ rg -n 'PreviewOriginRewriteScope::Slide' crates/peitho/src/main.rs
 ! rg -n 'PreviewOriginRewriteScope::NoteSlide' crates/peitho/src/main.rs
 ```
 
-#### Task 6: Add `/slide-source` and make writer success outcomes explicit
+#### Task 6: Add `/slide-source` with operation-typed writer results
 
 **Goal.** Serialize all three Markdown write paths under the existing mutex,
 return the post-save key and body for source edits, and preserve the two old
-success responses byte for byte.
+success responses byte for byte. Make the request/response pairing part of the
+writer type: no consumer can return a note response for a source write, or a
+source response for a note or inline write.
 
 **Files.**
 
@@ -702,32 +704,31 @@ let response = http_request_with_content_type(
 );
 assert_eq!((response.status, response.body.as_str()), (404, "404\n"));
 
-let captured = Arc::new(Mutex::new(Vec::new()));
-let captured_by_writer = Arc::clone(&captured);
-let server = deck_write_server(Box::new(move |request| {
-    captured_by_writer.lock().unwrap().push(request);
-    Ok(DeckWriteOutcome::SlideSource {
+let writer = RecordingDeckWriter::default().with_slide_source_result(Ok(
+    SlideSourceSaved {
         key: SlideKey::new("new-derived-key").unwrap(),
         body: "# New".to_owned(),
-    })
-}));
+    },
+));
+let calls = writer.calls();
+let server = deck_write_server(writer);
 let response = json_http_request(
     &server,
     "POST",
     "/slide-source",
-    r#"{"key":"old","old":"# Old","new":"# New","extra":true}"#,
+    r##"{"key":"old","old":"# Old","new":"# New","extra":true}"##,
 );
 assert_eq!((response.status, response.body.as_str()), (400, "invalid slide source body\n"));
 
-let valid_body = r#"{"key":"old","old":"# Old","new":"# New"}"#;
+let valid_body = r##"{"key":"old","old":"# Old","new":"# New"}"##;
 let saved = json_http_request(&server, "POST", "/slide-source", valid_body);
 assert_eq!(
     (saved.status, saved.body.as_str()),
-    (200, r#"{"key":"new-derived-key","body":"# New"}"#),
+    (200, r##"{"key":"new-derived-key","body":"# New"}"##),
 );
 assert_eq!(
-    captured.lock().unwrap().as_slice(),
-    [DeckWrite::SlideSource {
+    calls.lock().unwrap().as_slice(),
+    [RecordedDeckWrite::SlideSource {
         key: SlideKey::new("old").unwrap(),
         old: "# Old".to_owned(),
         new: "# New".to_owned(),
@@ -741,45 +742,64 @@ The invalid-request test also pins missing and wrong content types to
 
 Keep the existing `notes_route_saves_with_writer` and
 `slide_edit_route_passes_exact_request_to_deck_writer` assertions exactly
-`{"saved":true}` after their closures return `DeckWriteOutcome::Unit`.
+`{"saved":true}` after their typed writer methods return `()`.
 
-Capture the exact `DeckWrite::SlideSource { key, old, new }` received by the
-writer, add `slide_source_route_maps_conflict_unprocessable_and_io`, and rename
-the expanded mutex regression to
+Use one `RecordingDeckWriter` in the server test module for every route test.
+It records a test-only `RecordedDeckWrite`, returns independently configured
+results for each operation, and can measure concurrent entry. Capture the
+exact source `key`, `old`, and `new`, add
+`slide_source_route_maps_conflict_unprocessable_and_io`, and rename the
+expanded mutex regression to
 `notes_slide_edits_and_slide_sources_share_one_deck_writer_mutex` so Note,
 SlideEdit, and SlideSource can never execute concurrently.
 
-**Implementation (Green).** Add the closed request and outcome variants and
-change the alias exactly as follows:
+**Implementation (Green).** Replace the request enum, outcome enum, and closure
+alias with a per-operation surface whose method signatures enforce the
+response shape:
 
 ```rust
-pub enum DeckWrite {
-    Note { key: SlideKey, text: String },
-    SlideEdit { key: SlideKey, start: usize, end: usize, old: String, new: String },
-    SlideSource { key: SlideKey, old: String, new: String },
+pub struct SlideEditWrite {
+    pub key: SlideKey,
+    pub start: usize,
+    pub end: usize,
+    pub old: String,
+    pub new: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeckWriteOutcome {
-    Unit,
-    SlideSource { key: SlideKey, body: String },
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlideSourceSaved {
+    pub key: SlideKey,
+    pub body: String,
 }
 
-pub type DeckWriter = Box<
-    dyn FnMut(DeckWrite) -> Result<DeckWriteOutcome, DeckWriteError> + Send + 'static
->;
+pub trait DeckWriter: Send {
+    fn note(&mut self, key: SlideKey, text: String) -> Result<(), DeckWriteError>;
+    fn slide_edit(&mut self, edit: SlideEditWrite) -> Result<(), DeckWriteError>;
+    fn slide_source(
+        &mut self,
+        key: SlideKey,
+        old: String,
+        new: String,
+    ) -> Result<SlideSourceSaved, DeckWriteError>;
+}
 ```
 
 Add deny-unknown-fields `SlideSourceRequest`, `DeckWriteRoute::SlideSource`,
-and the `/slide-source` route arm. `respond_deck_write_result` maps `Unit` to
-the existing `{"saved":true}` bytes and `SlideSource { key, body }` to
-`{"key":"...","body":"..."}`. Serialize the latter through a response
-struct whose fields are declared `key` then `body`, so the exact response test
-does not depend on JSON-map key ordering. In `preview_deck_writer`, wrap
-note/inline success in `DeckWriteOutcome::Unit` and map the tuple returned by
-`write_preview_slide_source` directly to `{ key, body }`. Update every
-server/main test writer closure from `Ok(())` to the appropriate explicit
-outcome. Do not fork content-type, request-size, error, or mutex handling.
+and the `/slide-source` route arm. `DeckWriteRoute` parses each request and
+selects both its trait call and its response serializer in one place. Map only
+the `()` returned by `note` and `slide_edit` to the existing
+`{"saved":true}` bytes. Serialize only `SlideSourceSaved` as
+`{"key":"...","body":"..."}` through serde; its declared field order pins
+the exact response without JSON-map ordering. Keep a single
+`Arc<Mutex<Box<dyn DeckWriter>>>`, so content-type, request-size, 404-before-
+parsing, error mapping, and mutual exclusion remain in the shared handler.
+
+Make `PreviewDeckWriter` a small struct holding the input path and implement
+the trait by delegating to the three existing `write_preview_*` services. Map
+the source service's accepted `(key, body)` tuple to `SlideSourceSaved`; note
+and inline methods return their existing `()` directly. The type signatures,
+not a convention checked by each consumer, now make mismatched successful
+responses unrepresentable.
 
 **Verification.**
 
@@ -1320,10 +1340,12 @@ rg -q 'whole slide.*`e`' README.md
 `slide_body` as the single body definition; settings/notes exclusion;
 reparse-only refusals; shared comparison/removal/BOM helpers; parse-only
 saves and the accepted reparse as the sole source of response key/body; the
-three-route writer mutex and unchanged origin writer; preview-only
-`sources.json`; the shell's verbatim use of the server body; and the closed
-shell edit union. Update CLAUDE's repository map and long-polling pitfall route
-inventories to include `POST /slide-source`; start the invariant with
+three-method `DeckWriter` trait behind one mutex; `()` note/inline results and
+the `SlideSourceSaved` source result so request/response pairing is a type, not
+a convention; the unchanged origin writer; preview-only `sources.json`; the
+shell's verbatim use of the server body; and the closed shell edit union.
+Update CLAUDE's repository map and long-polling pitfall route inventories to
+include `POST /slide-source`; start the invariant with
 “Whole-slide Markdown source editing in preview”.
 
 Add “Editing a whole slide in preview” to the CLI guide. State `e`, stage
