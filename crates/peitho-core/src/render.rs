@@ -1680,8 +1680,9 @@ fn render_code_fragment(
 }
 
 /// The one non-emphasis highlighting seam for top-level and container code.
-/// Syntect preserves the source's final newline; rendered code blocks do not,
-/// so trim it here before either caller adds its `<pre><code>` wrappers.
+/// Trim a trailing newline only when it ends the HTML. If a scope covers it
+/// (for example, a final Markdown heading), it stays inside closing spans; this
+/// is inert because one trailing newline at a `<pre>`'s end renders no line.
 fn render_highlighted_code(
     highlighter: &Highlighter,
     code: &str,
@@ -3570,6 +3571,23 @@ mod tests {
         );
         // Syntax classes survive the wrapping.
         assert!(html.contains("hl-keyword"), "{html}");
+    }
+
+    #[test]
+    fn emphasized_markdown_lines_exclude_line_endings() {
+        let html = render_code_html("# T\n\n```markdown {1|2}\n# 見出し\n本文\n```");
+
+        let code_body = html
+            .split_once("<code ")
+            .and_then(|(_, html)| html.split_once('>'))
+            .and_then(|(_, html)| html.split_once("</code>"))
+            .map(|(body, _)| body)
+            .expect("rendered code body");
+        assert_eq!(
+            code_body.matches('\n').count(),
+            1,
+            "expected one code-body newline: {html}"
+        );
     }
 
     #[test]

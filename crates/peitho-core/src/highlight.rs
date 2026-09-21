@@ -155,6 +155,21 @@ impl Highlighter {
                 .parse_line(source_line, &self.syntax_set)
                 .map_err(|err| fail(&err))?;
 
+            // Parsing needs the ending to update syntax state, but rendering
+            // must not put that ending inside the independently wrapped line.
+            // `LinesWithEndings` recognizes LF and CRLF, not a lone CR.
+            // Operations at or after the stripped ending are clamped because
+            // their offsets would otherwise index past `text`; they still must
+            // be applied so the scope stack matches the parse.
+            let text = source_line
+                .strip_suffix("\r\n")
+                .or_else(|| source_line.strip_suffix('\n'))
+                .unwrap_or(source_line);
+            let clamped_ops = ops
+                .into_iter()
+                .map(|(offset, op)| (offset.min(text.len()), op))
+                .collect::<Vec<_>>();
+
             // Reopen the scopes inherited from previous lines:
             // `line_tokens_to_classed_spans` emits tags only for scopes it
             // pushes on this line, so an inherited multi-line string or block
@@ -168,13 +183,13 @@ impl Highlighter {
             }
 
             let (line_html, _delta) = line_tokens_to_classed_spans(
-                source_line,
-                ops.as_slice(),
+                text,
+                clamped_ops.as_slice(),
                 CLASS_STYLE,
                 &mut scope_stack,
             )
             .map_err(|err| fail(&err))?;
-            html.push_str(line_html.trim_end_matches('\n'));
+            html.push_str(&line_html);
 
             // Close every span still open at end of line, which is exactly the
             // depth of the scope stack now: `line_html` leaves
@@ -396,6 +411,27 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn source_line_text(source_line: &str) -> &str {
+        source_line
+            .strip_suffix('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .unwrap_or(source_line)
+    }
+
+    fn decode_highlighted_text(html: &str) -> String {
+        let mut text = String::new();
+        let mut rest = html;
+        while let Some(tag_start) = rest.find('<') {
+            text.push_str(&rest[..tag_start]);
+            let tag_end = rest[tag_start..]
+                .find('>')
+                .expect("highlighted HTML tags are closed");
+            rest = &rest[tag_start + tag_end + 1..];
+        }
+        text.push_str(rest);
+        html_escape::decode_html_entities(&text).into_owned()
+    }
+
     const CARINA_SUBLIME_SYNTAX: &str = r#"%YAML 1.2
 ---
 name: Carina
@@ -564,6 +600,39 @@ contexts:
         assert!(html.contains("hl-"));
         assert!(html.contains("fn"));
         assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn highlighted_lines_exclude_line_endings_and_preserve_text() {
+        let highlighter = Highlighter::defaults();
+
+        for (token, code) in [
+            ("markdown", "# Heading\nbody\n---\n## Two\n"),
+            ("html", "<main>\n  body & text\n</main>\n"),
+            (
+                "rust",
+                "let text = \"first\nsecond\";\n/* comment\ncontinues */\nfn main() {}\n",
+            ),
+            ("txt", "plain <text>\r\nsecond & line\r\nlast\r"),
+        ] {
+            let highlighted = highlighter.highlight_lines(code, token, 1).unwrap();
+            let expected = LinesWithEndings::from(code)
+                .map(source_line_text)
+                .collect::<Vec<_>>();
+
+            assert_eq!(highlighted.len(), expected.len(), "{token}");
+            for (line_html, source_text) in highlighted.iter().zip(expected) {
+                assert!(
+                    !line_html.contains('\n'),
+                    "{token} line contains a newline: {line_html:?}"
+                );
+                assert_eq!(
+                    decode_highlighted_text(line_html),
+                    source_text,
+                    "{token} line did not round-trip: {line_html:?}"
+                );
+            }
+        }
     }
 
     #[test]
