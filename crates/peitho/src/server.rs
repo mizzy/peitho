@@ -433,7 +433,7 @@ pub struct PresentServer {
     default_document: String,
     serve_remote_assets: bool,
     rehearsal_sink: Option<Arc<RehearsalSink>>,
-    deck_writer: Option<Arc<Mutex<DeckWriter>>>,
+    deck_writer: Option<Arc<Mutex<Box<dyn DeckWriter>>>>,
     server: Arc<Server>,
     listeners: Arc<Mutex<Vec<Arc<Server>>>>,
     sync: SyncHub,
@@ -441,21 +441,32 @@ pub struct PresentServer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeckWrite {
-    Note {
-        key: SlideKey,
-        text: String,
-    },
-    SlideEdit {
-        key: SlideKey,
-        start: usize,
-        end: usize,
-        old: String,
-        new: String,
-    },
+pub struct SlideEditWrite {
+    pub key: SlideKey,
+    pub start: usize,
+    pub end: usize,
+    pub old: String,
+    pub new: String,
 }
 
-pub type DeckWriter = Box<dyn FnMut(DeckWrite) -> Result<(), DeckWriteError> + Send + 'static>;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlideSourceSaved {
+    pub key: SlideKey,
+    pub body: String,
+}
+
+pub trait DeckWriter: Send {
+    fn note(&mut self, key: SlideKey, text: String) -> Result<(), DeckWriteError>;
+
+    fn slide_edit(&mut self, edit: SlideEditWrite) -> Result<(), DeckWriteError>;
+
+    fn slide_source(
+        &mut self,
+        key: SlideKey,
+        old: String,
+        new: String,
+    ) -> Result<SlideSourceSaved, DeckWriteError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeckWriteError {
@@ -885,8 +896,8 @@ impl PresentServer {
         self
     }
 
-    pub fn with_deck_writer(mut self, writer: DeckWriter) -> Self {
-        self.deck_writer = Some(Arc::new(Mutex::new(writer)));
+    pub fn with_deck_writer(mut self, writer: impl DeckWriter + 'static) -> Self {
+        self.deck_writer = Some(Arc::new(Mutex::new(Box::new(writer))));
         self
     }
 
@@ -1018,6 +1029,10 @@ impl PresentServer {
             }
             (&Method::Post, "/slide-edit") => {
                 self.respond_deck_write_post(request, DeckWriteRoute::SlideEdit);
+                return;
+            }
+            (&Method::Post, "/slide-source") => {
+                self.respond_deck_write_post(request, DeckWriteRoute::SlideSource);
                 return;
             }
             _ => {}
@@ -1212,12 +1227,12 @@ impl PresentServer {
         thread::spawn(move || {
             let mut request = request;
             let mut body = String::new();
-            let deck_write = request
+            let action = request
                 .as_reader()
                 .read_to_string(&mut body)
                 .ok()
                 .and_then(|_| route.parse_request(&body));
-            let Some(deck_write) = deck_write else {
+            let Some(action) = action else {
                 send_response(
                     request,
                     Response::from_string(route.invalid_body()).with_status_code(StatusCode(400)),
@@ -1229,7 +1244,7 @@ impl PresentServer {
                 let mut writer = writer
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                writer(deck_write)
+                action(writer.as_mut())
             };
             respond_deck_write_result(request, result);
         });
@@ -1358,10 +1373,26 @@ struct SlideEditRequest {
     new: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SlideSourceRequest {
+    key: SlideKey,
+    old: String,
+    new: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeckWriteRoute {
     Note,
     SlideEdit,
+    SlideSource,
+}
+
+type DeckWriteAction =
+    Box<dyn FnOnce(&mut dyn DeckWriter) -> Result<String, DeckWriteError> + 'static>;
+
+fn saved_deck_write_response_body(_: ()) -> String {
+    serde_json::json!({ "saved": true }).to_string()
 }
 
 impl DeckWriteRoute {
@@ -1369,6 +1400,7 @@ impl DeckWriteRoute {
         match self {
             Self::Note => "invalid notes content type\n",
             Self::SlideEdit => "invalid slide edit content type\n",
+            Self::SlideSource => "invalid slide source content type\n",
         }
     }
 
@@ -1376,26 +1408,44 @@ impl DeckWriteRoute {
         match self {
             Self::Note => "invalid notes body\n",
             Self::SlideEdit => "invalid slide edit body\n",
+            Self::SlideSource => "invalid slide source body\n",
         }
     }
 
-    fn parse_request(self, body: &str) -> Option<DeckWrite> {
+    fn parse_request(self, body: &str) -> Option<DeckWriteAction> {
         match self {
-            Self::Note => serde_json::from_str::<NotesRequest>(body)
-                .ok()
-                .map(|request| DeckWrite::Note {
-                    key: request.key,
-                    text: request.text,
-                }),
-            Self::SlideEdit => serde_json::from_str::<SlideEditRequest>(body)
-                .ok()
-                .map(|request| DeckWrite::SlideEdit {
-                    key: request.key,
-                    start: request.start,
-                    end: request.end,
-                    old: request.old,
-                    new: request.new,
-                }),
+            Self::Note => {
+                let request = serde_json::from_str::<NotesRequest>(body).ok()?;
+                Some(Box::new(move |writer| {
+                    writer
+                        .note(request.key, request.text)
+                        .map(saved_deck_write_response_body)
+                }))
+            }
+            Self::SlideEdit => {
+                let request = serde_json::from_str::<SlideEditRequest>(body).ok()?;
+                Some(Box::new(move |writer| {
+                    writer
+                        .slide_edit(SlideEditWrite {
+                            key: request.key,
+                            start: request.start,
+                            end: request.end,
+                            old: request.old,
+                            new: request.new,
+                        })
+                        .map(saved_deck_write_response_body)
+                }))
+            }
+            Self::SlideSource => {
+                let request = serde_json::from_str::<SlideSourceRequest>(body).ok()?;
+                Some(Box::new(move |writer| {
+                    writer
+                        .slide_source(request.key, request.old, request.new)
+                        .map(|saved| {
+                            serde_json::to_string(&saved).expect("slide source response serializes")
+                        })
+                }))
+            }
         }
     }
 }
@@ -2196,9 +2246,9 @@ fn send_json_response_with_status(request: tiny_http::Request, status: u16, body
     send_bytes_response(request, status, JSON_CONTENT_TYPE, body.as_bytes());
 }
 
-fn respond_deck_write_result(request: tiny_http::Request, result: Result<(), DeckWriteError>) {
+fn respond_deck_write_result(request: tiny_http::Request, result: Result<String, DeckWriteError>) {
     match result {
-        Ok(()) => send_json_response(request, serde_json::json!({ "saved": true }).to_string()),
+        Ok(body) => send_json_response(request, body),
         Err(err) => {
             let (status, message) = match err {
                 DeckWriteError::Conflict(message) => (409, message),
@@ -2276,6 +2326,115 @@ mod tests {
         sync::atomic::AtomicUsize,
         time::Duration,
     };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RecordedDeckWrite {
+        Note {
+            key: SlideKey,
+            text: String,
+        },
+        SlideEdit(SlideEditWrite),
+        SlideSource {
+            key: SlideKey,
+            old: String,
+            new: String,
+        },
+    }
+
+    #[derive(Clone)]
+    struct RecordingActivity {
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+
+    struct RecordingDeckWriter {
+        calls: Arc<Mutex<Vec<RecordedDeckWrite>>>,
+        note_result: Result<(), DeckWriteError>,
+        slide_edit_result: Result<(), DeckWriteError>,
+        slide_source_result: Result<SlideSourceSaved, DeckWriteError>,
+        activity: Option<RecordingActivity>,
+    }
+
+    impl Default for RecordingDeckWriter {
+        fn default() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                note_result: Ok(()),
+                slide_edit_result: Ok(()),
+                slide_source_result: Ok(SlideSourceSaved {
+                    key: SlideKey::new("saved").unwrap(),
+                    body: String::new(),
+                }),
+                activity: None,
+            }
+        }
+    }
+
+    impl RecordingDeckWriter {
+        fn calls(&self) -> Arc<Mutex<Vec<RecordedDeckWrite>>> {
+            Arc::clone(&self.calls)
+        }
+
+        fn with_note_result(mut self, result: Result<(), DeckWriteError>) -> Self {
+            self.note_result = result;
+            self
+        }
+
+        fn with_slide_edit_result(mut self, result: Result<(), DeckWriteError>) -> Self {
+            self.slide_edit_result = result;
+            self
+        }
+
+        fn with_slide_source_result(
+            mut self,
+            result: Result<SlideSourceSaved, DeckWriteError>,
+        ) -> Self {
+            self.slide_source_result = result;
+            self
+        }
+
+        fn with_activity(mut self, max_in_flight: Arc<AtomicUsize>) -> Self {
+            self.activity = Some(RecordingActivity {
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                max_in_flight,
+            });
+            self
+        }
+
+        fn record(&self, call: RecordedDeckWrite) {
+            if let Some(activity) = &self.activity {
+                let current = activity.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                activity.max_in_flight.fetch_max(current, Ordering::SeqCst);
+                self.calls.lock().unwrap().push(call);
+                thread::sleep(Duration::from_millis(50));
+                activity.in_flight.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                self.calls.lock().unwrap().push(call);
+            }
+        }
+    }
+
+    impl DeckWriter for RecordingDeckWriter {
+        fn note(&mut self, key: SlideKey, text: String) -> Result<(), DeckWriteError> {
+            self.record(RecordedDeckWrite::Note { key, text });
+            self.note_result.clone()
+        }
+
+        fn slide_edit(&mut self, edit: SlideEditWrite) -> Result<(), DeckWriteError> {
+            self.record(RecordedDeckWrite::SlideEdit(edit));
+            self.slide_edit_result.clone()
+        }
+
+        fn slide_source(
+            &mut self,
+            key: SlideKey,
+            old: String,
+            new: String,
+        ) -> Result<SlideSourceSaved, DeckWriteError> {
+            self.record(RecordedDeckWrite::SlideSource { key, old, new });
+            self.slide_source_result.clone()
+        }
+    }
 
     #[test]
     fn server_selects_longer_shutdown_grace_when_a_rehearsal_sink_exists() {
@@ -4270,12 +4429,9 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
     #[test]
     fn notes_route_saves_with_writer() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let captured_by_writer = Arc::clone(&captured);
-        let server = deck_write_server(Box::new(move |request| {
-            captured_by_writer.lock().unwrap().push(request);
-            Ok(())
-        }));
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let saved = json_http_request(
             &server,
@@ -4287,8 +4443,8 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         assert_eq!(saved.status, 200);
         assert_eq!(saved.body, r#"{"saved":true}"#);
         assert_eq!(
-            captured.lock().unwrap().as_slice(),
-            [DeckWrite::Note {
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::Note {
                 key: SlideKey::new("intro").unwrap(),
                 text: "new note".to_owned(),
             }]
@@ -4297,12 +4453,9 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
     #[test]
     fn notes_route_rejects_invalid_shapes() {
-        let calls = Arc::new(Mutex::new(0));
-        let calls_by_writer = Arc::clone(&calls);
-        let server = deck_write_server(Box::new(move |_request| {
-            *calls_by_writer.lock().unwrap() += 1;
-            Ok(())
-        }));
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let malformed = json_http_request(&server, "POST", "/notes", "{");
         let missing_field = json_http_request(&server, "POST", "/notes", r#"{"key":"intro"}"#);
@@ -4323,7 +4476,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         assert_eq!(unknown_field.body, "invalid notes body\n");
         assert_eq!(malformed_key.status, 400);
         assert_eq!(malformed_key.body, "invalid notes body\n");
-        assert_eq!(*calls.lock().unwrap(), 0);
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -4339,16 +4492,11 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
     #[test]
     fn notes_route_maps_conflict_to_409() {
-        let server = deck_write_server(Box::new(|request| {
-            assert_eq!(
-                request,
-                DeckWrite::Note {
-                    key: SlideKey::new("intro").unwrap(),
-                    text: "new note".to_owned(),
-                }
-            );
-            Err(DeckWriteError::Conflict("note target changed".to_owned()))
-        }));
+        let writer = RecordingDeckWriter::default().with_note_result(Err(
+            DeckWriteError::Conflict("note target changed".to_owned()),
+        ));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let conflict = json_http_request(
             &server,
@@ -4359,22 +4507,23 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
         assert_eq!(conflict.status, 409);
         assert_eq!(conflict.body, r#"{"error":"note target changed"}"#);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::Note {
+                key: SlideKey::new("intro").unwrap(),
+                text: "new note".to_owned(),
+            }]
+        );
     }
 
     #[test]
     fn notes_route_maps_unprocessable_to_422() {
         const MESSAGE: &str = "line 3: speaker note cannot contain '-->'\n  = help: remove or rewrite '-->' because it closes the HTML comment";
 
-        let server = deck_write_server(Box::new(|request| {
-            assert_eq!(
-                request,
-                DeckWrite::Note {
-                    key: SlideKey::new("intro").unwrap(),
-                    text: "new note".to_owned(),
-                }
-            );
-            Err(DeckWriteError::Unprocessable(MESSAGE.to_owned()))
-        }));
+        let writer = RecordingDeckWriter::default()
+            .with_note_result(Err(DeckWriteError::Unprocessable(MESSAGE.to_owned())));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let unprocessable = json_http_request(
             &server,
@@ -4388,20 +4537,22 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             serde_json::from_str::<Value>(&unprocessable.body).unwrap()["error"],
             MESSAGE
         );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::Note {
+                key: SlideKey::new("intro").unwrap(),
+                text: "new note".to_owned(),
+            }]
+        );
     }
 
     #[test]
     fn notes_route_maps_io_to_500() {
-        let server = deck_write_server(Box::new(|request| {
-            assert_eq!(
-                request,
-                DeckWrite::Note {
-                    key: SlideKey::new("intro").unwrap(),
-                    text: "new note".to_owned(),
-                }
-            );
-            Err(DeckWriteError::Io("failed to write deck.md".to_owned()))
-        }));
+        let writer = RecordingDeckWriter::default().with_note_result(Err(DeckWriteError::Io(
+            "failed to write deck.md".to_owned(),
+        )));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let io_failure = json_http_request(
             &server,
@@ -4412,23 +4563,20 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
         assert_eq!(io_failure.status, 500);
         assert_eq!(io_failure.body, r#"{"error":"failed to write deck.md"}"#);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::Note {
+                key: SlideKey::new("intro").unwrap(),
+                text: "new note".to_owned(),
+            }]
+        );
     }
 
     #[test]
     fn notes_route_requires_json_content_type() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_by_writer = Arc::clone(&calls);
-        let server = deck_write_server(Box::new(move |request| {
-            assert_eq!(
-                request,
-                DeckWrite::Note {
-                    key: SlideKey::new("intro").unwrap(),
-                    text: "new note".to_owned(),
-                }
-            );
-            calls_by_writer.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }));
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
         let body = r#"{"key":"intro","text":"new note"}"#;
 
         let text_plain =
@@ -4439,7 +4587,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         assert_eq!(text_plain.body, "invalid notes content type\n");
         assert_eq!(missing.status, 400);
         assert_eq!(missing.body, "invalid notes content type\n");
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(calls.lock().unwrap().is_empty());
 
         let with_parameters = http_request_with_content_type(
             &server,
@@ -4451,37 +4599,21 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
         assert_eq!(with_parameters.status, 200);
         assert_eq!(with_parameters.body, r#"{"saved":true}"#);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::Note {
+                key: SlideKey::new("intro").unwrap(),
+                text: "new note".to_owned(),
+            }]
+        );
     }
 
     #[test]
     fn notes_route_serializes_concurrent_saves() {
-        let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let in_flight_by_writer = Arc::clone(&in_flight);
-        let max_in_flight_by_writer = Arc::clone(&max_in_flight);
-        let server = deck_write_server(Box::new(move |request| {
-            match request {
-                DeckWrite::Note { key, text } => {
-                    assert!(key.as_str().starts_with("slide-"));
-                    assert_eq!(text, "new note");
-                }
-                DeckWrite::SlideEdit {
-                    key,
-                    start,
-                    end,
-                    old,
-                    new,
-                } => panic!(
-                    "notes route dispatched a slide edit: {key:?} {start} {end} {old:?} {new:?}"
-                ),
-            }
-            let current = in_flight_by_writer.fetch_add(1, Ordering::SeqCst) + 1;
-            max_in_flight_by_writer.fetch_max(current, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(50));
-            in_flight_by_writer.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
-        }));
+        let writer = RecordingDeckWriter::default().with_activity(Arc::clone(&max_in_flight));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let handles = (0..4)
             .map(|index| {
@@ -4503,6 +4635,13 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
         assert!(responses.iter().all(|response| response.status == 200));
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert!(calls.iter().all(|call| matches!(
+            call,
+            RecordedDeckWrite::Note { key, text }
+                if key.as_str().starts_with("slide-") && text == "new note"
+        )));
     }
 
     #[test]
@@ -4519,14 +4658,9 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
     #[test]
     fn slide_edit_route_rejects_content_type_malformed_missing_and_unknown_fields_with_400() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_by_writer = Arc::clone(&calls);
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(move |_request| {
-                calls_by_writer.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }));
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
         let valid = r#"{"key":"intro","start":120,"end":143,"old":"before","new":"after"}"#;
 
         let wrong_content_type = http_request_with_content_type(
@@ -4601,19 +4735,14 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             assert_eq!(response.status, 400);
             assert_eq!(response.body, "invalid slide edit body\n");
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]
     fn slide_edit_route_passes_exact_request_to_deck_writer() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let captured_by_writer = Arc::clone(&captured);
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(move |request| {
-                captured_by_writer.lock().unwrap().push(request);
-                Ok(())
-            }));
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let response = json_http_request(
             &server,
@@ -4625,36 +4754,24 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         assert_eq!(response.status, 200);
         assert_eq!(response.body, r#"{"saved":true}"#);
         assert_eq!(
-            captured.lock().unwrap().as_slice(),
-            [DeckWrite::SlideEdit {
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::SlideEdit(SlideEditWrite {
                 key: SlideKey::new("intro").unwrap(),
                 start: 120,
                 end: 143,
                 old: "Peitho is a *fast* tool".to_owned(),
                 new: "Peitho is a **very fast** tool".to_owned(),
-            }]
+            })]
         );
     }
 
     #[test]
     fn slide_edit_route_maps_conflict_to_409() {
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(|request| {
-                assert_eq!(
-                    request,
-                    DeckWrite::SlideEdit {
-                        key: SlideKey::new("intro").unwrap(),
-                        start: 120,
-                        end: 143,
-                        old: "before".to_owned(),
-                        new: "after".to_owned(),
-                    }
-                );
-                Err(DeckWriteError::Conflict(
-                    "the deck changed on disk; reload and retry".to_owned(),
-                ))
-            }));
+        let writer = RecordingDeckWriter::default().with_slide_edit_result(Err(
+            DeckWriteError::Conflict("the deck changed on disk; reload and retry".to_owned()),
+        ));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let response = json_http_request(
             &server,
@@ -4668,27 +4785,25 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             response.body,
             r#"{"error":"the deck changed on disk; reload and retry"}"#
         );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::SlideEdit(SlideEditWrite {
+                key: SlideKey::new("intro").unwrap(),
+                start: 120,
+                end: 143,
+                old: "before".to_owned(),
+                new: "after".to_owned(),
+            })]
+        );
     }
 
     #[test]
     fn slide_edit_route_maps_unprocessable_to_422() {
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(|request| {
-                assert_eq!(
-                    request,
-                    DeckWrite::SlideEdit {
-                        key: SlideKey::new("intro").unwrap(),
-                        start: 120,
-                        end: 143,
-                        old: "before".to_owned(),
-                        new: "after".to_owned(),
-                    }
-                );
-                Err(DeckWriteError::Unprocessable(
-                    "inline edit would change block structure".to_owned(),
-                ))
-            }));
+        let writer = RecordingDeckWriter::default().with_slide_edit_result(Err(
+            DeckWriteError::Unprocessable("inline edit would change block structure".to_owned()),
+        ));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let response = json_http_request(
             &server,
@@ -4702,25 +4817,25 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             response.body,
             r#"{"error":"inline edit would change block structure"}"#
         );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::SlideEdit(SlideEditWrite {
+                key: SlideKey::new("intro").unwrap(),
+                start: 120,
+                end: 143,
+                old: "before".to_owned(),
+                new: "after".to_owned(),
+            })]
+        );
     }
 
     #[test]
     fn slide_edit_route_maps_io_to_500() {
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(|request| {
-                assert_eq!(
-                    request,
-                    DeckWrite::SlideEdit {
-                        key: SlideKey::new("intro").unwrap(),
-                        start: 120,
-                        end: 143,
-                        old: "before".to_owned(),
-                        new: "after".to_owned(),
-                    }
-                );
-                Err(DeckWriteError::Io("failed to write deck.md".to_owned()))
-            }));
+        let writer = RecordingDeckWriter::default().with_slide_edit_result(Err(
+            DeckWriteError::Io("failed to write deck.md".to_owned()),
+        ));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
 
         let response = json_http_request(
             &server,
@@ -4731,68 +4846,235 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
 
         assert_eq!(response.status, 500);
         assert_eq!(response.body, r#"{"error":"failed to write deck.md"}"#);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::SlideEdit(SlideEditWrite {
+                key: SlideKey::new("intro").unwrap(),
+                start: 120,
+                end: 143,
+                old: "before".to_owned(),
+                new: "after".to_owned(),
+            })]
+        );
     }
 
     #[test]
-    fn notes_and_slide_edits_share_one_deck_writer_mutex() {
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let note_calls = Arc::new(AtomicUsize::new(0));
-        let slide_edit_calls = Arc::new(AtomicUsize::new(0));
-        let in_flight_by_writer = Arc::clone(&in_flight);
-        let max_in_flight_by_writer = Arc::clone(&max_in_flight);
-        let note_calls_by_writer = Arc::clone(&note_calls);
-        let slide_edit_calls_by_writer = Arc::clone(&slide_edit_calls);
-        let server = PresentServer::bind(PathBuf::new(), 0, "present.html")
-            .unwrap()
-            .with_deck_writer(Box::new(move |request| {
-                match request {
-                    DeckWrite::Note { key, text } => {
-                        assert!(!key.as_str().is_empty());
-                        assert_eq!(text, "new note");
-                        note_calls_by_writer.fetch_add(1, Ordering::SeqCst);
-                    }
-                    DeckWrite::SlideEdit {
-                        key,
-                        start,
-                        end,
-                        old,
-                        new,
-                    } => {
-                        assert!(!key.as_str().is_empty());
-                        assert_eq!((start, end), (120, 143));
-                        assert_eq!(old, "before");
-                        assert_eq!(new, "after");
-                        slide_edit_calls_by_writer.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-                let current = in_flight_by_writer.fetch_add(1, Ordering::SeqCst) + 1;
-                max_in_flight_by_writer.fetch_max(current, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(50));
-                in_flight_by_writer.fetch_sub(1, Ordering::SeqCst);
-                Ok(())
-            }));
+    fn slide_source_route_without_deck_writer_returns_404_before_parsing() {
+        let server = PresentServer::bind(PathBuf::new(), 0, "present.html").unwrap();
 
-        let handles = (0..4)
+        let response = http_request_with_content_type(
+            &server,
+            "POST",
+            "/slide-source",
+            "{",
+            Some("text/plain"),
+        );
+
+        assert_eq!((response.status, response.body.as_str()), (404, "404\n"));
+    }
+
+    #[test]
+    fn slide_source_route_rejects_malformed_missing_and_unknown_fields() {
+        let writer = RecordingDeckWriter::default();
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
+        let valid = r##"{"key":"old","old":"# Old","new":"# New"}"##;
+
+        let wrong_content_type = http_request_with_content_type(
+            &server,
+            "POST",
+            "/slide-source",
+            valid,
+            Some("text/plain"),
+        );
+        let missing_content_type = http_request(&server, "POST", "/slide-source", valid);
+        let malformed = json_http_request(&server, "POST", "/slide-source", "{");
+        let missing_key = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"old":"# Old","new":"# New"}"##,
+        );
+        let missing_old = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"old","new":"# New"}"##,
+        );
+        let missing_new = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"old","old":"# Old"}"##,
+        );
+        let unknown_field = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"old","old":"# Old","new":"# New","extra":true}"##,
+        );
+        let malformed_key = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"Bad Key","old":"# Old","new":"# New"}"##,
+        );
+
+        for response in [wrong_content_type, missing_content_type] {
+            assert_eq!(response.status, 400);
+            assert_eq!(response.body, "invalid slide source content type\n");
+        }
+        for response in [
+            malformed,
+            missing_key,
+            missing_old,
+            missing_new,
+            unknown_field,
+            malformed_key,
+        ] {
+            assert_eq!(response.status, 400);
+            assert_eq!(response.body, "invalid slide source body\n");
+        }
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn slide_source_route_passes_exact_request_and_returns_response_identity() {
+        let writer =
+            RecordingDeckWriter::default().with_slide_source_result(Ok(SlideSourceSaved {
+                key: SlideKey::new("new-derived-key").unwrap(),
+                body: "# New".to_owned(),
+            }));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
+
+        let saved = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"old","old":"# Old","new":"# New"}"##,
+        );
+
+        assert_eq!(
+            (saved.status, saved.body.as_str()),
+            (200, r##"{"key":"new-derived-key","body":"# New"}"##),
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedDeckWrite::SlideSource {
+                key: SlideKey::new("old").unwrap(),
+                old: "# Old".to_owned(),
+                new: "# New".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn slide_source_route_response_json_round_trips_writer_body() {
+        let expected_body = "# \"Quoted\" \\\n\t日本語".to_owned();
+        let writer =
+            RecordingDeckWriter::default().with_slide_source_result(Ok(SlideSourceSaved {
+                key: SlideKey::new("special").unwrap(),
+                body: expected_body.clone(),
+            }));
+        let server = deck_write_server(writer);
+
+        let response = json_http_request(
+            &server,
+            "POST",
+            "/slide-source",
+            r##"{"key":"old","old":"# Old","new":"# New"}"##,
+        );
+        let json: Value = serde_json::from_str(&response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(json["key"], "special");
+        assert_eq!(json["body"], expected_body);
+    }
+
+    #[test]
+    fn slide_source_route_maps_conflict_unprocessable_and_io() {
+        let cases = [
+            (
+                DeckWriteError::Conflict("the deck changed on disk; reload and retry".to_owned()),
+                409,
+                "the deck changed on disk; reload and retry",
+            ),
+            (
+                DeckWriteError::Unprocessable(
+                    "slide body edit would change the deck's slide count".to_owned(),
+                ),
+                422,
+                "slide body edit would change the deck's slide count",
+            ),
+            (
+                DeckWriteError::Io("failed to write deck.md".to_owned()),
+                500,
+                "failed to write deck.md",
+            ),
+        ];
+
+        for (error, status, message) in cases {
+            let writer = RecordingDeckWriter::default().with_slide_source_result(Err(error));
+            let calls = writer.calls();
+            let server = deck_write_server(writer);
+            let response = json_http_request(
+                &server,
+                "POST",
+                "/slide-source",
+                r##"{"key":"old","old":"# Old","new":"# New"}"##,
+            );
+
+            assert_eq!(response.status, status);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap()["error"],
+                message,
+            );
+            assert_eq!(
+                calls.lock().unwrap().as_slice(),
+                [RecordedDeckWrite::SlideSource {
+                    key: SlideKey::new("old").unwrap(),
+                    old: "# Old".to_owned(),
+                    new: "# New".to_owned(),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn notes_slide_edits_and_slide_sources_share_one_deck_writer_mutex() {
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let writer = RecordingDeckWriter::default().with_activity(Arc::clone(&max_in_flight));
+        let calls = writer.calls();
+        let server = deck_write_server(writer);
+
+        let handles = (0..6)
             .map(|index| {
                 let server = server.clone();
                 thread::spawn(move || {
-                    if index % 2 == 0 {
-                        json_http_request(
+                    match index % 3 {
+                        0 => json_http_request(
                             &server,
                             "POST",
                             "/notes",
                             &format!(r#"{{"key":"slide-{index}","text":"new note"}}"#),
-                        )
-                    } else {
-                        json_http_request(
+                        ),
+                        1 => json_http_request(
                             &server,
                             "POST",
                             "/slide-edit",
                             &format!(
                                 r#"{{"key":"slide-{index}","start":120,"end":143,"old":"before","new":"after"}}"#
                             ),
-                        )
+                        ),
+                        _ => json_http_request(
+                            &server,
+                            "POST",
+                            "/slide-source",
+                            &format!(
+                                r##"{{"key":"slide-{index}","old":"# Before","new":"# After"}}"##
+                            ),
+                        ),
                     }
                 })
             })
@@ -4803,9 +5085,49 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             .collect::<Vec<_>>();
 
         assert!(responses.iter().all(|response| response.status == 200));
-        assert_eq!(note_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(slide_edit_calls.load(Ordering::SeqCst), 2);
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    RecordedDeckWrite::Note { key, text }
+                        if !key.as_str().is_empty() && text == "new note"
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    RecordedDeckWrite::SlideEdit(SlideEditWrite {
+                        key,
+                        start: 120,
+                        end: 143,
+                        old,
+                        new,
+                    }) if !key.as_str().is_empty() && old == "before" && new == "after"
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    RecordedDeckWrite::SlideSource { key, old, new }
+                        if !key.as_str().is_empty()
+                            && old == "# Before"
+                            && new == "# After"
+                ))
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -4895,7 +5217,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         body: String,
     }
 
-    fn deck_write_server(writer: DeckWriter) -> PresentServer {
+    fn deck_write_server(writer: impl DeckWriter + 'static) -> PresentServer {
         PresentServer::bind(PathBuf::new(), 0, "present.html")
             .unwrap()
             .with_deck_writer(writer)
