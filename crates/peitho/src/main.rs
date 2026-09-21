@@ -5622,6 +5622,7 @@ contexts:
     }
 
     fn deterministic_example_slide_bytes(html: &str) -> Vec<u8> {
+        let html = &version_independent_mermaid_asset_names(html);
         if !html.contains(r#"class="peitho-math""#) {
             return html.as_bytes().to_vec();
         }
@@ -5671,6 +5672,32 @@ contexts:
         )
         .expect("KaTeX snapshot HTML is valid")
         .into_bytes()
+    }
+
+    // The built-in Mermaid cache key hashes CARGO_PKG_VERSION and becomes the
+    // asset file stem, so it changes on every release. Blank only that stem;
+    // the content-hash prefix still pins the SVG bytes.
+    fn version_independent_mermaid_asset_names(html: &str) -> String {
+        if !html.contains(r#"alt="diagram (mermaid)""#) {
+            return html.to_owned();
+        }
+        rewrite_str(
+            html,
+            RewriteStrSettings {
+                element_content_handlers: vec![element!(
+                    r#"img[alt="diagram (mermaid)"]"#,
+                    |element| {
+                        let src = element.get_attribute("src").expect("mermaid img has src");
+                        let (content_hash, _) =
+                            src.split_once('-').expect("asset name is <hash>-<stem>");
+                        element.set_attribute("src", &format!("{content_hash}-mermaid.svg"))?;
+                        Ok(())
+                    }
+                )],
+                ..RewriteStrSettings::new()
+            },
+        )
+        .expect("example slide HTML is valid")
     }
 
     fn has_arg(args: &[OsString], expected: &str) -> bool {
