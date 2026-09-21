@@ -2,28 +2,25 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, HashSet},
     env,
     error::Error,
     ffi::{OsStr, OsString},
     fmt, fs,
+    hash::Hasher,
     io::{self, IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, UdpSocket},
     path::{Component, Path, PathBuf},
     process::{Child, ExitStatus, Stdio},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use chrono::TimeZone;
 use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::{generate, Shell};
 use miette::IntoDiagnostic;
-use notify::{PollWatcher, RecursiveMode};
-use notify_debouncer_mini::{
-    new_debouncer_opt, Config as DebounceConfig, DebounceEventResult, Debouncer,
-};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -143,6 +140,7 @@ impl peitho_core::code_images::EmbedRenderer for CliEmbedRenderer {
 
 const OEMBED_CURL_MAX_TIME_SECS: u64 = 30;
 const OEMBED_CURL_RUNNER_MARGIN_SECS: u64 = 5;
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenericOEmbedFetchOperation {
@@ -420,6 +418,7 @@ struct BuildOptions {
 struct WatchRoot {
     path: PathBuf,
     ext: Option<&'static str>,
+    directory_candidate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -431,8 +430,8 @@ struct WatchTargets {
 struct WatchState {
     input: PathBuf,
     targets: WatchTargets,
-    watched_dirs: Vec<PathBuf>,
-    emitted_watch_error_notes: HashSet<String>,
+    input_snapshot: InputSnapshot,
+    candidate_snapshot: Option<InputSnapshot>,
     /// Label style for the notes this state emits. It rides the struct rather
     /// than each method's argument list because the notes are written to a
     /// `&mut dyn Write`, which cannot report whether it is a terminal.
@@ -440,79 +439,37 @@ struct WatchState {
 }
 
 impl WatchState {
-    fn new(
-        input: PathBuf,
-        targets: WatchTargets,
-        watched_dirs: Vec<PathBuf>,
-        style: LabelStyle,
-    ) -> Self {
+    fn new(input: PathBuf, targets: WatchTargets, style: LabelStyle) -> Self {
+        let input_snapshot = capture_input_snapshot(&targets);
         Self {
             input,
             targets,
-            watched_dirs,
-            emitted_watch_error_notes: HashSet::new(),
+            input_snapshot,
+            candidate_snapshot: None,
             style,
         }
     }
-
-    fn reconcile_after_events(
-        &mut self,
-        watcher: &mut dyn WatchController,
-        stderr: &mut dyn Write,
-    ) -> miette::Result<bool> {
-        let desired_dirs = self.targets.watch_dirs();
-        let result = reconcile_watched_dirs(
-            watcher,
-            &mut self.watched_dirs,
-            &desired_dirs,
-            stderr,
-            &mut self.emitted_watch_error_notes,
-            self.style,
-        )?;
-        if !result.had_failures {
-            self.emitted_watch_error_notes.clear();
-        }
-        Ok(result.changed)
-    }
-
-    fn reconcile_after_error(
-        &mut self,
-        watcher: &mut dyn WatchController,
-        stderr: &mut dyn Write,
-    ) -> miette::Result<bool> {
-        let desired_dirs = self.targets.watch_dirs();
-        let result = reconcile_watched_dirs(
-            watcher,
-            &mut self.watched_dirs,
-            &desired_dirs,
-            stderr,
-            &mut self.emitted_watch_error_notes,
-            self.style,
-        )?;
-        Ok(result.changed)
-    }
-
-    fn write_watch_error_note(
-        &mut self,
-        err: &notify::Error,
-        stderr: &mut dyn Write,
-    ) -> miette::Result<()> {
-        let key = err.to_string();
-        let note = format!(
-            "{note_label}watch error: {err}\n{help_label}missing watch targets are dropped and re-watched automatically when they reappear or on the next relevant change (deck, include, image, or asset save); if this error persists, check file watcher permissions",
-            note_label = self.style.note(),
-            help_label = self.style.help(),
-        );
-        write_suppressed_watch_note(&key, &note, stderr, &mut self.emitted_watch_error_notes)?;
-        Ok(())
-    }
 }
 
-struct WatchRuntime {
-    state: WatchState,
-    debouncer: Debouncer<PollWatcher>,
-    rx: mpsc::Receiver<DebounceEventResult>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputFingerprint {
+    Content(u64),
+    Metadata {
+        modified: Option<SystemTime>,
+        len: u64,
+    },
+    Directory,
+    Symlink {
+        target: Option<PathBuf>,
+        modified: Option<SystemTime>,
+        len: Option<u64>,
+        content: Option<u64>,
+    },
+    Missing,
+    Other,
 }
+
+type InputSnapshot = BTreeMap<PathBuf, InputFingerprint>;
 
 impl WatchTargets {
     /// The deck file, included Markdown, referenced images, and resolved asset
@@ -524,164 +481,202 @@ impl WatchTargets {
         included_files: Vec<PathBuf>,
         image_files: Vec<PathBuf>,
     ) -> Self {
-        let mut roots = vec![WatchRoot {
-            path: input.clone(),
-            ext: Some("md"),
-        }];
-        roots.extend(included_files.iter().cloned().map(|path| WatchRoot {
-            path,
-            ext: Some("md"),
-        }));
+        let mut roots = vec![WatchRoot::input(input.clone(), Some("md"))];
+        roots.extend(
+            included_files
+                .iter()
+                .cloned()
+                .map(|path| WatchRoot::input(path, Some("md"))),
+        );
         roots.extend(
             image_files
                 .into_iter()
-                .map(|path| WatchRoot { ext: None, path }),
+                .map(|path| WatchRoot::input(path, None)),
         );
-        if let Some(path) = assets.layouts.path() {
-            roots.push(WatchRoot {
-                path: path.to_path_buf(),
-                ext: Some("html"),
-            });
-        }
-        if let Some(path) = assets.css.path() {
-            roots.push(WatchRoot {
-                path: path.to_path_buf(),
-                ext: Some("css"),
-            });
-        }
-        if let Some(path) = assets.syntaxes.path() {
-            roots.push(WatchRoot {
-                path: path.to_path_buf(),
-                ext: Some("sublime-syntax"),
-            });
-        }
-        if let Some(path) = assets.fonts.path() {
-            roots.push(WatchRoot {
-                path: path.to_path_buf(),
-                ext: None,
-            });
-        }
+        roots.push(WatchRoot::asset(
+            &input,
+            &assets.layouts,
+            "layouts",
+            Some("html"),
+        ));
+        roots.push(WatchRoot::asset(&input, &assets.css, "css", Some("css")));
+        roots.push(WatchRoot::asset(
+            &input,
+            &assets.syntaxes,
+            "syntaxes",
+            Some("sublime-syntax"),
+        ));
+        roots.push(WatchRoot::asset(&input, &assets.fonts, "fonts", None));
         Self { roots, assets }
     }
+}
 
-    fn is_relevant_change(&self, changed: &Path) -> bool {
-        self.roots.iter().any(|root| {
-            if same_watch_path(&root.path, changed) {
-                return true;
-            }
-            if !root.path.is_dir() {
-                return false;
-            }
-            match root.ext {
-                Some(ext) => {
-                    changed.extension().and_then(|e| e.to_str()) == Some(ext)
-                        && changed
-                            .parent()
-                            .is_some_and(|parent| same_watch_path(&root.path, parent))
-                }
-                None => {
-                    changed.starts_with(&root.path)
-                        && !has_hidden_relative_component(&root.path, changed)
-                        && changed
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .is_none_or(|name| !name.starts_with('.'))
-                }
-            }
-        })
+impl WatchRoot {
+    fn input(path: PathBuf, ext: Option<&'static str>) -> Self {
+        Self {
+            path,
+            ext,
+            directory_candidate: false,
+        }
     }
 
-    fn watch_dirs(&self) -> Vec<PathBuf> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        for root in &self.roots {
-            if root.path.is_dir() {
-                if root.ext.is_none() {
-                    collect_watch_tree(&root.path, &mut dirs);
-                } else {
-                    push_watch_dir(&mut dirs, root.path.clone());
-                }
-            } else {
-                push_watch_dir(&mut dirs, parent_dir_for_watch(&root.path));
-            }
+    fn asset(
+        input: &Path,
+        provenance: &Provenance,
+        name: &'static str,
+        ext: Option<&'static str>,
+    ) -> Self {
+        match provenance.path() {
+            Some(path) => Self::input(path.to_path_buf(), ext),
+            None => Self {
+                path: asset_resolution::deck_parent(input).join(name),
+                ext,
+                directory_candidate: true,
+            },
         }
-        dirs
     }
 }
 
-fn collect_watch_tree(root: &Path, dirs: &mut Vec<PathBuf>) {
-    push_watch_dir(dirs, root.to_path_buf());
-    let Ok(entries) = fs::read_dir(root) else {
+fn capture_input_snapshot(targets: &WatchTargets) -> InputSnapshot {
+    let mut snapshot = BTreeMap::new();
+    for root in &targets.roots {
+        capture_watch_root(root, &mut snapshot);
+    }
+    snapshot
+}
+
+fn content_hash(path: &Path) -> Option<u64> {
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&bytes);
+    Some(hasher.finish())
+}
+
+fn content_fingerprint(path: &Path) -> InputFingerprint {
+    content_hash(path)
+        .map(InputFingerprint::Content)
+        .unwrap_or(InputFingerprint::Other)
+}
+
+fn metadata_fingerprint(metadata: &fs::Metadata) -> InputFingerprint {
+    InputFingerprint::Metadata {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    }
+}
+
+fn directory_fingerprint() -> InputFingerprint {
+    InputFingerprint::Directory
+}
+
+fn symlink_fingerprint(path: &Path, hash_content: bool) -> InputFingerprint {
+    let metadata = fs::metadata(path).ok();
+    InputFingerprint::Symlink {
+        target: fs::read_link(path).ok(),
+        modified: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok()),
+        len: metadata.as_ref().map(fs::Metadata::len),
+        content: hash_content.then(|| content_hash(path)).flatten(),
+    }
+}
+
+fn capture_watch_root(root: &WatchRoot, snapshot: &mut InputSnapshot) {
+    let Ok(metadata) = fs::symlink_metadata(&root.path) else {
+        snapshot.insert(root.path.clone(), InputFingerprint::Missing);
         return;
     };
-    let mut child_dirs = entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            if name.to_str().is_some_and(|name| name.starts_with('.')) {
-                return None;
-            }
-            entry
-                .file_type()
-                .ok()
-                .filter(|file_type| file_type.is_dir())
-                .map(|_| entry.path())
-        })
-        .collect::<Vec<_>>();
-    child_dirs.sort();
-    for child in child_dirs {
-        collect_watch_tree(&child, dirs);
-    }
-}
 
-fn has_hidden_relative_component(root: &Path, changed: &Path) -> bool {
-    changed.strip_prefix(root).ok().is_some_and(|relative| {
-        relative.components().any(|component| {
-            matches!(
-                component,
-                Component::Normal(name)
-                    if name.to_str().is_some_and(|name| name.starts_with('.'))
-            )
-        })
-    })
-}
-
-fn push_watch_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
-    if !dirs.iter().any(|existing| same_watch_path(existing, &dir)) {
-        dirs.push(dir);
-    }
-}
-
-trait WatchController {
-    fn watch_dir(&mut self, dir: &Path) -> miette::Result<()>;
-    fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()>;
-}
-
-struct NotifyWatchController<'a> {
-    watcher: &'a mut dyn notify::Watcher,
-}
-
-impl<'a> NotifyWatchController<'a> {
-    fn new(watcher: &'a mut dyn notify::Watcher) -> Self {
-        Self { watcher }
-    }
-}
-
-impl WatchController for NotifyWatchController<'_> {
-    fn watch_dir(&mut self, dir: &Path) -> miette::Result<()> {
-        let metadata = fs::metadata(dir)
-            .map_err(|err| miette::miette!("directory does not exist or cannot be read: {err}"))?;
-        if !metadata.is_dir() {
-            return Err(miette::miette!("path is not a directory"));
+    if metadata.file_type().is_symlink() {
+        let followed = fs::metadata(&root.path).ok();
+        if root.directory_candidate && !followed.as_ref().is_some_and(fs::Metadata::is_dir) {
+            snapshot.insert(root.path.clone(), symlink_fingerprint(&root.path, false));
+            return;
         }
-        self.watcher
-            .watch(dir, RecursiveMode::NonRecursive)
-            .map_err(|err| miette::miette!("{err}"))
+        let target_is_file = followed.as_ref().is_some_and(fs::Metadata::is_file);
+        snapshot.insert(
+            root.path.clone(),
+            symlink_fingerprint(&root.path, root.ext.is_some() && target_is_file),
+        );
+        if followed.as_ref().is_some_and(fs::Metadata::is_dir) {
+            capture_directory_contents(root, snapshot);
+        }
+        return;
     }
 
-    fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()> {
-        self.watcher
-            .unwatch(dir)
-            .map_err(|err| miette::miette!("{err}"))
+    if root.directory_candidate && !metadata.is_dir() {
+        let fingerprint = if metadata.is_file() {
+            metadata_fingerprint(&metadata)
+        } else {
+            InputFingerprint::Other
+        };
+        snapshot.insert(root.path.clone(), fingerprint);
+        return;
+    }
+
+    if metadata.is_file() {
+        let fingerprint = match root.ext {
+            Some(_) => content_fingerprint(&root.path),
+            None => metadata_fingerprint(&metadata),
+        };
+        snapshot.insert(root.path.clone(), fingerprint);
+        return;
+    }
+
+    if metadata.is_dir() {
+        snapshot.insert(root.path.clone(), directory_fingerprint());
+        capture_directory_contents(root, snapshot);
+    } else {
+        snapshot.insert(root.path.clone(), InputFingerprint::Other);
+    }
+}
+
+fn capture_directory_contents(root: &WatchRoot, snapshot: &mut InputSnapshot) {
+    match root.ext {
+        Some(ext) => capture_text_directory(&root.path, ext, snapshot),
+        None => capture_binary_directory(&root.path, snapshot),
+    }
+}
+
+fn capture_text_directory(path: &Path, ext: &str, snapshot: &mut InputSnapshot) {
+    let Ok(files) = collect_asset_files(path, ext) else {
+        return;
+    };
+    for path in files {
+        snapshot.insert(path.clone(), content_fingerprint(&path));
+    }
+}
+
+fn capture_binary_directory(path: &Path, snapshot: &mut InputSnapshot) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let fingerprint = if metadata.file_type().is_symlink() {
+            symlink_fingerprint(&path, false)
+        } else if metadata.is_file() {
+            metadata_fingerprint(&metadata)
+        } else if metadata.is_dir() {
+            directory_fingerprint()
+        } else {
+            InputFingerprint::Other
+        };
+        let is_dir = metadata.is_dir();
+        snapshot.entry(path.clone()).or_insert(fingerprint);
+        if is_dir {
+            capture_binary_directory(&path, snapshot);
+        }
     }
 }
 
@@ -1520,141 +1515,114 @@ fn rebuild_once_for_watch(
     Ok(())
 }
 
-fn handle_watch_paths_with_rebuild<F>(
+fn handle_watch_tick<F>(
     state: &mut WatchState,
-    watcher: &mut dyn WatchController,
-    changed_paths: &[PathBuf],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
-    mut rebuild: F,
+    rebuild: &mut F,
 ) -> miette::Result<()>
 where
     F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
 {
-    let relevant = changed_paths
-        .iter()
-        .any(|changed| state.targets.is_relevant_change(changed));
+    let current = capture_input_snapshot(&state.targets);
+    // A truncate, partial write, or in-progress binary copy is only a
+    // candidate. It must produce the same capture on the following tick
+    // before it can trigger a rebuild.
+    let Some(stable) = stable_snapshot_candidate(
+        &state.input_snapshot,
+        &mut state.candidate_snapshot,
+        current,
+    ) else {
+        return Ok(());
+    };
 
-    if relevant {
-        refresh_watch_targets(state, stderr)?;
+    refresh_watch_targets(state, stderr)?;
+    let refreshed = capture_input_snapshot(&state.targets);
+    if refreshed != stable {
+        state.candidate_snapshot = Some(refreshed);
+        return Ok(());
     }
 
-    let watch_set_changed = state.reconcile_after_events(watcher, stderr)?;
-    if relevant || watch_set_changed {
-        rebuild(stdout, stderr)?;
+    rebuild_with_input_snapshot(state, refreshed, stdout, stderr, rebuild)
+}
+
+fn stable_snapshot_candidate(
+    installed: &InputSnapshot,
+    candidate: &mut Option<InputSnapshot>,
+    current: InputSnapshot,
+) -> Option<InputSnapshot> {
+    if &current == installed {
+        *candidate = None;
+        return None;
     }
-    Ok(())
+    if candidate.as_ref() == Some(&current) {
+        *candidate = None;
+        return Some(current);
+    }
+    *candidate = Some(current);
+    None
+}
+
+fn rebuild_with_input_snapshot<F>(
+    state: &mut WatchState,
+    input_snapshot: InputSnapshot,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    rebuild: &mut F,
+) -> miette::Result<()>
+where
+    F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
+{
+    // Install the stable capture made before the build. Bytes written while
+    // the build runs must not be marked as consumed; the next tick will see
+    // them and may intentionally cause one extra rebuild.
+    let result = rebuild(stdout, stderr);
+    state.input_snapshot = input_snapshot;
+    result
+}
+
+fn run_initial_action_after_watch_snapshot<T, F>(
+    input: PathBuf,
+    initial_action: F,
+) -> miette::Result<(WatchState, T)>
+where
+    F: FnOnce() -> miette::Result<T>,
+{
+    // The initial build may overlap a save just like any later rebuild. Keep
+    // the pre-build capture so bytes arriving during that action remain new.
+    let state = prepare_watch_loop(input);
+    let value = initial_action()?;
+    Ok((state, value))
 }
 
 fn watch_build(options: BuildOptions) -> miette::Result<()> {
-    let (runtime, ()) = run_after_watch_registration(&options.input, prepare_watch_loop, || {
+    let (state, ()) = run_initial_action_after_watch_snapshot(options.input.clone(), || {
         println!("watching deck, referenced images, and resolved asset paths");
         rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())
     })?;
-    watch_paths_loop(runtime, move |stdout, stderr| {
+    watch_paths_loop(state, move |stdout, stderr| {
         rebuild_once_for_watch(&options, stdout, stderr)
     })
 }
 
-fn run_after_watch_registration<W, T, P, A>(
-    input: &Path,
-    prepare_watch: P,
-    action: A,
-) -> miette::Result<(W, T)>
-where
-    P: FnOnce(PathBuf) -> miette::Result<W>,
-    A: FnOnce() -> miette::Result<T>,
-{
-    let watch = prepare_watch(input.to_path_buf())?;
-    let value = action()?;
-    Ok((watch, value))
-}
-
-fn watch_paths_loop<F>(mut runtime: WatchRuntime, mut rebuild: F) -> miette::Result<()>
+fn watch_paths_loop<F>(mut state: WatchState, mut rebuild: F) -> miette::Result<()>
 where
     F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
 {
-    while let Ok(result) = runtime.rx.recv() {
-        let mut watcher = NotifyWatchController::new(runtime.debouncer.watcher());
-        handle_watch_event_result(
-            result,
-            &mut runtime.state,
-            &mut watcher,
+    loop {
+        thread::sleep(WATCH_POLL_INTERVAL);
+        handle_watch_tick(
+            &mut state,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
             &mut rebuild,
         )?;
     }
-
-    Ok(())
 }
 
-fn prepare_watch_loop(input: PathBuf) -> miette::Result<WatchRuntime> {
+fn prepare_watch_loop(input: PathBuf) -> WatchState {
     let targets = resolve_watch_targets_or_deck_only(&input);
-    let (tx, rx) = mpsc::channel::<DebounceEventResult>();
-    let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(200));
-    let debounce_config = DebounceConfig::default()
-        .with_timeout(Duration::from_millis(200))
-        .with_notify_config(notify_config);
-    let mut debouncer =
-        new_debouncer_opt::<_, PollWatcher>(debounce_config, tx).map_err(|err| {
-            miette::miette!(
-                help = "check file watcher permissions",
-                "failed to start file watcher\ncaused by: {err}"
-            )
-        })?;
-
-    {
-        let mut watcher = NotifyWatchController::new(debouncer.watcher());
-        let watched_dirs = register_watch_target_dirs(&targets, &mut watcher)?;
-        // Watch notes are always written to stderr (see `watch_paths_loop`).
-        let state = WatchState::new(input, targets, watched_dirs, LabelStyle::for_stderr());
-
-        Ok(WatchRuntime {
-            state,
-            debouncer,
-            rx,
-        })
-    }
-}
-
-fn register_watch_target_dirs(
-    targets: &WatchTargets,
-    watcher: &mut dyn WatchController,
-) -> miette::Result<Vec<PathBuf>> {
-    let dirs = targets.watch_dirs();
-    watch_all_dirs(watcher, &dirs)?;
-    Ok(dirs)
-}
-
-fn handle_watch_event_result<F>(
-    result: DebounceEventResult,
-    state: &mut WatchState,
-    watcher: &mut dyn WatchController,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-    mut rebuild: F,
-) -> miette::Result<()>
-where
-    F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
-{
-    match result {
-        Ok(events) => {
-            let paths = events
-                .into_iter()
-                .map(|event| event.path)
-                .collect::<Vec<_>>();
-            handle_watch_paths_with_rebuild(state, watcher, &paths, stdout, stderr, rebuild)
-        }
-        Err(err) => {
-            let watch_set_changed = state.reconcile_after_error(watcher, stderr)?;
-            state.write_watch_error_note(&err, stderr)?;
-            if watch_set_changed {
-                rebuild(stdout, stderr)?;
-            }
-            Ok(())
-        }
-    }
+    WatchState::new(input, targets, LabelStyle::for_stderr())
 }
 
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
@@ -1734,108 +1702,6 @@ fn resolved_asset_paths_changed(old: &ResolvedAssets, new: &ResolvedAssets) -> b
         || old.fonts.path() != new.fonts.path()
 }
 
-fn watch_all_dirs(watcher: &mut dyn WatchController, dirs: &[PathBuf]) -> miette::Result<()> {
-    for dir in dirs {
-        watcher.watch_dir(dir).map_err(|err| {
-            miette::miette!(
-                help =
-                    "verify the watched directories exist and are readable before starting --watch",
-                "failed to watch {}\ncaused by: {err}",
-                dir.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn watch_path_key(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-struct ReconcileResult {
-    changed: bool,
-    had_failures: bool,
-}
-
-fn reconcile_watched_dirs(
-    watcher: &mut dyn WatchController,
-    watched_dirs: &mut Vec<PathBuf>,
-    desired_dirs: &[PathBuf],
-    stderr: &mut dyn Write,
-    emitted_watch_error_notes: &mut HashSet<String>,
-    style: LabelStyle,
-) -> miette::Result<ReconcileResult> {
-    let previous_dirs = watched_dirs
-        .iter()
-        .map(|path| (watch_path_key(path), path.clone()))
-        .collect::<Vec<_>>();
-    let desired_dirs = desired_dirs
-        .iter()
-        .map(|path| (watch_path_key(path), path.clone()))
-        .collect::<Vec<_>>();
-    let previous_keys = previous_dirs
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect::<HashSet<_>>();
-    let desired_keys = desired_dirs
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect::<HashSet<_>>();
-    let mut next_watched_dirs = Vec::new();
-    let mut next_keys = HashSet::new();
-    let mut had_failures = false;
-
-    for (key, old) in previous_dirs {
-        if !desired_keys.contains(&key) {
-            if let Err(err) = watcher.unwatch_dir(&old) {
-                // The key is the unstyled text so suppression does not depend
-                // on whether this run is writing to a terminal.
-                let key = format!("failed to stop watching {}: {err}", old.display());
-                let note = format!("{}{key}", style.note());
-                write_suppressed_watch_note(&key, &note, stderr, emitted_watch_error_notes)?;
-                had_failures = true;
-            }
-        } else {
-            next_keys.insert(key);
-            next_watched_dirs.push(old);
-        }
-    }
-    for (key, new) in desired_dirs {
-        if !previous_keys.contains(&key) {
-            if let Err(err) = watcher.watch_dir(&new) {
-                let key = format!("failed to watch {}: {err}", new.display());
-                let note = format!("{}{key}", style.note());
-                write_suppressed_watch_note(&key, &note, stderr, emitted_watch_error_notes)?;
-                had_failures = true;
-            } else {
-                next_keys.insert(key);
-                next_watched_dirs.push(new);
-            }
-        }
-    }
-
-    let changed = previous_keys != next_keys;
-    *watched_dirs = next_watched_dirs;
-    Ok(ReconcileResult {
-        changed,
-        had_failures,
-    })
-}
-
-fn write_suppressed_watch_note(
-    key: &str,
-    note: &str,
-    stderr: &mut dyn Write,
-    emitted_watch_error_notes: &mut HashSet<String>,
-) -> miette::Result<()> {
-    if !emitted_watch_error_notes.insert(key.to_owned()) {
-        return Ok(());
-    }
-    writeln!(stderr, "{note}").into_diagnostic()?;
-    stderr.flush().into_diagnostic()?;
-    Ok(())
-}
-
 fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     let mut parts = Vec::new();
     if let Some(path) = assets.layouts.path() {
@@ -1863,19 +1729,6 @@ fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     } else {
         parts.join(", ")
     }
-}
-
-fn parent_dir_for_watch(path: &Path) -> PathBuf {
-    let mut candidate = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    while let Some(dir) = candidate {
-        if dir.is_dir() {
-            return dir.to_path_buf();
-        }
-        candidate = dir.parent().filter(|parent| !parent.as_os_str().is_empty());
-    }
-    Path::new(".").to_path_buf()
 }
 
 fn same_watch_path(left: &Path, right: &Path) -> bool {
@@ -5111,7 +4964,7 @@ fn default_route_ipv4() -> Option<IpAddr> {
 
 fn preview(options: PreviewOptions) -> miette::Result<()> {
     let cache = PathBuf::from(PREVIEW_CACHE);
-    let (watch, root) = run_after_watch_registration(&options.input, prepare_watch_loop, || {
+    let (watch, root) = run_initial_action_after_watch_snapshot(options.input.clone(), || {
         emit_initial_preview_root(&options.input, &cache, &mut std::io::stderr())
     })?;
 
@@ -5133,7 +4986,7 @@ fn preview(options: PreviewOptions) -> miette::Result<()> {
 }
 
 fn spawn_preview_watch(
-    watch: WatchRuntime,
+    watch: WatchState,
     cache: PathBuf,
     server: server::PresentServer,
 ) -> thread::JoinHandle<()> {
@@ -5171,11 +5024,11 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 fn watch_preview(
-    watch: WatchRuntime,
+    watch: WatchState,
     cache: PathBuf,
     server: server::PresentServer,
 ) -> miette::Result<()> {
-    let rebuild_input = watch.state.input.clone();
+    let rebuild_input = watch.input.clone();
     watch_paths_loop(watch, move |stdout, stderr| {
         rebuild_preview_once_for_watch(&rebuild_input, &cache, &server, stdout, stderr)
     })
@@ -6074,173 +5927,219 @@ contexts:
     }
 
     #[test]
-    fn watch_dependency_types_are_available() {
-        fn accepts_recursive_mode(_mode: notify::RecursiveMode) {}
+    fn stable_snapshot_candidate_requires_two_identical_changed_captures() {
+        let deck = PathBuf::from("deck.md");
+        let installed = BTreeMap::from([(deck.clone(), InputFingerprint::Content(1))]);
+        let changed = BTreeMap::from([(deck.clone(), InputFingerprint::Content(2))]);
+        let newer = BTreeMap::from([(deck, InputFingerprint::Content(3))]);
+        let mut candidate = None;
 
-        accepts_recursive_mode(notify::RecursiveMode::NonRecursive);
-        let result: notify_debouncer_mini::DebounceEventResult = Ok(Vec::new());
-
-        assert!(matches!(result, Ok(events) if events.is_empty()));
+        assert_eq!(
+            stable_snapshot_candidate(&installed, &mut candidate, installed.clone()),
+            None
+        );
+        assert_eq!(candidate, None);
+        assert_eq!(
+            stable_snapshot_candidate(&installed, &mut candidate, changed.clone()),
+            None
+        );
+        assert_eq!(candidate, Some(changed.clone()));
+        assert_eq!(
+            stable_snapshot_candidate(&installed, &mut candidate, newer.clone()),
+            None
+        );
+        assert_eq!(candidate, Some(newer.clone()));
+        assert_eq!(
+            stable_snapshot_candidate(&installed, &mut candidate, newer.clone()),
+            Some(newer)
+        );
+        assert_eq!(candidate, None);
     }
 
     #[test]
-    fn watch_covers_asset_dir_contents_by_extension() {
+    fn input_snapshot_tracks_precise_text_and_binary_inputs_only() {
         let dir = tempfile::tempdir().unwrap();
-        let layouts = dir.path().join("layouts");
-        let css = dir.path().join("css");
-        let syntaxes = dir.path().join("syntaxes");
-        fs::create_dir_all(&layouts).unwrap();
-        fs::create_dir_all(&css).unwrap();
-        fs::create_dir_all(&syntaxes).unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let deck = root.join("deck.md");
+        let included = root.join("includes/intro.md");
+        let image = root.join("images/photo.png");
+        let layouts = root.join("layouts");
+        let css = root.join("css");
+        let syntaxes = root.join("syntaxes");
+        let fonts = root.join("fonts");
+        let nested_fonts = fonts.join("noto");
+        let dist = root.join("dist");
+        for path in [
+            included.parent().unwrap(),
+            image.parent().unwrap(),
+            &layouts,
+            &css,
+            &syntaxes,
+            &nested_fonts,
+            &dist,
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::write(&included, "# Included\n").unwrap();
+        fs::write(&image, b"image").unwrap();
+        let layout = layouts.join("title.html");
+        let stylesheet = css.join("talk.css");
+        let syntax = syntaxes.join("talk.sublime-syntax");
+        let font = nested_fonts.join("talk.woff2");
+        fs::write(&layout, "<main></main>").unwrap();
+        fs::write(&stylesheet, "main {}").unwrap();
+        fs::write(&syntax, "%YAML 1.2").unwrap();
+        fs::write(&font, b"font").unwrap();
+        let sibling_video = root.join("talk.mp4");
+        fs::write(&sibling_video, b"large binary stand-in").unwrap();
+        fs::write(dist.join("index.html"), "generated").unwrap();
+
         let targets = WatchTargets::new(
-            dir.path().join("deck.md"),
+            deck.clone(),
             ResolvedAssets {
                 layouts: Provenance::Explicit(layouts.clone()),
                 css: Provenance::Explicit(css.clone()),
                 syntaxes: Provenance::Explicit(syntaxes.clone()),
-                fonts: Provenance::Builtin,
-            },
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(targets.is_relevant_change(&dir.path().join("deck.md")));
-        assert!(targets.is_relevant_change(&layouts.join("cover.html")));
-        assert!(targets.is_relevant_change(&css.join("base.css")));
-        assert!(targets.is_relevant_change(&syntaxes.join("foo.sublime-syntax")));
-        assert!(!targets.is_relevant_change(&layouts.join("notes.txt")));
-        assert!(!targets.is_relevant_change(&dir.path().join("other.md")));
-
-        let dirs = targets.watch_dirs();
-        assert!(dirs.iter().any(|d| d == &layouts));
-        assert!(dirs.iter().any(|d| d == &css));
-        assert!(dirs.iter().any(|d| d == &syntaxes));
-        assert!(dirs.iter().any(|d| d == dir.path()));
-    }
-
-    #[test]
-    fn watch_covers_fonts_dir_contents_without_extension_filter() {
-        let dir = tempfile::tempdir().unwrap();
-        let fonts = dir.path().join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        let targets = WatchTargets::new(
-            dir.path().join("deck.md"),
-            ResolvedAssets {
-                layouts: Provenance::Builtin,
-                css: Provenance::Builtin,
-                syntaxes: Provenance::Builtin,
                 fonts: Provenance::Explicit(fonts.clone()),
             },
-            Vec::new(),
-            Vec::new(),
+            vec![included.clone()],
+            vec![image.clone()],
         );
+        let snapshot = capture_input_snapshot(&targets);
 
-        assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
-        assert!(targets.is_relevant_change(&fonts.join("font-face.css")));
-        assert!(!targets.is_relevant_change(&dir.path().join("other.woff2")));
-
-        let dirs = targets.watch_dirs();
-        assert!(dirs.iter().any(|d| d == &fonts));
-        assert!(dirs.iter().any(|d| d == dir.path()));
+        for path in [&deck, &included, &layout, &stylesheet, &syntax] {
+            assert!(matches!(
+                snapshot.get(path),
+                Some(InputFingerprint::Content(_))
+            ));
+        }
+        for path in [&image, &font] {
+            assert!(matches!(
+                snapshot.get(path),
+                Some(InputFingerprint::Metadata { .. })
+            ));
+        }
+        assert!(!snapshot.contains_key(&sibling_video));
+        assert!(!snapshot.contains_key(&dist.join("index.html")));
     }
 
     #[test]
-    fn watch_ignores_dotfiles_in_fonts_dir() {
+    fn input_snapshot_filters_text_asset_extensions_and_unrelated_siblings() {
         let dir = tempfile::tempdir().unwrap();
-        let fonts = dir.path().join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        let targets = WatchTargets::new(
-            dir.path().join("deck.md"),
-            ResolvedAssets {
-                layouts: Provenance::Builtin,
-                css: Provenance::Builtin,
-                syntaxes: Provenance::Builtin,
-                fonts: Provenance::Explicit(fonts.clone()),
-            },
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(!targets.is_relevant_change(&fonts.join(".DS_Store")));
-        assert!(!targets.is_relevant_change(&fonts.join(".swp")));
-        assert!(targets.is_relevant_change(&fonts.join("deck-font.woff2")));
-    }
-
-    #[test]
-    fn watch_covers_nested_font_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let fonts = dir.path().join("fonts");
-        let nested = fonts.join("inter");
-        fs::create_dir_all(&nested).unwrap();
-        let targets = WatchTargets::new(
-            dir.path().join("deck.md"),
-            ResolvedAssets {
-                layouts: Provenance::Builtin,
-                css: Provenance::Builtin,
-                syntaxes: Provenance::Builtin,
-                fonts: Provenance::Explicit(fonts.clone()),
-            },
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(targets.is_relevant_change(&nested.join("400.woff2")));
-        assert!(!targets.is_relevant_change(&nested.join(".DS_Store")));
-        assert!(!targets.is_relevant_change(&dir.path().join("other/400.woff2")));
-
-        let dirs = targets.watch_dirs();
-        assert!(dirs.iter().any(|dir| dir == &fonts));
-        assert!(dirs.iter().any(|dir| dir == &nested));
-    }
-
-    #[test]
-    fn watch_dirs_falls_back_to_nearest_existing_ancestor_for_missing_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let deck = root.join("deck.md");
+        let deck = dir.path().join("deck.md");
+        let css = dir.path().join("css");
+        fs::create_dir_all(&css).unwrap();
         fs::write(&deck, "# Intro\n").unwrap();
-        let missing_fonts = root.join("gone").join("fonts").join("noto");
         let targets = WatchTargets::new(
             deck,
             ResolvedAssets {
-                layouts: Provenance::Builtin,
-                css: Provenance::Builtin,
-                syntaxes: Provenance::Builtin,
-                fonts: Provenance::Explicit(missing_fonts.clone()),
+                css: Provenance::Explicit(css.clone()),
+                ..empty_assets()
             },
             Vec::new(),
             Vec::new(),
         );
+        let before = capture_input_snapshot(&targets);
 
-        let dirs = targets.watch_dirs();
+        fs::write(dir.path().join("talk.mp4"), b"large binary stand-in").unwrap();
+        fs::write(css.join("notes.txt"), "not css").unwrap();
+        assert_eq!(capture_input_snapshot(&targets), before);
 
-        assert!(
-            dirs.iter().all(|path| path.is_dir()),
-            "actual dirs: {dirs:?}"
+        fs::write(css.join("talk.css"), "body {}\n").unwrap();
+        assert_ne!(capture_input_snapshot(&targets), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_emacs_lock_for_text_asset_does_not_rebuild() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = WatchFixture::new("# Intro\n");
+        let css = fixture._dir.path().join("css");
+        let lock = css.join(".#talk.css");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        symlink("talk.css", &lock).unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
         );
-        assert!(
-            dirs.iter().any(|path| path == &root),
-            "actual dirs: {dirs:?}"
-        );
-        assert!(
-            !dirs
-                .iter()
-                .any(|path| path == missing_fonts.parent().unwrap()),
-            "actual dirs: {dirs:?}"
-        );
+
+        assert_eq!(rebuilds, 0);
+        assert!(!capture_input_snapshot(&state.targets).contains_key(&lock));
     }
 
     #[test]
-    fn build_options_with_builtin_assets_watch_only_the_deck() {
+    fn regular_text_asset_loaded_by_build_is_tracked() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let css = fixture._dir.path().join("css");
+        let stylesheet = css.join("talk.css");
+        fs::write(&stylesheet, "body {}\n").unwrap();
+
+        assert!(collect_asset_files(&css, "css")
+            .unwrap()
+            .contains(&stylesheet));
+        assert!(matches!(
+            capture_input_snapshot(&fixture.targets).get(&stylesheet),
+            Some(InputFingerprint::Content(_))
+        ));
+    }
+
+    #[test]
+    fn input_snapshot_tracks_nested_fonts_but_ignores_hidden_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let fonts = dir.path().join("fonts");
+        let nested = fonts.join("noto");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::write(nested.join("400.woff2"), b"font").unwrap();
+        fs::write(nested.join(".swap"), b"hidden").unwrap();
         let targets = WatchTargets::new(
-            PathBuf::from("deck.md"),
-            empty_assets(),
+            deck,
+            ResolvedAssets {
+                fonts: Provenance::Explicit(fonts.clone()),
+                ..empty_assets()
+            },
             Vec::new(),
             Vec::new(),
         );
+        let snapshot = capture_input_snapshot(&targets);
 
-        assert!(targets.is_relevant_change(Path::new("deck.md")));
-        assert!(!targets.is_relevant_change(Path::new("layout.html")));
+        assert!(snapshot.contains_key(&fonts));
+        assert!(snapshot.contains_key(&nested));
+        assert!(snapshot.contains_key(&nested.join("400.woff2")));
+        assert!(!snapshot.contains_key(&nested.join(".swap")));
+    }
+
+    #[test]
+    fn input_snapshot_detects_candidate_asset_root_appearing_and_disappearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let css = dir.path().join("css");
+        fs::write(&deck, "# Intro\n").unwrap();
+        let targets = resolve_watch_targets(&deck).unwrap();
+        let missing = capture_input_snapshot(&targets);
+        assert_eq!(missing.get(&css), Some(&InputFingerprint::Missing));
+
+        fs::create_dir(&css).unwrap();
+        fs::write(css.join("talk.css"), "body {}\n").unwrap();
+        let present = capture_input_snapshot(&targets);
+        assert_ne!(present, missing);
+        assert_eq!(present.get(&css), Some(&InputFingerprint::Directory));
+
+        fs::remove_dir_all(&css).unwrap();
+        assert_eq!(capture_input_snapshot(&targets), missing);
     }
 
     fn render_example_slides(
@@ -7542,7 +7441,7 @@ contexts:
 
         let source =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs")).unwrap();
-        let production = source.split("#[cfg(test)]").next().unwrap();
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         let atomic_needle = ["write_atomic", "(origin_path"].concat();
         assert_eq!(production.matches(&atomic_needle).count(), 1);
         let shared_needle = ["write_preview_origin", "_rewrite("].concat();
@@ -7911,42 +7810,23 @@ contexts:
     }
 
     #[test]
-    fn preview_deck_writer_atomic_event_batch_rebuilds_once() {
+    fn preview_deck_writer_atomic_save_rebuilds_once_after_settling() {
         let fixture = WatchFixture::new("# Intro\n");
         let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let tmp_path = fixture.options.input.with_file_name("deck.md.tmp");
         let rebuilds = Cell::new(0);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let mut rebuild = |_: &mut dyn Write, _: &mut dyn Write| {
+            rebuilds.set(rebuilds.get() + 1);
+            Ok(())
+        };
 
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&tmp_path),
-            &mut stdout,
-            &mut stderr,
-            |_, _| {
-                rebuilds.set(rebuilds.get() + 1);
-                Ok(())
-            },
-        )
-        .unwrap();
+        handle_watch_tick(&mut state, &mut stdout, &mut stderr, &mut rebuild).unwrap();
 
         assert_eq!(rebuilds.get(), 0);
 
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            &[tmp_path, fixture.options.input.clone()],
-            &mut stdout,
-            &mut stderr,
-            |_, _| {
-                rebuilds.set(rebuilds.get() + 1);
-                Ok(())
-            },
-        )
-        .unwrap();
+        server::write_atomic(&fixture.options.input, b"# Changed\n").unwrap();
+        run_watch_ticks(&mut state, 2, &mut stdout, &mut stderr, &mut rebuild);
 
         assert_eq!(rebuilds.get(), 1);
     }
@@ -8406,354 +8286,374 @@ contexts:
     }
 
     #[test]
-    fn build_options_deduplicates_watch_parent_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let targets = WatchTargets::new(
-            dir.path().join("deck.md"),
-            ResolvedAssets {
-                layouts: Provenance::Explicit(dir.path().join("title-body-code.html")),
-                css: Provenance::Explicit(dir.path().join("base.css")),
-                syntaxes: Provenance::Builtin,
-                fonts: Provenance::Builtin,
-            },
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
-    }
-
-    #[test]
-    fn resolve_watch_targets_includes_referenced_images() {
+    fn resolve_watch_targets_tracks_referenced_images_and_includes() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
-        let image_dir = dir.path().join("img");
-        let other_image_dir = dir.path().join("pics");
-        let image = image_dir.join("a.png");
-        let other_image = other_image_dir.join("b.png");
-        fs::create_dir_all(&image_dir).unwrap();
-        fs::create_dir_all(&other_image_dir).unwrap();
-        fs::write(&image, b"image a").unwrap();
-        fs::write(&other_image, b"image b").unwrap();
-        fs::write(
-            &deck,
-            "# First\n\n![x](img/a.png)\n\n---\n# Second\n\n![y](pics/b.png)\n\n---\n# Repeated\n\n![x](img/a.png)\n",
-        )
-        .unwrap();
-
-        let targets = resolve_watch_targets(&deck).unwrap();
-
-        assert!(targets.is_relevant_change(&image));
-        assert!(targets.is_relevant_change(&other_image));
-        assert!(targets.watch_dirs().iter().any(|path| path == &image_dir));
-        assert!(targets
-            .watch_dirs()
-            .iter()
-            .any(|path| path == &other_image_dir));
-    }
-
-    #[test]
-    fn watch_path_handler_rebuilds_after_referenced_image_change() {
-        let fixture = WatchFixture::new("# Intro\n\n![x](img/a.png)\n");
-        let image_dir = fixture._dir.path().join("img");
-        let image = image_dir.join("a.png");
-        let layout = fixture._dir.path().join("layouts/title-body-code.html");
-        let old_bytes = b"old image bytes";
-        let new_bytes = b"new image bytes";
-        fs::create_dir_all(&image_dir).unwrap();
-        fs::write(&image, old_bytes).unwrap();
-        fs::write(layout, TEST_IMAGE_LAYOUT_HTML).unwrap();
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-        let old_asset = fixture
-            .options
-            .out
-            .join(format!("assets/{}-a.png", short_sha256_hex(old_bytes, 16)));
-        assert!(old_asset.exists());
-        stdout.clear();
-        stderr.clear();
-        fs::write(&image, new_bytes).unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&image),
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        let new_asset = fixture
-            .options
-            .out
-            .join(format!("assets/{}-a.png", short_sha256_hex(new_bytes, 16)));
-        assert!(String::from_utf8(stdout).unwrap().contains("built"));
-        assert!(new_asset.exists());
-        assert!(!old_asset.exists());
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_path_handler_rewatches_when_referenced_image_paths_change() {
-        let fixture = WatchFixture::new("# Intro\n\n![x](img/a.png)\n");
-        let image_dir = fixture._dir.path().join("img");
-        let image = image_dir.join("a.png");
-        fs::create_dir_all(&image_dir).unwrap();
-        fs::write(&image, b"image a").unwrap();
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let other_image_dir = fixture._dir.path().join("pics");
-        let other_image = other_image_dir.join("b.png");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-        fs::create_dir_all(&other_image_dir).unwrap();
-        fs::write(&other_image, b"image b").unwrap();
-        fs::write(&fixture.options.input, "# Intro\n\n![x](pics/b.png)\n").unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(state.targets.is_relevant_change(&other_image));
-        assert!(!state.targets.is_relevant_change(&image));
-        assert!(watcher.watched.iter().any(|path| path == &other_image_dir));
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_path_handler_refreshes_image_targets_after_highlighter_recovers() {
-        let dir = tempfile::tempdir().unwrap();
-        let deck = dir.path().join("deck.md");
-        let image_dir = dir.path().join("img");
-        let image = image_dir.join("a.png");
-        let syntaxes = dir.path().join("syntaxes");
-        let syntax = syntaxes.join("x.sublime-syntax");
-        fs::create_dir_all(&image_dir).unwrap();
-        fs::create_dir_all(&syntaxes).unwrap();
-        fs::write(&image, b"image a").unwrap();
-        fs::write(&deck, "# Intro\n\n![x](img/a.png)\n").unwrap();
-        let targets = resolve_watch_targets(&deck).unwrap();
-        assert!(!targets.is_relevant_change(&image));
-        let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&syntax),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(state.targets.is_relevant_change(&image));
-        assert!(watcher.watched.iter().any(|path| path == &image_dir));
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn resolve_watch_targets_keeps_includes_and_assets_when_deck_parse_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let deck = dir.path().join("deck.md");
-        let image_dir = dir.path().join("img");
-        let image = image_dir.join("a.png");
         let shared = dir.path().join("shared");
         let included = shared.join("intro.md");
-        let layouts = dir.path().join("layouts");
-        fs::create_dir_all(&image_dir).unwrap();
+        let image = dir.path().join("img/a.png");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
         fs::create_dir_all(&shared).unwrap();
-        fs::create_dir_all(&layouts).unwrap();
+        fs::write(&included, "# Included\n\n![x](img/a.png)\n").unwrap();
         fs::write(&image, b"image").unwrap();
-        fs::write(&included, "# Included\n").unwrap();
+        fs::write(&deck, "<!-- {\"include\":\"shared/intro.md\"} -->\n").unwrap();
+
+        let snapshot = capture_input_snapshot(&resolve_watch_targets(&deck).unwrap());
+
+        assert!(matches!(
+            snapshot.get(&included),
+            Some(InputFingerprint::Content(_))
+        ));
+        assert!(matches!(
+            snapshot.get(&image),
+            Some(InputFingerprint::Metadata { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_targets_do_not_render_or_track_generated_mermaid_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        let command = dir.path().join("svg-command.sh");
+        let marker = PathBuf::from(format!("{}.ran", command.display()));
+        let cache = dir.path().join(peitho_core::CODE_IMAGES_CACHE_DIR);
+        let out = dir.path().join("dist");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
+        fs::write(layouts.join("image.html"), TEST_IMAGE_LAYOUT_HTML).unwrap();
         fs::write(layouts.join("title-body-code.html"), TEST_LAYOUT_HTML).unwrap();
+        fs::write(css.join("base.css"), "section {}\n").unwrap();
+        write_script(
+            &command,
+            "#!/bin/sh\ncat >/dev/null\nprintf ran > \"$0.ran\"\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"></svg>'\n",
+        );
         fs::write(
             &deck,
-            "<!-- {\"include\":\"shared/intro.md\"} -->\n---\n# Broken\n\n![x](img/a.png)\n\n```nosuchlang\ncontent\n```\n",
+            format!(
+                "---\ncode_images:\n  mermaid: /bin/sh {}\n---\n# Diagram\n\n```mermaid\ngraph TD\n  A --> B\n```\n",
+                command.display()
+            ),
         )
         .unwrap();
 
         let targets = resolve_watch_targets(&deck).unwrap();
+        let before = capture_input_snapshot(&targets);
 
-        assert!(!targets.is_relevant_change(&image));
-        assert!(targets.is_relevant_change(&included));
-        assert_eq!(
-            targets.assets.layouts,
-            Provenance::DeckAdjacent(layouts.clone())
-        );
-        let watched_dirs = targets.watch_dirs();
-        assert!(watched_dirs.iter().any(|path| path == &shared));
-        assert!(watched_dirs.iter().any(|path| path == &layouts));
+        assert!(!marker.exists(), "target resolution ran the renderer");
+        assert!(!cache.exists(), "target resolution created the image cache");
+        assert!(!before.keys().any(|path| path.starts_with(&cache)));
+
+        let options = BuildOptions { input: deck, out };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        rebuild_once_for_watch(&options, &mut stdout, &mut stderr).unwrap();
+
+        assert!(marker.exists(), "the full rebuild did not run the renderer");
+        assert!(cache.is_dir());
+        assert_eq!(capture_input_snapshot(&targets), before);
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
     }
 
     #[test]
-    fn resolve_watch_targets_does_not_watch_generated_images_for_mermaid() {
+    fn broken_included_source_keeps_include_and_assets_tracked_until_fixed() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
-        let generated_cache = dir.path().join(peitho_core::CODE_IMAGES_CACHE_DIR);
-        fs::write(&deck, "# Diagram\n\n```mermaid\ngraph TD\n  A --> B\n```\n").unwrap();
-
-        let targets = resolve_watch_targets(&deck).unwrap();
-
-        assert!(!generated_cache.exists());
-        assert!(!targets
-            .watch_dirs()
-            .iter()
-            .any(|path| same_watch_path(path, &generated_cache)));
-    }
-
-    #[test]
-    fn watch_rebuild_once_writes_distribution_and_success_line() {
-        let fixture = WatchFixture::new("# Intro\n\nBody\n");
+        let included = dir.path().join("shared/intro.md");
+        let layout = dir.path().join("layouts/title-body-code.html");
+        let stylesheet = dir.path().join("css/base.css");
+        let out = dir.path().join("dist");
+        fs::create_dir_all(included.parent().unwrap()).unwrap();
+        fs::create_dir_all(layout.parent().unwrap()).unwrap();
+        fs::create_dir_all(stylesheet.parent().unwrap()).unwrap();
+        fs::write(&layout, TEST_LAYOUT_HTML).unwrap();
+        fs::write(&stylesheet, "section {}\n").unwrap();
+        fs::write(
+            &included,
+            "# Broken include\n\n```nosuchlang\ncontent\n```\n",
+        )
+        .unwrap();
+        fs::write(&deck, "<!-- {\"include\":\"shared/intro.md\"} -->\n").unwrap();
+        let options = BuildOptions {
+            input: deck.clone(),
+            out,
+        };
+        let mut state = prepare_watch_loop(deck);
+        let initial = capture_input_snapshot(&state.targets);
+        assert!(matches!(
+            initial.get(&included),
+            Some(InputFingerprint::Content(_))
+        ));
+        assert!(matches!(
+            initial.get(&layout),
+            Some(InputFingerprint::Content(_))
+        ));
+        assert!(matches!(
+            initial.get(&stylesheet),
+            Some(InputFingerprint::Content(_))
+        ));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
+        rebuild_once_for_watch(&options, &mut stdout, &mut stderr).unwrap();
+        assert!(String::from_utf8_lossy(&stderr).contains("build failed:"));
+        stdout.clear();
+        stderr.clear();
 
-        assert!(stderr.is_empty());
+        fs::write(&included, "# Fixed include\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
+        );
+
+        assert!(
+            options.out.join("manifest.json").is_file(),
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
         assert!(String::from_utf8(stdout)
             .unwrap()
             .contains("built 1 slide(s)"));
-        assert!(fixture.options.out.join("manifest.json").exists());
-        assert!(fixture.options.out.join("slides/000-intro.html").exists());
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
     }
 
     #[test]
-    fn build_watch_distribution_omits_preview_edit_annotations() {
+    fn referenced_image_set_refreshes_when_deck_references_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let first = dir.path().join("img/a.png");
+        let second = dir.path().join("pics/b.png");
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&first, b"first image").unwrap();
+        fs::write(&second, b"second image").unwrap();
+        fs::write(&deck, "# Intro\n\n![x](img/a.png)\n").unwrap();
+        let mut state = prepare_watch_loop(deck.clone());
+        assert!(state.input_snapshot.contains_key(&first));
+        assert!(!state.input_snapshot.contains_key(&second));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::write(&deck, "# Intro\n\n![x](pics/b.png)\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+        assert!(!state.input_snapshot.contains_key(&first));
+        assert!(state.input_snapshot.contains_key(&second));
+    }
+
+    #[test]
+    fn referenced_image_set_refreshes_after_highlighter_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let image = dir.path().join("img/a.png");
+        let syntaxes = dir.path().join("syntaxes");
+        let syntax = syntaxes.join("carina.sublime-syntax");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::create_dir_all(&syntaxes).unwrap();
+        fs::write(&image, b"image").unwrap();
+        fs::write(&deck, "# Intro\n\n![x](img/a.png)\n").unwrap();
+        let mut state = prepare_watch_loop(deck);
+        assert!(!state.input_snapshot.contains_key(&image));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::write(&syntax, CARINA_SUBLIME_SYNTAX).unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+        assert!(state.input_snapshot.contains_key(&image));
+    }
+
+    #[test]
+    fn watch_rebuild_writes_distribution_without_preview_annotations() {
         let fixture = WatchFixture::new("# Intro\n\nBefore rebuild.\n");
         let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
         rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-        let slide_path = fixture.options.out.join("slides/000-intro.html");
-        assert!(fs::read_to_string(&slide_path)
-            .unwrap()
-            .contains("Before rebuild."));
-
         fs::write(&fixture.options.input, "# Intro\n\nAfter rebuild.\n").unwrap();
-        handle_watch_paths_with_rebuild(
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
+            2,
             &mut stdout,
             &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
 
-        let slide = fs::read_to_string(slide_path).unwrap();
+        let slide = fs::read_to_string(fixture.options.out.join("slides/000-intro.html")).unwrap();
         assert!(slide.contains("After rebuild."), "{slide}");
         assert!(!slide.contains("Before rebuild."), "{slide}");
-        for forbidden in ["data-peitho-src", "data-peitho-md"] {
-            assert!(!slide.contains(forbidden), "{forbidden} found in {slide}");
-        }
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_rebuild_once_reports_failure_without_returning_error() {
-        let fixture =
-            WatchFixture::new("# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-
-        assert!(stdout.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
-        assert!(
-            stderr.contains("slot 'code' got 2 item(s)"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("help: use a layout with more code capacity or remove one code block"),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn watch_rebuild_once_reports_emit_failure_without_returning_error() {
-        let fixture = WatchFixture::new("# Intro\n");
-        fs::write(&fixture.options.out, "not a directory").unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-
-        assert!(stdout.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
-    }
-
-    #[test]
-    fn preview_watch_thread_result_reports_panics_as_errors() {
-        let err = preview_watch_thread_result(|| -> miette::Result<()> {
-            panic!("boom");
-        })
-        .unwrap_err();
-
-        assert_eq!(err, "preview watch panicked: boom");
-    }
-
-    #[test]
-    fn watch_path_handler_rebuilds_after_markdown_change() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-        fs::write(&fixture.options.input, "# Intro\n\n---\n# Details\n").unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        let manifest = fs::read_to_string(fixture.options.out.join("manifest.json")).unwrap();
-        assert!(manifest.contains(r#""slideCount": 2"#));
+        assert!(!slide.contains("data-peitho-src"), "{slide}");
+        assert!(!slide.contains("data-peitho-md"), "{slide}");
         assert!(String::from_utf8(stdout)
             .unwrap()
-            .contains("built 2 slide(s)"));
+            .contains("built 1 slide(s)"));
         assert!(stderr.is_empty());
     }
 
     #[test]
-    fn watch_path_handler_rebuilds_after_included_markdown_change() {
+    fn watch_rebuild_reports_failure_without_stopping_the_loop() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        fs::write(
+            &fixture.options.input,
+            "# Intro\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```",
+        )
+        .unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("build failed:"), "{stderr}");
+        assert!(stderr.contains("slot 'code' got 2 item(s)"), "{stderr}");
+    }
+
+    #[test]
+    fn watch_emit_failure_is_reported_and_a_later_change_still_rebuilds() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        fs::write(&fixture.options.out, "not a directory").unwrap();
+        fs::write(&fixture.options.input, "# Emit failure\n").unwrap();
+
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("build failed:"));
+
+        fs::remove_file(&fixture.options.out).unwrap();
+        fs::write(&fixture.options.input, "# Recovered\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        let slide =
+            fs::read_to_string(fixture.options.out.join("slides/000-recovered.html")).unwrap();
+        assert!(slide.contains("Recovered"), "{slide}");
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 1 slide(s)"));
+    }
+
+    #[test]
+    fn bad_frontmatter_asset_path_keeps_previous_targets_and_reports_build_failure() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let original_assets = state.targets.assets.clone();
+        let original_snapshot = state.input_snapshot.clone();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        fs::write(
+            &fixture.options.input,
+            "---\nlayouts: ./missing-layouts\n---\n# Intro\n",
+        )
+        .unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        assert_eq!(state.targets.assets, original_assets);
+        assert_ne!(state.input_snapshot, original_snapshot);
+        assert!(stdout.is_empty());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("build failed:"), "{stderr}");
+        assert!(stderr.contains("layouts path does not exist"), "{stderr}");
+        assert!(!stderr.contains("watching new asset paths"), "{stderr}");
+    }
+
+    #[test]
+    fn failed_watch_rebuild_is_followed_by_a_successful_fix_rebuild() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        fs::write(
+            &fixture.options.input,
+            "# Broken\n\n```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```\n",
+        )
+        .unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("build failed:"));
+
+        stderr.clear();
+        fs::write(&fixture.options.input, "# Fixed\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 1 slide(s)"));
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+        assert!(fixture.options.out.join("slides/000-fixed.html").is_file());
+    }
+
+    #[test]
+    fn markdown_and_include_changes_rebuild_the_final_content() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let shared = dir.path().join("shared");
@@ -8766,1101 +8666,169 @@ contexts:
             input: deck.clone(),
             out,
         };
-        let targets = resolve_watch_targets(&deck).unwrap();
-        assert!(targets.is_relevant_change(&included));
-        let watched_dirs = targets.watch_dirs();
-        assert!(
-            watched_dirs.iter().any(|path| path == &shared),
-            "actual dirs: {watched_dirs:?}"
-        );
-        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
-        let mut watcher = RecordingWatchController::default();
+        let mut state = prepare_watch_loop(deck.clone());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        rebuild_once_for_watch(&options, &mut stdout, &mut stderr).unwrap();
-        stdout.clear();
-        stderr.clear();
         fs::write(&included, "# Intro\n\n---\n# Included Details\n").unwrap();
-
-        handle_watch_paths_with_rebuild(
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
-            std::slice::from_ref(&included),
+            2,
             &mut stdout,
             &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
-        )
-        .unwrap();
-
-        let manifest = fs::read_to_string(options.out.join("manifest.json")).unwrap();
-        assert!(manifest.contains(r#""slideCount": 2"#));
-        assert!(String::from_utf8(stdout)
+            &mut |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
+        );
+        assert!(fs::read_to_string(options.out.join("manifest.json"))
             .unwrap()
-            .contains("built 2 slide(s)"));
-        assert!(stderr.is_empty());
-    }
+            .contains(r#""slideCount": 2"#));
 
-    #[test]
-    fn watch_path_handler_ignores_unwatched_file() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let unrelated = fixture._dir.path().join("outside").join("ignored.txt");
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            &[unrelated],
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
-        assert!(!fixture.options.out.join("manifest.json").exists());
-    }
-
-    #[test]
-    fn watch_path_handler_ignores_output_directory_event_in_watched_parent() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
         stdout.clear();
-        stderr.clear();
-
-        handle_watch_paths_with_rebuild(
+        fs::write(&deck, "# Deck only\n").unwrap();
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.out),
+            3,
             &mut stdout,
             &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        assert!(stdout.is_empty());
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_path_handler_rebuilds_after_atomic_save_final_path() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let temp = fixture._dir.path().join("deck-new.md");
-
-        fs::write(&temp, "# Atomic one\n\n---\n# Atomic two\n").unwrap();
-        fs::rename(&temp, &fixture.options.input).unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        let manifest = fs::read_to_string(fixture.options.out.join("manifest.json")).unwrap();
-        assert!(manifest.contains(r#""slideCount": 2"#));
-        assert!(String::from_utf8(stdout)
+            &mut |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
+        );
+        assert!(fs::read_to_string(options.out.join("manifest.json"))
             .unwrap()
-            .contains("built 2 slide(s)"));
+            .contains(r#""slideCount": 1"#));
         assert!(stderr.is_empty());
     }
 
     #[test]
-    fn watch_path_handler_rewatches_when_frontmatter_asset_paths_change() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let alternate_layouts = fixture._dir.path().join("other-layouts");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        fs::create_dir_all(&alternate_layouts).unwrap();
-        fs::write(
-            alternate_layouts.join("title-body-code.html"),
-            TEST_LAYOUT_HTML,
-        )
-        .unwrap();
-        fs::write(
-            &fixture.options.input,
-            "---\nlayouts: ./other-layouts\n---\n# Intro\n",
-        )
-        .unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        assert_eq!(
-            state.targets.assets.layouts,
-            Provenance::Explicit(alternate_layouts.clone())
-        );
-        assert!(watcher
-            .watched
-            .iter()
-            .any(|path| path == &alternate_layouts));
-        assert!(watcher
-            .unwatched
-            .iter()
-            .any(|path| path == &fixture._dir.path().join("layouts")));
-        assert!(String::from_utf8(stdout)
-            .unwrap()
-            .contains("built 1 slide(s)"));
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("note: watching new asset paths from frontmatter:"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("restart --watch"),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn watch_path_handler_rewatches_when_include_paths_change() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let shared = fixture._dir.path().join("shared");
-        let included = shared.join("intro.md");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        fs::create_dir_all(&shared).unwrap();
-        fs::write(&included, "# Included\n").unwrap();
-        fs::write(
-            &fixture.options.input,
-            "<!-- {\"include\":\"shared/intro.md\"} -->\n",
-        )
-        .unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(state.targets.is_relevant_change(&included));
-        assert!(watcher.watched.iter().any(|path| path == &shared));
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn deck_refresh_updates_targets_without_reconciling_watched_dirs() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let old_layouts = fixture._dir.path().join("layouts");
-        let alternate_layouts = fixture._dir.path().join("other-layouts");
-        fs::create_dir_all(&alternate_layouts).unwrap();
-        fs::write(
-            alternate_layouts.join("title-body-code.html"),
-            TEST_LAYOUT_HTML,
-        )
-        .unwrap();
-        let mut state = WatchState::new(
-            fixture.options.input.clone(),
-            fixture.targets.clone(),
-            fixture.targets.watch_dirs(),
-            LabelStyle::PLAIN,
-        );
-        fs::remove_dir_all(&old_layouts).unwrap();
-        fs::write(
-            &state.input,
-            "---\nlayouts: ./other-layouts\n---\n# Intro\n",
-        )
-        .unwrap();
-        let mut stderr = Vec::new();
-
-        refresh_watch_targets(&mut state, &mut stderr).unwrap();
-
-        assert!(state.watched_dirs.iter().any(|path| path == &old_layouts));
-        assert_eq!(
-            state.targets.assets.layouts,
-            Provenance::Explicit(alternate_layouts)
-        );
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("note: watching new asset paths from frontmatter:"));
-    }
-
-    #[test]
-    fn refresh_watch_targets_does_not_note_when_only_provenance_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let deck = root.join("deck.md");
-        let layouts = root.join("layouts");
-        fs::create_dir_all(&layouts).unwrap();
-        fs::write(layouts.join("title-body-code.html"), TEST_LAYOUT_HTML).unwrap();
-        fs::write(&deck, "# Intro\n").unwrap();
-        let targets = resolve_watch_targets(&deck).unwrap();
-        assert_eq!(
-            targets.assets.layouts,
-            Provenance::DeckAdjacent(layouts.clone())
-        );
-        let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck.clone(), targets, watched_dirs, LabelStyle::PLAIN);
-        fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Intro\n").unwrap();
-        let mut stderr = Vec::new();
-
-        refresh_watch_targets(&mut state, &mut stderr).unwrap();
-
-        assert!(
-            stderr.is_empty(),
-            "actual stderr: {}",
-            String::from_utf8_lossy(&stderr)
-        );
-        assert_eq!(state.targets.assets.layouts, Provenance::Explicit(layouts));
-    }
-
-    #[test]
-    fn deck_refresh_updates_targets_when_frontmatter_asset_removed_and_no_deck_adjacent_dir_exists()
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let deck = root.join("deck.md");
-        let explicit_layouts = root.join("x").join("layouts");
-        fs::create_dir_all(&explicit_layouts).unwrap();
-        fs::write(
-            explicit_layouts.join("title-body-code.html"),
-            TEST_LAYOUT_HTML,
-        )
-        .unwrap();
-        fs::write(&deck, "---\nlayouts: ./x/layouts\n---\n# Intro\n").unwrap();
-        let targets = resolve_watch_targets(&deck).unwrap();
-        assert_eq!(
-            targets.assets.layouts,
-            Provenance::Explicit(explicit_layouts.clone())
-        );
-        let watched_dirs = targets.watch_dirs();
-        assert!(watched_dirs.iter().any(|path| path == &explicit_layouts));
-        let mut state = WatchState::new(deck.clone(), targets, watched_dirs, LabelStyle::PLAIN);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        fs::write(&deck, "# Intro\n").unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&deck),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(state.targets.assets.layouts, Provenance::Builtin);
-        assert!(!state
-            .watched_dirs
-            .iter()
-            .any(|path| path == &explicit_layouts));
-    }
-
-    #[test]
-    fn watch_path_handler_reports_rebuild_error_when_asset_resolution_fails() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let original_assets = state.targets.assets.clone();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        fs::write(
-            &fixture.options.input,
-            "---\nlayouts: ./missing-layouts\n---\n# Intro\n",
-        )
-        .unwrap();
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
-        )
-        .unwrap();
-
-        assert_eq!(state.targets.assets, original_assets);
-        assert!(watcher.watched.is_empty());
-        assert!(watcher.unwatched.is_empty());
-        assert!(stdout.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("build failed:"), "actual stderr: {stderr}");
-        assert!(
-            stderr.contains("layouts path does not exist"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("restart --watch"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("watching new asset paths"),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn watch_path_handler_reconciles_after_new_fonts_subdir() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        let nested = fonts.join("noto");
-        fs::create_dir_all(&nested).unwrap();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&nested),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(watcher.watched.iter().any(|path| path == &nested));
-        assert_eq!(state.watched_dirs, state.targets.watch_dirs());
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_path_handler_reconciles_after_removed_fonts_subdir() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        let nested = fonts.join("noto");
-        fs::create_dir_all(&nested).unwrap();
-        state.watched_dirs = state.targets.watch_dirs();
-        fs::remove_dir_all(&nested).unwrap();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&nested),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(watcher.unwatched.iter().any(|path| path == &nested));
-        assert!(!state.watched_dirs.iter().any(|path| path == &nested));
-    }
-
-    #[test]
-    fn watch_path_handler_rebuilds_after_irrelevant_ancestor_event_that_changes_watch_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let deck = root.join("deck.md");
-        let sub = root.join("sub");
-        let fonts = sub.join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        fs::write(&deck, "---\nfonts: ./sub/fonts\n---\n# Intro\n").unwrap();
-        let targets = resolve_watch_targets(&deck).unwrap();
-        let mut state = WatchState::new(deck, targets, vec![root.clone()], LabelStyle::PLAIN);
-        fs::remove_dir_all(&sub).unwrap();
-        fs::create_dir_all(&fonts).unwrap();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&sub),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-        assert!(watcher.watched.iter().any(|path| path == &fonts));
-        assert!(state.watched_dirs.iter().any(|path| path == &fonts));
-    }
-
-    #[test]
-    fn watch_path_handler_ignores_hidden_font_directory_creation() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        let hidden = fonts.join(".hidden");
-        fs::create_dir_all(&hidden).unwrap();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&hidden),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 0);
-        assert!(!watcher.watched.iter().any(|path| path == &hidden));
-        assert!(!state
-            .targets
-            .watch_dirs()
-            .iter()
-            .any(|path| path == &hidden));
-        assert!(!state.watched_dirs.iter().any(|path| path == &hidden));
-    }
-
-    #[test]
-    fn watch_path_handler_ignores_hidden_font_descendant_file_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let deck = root.join("deck.md");
-        let fonts = root.join("fonts");
-        let normal = fonts.join("normal");
-        fs::create_dir_all(&normal).unwrap();
-        fs::write(&deck, "---\nfonts: ./fonts\n---\n# Intro\n").unwrap();
-        let targets = resolve_watch_targets(&deck).unwrap();
-        let watched_dirs = targets.watch_dirs();
-        let mut state = WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN);
-        let hidden = fonts.join(".hidden");
-        let hidden_file = hidden.join("a.woff2");
-        fs::create_dir_all(&hidden).unwrap();
-        fs::write(&hidden_file, b"font").unwrap();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&hidden_file),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 0);
-
-        let normal_file = normal.join("a.woff2");
-        fs::write(&normal_file, b"font").unwrap();
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&normal_file),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 1);
-    }
-
-    #[test]
-    fn watch_path_handler_ignores_irrelevant_event_when_watch_set_is_unchanged() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        let unrelated = fonts.parent().unwrap().join("ignored.txt");
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&unrelated),
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(rebuilds, 0);
-        assert!(watcher.watched.is_empty());
-        assert!(watcher.unwatched.is_empty());
-    }
-
-    #[test]
-    fn shared_watch_path_handler_invokes_injected_rebuild_action() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut state = watch_state_for_fixture(&fixture);
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut calls = 0;
-
-        handle_watch_paths_with_rebuild(
-            &mut state,
-            &mut watcher,
-            std::slice::from_ref(&fixture.options.input),
-            &mut stdout,
-            &mut stderr,
-            |stdout, _stderr| {
-                calls += 1;
-                writeln!(stdout, "custom rebuild").into_diagnostic()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(calls, 1);
-        assert_eq!(String::from_utf8(stdout).unwrap(), "custom rebuild\n");
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_target_registration_runs_before_initial_rebuild() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        register_watch_target_dirs(&fixture.targets, &mut watcher).unwrap();
-        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
-
-        assert!(watcher
-            .watched
-            .iter()
-            .any(|path| same_watch_path(path, fixture._dir.path())));
-        assert!(String::from_utf8(stdout)
-            .unwrap()
-            .contains("built 1 slide(s)"));
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn watch_state_owns_registered_dirs_after_registration() {
-        let fixture = WatchFixture::new("# Intro\n");
-        let mut watcher = RecordingWatchController::default();
-
-        let watched_dirs = register_watch_target_dirs(&fixture.targets, &mut watcher).unwrap();
-        let state = WatchState::new(
-            fixture.options.input.clone(),
-            fixture.targets.clone(),
-            watched_dirs.clone(),
-            LabelStyle::PLAIN,
-        );
-
-        assert_eq!(state.input, fixture.options.input);
-        assert_eq!(state.watched_dirs, watched_dirs);
-        assert_eq!(watcher.watched, state.watched_dirs);
-        assert!(state.emitted_watch_error_notes.is_empty());
-    }
-
-    #[test]
-    fn notify_watch_controller_rejects_missing_dir_before_poll_watcher_can_skip_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        let (tx, _rx) = mpsc::channel::<DebounceEventResult>();
-        let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(50));
-        let debounce_config = DebounceConfig::default()
-            .with_timeout(Duration::from_millis(50))
-            .with_notify_config(notify_config);
-        let mut debouncer = new_debouncer_opt::<_, PollWatcher>(debounce_config, tx).unwrap();
-        let mut controller = NotifyWatchController::new(debouncer.watcher());
-
-        let err = controller.watch_dir(&missing).unwrap_err();
-
-        let message = err.to_string();
-        assert!(
-            message.contains("does not exist"),
-            "actual error: {message}"
-        );
-        assert!(
-            !message.contains("failed to watch"),
-            "actual error: {message}"
-        );
-        assert!(!message.contains("help:"), "actual error: {message}");
-    }
-
-    #[test]
-    fn watch_all_dirs_wraps_startup_watch_failure_with_help() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        let (tx, _rx) = mpsc::channel::<DebounceEventResult>();
-        let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(50));
-        let debounce_config = DebounceConfig::default()
-            .with_timeout(Duration::from_millis(50))
-            .with_notify_config(notify_config);
-        let mut debouncer = new_debouncer_opt::<_, PollWatcher>(debounce_config, tx).unwrap();
-        let mut controller = NotifyWatchController::new(debouncer.watcher());
-
-        let err = watch_all_dirs(&mut controller, std::slice::from_ref(&missing)).unwrap_err();
-
-        let message = err.to_string();
-        assert!(
-            message.contains(&format!("failed to watch {}", missing.display())),
-            "actual error: {message}"
-        );
-        let help = err.help().expect("help must be present").to_string();
-        assert!(
-            help.contains(
-                "verify the watched directories exist and are readable before starting --watch"
-            ),
-            "actual help: {help}"
-        );
-        assert!(message.contains("caused by:"), "actual error: {message}");
-    }
-
-    #[test]
-    fn reconcile_watch_failure_note_uses_single_line_bare_controller_cause() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        let (tx, _rx) = mpsc::channel::<DebounceEventResult>();
-        let notify_config = notify::Config::default().with_poll_interval(Duration::from_millis(50));
-        let debounce_config = DebounceConfig::default()
-            .with_timeout(Duration::from_millis(50))
-            .with_notify_config(notify_config);
-        let mut debouncer = new_debouncer_opt::<_, PollWatcher>(debounce_config, tx).unwrap();
-        let mut controller = NotifyWatchController::new(debouncer.watcher());
-        let mut watched_dirs = Vec::new();
-        let desired_dirs = vec![missing.clone()];
-        let mut stderr = Vec::new();
-        let mut emitted_notes = HashSet::new();
-
-        let result = reconcile_watched_dirs(
-            &mut controller,
-            &mut watched_dirs,
-            &desired_dirs,
-            &mut stderr,
-            &mut emitted_notes,
-            LabelStyle::PLAIN,
-        )
-        .unwrap();
-
-        assert!(!result.changed);
-        assert!(result.had_failures);
-        let stderr = String::from_utf8(stderr).unwrap();
-        let lines = stderr.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 1, "actual stderr: {stderr}");
-        assert!(
-            lines[0].starts_with(&format!("note: failed to watch {}: ", missing.display())),
-            "actual stderr: {stderr}"
-        );
-        assert!(!stderr.contains("help:"), "actual stderr: {stderr}");
-        assert!(
-            !stderr.contains("restart --watch"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains(&format!(
-                "note: failed to watch {}: failed to watch {}",
-                missing.display(),
-                missing.display()
-            )),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn reconcile_watched_dirs_applies_diff_and_updates_owned_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let old = root.join("old");
-        let keep = root.join("keep");
-        let new = root.join("new");
-        fs::create_dir_all(&old).unwrap();
-        fs::create_dir_all(&keep).unwrap();
-        fs::create_dir_all(&new).unwrap();
-        let mut watched_dirs = vec![old.clone(), keep.clone()];
-        let desired_dirs = vec![keep.clone(), new.clone()];
-        let mut watcher = RecordingWatchController::default();
-        let mut stderr = Vec::new();
-        let mut emitted_notes = HashSet::new();
-
-        let result = reconcile_watched_dirs(
-            &mut watcher,
-            &mut watched_dirs,
-            &desired_dirs,
-            &mut stderr,
-            &mut emitted_notes,
-            LabelStyle::PLAIN,
-        )
-        .unwrap();
-
-        assert!(result.changed);
-        assert!(!result.had_failures);
-        assert_eq!(watcher.unwatched, vec![old]);
-        assert_eq!(watcher.watched, vec![new]);
-        assert_eq!(watched_dirs, desired_dirs);
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn reconcile_watched_dirs_excludes_failed_watch_and_retries_later() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let desired = root.join("desired");
-        fs::create_dir_all(&desired).unwrap();
-        let mut watched_dirs = Vec::new();
-        let desired_dirs = vec![desired.clone()];
-        let mut watcher = RecordingWatchController {
-            fail_watch: vec![desired.clone()],
-            ..RecordingWatchController::default()
-        };
-        let mut stderr = Vec::new();
-        let mut emitted_notes = HashSet::new();
-
-        let result = reconcile_watched_dirs(
-            &mut watcher,
-            &mut watched_dirs,
-            &desired_dirs,
-            &mut stderr,
-            &mut emitted_notes,
-            LabelStyle::PLAIN,
-        )
-        .unwrap();
-
-        assert!(!result.changed);
-        assert!(result.had_failures);
-        assert_eq!(watcher.watched, vec![desired.clone()]);
-        assert!(watched_dirs.is_empty());
-
-        watcher.fail_watch.clear();
-        let result = reconcile_watched_dirs(
-            &mut watcher,
-            &mut watched_dirs,
-            &desired_dirs,
-            &mut stderr,
-            &mut emitted_notes,
-            LabelStyle::PLAIN,
-        )
-        .unwrap();
-
-        assert!(result.changed);
-        assert!(!result.had_failures);
-        assert_eq!(watcher.watched, vec![desired.clone(), desired.clone()]);
-        assert_eq!(watched_dirs, desired_dirs);
-    }
-
-    #[test]
-    fn reconcile_watched_dirs_notes_failures_and_converges() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
-        let stale = root.join("stale");
-        let desired = root.join("desired");
-        let mut watched_dirs = vec![stale.clone()];
-        let desired_dirs = vec![desired.clone()];
-        let mut watcher = RecordingWatchController {
-            fail_unwatch: vec![stale.clone()],
-            fail_watch: vec![desired.clone()],
-            ..RecordingWatchController::default()
-        };
-        let mut stderr = Vec::new();
-        let mut emitted_notes = HashSet::new();
-
-        let result = reconcile_watched_dirs(
-            &mut watcher,
-            &mut watched_dirs,
-            &desired_dirs,
-            &mut stderr,
-            &mut emitted_notes,
-            LabelStyle::PLAIN,
-        )
-        .unwrap();
-
-        assert!(result.changed);
-        assert!(result.had_failures);
-        assert_eq!(watcher.unwatched, vec![stale]);
-        assert_eq!(watcher.watched, vec![desired]);
-        assert!(watched_dirs.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("note: failed to stop watching"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("note: failed to watch"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("restart --watch"),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn watch_startup_runs_registration_before_initial_action() {
-        let events = RefCell::new(Vec::new());
-        let input = PathBuf::from("deck.md");
-
-        let (watch, value) = run_after_watch_registration(
-            &input,
-            |path| {
-                events
-                    .borrow_mut()
-                    .push(format!("watch:{}", path.display()));
-                Ok("watch-runtime")
-            },
-            || {
-                events.borrow_mut().push("initial-build".to_owned());
-                Ok("initial-root")
-            },
-        )
-        .unwrap();
-
-        assert_eq!(watch, "watch-runtime");
-        assert_eq!(value, "initial-root");
-        assert_eq!(
-            &*events.borrow(),
-            &vec!["watch:deck.md".to_owned(), "initial-build".to_owned()]
-        );
-    }
-
-    #[test]
-    fn watch_target_resolution_falls_back_to_deck_parent_when_initial_assets_are_invalid() {
+    fn removed_include_leaves_the_tracked_set_after_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
-        fs::write(&deck, "---\nlayouts: ./missing-layouts\n---\n# Intro\n").unwrap();
-
-        let targets = resolve_watch_targets_or_deck_only(&deck);
-
-        assert_eq!(targets.roots.len(), 1);
-        assert_eq!(targets.roots[0].path, deck);
-        assert_eq!(targets.watch_dirs(), vec![dir.path().to_path_buf()]);
-    }
-
-    #[test]
-    fn watch_event_handler_notes_error_reconciles_and_continues() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        fs::remove_dir_all(&fonts).unwrap();
-        let mut watcher = RecordingWatchController::default();
+        let included = dir.path().join("shared/intro.md");
+        fs::create_dir_all(included.parent().unwrap()).unwrap();
+        fs::write(&included, "# Included\n").unwrap();
+        fs::write(&deck, "<!-- {\"include\":\"shared/intro.md\"} -->\n").unwrap();
+        let mut state = prepare_watch_loop(deck.clone());
+        assert!(state.input_snapshot.contains_key(&included));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut rebuilds = 0;
-        let result: DebounceEventResult =
-            Err(notify::Error::path_not_found().add_path(fonts.clone()));
 
-        handle_watch_event_result(
-            result,
+        fs::write(&deck, "# Deck only\n").unwrap();
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
+            3,
             &mut stdout,
             &mut stderr,
-            |_stdout, _stderr| {
+            &mut |_stdout, _stderr| {
                 rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+        assert!(!state.input_snapshot.contains_key(&included));
+        assert!(!state
+            .targets
+            .roots
+            .iter()
+            .any(|root| same_watch_path(&root.path, &included)));
+
+        fs::write(&included, "# No longer included\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+    }
+
+    #[test]
+    fn truncate_then_write_across_ticks_rebuilds_only_the_final_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Initial\n").unwrap();
+        let mut state = prepare_watch_loop(deck.clone());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilt_sources = Vec::new();
+        let mut failed_builds = 0;
+        let fixed_mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_000);
+
+        fs::write(&deck, "").unwrap();
+        fs::File::open(&deck)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(fixed_mtime))
+            .unwrap();
+        handle_watch_tick(
+            &mut state,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                failed_builds += 1;
                 Ok(())
             },
         )
         .unwrap();
+        fs::write(&deck, "# Complete\n").unwrap();
+        fs::File::open(&deck)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(fixed_mtime))
+            .unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                let source = fs::read_to_string(&deck).unwrap();
+                if source.is_empty() {
+                    failed_builds += 1;
+                } else {
+                    rebuilt_sources.push(source);
+                }
+                Ok(())
+            },
+        );
 
-        assert_eq!(rebuilds, 1);
-        assert!(watcher.unwatched.iter().any(|path| path == &fonts));
-        assert!(!state.watched_dirs.iter().any(|path| path == &fonts));
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("note: watch error:"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("missing watch targets are dropped and re-watched automatically"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains(&fonts.display().to_string()),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("stopped watching"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("removed missing paths"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("restart the command"),
-            "actual stderr: {stderr}"
-        );
+        assert_eq!(failed_builds, 0);
+        assert_eq!(rebuilt_sources, vec!["# Complete\n"]);
     }
 
     #[test]
-    fn watch_event_handler_suppresses_same_error_after_reconcile_changes_state() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        fs::remove_dir_all(&fonts).unwrap();
-        let mut watcher = RecordingWatchController::default();
+    fn input_changing_on_every_tick_rebuilds_once_after_it_settles() {
+        let (dir, mut state, fonts) = watch_state_with_fonts();
+        let font = fonts.join("talk-font.woff2");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut rebuilds = 0;
 
-        for _ in 0..2 {
-            handle_watch_event_result(
-                Err(notify::Error::path_not_found().add_path(fonts.clone())),
+        for bytes in [
+            b"font-1".as_slice(),
+            b"font-version-2",
+            b"font-version-three",
+        ] {
+            fs::write(&font, bytes).unwrap();
+            handle_watch_tick(
                 &mut state,
-                &mut watcher,
                 &mut stdout,
                 &mut stderr,
-                |_stdout, _stderr| {
+                &mut |_stdout, _stderr| {
                     rebuilds += 1;
                     Ok(())
                 },
             )
             .unwrap();
         }
-
-        assert_eq!(rebuilds, 1);
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert_eq!(stderr.matches("note: watch error:").count(), 1);
-        assert_eq!(
-            stderr
-                .matches("missing watch targets are dropped and re-watched automatically")
-                .count(),
-            1
-        );
-        assert!(
-            !stderr.contains("stopped watching"),
-            "actual stderr: {stderr}"
-        );
-        assert_eq!(
-            stderr
-                .matches("if this error persists, check file watcher permissions")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn watch_event_handler_returns_ok_when_watcher_reports_error() {
-        let (_dir, mut state, _fonts) = watch_state_with_fonts();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        handle_watch_event_result(
-            Err(notify::Error::generic("backend stopped")),
-            &mut state,
-            &mut watcher,
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
-
-        assert!(stdout.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(stderr.contains("note: watch error: backend stopped"));
-    }
-
-    #[test]
-    fn watch_event_handler_does_not_rebuild_when_error_does_not_change_watch_set() {
-        let (_dir, mut state, _fonts) = watch_state_with_fonts();
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-        let result: DebounceEventResult =
-            Err(notify::Error::generic("permission denied while scanning")
-                .add_path(state.input.clone()));
-
-        handle_watch_event_result(
-            result,
-            &mut state,
-            &mut watcher,
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| {
-                rebuilds += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-
         assert_eq!(rebuilds, 0);
-        assert_eq!(state.watched_dirs, state.targets.watch_dirs());
-        assert!(watcher.watched.is_empty());
-        assert!(watcher.unwatched.is_empty());
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("missing watch targets are dropped and re-watched automatically"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("if this error persists, check file watcher permissions"),
-            "actual stderr: {stderr}"
-        );
-        assert!(
-            !stderr.contains("removed missing paths"),
-            "actual stderr: {stderr}"
-        );
-    }
-
-    #[test]
-    fn watch_event_handler_rebuilds_once_when_error_changes_watch_set_even_if_path_irrelevant() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        let stale = fonts.parent().unwrap().join("stale-watch-root");
-        state.watched_dirs.push(stale.clone());
-        let mut watcher = RecordingWatchController::default();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut rebuilds = 0;
-        let result: DebounceEventResult =
-            Err(notify::Error::path_not_found().add_path(stale.clone()));
-
-        handle_watch_event_result(
-            result,
+        handle_watch_tick(
             &mut state,
-            &mut watcher,
             &mut stdout,
             &mut stderr,
-            |_stdout, _stderr| {
+            &mut |_stdout, _stderr| {
                 rebuilds += 1;
                 Ok(())
             },
@@ -9868,190 +8836,500 @@ contexts:
         .unwrap();
 
         assert_eq!(rebuilds, 1);
-        assert!(watcher.unwatched.iter().any(|path| path == &stale));
-        assert!(!state.watched_dirs.iter().any(|path| path == &stale));
+        drop(dir);
     }
 
     #[test]
-    fn watch_event_handler_suppresses_reconcile_failure_until_clean_ok_batch() {
-        let (_dir, mut state, fonts) = watch_state_with_fonts();
-        state.watched_dirs.retain(|path| path != &fonts);
-        let mut watcher = RecordingWatchController {
-            fail_watch: vec![fonts.clone()],
-            ..RecordingWatchController::default()
-        };
+    fn single_write_rebuilds_after_two_identical_captures() {
+        let fixture = WatchFixture::new("# Initial\n");
+        let mut state = watch_state_for_fixture(&fixture);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let event_path = state
-            .input
-            .parent()
+        let mut rebuilds = 0;
+
+        fs::write(&fixture.options.input, "# Changed\n").unwrap();
+        handle_watch_tick(
+            &mut state,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rebuilds, 0);
+        handle_watch_tick(
+            &mut state,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rebuilds, 1);
+    }
+
+    #[test]
+    fn watch_build_snapshot_precedes_the_initial_build_action() {
+        let fixture = WatchFixture::new("# Initial\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let (mut state, ()) =
+            run_initial_action_after_watch_snapshot(fixture.options.input.clone(), || {
+                rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr)?;
+                fs::write(&fixture.options.input, "# Saved during initial build\n")
+                    .into_diagnostic()?;
+                Ok(())
+            })
+            .unwrap();
+        stdout.clear();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        let slide = fs::read_to_string(
+            fixture
+                .options
+                .out
+                .join("slides/000-saved-during-initial-build.html"),
+        )
+        .unwrap();
+        assert!(slide.contains("Saved during initial build"), "{slide}");
+        assert!(String::from_utf8(stdout)
             .unwrap()
-            .join("dist")
-            .join("index.html");
-
-        for _ in 0..2 {
-            handle_watch_event_result(
-                Ok(vec![notify_debouncer_mini::DebouncedEvent::new(
-                    event_path.clone(),
-                    notify_debouncer_mini::DebouncedEventKind::Any,
-                )]),
-                &mut state,
-                &mut watcher,
-                &mut stdout,
-                &mut stderr,
-                |_stdout, _stderr| Ok(()),
-            )
-            .unwrap();
-        }
-
-        let stderr_after_repeated_failure = String::from_utf8(stderr.clone()).unwrap();
-        assert_eq!(
-            stderr_after_repeated_failure
-                .matches("note: failed to watch")
-                .count(),
-            1
-        );
-
-        watcher.fail_watch.clear();
-        handle_watch_event_result(
-            Ok(vec![notify_debouncer_mini::DebouncedEvent::new(
-                event_path.clone(),
-                notify_debouncer_mini::DebouncedEventKind::Any,
-            )]),
-            &mut state,
-            &mut watcher,
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
-
-        state.watched_dirs.retain(|path| path != &fonts);
-        watcher.fail_watch.push(fonts.clone());
-        handle_watch_event_result(
-            Ok(vec![notify_debouncer_mini::DebouncedEvent::new(
-                event_path,
-                notify_debouncer_mini::DebouncedEventKind::Any,
-            )]),
-            &mut state,
-            &mut watcher,
-            &mut stdout,
-            &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
-
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert_eq!(stderr.matches("note: failed to watch").count(), 2);
+            .contains("built 1 slide(s)"));
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
     }
 
     #[test]
-    fn watch_event_handler_suppresses_alternating_duplicate_error_notes() {
-        let (_dir, mut state, _fonts) = watch_state_with_fonts();
-        let mut watcher = RecordingWatchController::default();
+    fn preview_snapshot_precedes_the_initial_preview_build_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let cache = dir.path().join("preview-cache");
+        fs::write(&deck, "# Initial\n").unwrap();
+        let mut initial_stderr = Vec::new();
+
+        let (mut state, root) = run_initial_action_after_watch_snapshot(deck.clone(), || {
+            let root = emit_initial_preview_root(&deck, &cache, &mut initial_stderr)?;
+            fs::write(&deck, "# Saved during initial preview build\n").into_diagnostic()?;
+            Ok(root)
+        })
+        .unwrap();
+        assert!(root.join("manifest.json").is_file());
+        assert!(initial_stderr.is_empty());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-
-        for message in [
-            "backend noisy a",
-            "backend noisy b",
-            "backend noisy a",
-            "backend noisy b",
-        ] {
-            handle_watch_event_result(
-                Err(notify::Error::generic(message)),
-                &mut state,
-                &mut watcher,
-                &mut stdout,
-                &mut stderr,
-                |_stdout, _stderr| Ok(()),
-            )
-            .unwrap();
-        }
-
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert_eq!(
-            stderr.matches("note: watch error: backend noisy a").count(),
-            1
+        let mut rebuilt_sources = Vec::new();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilt_sources.push(fs::read_to_string(&deck).unwrap());
+                Ok(())
+            },
         );
+
         assert_eq!(
-            stderr.matches("note: watch error: backend noisy b").count(),
-            1
+            rebuilt_sources,
+            vec!["# Saved during initial preview build\n"]
         );
     }
 
     #[test]
-    fn watch_event_handler_suppresses_consecutive_duplicate_error_notes() {
-        let (_dir, mut state, _fonts) = watch_state_with_fonts();
-        let mut watcher = RecordingWatchController::default();
+    fn write_during_rebuild_is_detected_after_it_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Initial\n").unwrap();
+        let mut state = prepare_watch_loop(deck.clone());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let mut rebuilt_sources = Vec::new();
 
-        for _ in 0..2 {
-            handle_watch_event_result(
-                Err(notify::Error::generic("backend noisy")),
-                &mut state,
-                &mut watcher,
-                &mut stdout,
-                &mut stderr,
-                |_stdout, _stderr| Ok(()),
-            )
-            .unwrap();
-        }
-
-        handle_watch_event_result(
-            Ok(vec![notify_debouncer_mini::DebouncedEvent::new(
-                state.input.clone(),
-                notify_debouncer_mini::DebouncedEventKind::Any,
-            )]),
+        fs::write(&deck, "# First\n").unwrap();
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
+            2,
             &mut stdout,
             &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
-
-        handle_watch_event_result(
-            Err(notify::Error::generic("backend noisy")),
+            &mut |_stdout, _stderr| {
+                rebuilt_sources.push(fs::read_to_string(&deck).unwrap());
+                fs::write(&deck, "# Saved during rebuild\n").unwrap();
+                Ok(())
+            },
+        );
+        run_watch_ticks(
             &mut state,
-            &mut watcher,
+            2,
             &mut stdout,
             &mut stderr,
-            |_stdout, _stderr| Ok(()),
-        )
-        .unwrap();
+            &mut |_stdout, _stderr| {
+                rebuilt_sources.push(fs::read_to_string(&deck).unwrap());
+                Ok(())
+            },
+        );
 
-        let stderr = String::from_utf8(stderr).unwrap();
         assert_eq!(
-            stderr.matches("note: watch error: backend noisy").count(),
-            2
+            rebuilt_sources,
+            vec!["# First\n", "# Saved during rebuild\n"]
         );
     }
 
     #[test]
-    fn watch_event_handler_keeps_stderr_write_failure_fatal() {
-        let (_dir, mut state, _fonts) = watch_state_with_fonts();
-        let mut watcher = RecordingWatchController::default();
+    fn failed_rebuild_installs_the_stable_prebuild_snapshot() {
+        let fixture = WatchFixture::new("# Initial\n");
+        let mut state = watch_state_for_fixture(&fixture);
         let mut stdout = Vec::new();
-        let mut stderr = FailingWriter;
-
-        let err = handle_watch_event_result(
-            Err(notify::Error::generic("backend stopped")),
+        let mut stderr = Vec::new();
+        fs::write(&fixture.options.input, "# Changed\n").unwrap();
+        handle_watch_tick(
             &mut state,
-            &mut watcher,
             &mut stdout,
             &mut stderr,
-            |_stdout, _stderr| Ok(()),
+            &mut |_stdout, _stderr| Ok(()),
+        )
+        .unwrap();
+        let stable = capture_input_snapshot(&state.targets);
+
+        let err = handle_watch_tick(
+            &mut state,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                fs::write(&fixture.options.input, "# Saved during failed rebuild\n").unwrap();
+                Err(miette::miette!("injected rebuild failure"))
+            },
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("closed"), "actual error: {err}");
+        assert!(err.to_string().contains("injected rebuild failure"));
+        assert_eq!(state.input_snapshot, stable);
+        assert_ne!(capture_input_snapshot(&state.targets), state.input_snapshot);
     }
 
     #[test]
-    fn watch_build_function_is_available_for_cli_dispatch() {
-        let _watch: fn(BuildOptions) -> miette::Result<()> = watch_build;
+    fn atomic_css_save_and_nested_font_change_each_rebuild_once() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let fonts = fixture._dir.path().join("fonts/noto");
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(fonts.join("talk.woff2"), b"font").unwrap();
+        fs::write(
+            &fixture.options.input,
+            "---\nfonts: ./fonts\n---\n# Intro\n",
+        )
+        .unwrap();
+        let mut state = prepare_watch_loop(fixture.options.input.clone());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        let css = fixture._dir.path().join("css/talk.css");
+        let temp = fixture._dir.path().join("css/.talk.css.tmp");
+        fs::write(&temp, "body { color: blue; }\n").unwrap();
+        fs::rename(&temp, &css).unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+        fs::write(fonts.join("talk.woff2"), b"longer font bytes").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 2);
+    }
+
+    #[test]
+    fn deck_and_font_saved_together_rebuild_once() {
+        let (dir, mut state, fonts) = watch_state_with_fonts();
+        let deck = state.input.clone();
+        let font = fonts.join("talk.woff2");
+        fs::write(&font, b"font one").unwrap();
+        state.input_snapshot = capture_input_snapshot(&state.targets);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::write(&deck, "---\nfonts: ./fonts\n---\n# Changed\n").unwrap();
+        fs::write(&font, b"font version two is longer").unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn new_font_and_deleted_include_each_rebuild_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared/intro.md");
+        let font = dir.path().join("fonts/new.woff2");
+        fs::create_dir_all(included.parent().unwrap()).unwrap();
+        fs::create_dir_all(font.parent().unwrap()).unwrap();
+        fs::write(&included, "# Intro\n").unwrap();
+        fs::write(
+            &deck,
+            "---\nfonts: ./fonts\n---\n<!-- {\"include\":\"shared/intro.md\"} -->\n",
+        )
+        .unwrap();
+        let mut state = prepare_watch_loop(deck);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::write(&font, b"font").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+        fs::remove_file(&included).unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 2);
+    }
+
+    #[test]
+    fn zero_config_css_directory_appearing_rebuilds_once_and_refreshes_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let css = dir.path().join("css");
+        fs::write(&deck, "# Initial\n").unwrap();
+        let mut state = prepare_watch_loop(deck);
+        assert_eq!(state.targets.assets.css, Provenance::Builtin);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::create_dir(&css).unwrap();
+        fs::write(css.join("talk.css"), "body {}\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 1);
+        assert_eq!(state.targets.assets.css, Provenance::DeckAdjacent(css));
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("watching new asset paths from frontmatter"));
+    }
+
+    #[test]
+    fn referenced_image_change_rebuilds_distribution() {
+        let fixture = WatchFixture::new("# Intro\n\n![x](img/a.png)\n");
+        let image = fixture._dir.path().join("img/a.png");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, b"old image").unwrap();
+        fs::write(
+            fixture._dir.path().join("layouts/title-body-code.html"),
+            TEST_IMAGE_LAYOUT_HTML,
+        )
+        .unwrap();
+        let mut state = prepare_watch_loop(fixture.options.input.clone());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        rebuild_once_for_watch(&fixture.options, &mut stdout, &mut stderr).unwrap();
+        stdout.clear();
+
+        let new_bytes = b"new image bytes are longer";
+        fs::write(&image, new_bytes).unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&fixture.options, stdout, stderr),
+        );
+
+        assert!(fixture
+            .options
+            .out
+            .join(format!("assets/{}-a.png", short_sha256_hex(new_bytes, 16)))
+            .exists());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn frontmatter_and_include_target_changes_are_refreshed() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let alternate_layouts = fixture._dir.path().join("other-layouts");
+        let included = fixture._dir.path().join("shared/intro.md");
+        fs::create_dir_all(&alternate_layouts).unwrap();
+        fs::create_dir_all(included.parent().unwrap()).unwrap();
+        fs::write(
+            alternate_layouts.join("title-body-code.html"),
+            TEST_LAYOUT_HTML,
+        )
+        .unwrap();
+        fs::write(&included, "# Included\n").unwrap();
+        let mut state = watch_state_for_fixture(&fixture);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        fs::write(
+            &fixture.options.input,
+            "---\nlayouts: ./other-layouts\n---\n<!-- {\"include\":\"shared/intro.md\"} -->\n",
+        )
+        .unwrap();
+        run_watch_ticks(
+            &mut state,
+            3,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+        let refreshed = capture_input_snapshot(&state.targets);
+
+        assert_eq!(rebuilds, 1);
+        assert_eq!(
+            state.targets.assets.layouts,
+            Provenance::Explicit(alternate_layouts)
+        );
+        assert!(matches!(
+            refreshed.get(&included),
+            Some(InputFingerprint::Content(_))
+        ));
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("watching new asset paths from frontmatter"));
+    }
+
+    #[test]
+    fn initial_resolution_failure_recovers_after_the_deck_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let out = dir.path().join("dist");
+        fs::write(&deck, "---\ntime: [\n---\n# Broken\n").unwrap();
+        let mut state = prepare_watch_loop(deck.clone());
+        let options = BuildOptions {
+            input: deck.clone(),
+            out,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        rebuild_once_for_watch(&options, &mut stdout, &mut stderr).unwrap();
+        assert!(String::from_utf8_lossy(&stderr).contains("build failed:"));
+        stdout.clear();
+        stderr.clear();
+        fs::write(&deck, "# Recovered\n").unwrap();
+        run_watch_ticks(
+            &mut state,
+            2,
+            &mut stdout,
+            &mut stderr,
+            &mut |stdout, stderr| rebuild_once_for_watch(&options, stdout, stderr),
+        );
+
+        assert!(options.out.join("manifest.json").exists());
+        assert!(String::from_utf8(stdout)
+            .unwrap()
+            .contains("built 1 slide(s)"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn output_and_hidden_file_churn_never_rebuilds() {
+        let fixture = WatchFixture::new("# Intro\n");
+        let fonts = fixture._dir.path().join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        fs::write(
+            &fixture.options.input,
+            "---\nfonts: ./fonts\n---\n# Intro\n",
+        )
+        .unwrap();
+        let mut state = prepare_watch_loop(fixture.options.input.clone());
+        let preview_cache = fixture._dir.path().join(PREVIEW_CACHE);
+        fs::create_dir_all(&fixture.options.out).unwrap();
+        fs::create_dir_all(preview_cache.join("build-0")).unwrap();
+        fs::write(fixture.options.out.join("index.html"), "output").unwrap();
+        fs::write(preview_cache.join("build-0/index.html"), "preview").unwrap();
+        fs::write(fonts.join(".copying"), b"partial font").unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut rebuilds = 0;
+
+        run_watch_ticks(
+            &mut state,
+            4,
+            &mut stdout,
+            &mut stderr,
+            &mut |_stdout, _stderr| {
+                rebuilds += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(rebuilds, 0);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn preview_watch_thread_result_reports_panics_as_errors() {
+        let err = preview_watch_thread_result(|| -> miette::Result<()> {
+            panic!("boom");
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "preview watch panicked: boom");
     }
 
     #[test]
@@ -14098,45 +13376,6 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         );
     }
 
-    fn contains_watch_path(paths: &[PathBuf], path: &Path) -> bool {
-        let path_key = watch_path_key(path);
-        paths
-            .iter()
-            .any(|existing| watch_path_key(existing) == path_key)
-    }
-
-    #[derive(Default)]
-    struct RecordingWatchController {
-        watched: Vec<PathBuf>,
-        unwatched: Vec<PathBuf>,
-        fail_watch: Vec<PathBuf>,
-        fail_unwatch: Vec<PathBuf>,
-    }
-
-    impl WatchController for RecordingWatchController {
-        fn watch_dir(&mut self, dir: &Path) -> miette::Result<()> {
-            self.watched.push(dir.to_path_buf());
-            if contains_watch_path(&self.fail_watch, dir) {
-                return Err(miette::miette!(
-                    "injected watch failure for {}",
-                    dir.display()
-                ));
-            }
-            Ok(())
-        }
-
-        fn unwatch_dir(&mut self, dir: &Path) -> miette::Result<()> {
-            self.unwatched.push(dir.to_path_buf());
-            if contains_watch_path(&self.fail_unwatch, dir) {
-                return Err(miette::miette!(
-                    "injected unwatch failure for {}",
-                    dir.display()
-                ));
-            }
-            Ok(())
-        }
-    }
-
     #[derive(Debug, PartialEq, Eq)]
     enum PreviewReloadEvent {
         Swap(PathBuf),
@@ -14363,10 +13602,9 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         fs::create_dir_all(&fonts).unwrap();
         fs::write(&deck, "---\nfonts: ./fonts\n---\n# Intro\n").unwrap();
         let targets = resolve_watch_targets(&deck).unwrap();
-        let watched_dirs = targets.watch_dirs();
         (
             dir,
-            WatchState::new(deck, targets, watched_dirs, LabelStyle::PLAIN),
+            WatchState::new(deck, targets, LabelStyle::PLAIN),
             fonts,
         )
     }
@@ -14375,9 +13613,22 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         WatchState::new(
             fixture.options.input.clone(),
             fixture.targets.clone(),
-            fixture.targets.watch_dirs(),
             LabelStyle::PLAIN,
         )
+    }
+
+    fn run_watch_ticks<F>(
+        state: &mut WatchState,
+        count: usize,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+        rebuild: &mut F,
+    ) where
+        F: FnMut(&mut dyn Write, &mut dyn Write) -> miette::Result<()>,
+    {
+        for _ in 0..count {
+            handle_watch_tick(state, stdout, stderr, rebuild).unwrap();
+        }
     }
 
     fn empty_assets() -> ResolvedAssets {
@@ -14395,23 +13646,5 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             .nth(2)
             .unwrap()
             .to_path_buf()
-    }
-
-    struct FailingWriter;
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "closed",
-            ))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "closed",
-            ))
-        }
     }
 }
