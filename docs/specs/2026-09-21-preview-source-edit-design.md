@@ -16,7 +16,7 @@ rebuild runs, and the page reloads with the rendered result.
 
 Markdown stays the single source of truth. This is a third write path into the
 Markdown file next to `POST /notes` and `POST /slide-edit`, sharing their
-mutex and their origin-write seam.
+mutex and their origin-write seam (which this work also repairs, see §3).
 
 ### Non-goals
 
@@ -182,12 +182,31 @@ Request `{key, old, new}` (`application/json`, `deny_unknown_fields`).
   changed on disk; reload and retry" → `rewrite_slide_body` (refusal → 422)
   → `write_preview_origin_rewrite`.
 - Origin scope: the rewrite replaces a slide span whose edge blank runs are
-  preserved, exactly the shape `PreviewOriginRewriteScope::NoteSlide` exists
-  for (synthetic edges may clip; changed bytes are interior). The variant is
-  renamed `Slide` and used by both; no third scope. An include-file slide is
-  written to its include file; a span that cannot translate is a 409 naming
-  the file. **The plan must pin this with tests on the first, middle, and last
-  slide of an included file before any shell work.**
+  preserved, the shape `PreviewOriginRewriteScope::NoteSlide` exists for. The
+  variant is renamed `Slide` and used by both; no third scope. An include-file
+  slide is written to its include file; a span that cannot translate is a 409
+  naming the file.
+- **`write_preview_origin_rewrite` is fixed, not just reused.** Measuring the
+  last slide of an included file (Task 5) showed a leak that the note path
+  already had on `main`: `translate_span` clips the top-level file's blank
+  line off the slide span, but the writer sliced the rewritten text up to the
+  *requested* end, so `deck.md`'s `\n` was written into the include file. The
+  fix is structural, because inferring the mapped region by counting bytes
+  back from the end of the rewritten text was tried first and regressed
+  (`rewrite_note` replaces the slide's whole trailing blank run with one line
+  ending, so a legitimate note save on an unterminated include file read as
+  "foreign bytes changed" — a permanent 409 found by review): the bytes clipped
+  off a slide scope's edges are only blank-line bytes between the include's
+  content and a separator, so when the tail is clipped the origin receives the
+  rewritten content up to its last non-blank line, followed by the origin
+  range's *own* trailing run (plus one line ending in the file's style when
+  that run had none). A rewrite that no longer starts with the clipped head is a 409 naming
+  the file (clipped bytes can only be synthetic `\n` units: `translate_span`
+  already refuses anything else as an untranslatable scope). The written
+  text can differ from the validated candidate only in blank lines directly
+  before a following separator, which cannot change parsing. Unclipped writes
+  are byte-identical to before (differential over 8k saves), and first and
+  middle included slides are not clipped (measured).
 - No rebuild is triggered by the write; the watcher remains the only trigger.
 
 **Response.** Success answers `{"key":"<post-save key>","body":"<post-save
@@ -315,6 +334,10 @@ is no "preview artifacts without sources" state to handle.
   `sources.json` emission (§4) must not fail the build on a refusal: the slide
   is simply absent from the map and `e` reports that it cannot be edited from
   preview.
+- **Known edge**: line-ending style is inferred from the file, so a pure-CRLF
+  single-slide file with no final newline loses its style once an emptied body
+  leaves it with zero line terminators (the next save writes LF). Cosmetic;
+  measured by the Task 5 harness.
 - **Known tradeoff**: moving an inline note out of a heading line can change a
   *derived* key (`Tail <!-- n -->\nSetext\n===` derives `tail-setext`; after
   the note moves, the trailing space is gone and the key is `tailsetext`). The
