@@ -523,7 +523,8 @@ for (old_key, old_body, new_body, response_key) in [
     ("included-middle", "# Included middle", "# Revised middle\n\n- added", "revised-middle"),
     ("included-last", "# Included last", "# Revised last\n\n- added", "revised-last"),
 ] {
-    let (dir, deck, included, top_source) = include_deck_fixture(included_source);
+    let (dir, deck, included, top_source) =
+        include_deck_fixture(TOP_SOURCE, included_source);
     let key = SlideKey::new(old_key).unwrap();
     let (result_key, result_body) =
         write_preview_slide_source(&deck, &key, old_body, new_body).unwrap();
@@ -545,14 +546,15 @@ the four values used above:
 const TOP_SOURCE: &str = "<!-- {\"include\":\"included.md\"} -->\n\n---\n\n# Top\n";
 
 fn include_deck_fixture(
+    top_source: &'static str,
     included_source: &str,
 ) -> (tempfile::TempDir, PathBuf, PathBuf, &'static str) {
     let dir = tempfile::tempdir().unwrap();
     let deck = dir.path().join("deck.md");
     let included = dir.path().join("included.md");
-    fs::write(&deck, TOP_SOURCE).unwrap();
+    fs::write(&deck, top_source).unwrap();
     fs::write(&included, included_source).unwrap();
-    (dir, deck, included, TOP_SOURCE)
+    (dir, deck, included, top_source)
 }
 ```
 
@@ -572,6 +574,31 @@ runs into one `-`, and trims empty pieces. Thus `# Included first`,
 `# Included middle`, and `# Included last` derive exactly `included-first`,
 `included-middle`, and `included-last`; keep those fixture keys and assert them
 through the service results above.
+
+Add regressions for the clipped trailing edge shared by all preview writes. A
+note save on the last included slide writes `a`, then `b`, then `c` without
+copying the top-level separator's synthetic blank line into the include file;
+an include origin that ended in LF keeps one LF terminator, and a pure-CRLF
+origin keeps one CRLF terminator. A one-slide include pins the same behavior
+for both source and note saves across a second save. The tight-separator source
+fixture expects inserted blank lines before separators that are inside the
+include file, but its last slide keeps only its origin terminator because the
+following top-level separator boundary is synthetic.
+
+Also cover an unterminated one-slide include with tight and loose top-level
+separators in LF and pure CRLF decks. Adding, replacing, deleting, and adding a
+note again must remain stable with one final line ending; a source save must
+terminate the include and leave a following note save editable. Pin that the
+last content line's trailing spaces survive by deleting the note from a last
+included slide containing `"# I1\n\ntext  \n\n<!-- n -->\n"` and expecting
+exactly `"# I1\n\ntext  \n"`.
+
+Call `write_preview_origin_rewrite` directly after replacing one clipped
+synthetic LF with a non-newline byte. Assert that `translate_span` rejects the
+scope and the writer maps that untranslatable scope to a 409 naming the origin
+file, with both files unchanged. Pin the mixed-origin slide-scope refusal at
+this writer too: the service only supplies parsed slide spans, while the shared
+writer owns the origin-translation boundary.
 
 **Implementation (Green).** Add:
 
@@ -602,19 +629,47 @@ and returned both pieces of post-save identity.
 Map missing keys and drift to 409, core refusals to 422, and I/O to 500.
 Return immediately after the origin write; do not invoke a build, generation
 swap, or sync notification because the watcher is the sole rebuild trigger.
+Lift the missing-key conflict construction next to the other preview-deck error
+helpers and use it from every service that performs the same key lookup.
 
 Rename `PreviewOriginRewriteScope::NoteSlide` to `Slide`; use it for notes and
 whole-slide source, leave `EditableBlock` intact, and make the `Slide` conflict
-copy refer to editing the slide in the named file. Do not edit the body of
-`write_preview_origin_rewrite`. `source_span` matches both variants and
-`requires_whole_translation` remains `false` for `Slide`, `true` for
-`EditableBlock`.
+copy refer to editing the slide in the named file. `source_span` matches both
+variants and `requires_whole_translation` remains `false` for `Slide`, `true`
+for `EditableBlock`.
+
+Fix clipped-edge mapping once in `write_preview_origin_rewrite`.
+`translate_span` guarantees that clipped edge units are synthetic single LFs;
+a non-newline synthetic byte makes the scope untranslatable before mapping.
+For a slide-scope write, the rewritten scope must still start with the identical
+clipped head or the writer returns the existing span conflict naming the origin
+file. When the tail is clipped, remove the clipped head from the rewritten
+scope, keep through the content end of its last non-blank line (including that
+line's trailing spaces), then append the origin range's own trailing run
+measured from its last non-blank line. If that run has no line terminator,
+append CRLF for a pure-CRLF origin file and LF otherwise. Apply the existing
+pure-CRLF conversion afterward. When no edge is clipped, keep the pre-task
+write byte-identical; `EditableBlock` still requires a whole-span translation.
+
+Do not infer a rewritten tail by counting backward from the rewritten scope's
+end. Note append reshapes the trailing blank run, so that inference both copied
+the top-level boundary newline into an included file on main and made the
+interim clipped-edge fix permanently reject unterminated includes. The mapped
+write may differ from the validated candidate only in blank lines immediately
+before a following separator, which cannot change parsing.
 
 **Verification.**
 
 ```sh
 cargo test -p peitho --bin peitho write_preview_slide_source
-diff -u <(git show HEAD:crates/peitho/src/main.rs | sed -n '/^fn write_preview_origin_rewrite(/,/^fn write_preview_note(/p' | sed '$d') <(sed -n '/^fn write_preview_origin_rewrite(/,/^fn write_preview_note(/p' crates/peitho/src/main.rs | sed '$d')
+cargo test -p peitho --bin peitho write_preview_note_does_not_leak_a_clipped_include_tail
+cargo test -p peitho --bin peitho write_preview_note_preserves_a_crlf_terminator_for_a_clipped_include_tail
+cargo test -p peitho --bin peitho write_preview_note_writes_unterminated_includes_across_separator_and_line_endings
+cargo test -p peitho --bin peitho write_preview_slide_source_then_note_writes_an_unterminated_include
+cargo test -p peitho --bin peitho preview_slide_and_note_saves_do_not_leak_a_single_slide_include_tail
+cargo test -p peitho --bin peitho write_preview_note_preserves_trailing_spaces_on_the_last_content_line
+cargo test -p peitho --bin peitho write_preview_origin_rewrite_maps_a_non_newline_synthetic_byte_to_scope_conflict
+cargo test -p peitho --bin peitho write_preview_origin_rewrite_rejects_a_mixed_origin_slide_scope
 rg -n 'PreviewOriginRewriteScope::Slide' crates/peitho/src/main.rs
 ! rg -n 'PreviewOriginRewriteScope::NoteSlide' crates/peitho/src/main.rs
 ```

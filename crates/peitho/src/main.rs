@@ -2087,22 +2087,35 @@ fn preview_deck_drift_conflict() -> server::DeckWriteError {
     server::DeckWriteError::Conflict("the deck changed on disk; reload and retry".to_owned())
 }
 
+fn preview_deck_missing_slide_conflict(key: &SlideKey) -> server::DeckWriteError {
+    preview_deck_conflict(peitho_core::BuildError::new(
+        peitho_core::error::ErrorKind::Parse,
+        None,
+        format!("slide key '{}' not found in current deck", key.as_str()),
+        "reload preview and retry on a slide whose key still exists",
+    ))
+}
+
+fn preview_deck_unprocessable(report: miette::Report) -> server::DeckWriteError {
+    server::DeckWriteError::Unprocessable(plain_diagnostic_text(&report))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewOriginRewriteScope {
-    NoteSlide(peitho_core::domain::SourceSpan),
+    Slide(peitho_core::domain::SourceSpan),
     EditableBlock(peitho_core::domain::SourceSpan),
 }
 
 impl PreviewOriginRewriteScope {
     fn source_span(self) -> peitho_core::domain::SourceSpan {
         match self {
-            Self::NoteSlide(span) | Self::EditableBlock(span) => span,
+            Self::Slide(span) | Self::EditableBlock(span) => span,
         }
     }
 
     fn requires_whole_translation(self) -> bool {
         match self {
-            Self::NoteSlide(_) => false,
+            Self::Slide(_) => false,
             Self::EditableBlock(_) => true,
         }
     }
@@ -2115,9 +2128,9 @@ fn preview_deck_span_conflict(
     scope: PreviewOriginRewriteScope,
 ) -> server::DeckWriteError {
     let (message, help) = match scope {
-        PreviewOriginRewriteScope::NoteSlide(_) => (
+        PreviewOriginRewriteScope::Slide(_) => (
             "this slide cannot be edited from preview",
-            format!("edit the note in {}", file.display()),
+            format!("edit the slide in {}", file.display()),
         ),
         PreviewOriginRewriteScope::EditableBlock(_) => (
             "this block cannot be edited from preview",
@@ -2165,6 +2178,18 @@ fn convert_bare_lf_to_crlf(source: &str) -> String {
         converted.push(character);
     }
     converted
+}
+
+fn last_nonblank_line_content_end(source: &str) -> usize {
+    let content_end = source.trim_end_matches([' ', '\t', '\r', '\n']).len();
+    if content_end == 0 {
+        0
+    } else {
+        content_end
+            + source[content_end..]
+                .find(['\r', '\n'])
+                .unwrap_or(source.len() - content_end)
+    }
 }
 
 fn preview_scope_span_conflict(
@@ -2216,6 +2241,7 @@ fn write_preview_origin_rewrite(
         .line_map
         .translate_span(before, requested)
         .ok_or_else(|| preview_scope_span_conflict(input, loaded, before, scope))?;
+    let clipped_tail = requested.end - translated.combined.end;
     if scope.requires_whole_translation() && translated.combined != requested {
         return Err(preview_deck_span_conflict(
             input,
@@ -2224,6 +2250,7 @@ fn write_preview_origin_rewrite(
             scope,
         ));
     }
+    let clipped_head_source = &before[requested.start..translated.combined.start];
 
     let origin_path = translated.file.as_path();
     let mut origin_source = fs::read_to_string(origin_path).map_err(|err| {
@@ -2247,17 +2274,46 @@ fn write_preview_origin_rewrite(
         ));
     }
 
-    let rewritten_scope = after
-        .get(translated.combined.start..rewritten_scope_end)
+    let rewritten_requested = after
+        .get(requested.start..rewritten_scope_end)
         .ok_or_else(|| {
             preview_deck_span_conflict(input, origin_path, translated.start.line, scope)
         })?;
-    let rewritten_scope: Cow<'_, str> =
-        if origin_source.contains("\r\n") && !contains_bare_lf(&origin_source) {
-            Cow::Owned(convert_bare_lf_to_crlf(rewritten_scope))
-        } else {
-            Cow::Borrowed(rewritten_scope)
-        };
+    let origin_uses_crlf = origin_source.contains("\r\n") && !contains_bare_lf(&origin_source);
+    let rewritten_scope: Cow<'_, str> = match scope {
+        PreviewOriginRewriteScope::Slide(_) => {
+            let rewritten_without_head = rewritten_requested
+                .strip_prefix(clipped_head_source)
+                .ok_or_else(|| {
+                    preview_deck_span_conflict(input, origin_path, translated.start.line, scope)
+                })?;
+            if clipped_tail == 0 {
+                Cow::Borrowed(rewritten_without_head)
+            } else {
+                // A clipped slide tail is only the blank boundary before a following separator,
+                // so rebuild it from the origin's own trailing run. This may change those blank
+                // lines or give an unterminated include a final line ending; neither changes
+                // parsing.
+                let rewritten_content_end = last_nonblank_line_content_end(rewritten_without_head);
+                let origin_content_end = last_nonblank_line_content_end(expected_origin);
+                let origin_trailing_run = &expected_origin[origin_content_end..];
+                let mut mapped =
+                    String::with_capacity(rewritten_content_end + origin_trailing_run.len() + 2);
+                mapped.push_str(&rewritten_without_head[..rewritten_content_end]);
+                mapped.push_str(origin_trailing_run);
+                if !origin_trailing_run.contains('\n') {
+                    mapped.push_str(if origin_uses_crlf { "\r\n" } else { "\n" });
+                }
+                Cow::Owned(mapped)
+            }
+        }
+        PreviewOriginRewriteScope::EditableBlock(_) => Cow::Borrowed(rewritten_requested),
+    };
+    let rewritten_scope: Cow<'_, str> = if origin_uses_crlf {
+        Cow::Owned(convert_bare_lf_to_crlf(&rewritten_scope))
+    } else {
+        rewritten_scope
+    };
     if origin_source.get(range.clone()) == Some(rewritten_scope.as_ref()) {
         return Ok(());
     }
@@ -2290,18 +2346,11 @@ fn write_preview_note(
         ))
         .map_err(classify_preview_deck_report)?;
 
-    let Some(slide) = parsed
+    let slide = parsed
         .parsed_slides()
         .iter()
         .find(|slide| slide.key == *key)
-    else {
-        return Err(preview_deck_conflict(peitho_core::BuildError::new(
-            peitho_core::error::ErrorKind::Parse,
-            None,
-            format!("slide key '{}' not found in current deck", key.as_str()),
-            "reload preview and retry on a slide whose key still exists",
-        )));
-    };
+        .ok_or_else(|| preview_deck_missing_slide_conflict(key))?;
 
     let rewritten = loaded
         .translate(peitho_core::notes_edit::rewrite_note(
@@ -2311,12 +2360,12 @@ fn write_preview_note(
             text,
             &highlighter,
         ))
-        .map_err(|report| server::DeckWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
+        .map_err(preview_deck_unprocessable)?;
 
     write_preview_origin_rewrite(
         input,
         &loaded,
-        PreviewOriginRewriteScope::NoteSlide(slide.source_span),
+        PreviewOriginRewriteScope::Slide(slide.source_span),
         combined_source,
         &rewritten,
     )
@@ -2364,7 +2413,7 @@ fn write_preview_slide_edit(
             new,
             &highlighter,
         ))
-        .map_err(|report| server::DeckWriteError::Unprocessable(plain_diagnostic_text(&report)))?;
+        .map_err(preview_deck_unprocessable)?;
     write_preview_origin_rewrite(
         input,
         &loaded,
@@ -2372,6 +2421,57 @@ fn write_preview_slide_edit(
         combined_source,
         &rewritten,
     )
+}
+
+#[allow(dead_code)]
+fn write_preview_slide_source(
+    input: &Path,
+    key: &SlideKey,
+    old: &str,
+    new: &str,
+) -> Result<(SlideKey, String), server::DeckWriteError> {
+    let loaded = load_and_expand_deck_source(input).map_err(classify_preview_deck_report)?;
+    let (_, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)
+        .map_err(classify_preview_deck_report)?;
+    let combined_source = loaded.source.as_str();
+    let parsed = loaded
+        .translate(peitho_core::parse_deck(
+            combined_source,
+            loaded.frontmatter.clone(),
+            &highlighter,
+        ))
+        .map_err(classify_preview_deck_report)?;
+    let slide = parsed
+        .parsed_slides()
+        .iter()
+        .find(|slide| slide.key == *key)
+        .ok_or_else(|| preview_deck_missing_slide_conflict(key))?;
+    let current_body = loaded
+        .translate(peitho_core::slide_source::slide_body(
+            combined_source,
+            slide,
+        ))
+        .map_err(preview_deck_unprocessable)?;
+    if current_body != old {
+        return Err(preview_deck_drift_conflict());
+    }
+
+    let peitho_core::slide_source::SlideBodyRewrite { source, key, body } = loaded
+        .translate(peitho_core::slide_source::rewrite_slide_body(
+            combined_source,
+            slide,
+            new,
+            &highlighter,
+        ))
+        .map_err(preview_deck_unprocessable)?;
+    write_preview_origin_rewrite(
+        input,
+        &loaded,
+        PreviewOriginRewriteScope::Slide(slide.source_span),
+        combined_source,
+        &source,
+    )?;
+    Ok((key, body))
 }
 
 fn preview_deck_writer(input: PathBuf) -> server::DeckWriter {
@@ -6312,13 +6412,28 @@ contexts:
         (span.start, span.end)
     }
 
-    fn assert_preview_deck_drift(result: Result<(), server::DeckWriteError>) {
-        assert_eq!(
-            result,
-            Err(server::DeckWriteError::Conflict(
-                "the deck changed on disk; reload and retry".to_owned()
-            ))
-        );
+    fn assert_preview_deck_drift<T>(result: Result<T, server::DeckWriteError>) {
+        match result {
+            Err(server::DeckWriteError::Conflict(message)) => {
+                assert_eq!(message, "the deck changed on disk; reload and retry")
+            }
+            Err(err) => panic!("deck drift must be a conflict: {err:?}"),
+            Ok(_) => panic!("deck drift must be refused"),
+        }
+    }
+
+    const TOP_SOURCE: &str = "<!-- {\"include\":\"included.md\"} -->\n\n---\n\n# Top\n";
+
+    fn include_deck_fixture(
+        top_source: &'static str,
+        included_source: &str,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, &'static str) {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("included.md");
+        fs::write(&deck, top_source).unwrap();
+        fs::write(&included, included_source).unwrap();
+        (dir, deck, included, top_source)
     }
 
     fn dispatch_preview_note(
@@ -6330,6 +6445,666 @@ contexts:
             key,
             text: text.to_owned(),
         })
+    }
+
+    #[test]
+    fn write_preview_slide_source_rejects_missing_key_and_body_drift_as_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let source = "<!-- {\"key\":\"current\"} -->\n# Current\n\nOriginal body\n";
+        fs::write(&deck, source).unwrap();
+
+        let missing = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("missing").unwrap(),
+            "# Current\n\nOriginal body",
+            "# Replacement",
+        )
+        .unwrap_err();
+        let server::DeckWriteError::Conflict(message) = missing else {
+            panic!("missing slide key must be a conflict: {missing:?}");
+        };
+        assert!(message.contains("slide key 'missing' not found in current deck"));
+        assert!(message.contains("reload preview and retry on a slide whose key still exists"));
+
+        assert_preview_deck_drift(write_preview_slide_source(
+            &deck,
+            &SlideKey::new("current").unwrap(),
+            "# Current\n\nStale body",
+            "# Replacement",
+        ));
+        assert_eq!(fs::read_to_string(&deck).unwrap(), source);
+    }
+
+    #[test]
+    fn write_preview_slide_source_maps_slide_body_refusal_to_unprocessable() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let source = "<!-- {\"key\":\"bare-cr\"} -->\n# Bare CR\n\nBody\rTail\n";
+        fs::write(&deck, source).unwrap();
+
+        let err = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("bare-cr").unwrap(),
+            "# Bare CR\n\nBody\rTail",
+            "# Revised",
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Unprocessable(message) = err else {
+            panic!("slide body refusal must be unprocessable: {err:?}");
+        };
+        assert!(message.contains("bare CR line endings are not supported by preview editing"));
+        assert!(message
+            .contains("convert the deck to LF or CRLF line endings, then reload the preview"));
+        assert_eq!(fs::read_to_string(&deck).unwrap(), source);
+    }
+
+    #[test]
+    fn write_preview_slide_source_maps_structural_refusal_to_unprocessable() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let source = "<!-- {\"key\":\"structural\"} -->\n# Structural\n\nBody\n";
+        fs::write(&deck, source).unwrap();
+
+        let err = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("structural").unwrap(),
+            "# Structural\n\nBody",
+            "# Structural\n\n---\n\n# Extra",
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Unprocessable(message) = err else {
+            panic!("structural refusal must be unprocessable: {err:?}");
+        };
+        assert!(message.contains("slide body edit would change the deck's slide count"));
+        assert!(message.contains(
+            "a `---` line in the body splits the slide, and removing all content removes it"
+        ));
+        assert_eq!(fs::read_to_string(&deck).unwrap(), source);
+    }
+
+    #[test]
+    fn write_preview_slide_source_writes_parse_valid_layout_arity_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        fs::create_dir(&layouts).unwrap();
+        fs::write(
+            layouts.join("strict.html"),
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"arity\",\"layout\":\"strict\"} -->\n# Arity\n\nOne\n",
+        )
+        .unwrap();
+        let new_body = "# Arity\n\nOne\n\nTwo";
+
+        let (key, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("arity").unwrap(),
+            "# Arity\n\nOne",
+            new_body,
+        )
+        .unwrap();
+
+        assert_eq!(key.as_str(), "arity");
+        assert_eq!(body, new_body);
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "<!-- {\"key\":\"arity\",\"layout\":\"strict\"} -->\n\n# Arity\n\nOne\n\nTwo\n"
+        );
+        let build_error = match build_artifacts(&deck) {
+            Ok(_) => panic!("the saved body must still fail the layout arity check"),
+            Err(err) => err,
+        };
+        assert!(plain_diagnostic_text(&build_error)
+            .contains("slot 'body' got 2 item(s), but layout 'strict' allows 1"));
+    }
+
+    #[test]
+    fn write_preview_slide_source_writes_a_skipped_slide() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            "<!-- {\"key\":\"skipped\",\"skip\":true} -->\n# Old\n",
+        )
+        .unwrap();
+        let new_body = "# Revised\n\nBody";
+
+        let (key, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("skipped").unwrap(),
+            "# Old",
+            new_body,
+        )
+        .unwrap();
+
+        assert_eq!(key.as_str(), "skipped");
+        assert_eq!(body, new_body);
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "<!-- {\"key\":\"skipped\",\"skip\":true} -->\n\n# Revised\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_source_returns_the_accepting_reparse_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "# Old heading\n").unwrap();
+
+        let (key, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("old-heading").unwrap(),
+            "# Old heading",
+            "\n# New heading\r\n\r\nBody\n\n",
+        )
+        .unwrap();
+
+        assert_eq!(key.as_str(), "new-heading");
+        assert_eq!(body, "# New heading\n\nBody");
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "# New heading\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_source_preserves_a_leading_origin_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n# Old\n").unwrap();
+
+        let (key, body) =
+            write_preview_slide_source(&deck, &SlideKey::new("bom").unwrap(), "# Old", "# New")
+                .unwrap();
+
+        assert_eq!(key.as_str(), "bom");
+        assert_eq!(body, "# New");
+        assert_eq!(
+            fs::read(&deck).unwrap(),
+            b"\xef\xbb\xbf<!-- {\"key\":\"bom\"} -->\n\n# New\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_source_preserves_pure_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n# CRLF\r\n\r\nbefore\r\n",
+        )
+        .unwrap();
+
+        let (key, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("crlf").unwrap(),
+            "# CRLF\n\nbefore",
+            "# CRLF\n\nafter",
+        )
+        .unwrap();
+
+        assert_eq!(key.as_str(), "crlf");
+        assert_eq!(body, "# CRLF\n\nafter");
+        let bytes = fs::read(&deck).unwrap();
+        assert_eq!(
+            bytes,
+            b"<!-- {\"key\":\"crlf\"} -->\r\n\r\n# CRLF\r\n\r\nafter\r\n"
+        );
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte != b'\n' || (index > 0 && bytes[index - 1] == b'\r')));
+    }
+
+    #[test]
+    fn write_preview_slide_source_does_not_run_code_image_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let sentinel = dir.path().join("code-image-command-ran");
+        fs::write(
+            &deck,
+            format!(
+                "---\ncode_images:\n  dot: sh -c 'touch {}'\n---\n<!-- {{\"key\":\"diagram\"}} -->\n# Diagram\n\nSafe paragraph\n\n```dot\ndigraph {{}}\n```\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        let old_body = "# Diagram\n\nSafe paragraph\n\n```dot\ndigraph {}\n```";
+        let new_body = "# Diagram\n\nEdited safely\n\n```dot\ndigraph {}\n```";
+
+        let (_, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("diagram").unwrap(),
+            old_body,
+            new_body,
+        )
+        .unwrap();
+
+        assert_eq!(body, new_body);
+        assert!(fs::read_to_string(&deck).unwrap().contains("Edited safely"));
+        assert!(!sentinel.exists());
+    }
+
+    #[test]
+    fn write_preview_slide_source_maps_origin_read_and_write_failures_to_io() {
+        let read_dir = tempfile::tempdir().unwrap();
+        let read_deck = read_dir.path().join("deck.md");
+        fs::write(&read_deck, "<!-- {\"key\":\"vanished\"} -->\n# Before\n").unwrap();
+        let loaded = load_and_expand_deck_source(&read_deck).unwrap();
+        let (_, highlighter) =
+            resolve_assets_and_highlighter(&read_deck, &loaded.frontmatter).unwrap();
+        let parsed = loaded
+            .translate(peitho_core::parse_deck(
+                &loaded.source,
+                loaded.frontmatter.clone(),
+                &highlighter,
+            ))
+            .unwrap();
+        let slide = &parsed.parsed_slides()[0];
+        let rewritten = loaded
+            .translate(peitho_core::slide_source::rewrite_slide_body(
+                &loaded.source,
+                slide,
+                "# After",
+                &highlighter,
+            ))
+            .unwrap();
+        fs::remove_file(&read_deck).unwrap();
+
+        let read_err = write_preview_origin_rewrite(
+            &read_deck,
+            &loaded,
+            PreviewOriginRewriteScope::Slide(slide.source_span),
+            &loaded.source,
+            &rewritten.source,
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Io(read_message) = read_err else {
+            panic!("origin read failure must be I/O: {read_err:?}");
+        };
+        assert!(read_message.contains("make the file readable and retry"));
+
+        let write_dir = tempfile::tempdir().unwrap();
+        let deck = write_dir.path().join("deck.md");
+        let source = "<!-- {\"key\":\"unwritable\"} -->\n# Before\n";
+        fs::write(&deck, source).unwrap();
+        fs::create_dir(write_dir.path().join("deck.md.tmp")).unwrap();
+
+        let err = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("unwritable").unwrap(),
+            "# Before",
+            "# After",
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Io(message) = err else {
+            panic!("origin write failure must be I/O: {err:?}");
+        };
+        assert!(message.contains("make the file and its directory writable and retry"));
+        assert_eq!(fs::read_to_string(&deck).unwrap(), source);
+    }
+
+    #[test]
+    fn write_preview_slide_source_writes_first_middle_and_last_included_slides() {
+        let included_source = concat!(
+            "# Included first\n\n---\n\n",
+            "# Included middle\n\n---\n\n",
+            "# Included last\n",
+        );
+        for (old_key, old_body, new_body, response_key) in [
+            (
+                "included-first",
+                "# Included first",
+                "# Revised first\n\n- added",
+                "revised-first",
+            ),
+            (
+                "included-middle",
+                "# Included middle",
+                "# Revised middle\n\n- added",
+                "revised-middle",
+            ),
+            (
+                "included-last",
+                "# Included last",
+                "# Revised last\n\n- added",
+                "revised-last",
+            ),
+        ] {
+            let (dir, deck, included, top_source) =
+                include_deck_fixture(TOP_SOURCE, included_source);
+            let key = SlideKey::new(old_key).unwrap();
+
+            let (result_key, result_body) =
+                write_preview_slide_source(&deck, &key, old_body, new_body).unwrap();
+
+            assert_eq!(result_key.as_str(), response_key);
+            assert_eq!(result_body, new_body);
+            assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+            assert_eq!(
+                fs::read_to_string(&included).unwrap(),
+                included_source.replacen(old_body, new_body, 1),
+            );
+            drop(dir);
+        }
+    }
+
+    #[test]
+    fn write_preview_slide_source_writes_tight_separator_included_slides_exactly() {
+        let included_source = "# Included first\n---\n# Included middle\n---\n# Included last\n";
+        for (old_key, old_body, new_body, response_key, expected) in [
+            (
+                "included-first",
+                "# Included first",
+                "# Revised first\n\n- added",
+                "revised-first",
+                "# Revised first\n\n- added\n\n---\n# Included middle\n---\n# Included last\n",
+            ),
+            (
+                "included-middle",
+                "# Included middle",
+                "# Revised middle\n\n- added",
+                "revised-middle",
+                "# Included first\n---\n# Revised middle\n\n- added\n\n---\n# Included last\n",
+            ),
+            (
+                "included-last",
+                "# Included last",
+                "# Revised last\n\n- added",
+                "revised-last",
+                "# Included first\n---\n# Included middle\n---\n# Revised last\n\n- added\n",
+            ),
+        ] {
+            let (dir, deck, included, top_source) =
+                include_deck_fixture(TOP_SOURCE, included_source);
+            let key = SlideKey::new(old_key).unwrap();
+
+            let (result_key, result_body) =
+                write_preview_slide_source(&deck, &key, old_body, new_body).unwrap();
+
+            assert_eq!(result_key.as_str(), response_key);
+            assert_eq!(result_body, new_body);
+            assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
+            assert_eq!(fs::read_to_string(&included).unwrap(), expected);
+            drop(dir);
+        }
+    }
+
+    #[test]
+    fn write_preview_note_does_not_leak_a_clipped_include_tail() {
+        let included_source = concat!(
+            "# Included first\n\n---\n\n",
+            "# Included middle\n\n---\n\n",
+            "# Included last\n",
+        );
+        let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, included_source);
+        let key = SlideKey::new("included-last").unwrap();
+
+        for text in ["a", "b", "c"] {
+            write_preview_note(&deck, &key, text).unwrap();
+
+            assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+            assert_eq!(
+                fs::read_to_string(&included).unwrap(),
+                format!(
+                    "# Included first\n\n---\n\n# Included middle\n\n---\n\n# Included last\n\n<!-- {text} -->\n"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn write_preview_note_preserves_a_crlf_terminator_for_a_clipped_include_tail() {
+        let (_dir, deck, included, top_source) =
+            include_deck_fixture(TOP_SOURCE, "# Included last\r\n");
+        let key = SlideKey::new("included-last").unwrap();
+
+        for text in ["a", "b"] {
+            write_preview_note(&deck, &key, text).unwrap();
+
+            assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+            assert_eq!(
+                fs::read(&included).unwrap(),
+                format!("# Included last\r\n\r\n<!-- {text} -->\r\n").as_bytes(),
+            );
+        }
+    }
+
+    #[test]
+    fn write_preview_note_writes_unterminated_includes_across_separator_and_line_endings() {
+        for (name, top_source, included_source, content, line_ending) in [
+            (
+                "lf-tight",
+                "<!-- {\"include\":\"included.md\"} -->\n---\n# Top\n",
+                "# I1",
+                "# I1",
+                "\n",
+            ),
+            (
+                "lf-loose",
+                "<!-- {\"include\":\"included.md\"} -->\n\n---\n\n# Top\n",
+                "# I1",
+                "# I1",
+                "\n",
+            ),
+            (
+                "crlf-tight",
+                "<!-- {\"include\":\"included.md\"} -->\r\n---\r\n# Top\r\n",
+                "# I1\r\nBody",
+                "# I1\r\nBody",
+                "\r\n",
+            ),
+            (
+                "crlf-loose",
+                "<!-- {\"include\":\"included.md\"} -->\r\n\r\n---\r\n\r\n# Top\r\n",
+                "# I1\r\nBody",
+                "# I1\r\nBody",
+                "\r\n",
+            ),
+        ] {
+            let (_dir, deck, included, top_source) =
+                include_deck_fixture(top_source, included_source);
+            let key = SlideKey::new("i1").unwrap();
+
+            for text in ["n", "b"] {
+                write_preview_note(&deck, &key, text)
+                    .unwrap_or_else(|err| panic!("{name} note {text}: {err:?}"));
+                assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes(), "{name}");
+                assert_eq!(
+                    fs::read_to_string(&included).unwrap(),
+                    format!("{content}{line_ending}{line_ending}<!-- {text} -->{line_ending}"),
+                    "{name}",
+                );
+            }
+
+            write_preview_note(&deck, &key, "")
+                .unwrap_or_else(|err| panic!("{name} note deletion: {err:?}"));
+            assert_eq!(
+                fs::read_to_string(&included).unwrap(),
+                format!("{content}{line_ending}"),
+                "{name}",
+            );
+
+            write_preview_note(&deck, &key, "c")
+                .unwrap_or_else(|err| panic!("{name} note c: {err:?}"));
+            assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes(), "{name}");
+            assert_eq!(
+                fs::read_to_string(&included).unwrap(),
+                format!("{content}{line_ending}{line_ending}<!-- c -->{line_ending}"),
+                "{name}",
+            );
+        }
+    }
+
+    #[test]
+    fn write_preview_slide_source_then_note_writes_an_unterminated_include() {
+        let top_source = "<!-- {\"include\":\"included.md\"} -->\n---\n# Top\n";
+        let (_dir, deck, included, top_source) = include_deck_fixture(top_source, "# I1");
+
+        let (key, body) = write_preview_slide_source(
+            &deck,
+            &SlideKey::new("i1").unwrap(),
+            "# I1",
+            "# I2\n\nBody",
+        )
+        .unwrap();
+
+        assert_eq!(key.as_str(), "i2");
+        assert_eq!(body, "# I2\n\nBody");
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(fs::read(&included).unwrap(), b"# I2\n\nBody\n");
+
+        write_preview_note(&deck, &key, "n").unwrap();
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(
+            fs::read(&included).unwrap(),
+            b"# I2\n\nBody\n\n<!-- n -->\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_note_preserves_trailing_spaces_on_the_last_content_line() {
+        let included_source = "# I1\n\ntext  \n\n<!-- n -->\n";
+        let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, included_source);
+
+        write_preview_note(&deck, &SlideKey::new("i1").unwrap(), "").unwrap();
+
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(fs::read(&included).unwrap(), b"# I1\n\ntext  \n");
+    }
+
+    #[test]
+    fn preview_slide_and_note_saves_do_not_leak_a_single_slide_include_tail() {
+        {
+            let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, "# Only\n");
+            let key = SlideKey::new("only").unwrap();
+
+            let (key, body) =
+                write_preview_slide_source(&deck, &key, "# Only", "# Once\n\nBody").unwrap();
+            assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+            assert_eq!(fs::read(&included).unwrap(), b"# Once\n\nBody\n");
+
+            write_preview_slide_source(&deck, &key, &body, "# Twice\n\nBody").unwrap();
+            assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+            assert_eq!(fs::read(&included).unwrap(), b"# Twice\n\nBody\n");
+        }
+
+        {
+            let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, "# Only\n");
+            let key = SlideKey::new("only").unwrap();
+
+            for text in ["a", "b"] {
+                write_preview_note(&deck, &key, text).unwrap();
+
+                assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+                assert_eq!(
+                    fs::read_to_string(&included).unwrap(),
+                    format!("# Only\n\n<!-- {text} -->\n"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_preview_origin_rewrite_maps_a_non_newline_synthetic_byte_to_scope_conflict() {
+        let included_source = "# Included last\n";
+        let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, included_source);
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+        let (_, highlighter) = resolve_assets_and_highlighter(&deck, &loaded.frontmatter).unwrap();
+        let parsed = loaded
+            .translate(peitho_core::parse_deck(
+                &loaded.source,
+                loaded.frontmatter.clone(),
+                &highlighter,
+            ))
+            .unwrap();
+        let slide = parsed
+            .parsed_slides()
+            .iter()
+            .find(|slide| slide.key.as_str() == "included-last")
+            .unwrap();
+        let requested = slide.source_span;
+        let translated = loaded
+            .line_map
+            .translate_span(&loaded.source, requested)
+            .unwrap();
+        assert!(translated.combined.end < requested.end);
+        let clipped_tail = &loaded.source[translated.combined.end..requested.end];
+        assert!(clipped_tail.bytes().all(|byte| byte == b'\n'));
+        let mut before = loaded.source.clone();
+        before.replace_range(translated.combined.end..translated.combined.end + 1, "x");
+        assert!(loaded.line_map.translate_span(&before, requested).is_none());
+        let mut after = before.clone();
+        let heading = after.find("# Included last").unwrap();
+        after.replace_range(heading + 2..heading + "# Included".len(), "Replaced");
+
+        let err = write_preview_origin_rewrite(
+            &deck,
+            &loaded,
+            PreviewOriginRewriteScope::Slide(requested),
+            &before,
+            &after,
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Conflict(message) = err else {
+            panic!("an untranslatable slide scope must be a conflict: {err:?}");
+        };
+        assert!(message.contains("this slide cannot be edited from preview"));
+        assert!(message.contains("included.md"));
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(fs::read_to_string(&included).unwrap(), included_source);
+    }
+
+    #[test]
+    fn write_preview_origin_rewrite_rejects_a_mixed_origin_slide_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let included = dir.path().join("shared.md");
+        fs::write(
+            &deck,
+            "# Before\n\n---\n<!-- {\"include\":\"shared.md\"} -->\n---\n# After\n",
+        )
+        .unwrap();
+        fs::write(&included, "# Included").unwrap();
+        let loaded = load_and_expand_deck_source(&deck).unwrap();
+        let before = loaded.source.clone();
+        let included_start = before.find("# Included").unwrap();
+        let after_start = before.find("# After").unwrap();
+        let mut after = before.clone();
+        after.replace_range(
+            included_start + "# ".len()..included_start + "# Included".len(),
+            "Revised",
+        );
+
+        let err = write_preview_origin_rewrite(
+            &deck,
+            &loaded,
+            PreviewOriginRewriteScope::Slide(peitho_core::domain::SourceSpan {
+                start: included_start,
+                end: after_start + "# After".len(),
+            }),
+            &before,
+            &after,
+        )
+        .unwrap_err();
+
+        let server::DeckWriteError::Conflict(message) = err else {
+            panic!("mixed-origin slide must be a conflict: {err:?}");
+        };
+        assert!(message.contains("this slide cannot be edited from preview"));
+        assert!(message.contains("edit the slide in"));
+        assert!(message.contains("shared.md"));
+        assert_eq!(fs::read_to_string(&included).unwrap(), "# Included");
     }
 
     #[test]
@@ -6625,7 +7400,7 @@ contexts:
     }
 
     #[test]
-    fn preview_origin_writer_is_shared_by_note_and_slide_edit_regressions() {
+    fn preview_origin_writer_is_shared_by_all_preview_write_regressions() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let key = SlideKey::new("shared-seam").unwrap();
@@ -6643,13 +7418,23 @@ contexts:
 
         write_preview_note(&deck, &key, "new note").unwrap();
         write_preview_slide_edit(&deck, &key, start, end, "before", "after").unwrap();
+        let (result_key, result_body) = write_preview_slide_source(
+            &deck,
+            &key,
+            "# Shared seam\n\nafter",
+            "# Shared seam\n\nafter\n\n- added",
+        )
+        .unwrap();
 
+        assert_eq!(result_key, key);
+        assert_eq!(result_body, "# Shared seam\n\nafter\n\n- added");
         assert_eq!(
             fs::read_to_string(&deck).unwrap(),
             concat!(
                 "<!-- {\"key\":\"shared-seam\"} -->\n",
+                "\n",
                 "# Shared seam\n\n",
-                "after\n\n",
+                "after\n\n- added\n\n",
                 "<!-- new note -->\n",
             )
         );
@@ -6660,7 +7445,7 @@ contexts:
         let atomic_needle = ["write_atomic", "(origin_path"].concat();
         assert_eq!(production.matches(&atomic_needle).count(), 1);
         let shared_needle = ["write_preview_origin", "_rewrite("].concat();
-        assert_eq!(production.matches(&shared_needle).count(), 3);
+        assert_eq!(production.matches(&shared_needle).count(), 4);
     }
 
     #[test]
@@ -6711,7 +7496,7 @@ contexts:
                 "<!-- {\"key\":\"shared-seam\"} -->\n",
                 "# Shared seam\n\n",
                 "after\n\n",
-                "<!-- new note -->\n\n",
+                "<!-- new note -->\n",
             )
         );
         assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
@@ -6804,7 +7589,7 @@ contexts:
             concat!(
                 "<!-- {\"key\":\"shared\"} -->\n",
                 "# Shared\n\n",
-                "<!-- edited in preview -->\n\n",
+                "<!-- edited in preview -->\n",
             )
         );
 
@@ -6820,7 +7605,7 @@ contexts:
             concat!(
                 "<!-- {\"key\":\"shared\"} -->\n",
                 "# Shared\n\n",
-                "<!-- x -->\n\n",
+                "<!-- x -->\n",
             )
         );
     }
