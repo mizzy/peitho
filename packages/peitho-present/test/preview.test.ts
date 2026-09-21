@@ -8,6 +8,7 @@ import {
   previewGridColumnCount,
   type PreviewShell
 } from "../src/preview";
+import { calculateCanvasFit } from "../src/canvas";
 import type { Notes } from "../../../bindings/Notes";
 import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncChannel } from "../src/sync";
@@ -194,8 +195,11 @@ type InlineEditFetchFixture = PreviewFetchFixture & {
   rejectSlideEditPost(error: unknown): void;
 };
 
-function inlineEditFetchFixture(): InlineEditFetchFixture {
-  const base = previewFetchFixture();
+function inlineEditFetchFixture(
+  sourceSlideSources: SlideSources = slideSources,
+  sourceNotes: Notes = notes
+): InlineEditFetchFixture {
+  const base = previewFetchFixture(manifest, cssText, sourceNotes, sourceSlideSources);
   const posts: Array<[string, RequestInit]> = [];
   const settlers: Array<{
     resolve(response: Response): void;
@@ -223,6 +227,47 @@ function inlineEditFetchFixture(): InlineEditFetchFixture {
     rejectSlideEditPost(error: unknown): void {
       const settler = settlers.shift();
       if (settler === undefined) throw new Error("No pending /slide-edit request");
+      settler.reject(error);
+    }
+  };
+}
+
+type SourceEditFetchFixture = InlineEditFetchFixture & {
+  sourceEditPosts(): Array<[string, RequestInit]>;
+  resolveSourceEditPost(response: Response): void;
+  rejectSourceEditPost(error: unknown): void;
+};
+
+function sourceEditFetchFixture(
+  sourceSlideSources: SlideSources = slideSources,
+  sourceNotes: Notes = notes
+): SourceEditFetchFixture {
+  const base = inlineEditFetchFixture(sourceSlideSources, sourceNotes);
+  const posts: Array<[string, RequestInit]> = [];
+  const settlers: Array<{
+    resolve(response: Response): void;
+    reject(error: unknown): void;
+  }> = [];
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/slide-source") {
+      posts.push([url, init ?? {}]);
+      return new Promise<Response>((resolve, reject) => settlers.push({ resolve, reject }));
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  return {
+    ...base,
+    fetcher,
+    sourceEditPosts: () => posts,
+    resolveSourceEditPost(response: Response): void {
+      const settler = settlers.shift();
+      if (settler === undefined) throw new Error("No pending /slide-source request");
+      settler.resolve(response);
+    },
+    rejectSourceEditPost(error: unknown): void {
+      const settler = settlers.shift();
+      if (settler === undefined) throw new Error("No pending /slide-source request");
       settler.reject(error);
     }
   };
@@ -275,6 +320,7 @@ async function mountInlineEditForTest(options: {
   index?: number;
   bus?: EventTarget;
   fixture?: InlineEditFetchFixture;
+  viewport?: () => { width: number; height: number };
   selectionRangeProvider?: (editor: HTMLElement) => {
     range: Range;
     select(range: Range): void;
@@ -300,7 +346,7 @@ async function mountInlineEditForTest(options: {
     window,
     storage: sessionStorage,
     selectionRangeProvider: options.selectionRangeProvider,
-    viewport: () => ({ width: 1280, height: 720 })
+    viewport: options.viewport ?? (() => ({ width: 1280, height: 720 }))
   });
   shells.push(shell);
   return { root, shell, fixture, bus };
@@ -2979,6 +3025,396 @@ it("centres the restored slide on first layout, then steps with nearest", async 
   } finally {
     HTMLElement.prototype.scrollIntoView = original;
   }
+});
+
+it("source_edit_request_obeys_single_mode_and_one_edit_union", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  let viewport = { width: 1280, height: 720 };
+  const { root, shell } = await mountInlineEditForTest({
+    mode: "grid",
+    bus,
+    fixture,
+    viewport: () => viewport
+  });
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
+  );
+  expect(shell.mode).toBe("single");
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  note.value = "settling note";
+  shell.navigate({ index: 1 });
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const textarea = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  const introHost = root.querySelector<HTMLElement>(
+    '.peitho-preview-slide[data-slide-key="intro"]'
+  )!;
+  const middleHost = root.querySelector<HTMLElement>(
+    '.peitho-preview-slide[data-slide-key="middle"]'
+  )!;
+  const endHost = root.querySelector<HTMLElement>(
+    '.peitho-preview-slide[data-slide-key="end"]'
+  )!;
+  expect(textarea.value).toBe("# Middle");
+  expect(textarea.closest<HTMLElement>('[data-slide-key="middle"]')).not.toBeNull();
+  expect(introHost.hidden).toBe(true);
+  expect(middleHost.hidden).toBe(true);
+  expect(endHost.hidden).toBe(true);
+  const initialFit = calculateCanvasFit(
+    {
+      width: viewport.width - PREVIEW_STRIP_WIDTH,
+      height: viewport.height - PREVIEW_NOTES_HEIGHT
+    },
+    manifest.canvasWidth,
+    manifest.canvasHeight
+  );
+  expect(parseFloat(textarea.style.left)).toBeCloseTo(initialFit.left);
+  expect(parseFloat(textarea.style.top)).toBeCloseTo(initialFit.top);
+  expect(parseFloat(textarea.style.width)).toBeCloseTo(
+    manifest.canvasWidth * initialFit.scale
+  );
+  expect(parseFloat(textarea.style.height)).toBeCloseTo(
+    manifest.canvasHeight * initialFit.scale
+  );
+  expect(textarea.style.transform).toBe("");
+
+  viewport = { width: 1440, height: 900 };
+  window.dispatchEvent(new Event("resize"));
+  const resizedFit = calculateCanvasFit(
+    {
+      width: viewport.width - PREVIEW_STRIP_WIDTH,
+      height: viewport.height - PREVIEW_NOTES_HEIGHT
+    },
+    manifest.canvasWidth,
+    manifest.canvasHeight
+  );
+  expect(parseFloat(textarea.style.left)).toBeCloseTo(resizedFit.left);
+  expect(parseFloat(textarea.style.top)).toBeCloseTo(resizedFit.top);
+  expect(parseFloat(textarea.style.width)).toBeCloseTo(
+    manifest.canvasWidth * resizedFit.scale
+  );
+  expect(parseFloat(textarea.style.height)).toBeCloseTo(
+    manifest.canvasHeight * resizedFit.scale
+  );
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(root.querySelectorAll('[data-peitho-preview="source"]')).toHaveLength(1);
+  const middleEditable = slideShadow(root, "middle").querySelector<HTMLElement>(
+    "#middle-editable"
+  )!;
+  dispatchShadowClick(middleEditable);
+  expect(middleEditable.hasAttribute("contenteditable")).toBe(false);
+
+  textarea.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true
+    })
+  );
+  expect(textarea.isConnected).toBe(false);
+  expect(introHost.hidden).toBe(true);
+  expect(middleHost.hidden).toBe(false);
+  expect(endHost.hidden).toBe(true);
+
+  dispatchShadowClick(middleEditable);
+  middleEditable.textContent = "pending inline edit";
+  middleEditable.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(middleEditable.getAttribute("contenteditable")).toBe("false");
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() =>
+    expect(middleEditable.hasAttribute("contenteditable")).toBe(false)
+  );
+
+  const unavailableReason =
+    "bare CR line endings are not supported by preview editing\n" +
+    "  = help: convert the deck to LF or CRLF line endings, then reload the preview";
+  const unavailableFixture = sourceEditFetchFixture({
+    version: 1,
+    sources: { middle: "# Middle", end: "# End" },
+    unavailable: { intro: unavailableReason }
+  });
+  const unavailableBus = new EventTarget();
+  const unavailableMount = await mountInlineEditForTest({
+    bus: unavailableBus,
+    fixture: unavailableFixture
+  });
+  unavailableBus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const unavailableStatus = unavailableMount.root.querySelector<HTMLSpanElement>(
+    '[data-peitho-preview="status"]'
+  )!;
+  const unavailableHost = unavailableMount.root.querySelector<HTMLElement>(
+    '.peitho-preview-slide[data-slide-key="intro"]'
+  )!;
+  expect(unavailableMount.root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+  expect(unavailableHost.hidden).toBe(false);
+  expect(unavailableStatus.textContent).toBe(unavailableReason);
+  expect(unavailableStatus.style.whiteSpace).toBe("pre-wrap");
+
+  delete unavailableFixture.sources.unavailable.intro;
+  unavailableBus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(unavailableStatus.textContent).toBe("this slide cannot be edited from preview");
+  expect(unavailableHost.hidden).toBe(false);
+
+  unavailableFixture.sources.sources.intro = "# Intro";
+  unavailableBus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const reopenedEditor = unavailableMount.root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  expect(reopenedEditor.value).toBe("# Intro");
+  expect(unavailableStatus.textContent).toBe("");
+  reopenedEditor.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
+  );
+});
+
+it("source_edit_refusal_status_clears_on_committed_index_and_mode_transitions", async () => {
+  const refusal = "bare CR line endings are not supported by preview editing";
+  const fixture = sourceEditFetchFixture({
+    version: 1,
+    sources: { middle: "# Middle", end: "# End" },
+    unavailable: { intro: refusal }
+  });
+  const bus = new EventTarget();
+  const { root, shell } = await mountInlineEditForTest({ bus, fixture });
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(status.textContent).toBe(refusal);
+  shell.navigate("next");
+  expect(shell.currentIndex).toBe(1);
+  expect(status.textContent).toBe("");
+
+  shell.navigate("prev");
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  expect(status.textContent).toBe(refusal);
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } })
+  );
+  expect(shell.mode).toBe("grid");
+  expect(status.textContent).toBe("");
+});
+
+it("source_edit_success_clears_a_prior_save_failure", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const editor = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  editor.value = "# First draft";
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  fixture.resolveSourceEditPost({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: "slide source refused" })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("slide source refused"));
+
+  editor.value = "# Fixed draft";
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(2));
+  fixture.resolveSourceEditPost(okJson({ key: "fixed", body: "# Fixed canonical" }));
+  await vi.waitFor(() => expect(editor.isConnected).toBe(false));
+  expect(status.textContent).toBe("");
+});
+
+it("source_edit_open_blocks_every_interim_transition_and_deferred_reload", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root, shell } = await mountInlineEditForTest({ bus, fixture });
+  const channel = mockChannel();
+  const reload = vi.fn();
+  cleanups.push(installPreviewReload(shell, () => channel, reload));
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const editor = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  editor.value = "# Draft must stay open";
+  channel.onmessage?.({ data: { generation: shell.generation + 1 } });
+
+  const expectBlocked = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(shell.currentIndex).toBe(0);
+    expect(shell.mode).toBe("single");
+    expect(editor.isConnected).toBe(true);
+    expect(editor.value).toBe("# Draft must stay open");
+    expect(fixture.sourceEditPosts()).toHaveLength(0);
+    expect(reload).not.toHaveBeenCalled();
+  };
+
+  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  await expectBlocked();
+  shell.navigate({ index: 2 });
+  await expectBlocked();
+  root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
+  await expectBlocked();
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } })
+  );
+  await expectBlocked();
+});
+
+it("source_edit_success_uses_server_identity_for_the_next_save", async () => {
+  const bus = new EventTarget();
+  const sourceNotes: Notes = { version: 1, notes: { intro: "Keep this note." } };
+  const fixture = sourceEditFetchFixture(slideSources, sourceNotes);
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const host = root.querySelector<HTMLElement>(
+    '.peitho-preview-slide[data-slide-key="intro"]'
+  )!;
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const firstEditor = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  firstEditor.value = "# Typed";
+  firstEditor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true
+    })
+  );
+
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.sourceEditPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    old: "# Intro",
+    new: "# Typed"
+  });
+  expect(firstEditor.readOnly).toBe(true);
+  fixture.resolveSourceEditPost(okJson({ key: "renamed", body: "# Server canonical" }));
+  await vi.waitFor(() => expect(firstEditor.isConnected).toBe(false));
+  expect(fixture.sources.sources).toEqual({
+    middle: "# Middle",
+    end: "# End",
+    renamed: "# Server canonical"
+  });
+  expect(host.hidden).toBe(false);
+  expect(host.dataset.slideKey).toBe("intro");
+
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  expect(note.value).toBe("Keep this note.");
+  note.dispatchEvent(new FocusEvent("blur"));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(fixture.notes.notes).toEqual({ intro: "Keep this note." });
+  expect(fixture.notesPosts()).toHaveLength(0);
+
+  note.value = "note still uses manifest identity";
+  note.dispatchEvent(new FocusEvent("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    text: "note still uses manifest identity"
+  });
+  fixture.resolveNotesPost({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ error: "note save refused" })
+  } as Response);
+  await vi.waitFor(() => expect(status.textContent).toBe("note save refused"));
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const unchangedEditor = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  expect(unchangedEditor.value).toBe("# Server canonical");
+  expect(unchangedEditor.closest<HTMLElement>('[data-slide-key="intro"]')).not.toBeNull();
+  unchangedEditor.dispatchEvent(new FocusEvent("blur"));
+  await vi.waitFor(() => expect(unchangedEditor.isConnected).toBe(false));
+  expect(fixture.sourceEditPosts()).toHaveLength(1);
+  expect(host.hidden).toBe(false);
+  expect(status.textContent).toBe("note save refused");
+
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  const secondEditor = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="source"]'
+  )!;
+  expect(secondEditor.value).toBe("# Server canonical");
+  secondEditor.value = "# Fix the build";
+  secondEditor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true
+    })
+  );
+
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(2));
+  expect(JSON.parse(fixture.sourceEditPosts()[1][1].body as string)).toEqual({
+    key: "renamed",
+    old: "# Server canonical",
+    new: "# Fix the build"
+  });
+  const sourceError = "slide source refused\n  = help: close the unclosed code fence";
+  fixture.resolveSourceEditPost({
+    ok: false,
+    status: 422,
+    text: async () => JSON.stringify({ error: sourceError })
+  } as Response);
+  await vi.waitFor(() => expect(secondEditor.readOnly).toBe(false));
+  expect(secondEditor.isConnected).toBe(true);
+  expect(status.textContent).toBe(`note save refused\n${sourceError}`);
+  expect(status.style.whiteSpace).toBe("pre-wrap");
+
+  secondEditor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true
+    })
+  );
+  expect(secondEditor.isConnected).toBe(false);
+  expect(host.hidden).toBe(false);
+  expect(status.textContent).toBe("note save refused");
 });
 
 it("inline_edit_click_uses_composed_path_inside_current_slide_shadow_root", async () => {

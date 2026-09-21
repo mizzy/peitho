@@ -306,6 +306,127 @@ async function readErrorResponse(response, fallbackLabel) {
   return fallbackLabel === void 0 ? body : `${fallbackLabel} failed (HTTP ${response.status})`;
 }
 
+// src/previewSourceEdit.ts
+var INVALID_RESPONSE_MESSAGE = "slide source save returned an invalid response";
+function openPreviewSourceEdit(options) {
+  const textarea = options.document.createElement("textarea");
+  textarea.dataset.peithoPreview = "source";
+  textarea.setAttribute("aria-label", "Slide Markdown source");
+  textarea.spellcheck = false;
+  textarea.wrap = "off";
+  textarea.value = options.body;
+  textarea.style.position = "absolute";
+  textarea.style.boxSizing = "border-box";
+  textarea.style.margin = "0";
+  textarea.style.resize = "none";
+  textarea.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  textarea.style.tabSize = "2";
+  textarea.style.whiteSpace = "pre";
+  textarea.style.overflow = "auto";
+  let closed = false;
+  let commitPromise = null;
+  const onKeyDown = (event) => {
+    if (isComposingKey(event)) return;
+    if (event.key === "Enter") {
+      event.stopPropagation();
+      if (!event.metaKey && !event.ctrlKey) return;
+      event.preventDefault();
+      if (commitPromise === null) options.onCommitRequest();
+      return;
+    }
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (commitPromise === null) options.onCancelRequest();
+  };
+  const onBlur = () => {
+    if (commitPromise === null) options.onCommitRequest();
+  };
+  textarea.addEventListener("keydown", onKeyDown);
+  textarea.addEventListener("blur", onBlur);
+  options.tile.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(0, 0);
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    textarea.removeEventListener("keydown", onKeyDown);
+    textarea.removeEventListener("blur", onBlur);
+    textarea.remove();
+  };
+  const fail = (message) => {
+    textarea.readOnly = false;
+    if (!closed) textarea.focus({ preventScroll: true });
+    return { status: "failed", message };
+  };
+  const post = async (newBody) => {
+    let response;
+    try {
+      response = await options.fetcher("/slide-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: options.key, old: options.body, new: newBody }),
+        keepalive: false
+      });
+    } catch (error) {
+      return fail(`failed to save slide source: ${String(error)}`);
+    }
+    if (!response.ok) {
+      try {
+        return fail(await readErrorResponse(response, "slide source save"));
+      } catch (error) {
+        return fail(`failed to save slide source: ${String(error)}`);
+      }
+    }
+    let value;
+    try {
+      value = await response.json();
+    } catch {
+      return fail(INVALID_RESPONSE_MESSAGE);
+    }
+    if (typeof value !== "object" || value === null || typeof value.key !== "string" || typeof value.body !== "string") {
+      return fail(INVALID_RESPONSE_MESSAGE);
+    }
+    const saved = value;
+    close();
+    return {
+      status: "saved",
+      previousKey: options.key,
+      key: saved.key,
+      body: saved.body
+    };
+  };
+  const commit = () => {
+    if (closed) return Promise.resolve({ status: "closed" });
+    if (commitPromise !== null) return commitPromise;
+    const newBody = textarea.value;
+    if (newBody === options.body) {
+      close();
+      return Promise.resolve({ status: "unchanged", key: options.key, body: options.body });
+    }
+    textarea.readOnly = true;
+    const request = post(newBody);
+    commitPromise = request;
+    const clearCommit = () => {
+      if (commitPromise === request) commitPromise = null;
+    };
+    void request.then(clearCommit, clearCommit);
+    return request;
+  };
+  return {
+    textarea,
+    commit,
+    cancel: close,
+    setFrame(frame) {
+      textarea.style.left = `${frame.left}px`;
+      textarea.style.top = `${frame.top}px`;
+      textarea.style.width = `${frame.width}px`;
+      textarea.style.height = `${frame.height}px`;
+    },
+    destroy: close
+  };
+}
+
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
   let index = from + direction;
@@ -842,7 +963,7 @@ var PreviewShellController = class {
   panelStatuses = /* @__PURE__ */ new Map();
   notesPositionText;
   buildErrorBanner;
-  activeSlideEdit = null;
+  activeEdit = null;
   notesTextareaKey = null;
   swallowEnterRepeat = false;
   flushChain = Promise.resolve(true);
@@ -874,6 +995,7 @@ var PreviewShellController = class {
     else if (action === "activate") this.activateSelection();
     else this.log.error("Invalid peitho:overviewrequest event");
   };
+  onSourceEditRequest = () => this.tryStartSourceEdit();
   onResize = () => this.applyLayout();
   onNotesKeyDown = (event) => {
     if (event.key === "Enter" && event.repeat && this.swallowEnterRepeat) {
@@ -892,8 +1014,9 @@ var PreviewShellController = class {
   };
   onPageHide = () => {
     this.saveState();
-    const edit = this.activeSlideEdit;
-    if (edit !== null) {
+    const active = this.activeEdit;
+    if (active?.kind === "inline") {
+      const edit = active.edit;
       const text2 = this.slideEditText(edit);
       if (text2 !== edit.old) {
         void this.sendSlideEdit(edit, text2, true).catch(() => void 0);
@@ -937,6 +1060,7 @@ var PreviewShellController = class {
     this.notesTextarea.addEventListener("blur", this.onNotesBlur);
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
+    this.bus.addEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
     this.win.addEventListener("resize", this.onResize);
     this.win.addEventListener("pagehide", this.onPageHide);
   }
@@ -1015,7 +1139,7 @@ var PreviewShellController = class {
   requestGenerationReload(generation, reload) {
     if (generation === this.generation) return;
     this.saveState();
-    if (this.activeSlideEdit !== null || this.pendingTransitionSettlements > 0) {
+    if (this.isEditOpen() || this.pendingTransitionSettlements > 0) {
       this.deferredReload = reload;
       return;
     }
@@ -1089,14 +1213,21 @@ var PreviewShellController = class {
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
+    this.bus.removeEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
     this.win.removeEventListener("resize", this.onResize);
     this.win.removeEventListener("pagehide", this.onPageHide);
     while (this.tileListenerCleanups.length > 0) this.tileListenerCleanups.pop()?.();
-    const edit = this.activeSlideEdit;
-    if (edit !== null) {
-      edit.removeListeners();
-      this.activeSlideEdit = null;
-      this.restoreSlideEdit(edit);
+    const active = this.activeEdit;
+    if (active !== null) {
+      this.activeEdit = null;
+      if (active.kind === "inline") {
+        active.edit.removeListeners();
+        this.restoreSlideEdit(active.edit);
+      } else {
+        active.edit.destroy();
+        this.setSlideSourceStatus("");
+        this.applyLayout();
+      }
     }
     this.deferredReload = null;
     this.fontScopeCleanup?.();
@@ -1158,10 +1289,70 @@ var PreviewShellController = class {
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
-    return { meta: slide, tile, host, thumb, thumbHost, tileNumber };
+    return { meta: slide, sourceKey: slide.key, tile, host, thumb, thumbHost, tileNumber };
+  }
+  tryStartSourceEdit() {
+    if (this.mode === "grid" || this.isEditOpen() || this.pendingTransitionSettlements > 0) {
+      return;
+    }
+    const view = this.slides[this.currentIndex];
+    if (view === void 0) return;
+    const unavailable = this.sources.unavailable[view.sourceKey];
+    if (unavailable !== void 0) {
+      this.setSlideSourceStatus(unavailable);
+      return;
+    }
+    const body = this.sources.sources[view.sourceKey];
+    if (body === void 0) {
+      this.setSlideSourceStatus("this slide cannot be edited from preview");
+      return;
+    }
+    let edit;
+    edit = openPreviewSourceEdit({
+      document: this.doc,
+      fetcher: this.fetcher,
+      tile: view.tile,
+      key: view.sourceKey,
+      body,
+      onCommitRequest: () => this.commitSourceEdit(edit),
+      onCancelRequest: () => this.cancelSourceEdit(edit)
+    });
+    this.activeEdit = { kind: "source", edit, view };
+    this.setSlideSourceStatus("");
+    this.applyLayout();
+  }
+  commitSourceEdit(edit) {
+    void edit.commit().then((result) => this.finishSourceEditCommit(edit, result));
+  }
+  finishSourceEditCommit(edit, result) {
+    if (result.status === "closed") return;
+    const active = this.activeEdit;
+    if (active?.kind !== "source" || active.edit !== edit) return;
+    if (result.status === "failed") {
+      this.setSlideSourceStatus(result.message);
+      return;
+    }
+    if (result.status === "saved") {
+      delete this.sources.sources[result.previousKey];
+      this.sources.sources[result.key] = result.body;
+      active.view.sourceKey = result.key;
+    }
+    this.activeEdit = null;
+    this.setSlideSourceStatus("");
+    this.applyLayout();
+    if (this.pendingTransitionSettlements === 0) this.releaseDeferredReload();
+  }
+  cancelSourceEdit(edit) {
+    const active = this.activeEdit;
+    if (active?.kind !== "source" || active.edit !== edit) return;
+    edit.cancel();
+    this.activeEdit = null;
+    this.setSlideSourceStatus("");
+    this.applyLayout();
+    this.releaseDeferredReload();
   }
   tryStartSlideEdit(slide, host, event) {
-    if (this.activeSlideEdit !== null || this.pendingTransitionSettlements > 0) return true;
+    if (this.isEditOpen() || this.pendingTransitionSettlements > 0) return true;
     if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
     const shadow = host.shadowRoot;
     if (shadow === null) return false;
@@ -1231,14 +1422,14 @@ var PreviewShellController = class {
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
-    this.activeSlideEdit = edit;
+    this.activeEdit = { kind: "inline", edit };
     this.setSlideEditStatus("");
     editor.focus({ preventScroll: true });
     placeCaretAtEnd(this.win, editor);
     return true;
   }
   handleSlideEditKeyDown(edit, event) {
-    if (this.activeSlideEdit !== edit) return;
+    if (this.activeEdit?.kind !== "inline" || this.activeEdit.edit !== edit) return;
     if (edit.commitPromise !== null) {
       if (event.key === "Escape" || event.key === "Enter") {
         event.preventDefault();
@@ -1267,23 +1458,25 @@ var PreviewShellController = class {
     this.releaseDeferredReload();
   }
   closeSlideEdit(edit) {
-    if (this.activeSlideEdit !== edit) return false;
+    if (this.activeEdit?.kind !== "inline" || this.activeEdit.edit !== edit) return false;
     edit.removeListeners();
-    this.activeSlideEdit = null;
+    this.activeEdit = null;
     this.restoreSlideEdit(edit);
     this.setSlideEditStatus("");
     return true;
   }
   commitSlideEditAndRelease() {
-    void this.commitSlideEdit().then((committed) => {
+    void this.settleActiveEdit().then((committed) => {
       if (committed && this.pendingTransitionSettlements === 0) {
         this.releaseDeferredReload();
       }
     });
   }
-  commitSlideEdit() {
-    const edit = this.activeSlideEdit;
-    if (edit === null) return Promise.resolve(true);
+  settleActiveEdit() {
+    const active = this.activeEdit;
+    if (active === null) return Promise.resolve(true);
+    if (active.kind === "source") return Promise.resolve(false);
+    const edit = active.edit;
     if (edit.commitPromise !== null) return edit.commitPromise;
     const newText = this.slideEditText(edit);
     if (newText === edit.old) {
@@ -1301,16 +1494,18 @@ var PreviewShellController = class {
     try {
       const response = await this.sendSlideEdit(edit, newText, false);
       if (response.ok) {
-        if (this.activeSlideEdit === edit) this.finishSlideEdit(edit, newText);
+        if (this.activeEdit?.kind === "inline" && this.activeEdit.edit === edit) {
+          this.finishSlideEdit(edit, newText);
+        }
         return true;
       }
       const error = await readErrorResponse(response, "slide edit");
-      if (this.activeSlideEdit === edit) {
+      if (this.activeEdit?.kind === "inline" && this.activeEdit.edit === edit) {
         this.setSlideEditStatus(error);
         this.unlockSlideEdit(edit);
       }
     } catch (error) {
-      if (this.activeSlideEdit === edit) {
+      if (this.activeEdit?.kind === "inline" && this.activeEdit.edit === edit) {
         this.setSlideEditStatus(`failed to save slide edit: ${String(error)}`);
         this.unlockSlideEdit(edit);
       }
@@ -1319,7 +1514,7 @@ var PreviewShellController = class {
   }
   finishSlideEdit(edit, newText) {
     edit.removeListeners();
-    this.activeSlideEdit = null;
+    this.activeEdit = null;
     edit.editor.textContent = newText;
     this.restoreSlideEditorAttributes(edit);
     edit.target.removeAttribute("data-peitho-src");
@@ -1516,6 +1711,9 @@ var PreviewShellController = class {
   setSlideEditStatus(message) {
     this.setPanelStatus("slide-edit", message);
   }
+  setSlideSourceStatus(message) {
+    this.setPanelStatus("slide-source", message);
+  }
   /**
    * Save channels clear only their own status so one successful write cannot hide an
    * unrelated failure. Any remaining failure keeps the entire panel visibly alerting.
@@ -1523,7 +1721,7 @@ var PreviewShellController = class {
   setPanelStatus(source, message) {
     if (message === "") this.panelStatuses.delete(source);
     else this.panelStatuses.set(source, message);
-    const combined = ["notes", "slide-edit"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
+    const combined = ["notes", "slide-edit", "slide-source"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
     this.notesStatus.textContent = combined;
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
@@ -1555,6 +1753,9 @@ var PreviewShellController = class {
   isLoaded() {
     return this.manifest !== null;
   }
+  isEditOpen() {
+    return this.activeEdit !== null;
+  }
   toggleOverview() {
     if (this.mode === "grid") this.exitGrid();
     else this.enterGrid();
@@ -1585,9 +1786,11 @@ var PreviewShellController = class {
     const needsFlush = mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey;
     const commit = () => {
       const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
+      const previousMode = this.mode;
       this.currentIndex = index;
       this.selectedIndex = index;
       this.mode = mode;
+      if (previousIndex !== index || previousMode !== mode) this.setSlideSourceStatus("");
       if (mode === "grid" && this.doc.activeElement === this.notesTextarea) {
         this.notesTextarea.blur();
       }
@@ -1595,7 +1798,7 @@ var PreviewShellController = class {
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
       this.saveState();
     };
-    if (this.activeSlideEdit === null && (!needsFlush || this.notesSettled())) {
+    if (!this.isEditOpen() && (!needsFlush || this.notesSettled())) {
       commit();
       this.releaseDeferredReload();
       return;
@@ -1606,7 +1809,7 @@ var PreviewShellController = class {
         const settled = await this.settleForTransition(sequence);
         if (sequence !== this.transitionSequence) return;
         if (!settled) {
-          if (this.activeSlideEdit === null) this.releaseDeferredReload();
+          if (!this.isEditOpen()) this.releaseDeferredReload();
           return;
         }
         commit();
@@ -1617,7 +1820,7 @@ var PreviewShellController = class {
     })();
   }
   async settleForTransition(sequence) {
-    if (!await this.commitSlideEdit()) return false;
+    if (!await this.settleActiveEdit()) return false;
     if (sequence !== this.transitionSequence) return false;
     while (!this.notesSettled()) {
       if (!await this.flushNotes()) return false;
@@ -1730,6 +1933,7 @@ var PreviewShellController = class {
     this.root.style.removeProperty("scroll-padding-bottom");
     this.slides.forEach((slide, index) => {
       const active = index === this.currentIndex;
+      const sourceEdit = active && this.activeEdit?.kind === "source" && this.activeEdit.view === slide ? this.activeEdit.edit : null;
       slide.tile.hidden = !active;
       slide.tile.classList.toggle("is-selected", active);
       slide.tile.style.position = "absolute";
@@ -1745,9 +1949,18 @@ var PreviewShellController = class {
       slide.tile.style.outlineColor = "";
       slide.tile.style.outlineOffset = "";
       slide.tile.style.background = "transparent";
-      slide.host.hidden = !active;
+      slide.host.hidden = !active || sourceEdit !== null;
       slide.tileNumber.hidden = true;
-      this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
+      if (sourceEdit === null) {
+        this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
+      } else {
+        sourceEdit.setFrame({
+          left: fit.left,
+          top: fit.top,
+          width: this.dimensions.width * fit.scale,
+          height: this.dimensions.height * fit.scale
+        });
+      }
       slide.thumb.classList.toggle("is-selected", active);
       slide.thumb.setAttribute("aria-current", active ? "true" : "false");
       slide.thumb.style.position = "relative";

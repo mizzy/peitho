@@ -1220,6 +1220,9 @@ ordinary active slides continue through `applyHostFrame` unchanged. Run a
 layout pass after the source editor closes so the current host reappears while
 non-current hosts stay hidden; the controller owns this visibility and the
 source-editor module never reads or writes `host.hidden`.
+Until Task 12 replaces this interim policy, `settleActiveEdit` commits inline
+edits but returns `false` for a source edit, so every transition leaves its
+textarea, draft, and deferred reload untouched.
 
 **Verification.**
 
@@ -1274,8 +1277,9 @@ for the two stale-map causes below. Together they cover these sequences:
    without losing any editor text.
 8. Source drafts never appear in the serialized `PreviewState`.
 
-**Implementation (Green).** Replace the inline-only settlement call with one
-`commitActiveEdit(): Promise<boolean>` that switches on `ActiveEdit.kind`.
+**Implementation (Green).** Replace the interim `settleActiveEdit` function
+with one `commitActiveEdit(): Promise<boolean>` that switches on
+`ActiveEdit.kind`.
 Source success/unchanged closes the union, clears only source status, and may
 release reload; the key/blur wrapper releases only when
 `pendingTransitionSettlements === 0`, while a transition releases after its
@@ -1294,6 +1298,8 @@ cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_f
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_reload_releases_once'
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_derived_key_can_recover_after_build_failure'
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'stale_source_map_after_inline_or_external_failed_rebuild_preserves_draft_on_409'
+! rg -n 'settleActiveEdit' packages/peitho-present/src/preview.ts
+test "$(rg -n 'private commitActiveEdit\(' packages/peitho-present/src/preview.ts | wc -l | tr -d ' ')" -eq 1
 cd packages/peitho-present && npm run typecheck
 ```
 
