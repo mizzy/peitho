@@ -12,6 +12,14 @@ use crate::{
 };
 use std::ops::Range;
 
+/// Returns whether a complete or partial Markdown line contains only ASCII
+/// blank-line bytes.
+pub(crate) fn is_ascii_blank_line(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
 struct LineContext {
     start: usize,
     content_end: usize,
@@ -358,7 +366,7 @@ fn line_context(source: &str, span: SourceSpan) -> LineContext {
         .all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
         && source
             .get(content_end..line_content_end)
-            .is_some_and(|suffix| suffix.trim().is_empty());
+            .is_some_and(is_ascii_blank_line);
 
     LineContext {
         start,
@@ -410,7 +418,7 @@ fn line_has_nonblank_neighbors(source: &str, line: &LineContext) -> bool {
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |newline| newline + 1);
-    if source[previous_start..previous_end].trim().is_empty() || line.end >= source.len() {
+    if is_ascii_blank_line(&source[previous_start..previous_end]) || line.end >= source.len() {
         return false;
     }
 
@@ -420,7 +428,7 @@ fn line_has_nonblank_neighbors(source: &str, line: &LineContext) -> bool {
         .map_or(source.len(), |relative_newline| {
             line_terminator(source, line.end + relative_newline).start
         });
-    !source[line.end..next_end].trim().is_empty()
+    !is_ascii_blank_line(&source[line.end..next_end])
 }
 
 fn append_comment(source: &str, slide: SourceSpan, comment: &str, line_ending: &str) -> String {
@@ -439,7 +447,7 @@ fn append_comment(source: &str, slide: SourceSpan, comment: &str, line_ending: &
 
 pub(crate) fn last_nonblank_line_end(source: &str, slide: SourceSpan) -> Option<usize> {
     let body = &source[slide.start..slide.end];
-    let kept = body.trim_end().len();
+    let kept = body.trim_end_matches([' ', '\t', '\r', '\n']).len();
     (kept > 0).then(|| {
         slide.start
             + body[kept..]
@@ -615,6 +623,38 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_note_removal_treats_unicode_whitespace_lines_as_nonblank_neighbors() {
+        let highlighter = Highlighter::defaults();
+        let cases = [
+            (
+                "ideographic-space-before",
+                "\u{3000}\n<!-- note -->\nafter\n",
+                "\u{3000}\n\nafter\n",
+            ),
+            (
+                "nbsp-after",
+                "before\n<!-- note -->\n\u{a0}\n",
+                "before\n\n\u{a0}\n",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let deck = parse(source, &highlighter);
+            let slide = &deck.parsed_slides()[0];
+            let rewritten = rewrite_note(
+                source,
+                slide.source_span,
+                &slide.note_spans,
+                "",
+                &highlighter,
+            )
+            .unwrap();
+
+            assert_eq!(rewritten, expected, "{name}");
+        }
+    }
+
+    #[test]
     fn rewrite_note_relocates_container_and_inline_comments_to_slide_end() {
         let highlighter = Highlighter::defaults();
         let cases = [
@@ -711,6 +751,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(rewritten, "# Title\n\n<!-- new note -->\n");
+    }
+
+    #[test]
+    fn rewrite_note_append_preserves_unicode_whitespace_trailing_paragraphs() {
+        let highlighter = Highlighter::defaults();
+
+        for (name, whitespace) in [("nbsp", "\u{a0}"), ("ideographic-space", "\u{3000}")] {
+            let source = format!("# I1\n\ntext\n\n{whitespace}\n");
+            let expected = format!("# I1\n\ntext\n\n{whitespace}\n\n<!-- new -->\n");
+            let deck = parse(&source, &highlighter);
+            let slide = &deck.parsed_slides()[0];
+            let rewritten = rewrite_note(
+                &source,
+                slide.source_span,
+                &slide.note_spans,
+                "new",
+                &highlighter,
+            )
+            .unwrap();
+
+            assert_eq!(rewritten, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn rewrite_note_in_place_preserves_unicode_whitespace_trailing_paragraphs() {
+        let highlighter = Highlighter::defaults();
+
+        for (name, whitespace) in [("nbsp", "\u{a0}"), ("ideographic-space", "\u{3000}")] {
+            let source = format!("# I1\n\ntext\n\n{whitespace}\n\n<!-- old -->\n");
+            let expected = format!("# I1\n\ntext\n\n{whitespace}\n\n<!-- new -->\n");
+            let deck = parse(&source, &highlighter);
+            let slide = &deck.parsed_slides()[0];
+            assert_eq!(slide.note_spans.len(), 1, "{name}: note span");
+
+            let rewritten = rewrite_note(
+                &source,
+                slide.source_span,
+                &slide.note_spans,
+                "new",
+                &highlighter,
+            )
+            .unwrap();
+
+            assert_eq!(rewritten, expected, "{name}");
+        }
     }
 
     #[test]

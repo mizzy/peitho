@@ -6,8 +6,8 @@ use crate::{
     highlight::Highlighter,
     json::pretty_json,
     notes_edit::{
-        canonical_comment, last_nonblank_line_end, normalized_note_text, remove_comment_spans,
-        restore_bom, source_line_ending, spans_match_source, strip_bom,
+        canonical_comment, is_ascii_blank_line, last_nonblank_line_end, normalized_note_text,
+        remove_comment_spans, restore_bom, source_line_ending, spans_match_source, strip_bom,
     },
     parser::{parse_frontmatter, parse_markdown},
     phase::{Deck, Parsed, ParsedSlide},
@@ -278,7 +278,7 @@ fn edge_blank_runs(source: &str, slide: SourceSpan) -> Result<(Range<usize>, Ran
     let body = &source[slide.start..slide.end];
     let leading_bytes = body
         .split_inclusive('\n')
-        .take_while(|line| line.trim().is_empty())
+        .take_while(|line| is_ascii_blank_line(line))
         .map(str::len)
         .sum::<usize>();
     let Some(trailing_start) = last_nonblank_line_end(source, slide) else {
@@ -331,7 +331,7 @@ fn preserved_settings_body_spacing<'a>(
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let indentation = &source[settings_line_start..settings.start];
-    if !is_ascii_blank(indentation)
+    if !is_ascii_blank_line(indentation)
         || slide
             .note_spans
             .iter()
@@ -357,7 +357,7 @@ fn first_body_line_start(
             .find('\n')
             .map_or(slide.source_span.end, |newline| line_start + newline + 1);
         let line = line_start..line_end;
-        if is_ascii_blank(&source[line.clone()]) {
+        if is_ascii_blank_line(&source[line.clone()]) {
             line_start = line_end;
             continue;
         }
@@ -387,12 +387,6 @@ fn line_has_body_content(source: &str, line: Range<usize>, notes: &[SourceSpan])
         body.push_str(&source[cursor..line.end]);
     }
     !normalize_body(&body).is_empty()
-}
-
-fn is_ascii_blank(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
 }
 
 fn refusal(message: impl Into<String>) -> BuildError {
@@ -445,12 +439,12 @@ fn refuse_bare_cr(source: &str) -> Result<()> {
 fn normalize_body(body: &str) -> String {
     let normalized = normalized_note_text(body);
     let lines = normalized.split('\n').collect::<Vec<_>>();
-    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
+    let Some(start) = lines.iter().position(|line| !is_ascii_blank_line(line)) else {
         return String::new();
     };
     let end = lines
         .iter()
-        .rposition(|line| !line.trim().is_empty())
+        .rposition(|line| !is_ascii_blank_line(line))
         .unwrap();
     lines[start..=end].join("\n")
 }
@@ -533,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_slide_body_canonicalizes_non_ascii_whitespace_settings_gaps() {
+    fn rewrite_slide_body_treats_non_ascii_whitespace_after_settings_as_body() {
         let cases = [
             ("ideographic-space", "\u{3000}"),
             ("non-breaking-space", "\u{00a0}"),
@@ -550,11 +544,16 @@ mod tests {
             let source = format!("<!-- {{\"key\":\"fixed\"}} -->\n{whitespace}\n# Title\n\nBody\n");
             let deck = parse_source(&source, &highlighter).unwrap();
             let target = &deck.parsed_slides()[0];
+            let body = format!("{whitespace}\n# Title\n\nBody");
+
+            assert_eq!(slide_body(&source, target).unwrap(), body, "{name}: body");
+            let rewritten = rewrite_slide_body(&source, target, &body, &highlighter).unwrap();
+            assert_eq!(rewritten.source, source, "{name}: identity source");
 
             let rewritten = rewrite_slide_body(&source, target, "# New", &highlighter).unwrap();
             assert_eq!(
-                rewritten.source, "<!-- {\"key\":\"fixed\"} -->\n\n# New\n",
-                "{name}: canonical separator"
+                rewritten.source, "<!-- {\"key\":\"fixed\"} -->\n# New\n",
+                "{name}: replacement source"
             );
 
             let error = rewrite_slide_body(&source, target, "---", &highlighter).unwrap_err();
@@ -1274,6 +1273,16 @@ mod tests {
                 "# First\n\n---\n\n<!-- {\"key\":\"last\"} -->\n# Last",
                 true,
             ),
+            (
+                "identity-ideographic-space-at-slide-edges",
+                "<!-- {\"key\":\"ideographic\"} -->\n\u{3000}\n# Ideographic\n\u{3000}\n",
+                true,
+            ),
+            (
+                "identity-nbsp-at-slide-edges",
+                "<!-- {\"key\":\"nbsp\"} -->\n\u{a0}\n# NBSP\n\u{a0}\n",
+                true,
+            ),
         ];
         let highlighter = Highlighter::defaults();
 
@@ -1465,6 +1474,33 @@ mod tests {
     }
 
     #[test]
+    fn slide_body_preserves_unicode_whitespace_edge_lines() {
+        let source = "<!-- {\"key\":\"fixed\"} -->\n\u{3000}\n# Title\n\u{3000}\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let target = &deck.parsed_slides()[0];
+
+        assert_eq!(
+            slide_body(source, target).unwrap(),
+            "\u{3000}\n# Title\n\u{3000}"
+        );
+    }
+
+    #[test]
+    fn rewrite_slide_body_identity_preserves_unicode_whitespace_edges_and_settings_gap() {
+        let source = "<!-- {\"key\":\"fixed\"} -->\n\u{3000}\n# Title\n\u{3000}\n";
+        let body = "\u{3000}\n# Title\n\u{3000}";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+
+        let rewritten =
+            rewrite_slide_body(source, &deck.parsed_slides()[0], body, &highlighter).unwrap();
+
+        assert_eq!(rewritten.source.as_bytes(), source.as_bytes());
+        assert_eq!(rewritten.body.as_bytes(), body.as_bytes());
+    }
+
+    #[test]
     fn rewrite_slide_body_normalizes_submitted_bare_cr_to_lf() {
         let source = "# T\n";
         let highlighter = Highlighter::defaults();
@@ -1509,7 +1545,10 @@ mod tests {
 
     #[test]
     fn edge_blank_runs_refuses_a_slide_without_a_nonblank_line() {
-        let source = "\u{3000}\n";
+        // Parser-produced slides always contain a Markdown-nonblank body,
+        // settings comment, or note. Keep this direct helper test for the
+        // defensive refusal of a fabricated all-blank span.
+        let source = "  \n\t\n";
         let error = edge_blank_runs(
             source,
             SourceSpan {
