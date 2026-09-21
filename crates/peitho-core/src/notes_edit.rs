@@ -4,7 +4,10 @@ use crate::{
     domain::SourceSpan,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
-    parser::{is_page_settings_body, line_for_offset, parse_frontmatter, parse_markdown},
+    parser::{
+        is_page_settings_body, line_for_offset, page_settings_comment_body, parse_frontmatter,
+        parse_markdown,
+    },
 };
 use std::ops::Range;
 
@@ -33,7 +36,7 @@ pub fn rewrite_note(
     highlighter: &Highlighter,
 ) -> Result<String> {
     let (source, had_bom) = strip_bom(source);
-    if !spans_match_source(source, slide, notes) {
+    if !spans_match_source(source, slide, None, notes) {
         return Err(BuildError::new(
             ErrorKind::Parse,
             None,
@@ -83,7 +86,39 @@ pub fn rewrite_note(
     Ok(restore_bom(candidate, had_bom))
 }
 
-fn spans_match_source(source: &str, slide: SourceSpan, notes: &[SourceSpan]) -> bool {
+pub(crate) fn spans_match_source(
+    source: &str,
+    slide: SourceSpan,
+    settings: Option<SourceSpan>,
+    notes: &[SourceSpan],
+) -> bool {
+    fn comment_span(source: &str, slide: SourceSpan, span: SourceSpan) -> Option<&str> {
+        if slide.start > span.start
+            || span.start >= span.end
+            || span.end > slide.end
+            || !source.is_char_boundary(span.start)
+            || !source.is_char_boundary(span.end)
+        {
+            return None;
+        }
+
+        let raw = &source[span.start..span.end];
+        let body = raw.trim_end();
+        if !raw.starts_with("<!--") || !body.ends_with("-->") || body.len() < 7 {
+            return None;
+        }
+        let inner = &body[4..body.len() - 3];
+        if inner
+            .find("-->")
+            .is_some_and(|close| inner[close..].contains('\n'))
+        {
+            return None;
+        }
+
+        let line = line_context(source, span);
+        (slide.start <= line.start && line.end <= slide.end).then_some(raw)
+    }
+
     if slide.end > source.len()
         || slide.start > slide.end
         || !source.is_char_boundary(slide.start)
@@ -92,34 +127,25 @@ fn spans_match_source(source: &str, slide: SourceSpan, notes: &[SourceSpan]) -> 
         return false;
     }
 
-    let bounds_match = notes.iter().all(|span| {
-        slide.start <= span.start
-            && span.start < span.end
-            && span.end <= slide.end
-            && source.is_char_boundary(span.start)
-            && source.is_char_boundary(span.end)
-    });
-    if !bounds_match || !notes.windows(2).all(|spans| spans[0].end <= spans[1].start) {
+    if !notes.windows(2).all(|spans| spans[0].end <= spans[1].start)
+        || settings.is_some_and(|settings| {
+            notes
+                .iter()
+                .any(|note| settings.start < note.end && note.start < settings.end)
+        })
+    {
         return false;
     }
 
-    notes.iter().all(|span| {
-        let raw = &source[span.start..span.end];
-        let body = raw.trim_end();
-        if !raw.starts_with("<!--") || !body.ends_with("-->") || body.len() < 7 {
-            return false;
-        }
-        let inner = &body[4..body.len() - 3];
-        if inner
-            .find("-->")
-            .is_some_and(|close| inner[close..].contains('\n'))
-        {
-            return false;
-        }
-
-        let line = line_context(source, *span);
-        slide.start <= line.start && line.end <= slide.end
-    })
+    let notes_match = notes.iter().all(|span| {
+        comment_span(source, slide, *span)
+            .is_some_and(|raw| page_settings_comment_body(raw).is_none())
+    });
+    let settings_match = settings.is_none_or(|span| {
+        comment_span(source, slide, span)
+            .is_some_and(|raw| page_settings_comment_body(raw).is_some())
+    });
+    notes_match && settings_match
 }
 
 pub(crate) fn strip_bom(source: &str) -> (&str, bool) {
@@ -136,6 +162,21 @@ pub(crate) fn restore_bom(source: String, had_bom: bool) -> String {
     } else {
         source
     }
+}
+
+/// Span order does not matter; spans must be disjoint.
+pub(crate) fn remove_comment_spans(source: &str, spans: &[SourceSpan]) -> (String, usize) {
+    let mut spans = spans.to_vec();
+    spans.sort_by_key(|span| span.start);
+    let mut rewritten = source.to_owned();
+    let mut removed_bytes = 0;
+    for span in spans.iter().rev() {
+        let line = line_context(source, *span);
+        let (range, replacement) = removal_edit(&rewritten, *span, &line);
+        removed_bytes += range.end - range.start - replacement.len();
+        rewritten.replace_range(range, &replacement);
+    }
+    (rewritten, removed_bytes)
 }
 
 fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str) -> String {
@@ -157,28 +198,18 @@ fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str
                 .unwrap_or_else(|| source_line_ending(source, slide));
             canonical_comment(text, line_ending)
         });
-    let mut rewritten = source.to_owned();
-    let mut removed_bytes = 0;
 
-    for (index, span) in notes.iter().enumerate().rev() {
-        let line = line_context(source, *span);
-        if index == 0 {
-            if let Some(replacement) = in_place_comment.as_deref() {
-                let mut replacement = replacement.to_owned();
-                if let Some(terminator) = &line.terminator {
-                    replacement.push_str(&source[terminator.clone()]);
-                }
-                rewritten.replace_range(span.start..line.end, &replacement);
-                continue;
-            }
+    if let Some(mut replacement) = in_place_comment {
+        let (mut rewritten, _) = remove_comment_spans(source, &notes[1..]);
+        if let Some(terminator) = &first_line.terminator {
+            replacement.push_str(&source[terminator.clone()]);
         }
-
-        let (range, replacement) = removal_edit(&rewritten, *span, &line);
-        removed_bytes += range.end - range.start - replacement.len();
-        rewritten.replace_range(range, &replacement);
+        rewritten.replace_range(notes[0].start..first_line.end, &replacement);
+        return rewritten;
     }
 
-    if in_place_comment.is_none() && !text.is_empty() {
+    let (rewritten, removed_bytes) = remove_comment_spans(source, notes);
+    if !text.is_empty() {
         let adjusted_slide = SourceSpan {
             start: slide.start,
             end: slide.end - removed_bytes,
@@ -191,7 +222,7 @@ fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str
     rewritten
 }
 
-fn source_line_ending(source: &str, slide: SourceSpan) -> &'static str {
+pub(crate) fn source_line_ending(source: &str, slide: SourceSpan) -> &'static str {
     if source[slide.start..slide.end].contains("\r\n") {
         "\r\n"
     } else {
@@ -226,7 +257,7 @@ pub(crate) fn normalized_note_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn canonical_comment(text: &str, line_ending: &str) -> String {
+pub(crate) fn canonical_comment(text: &str, line_ending: &str) -> String {
     let normalized = normalized_note_text(text);
     if normalized.contains('\n') {
         let body = normalized.replace('\n', line_ending);
@@ -531,6 +562,20 @@ mod tests {
                 "Text  more\n",
             )
         );
+    }
+
+    #[test]
+    fn remove_comment_spans_accepts_disjoint_spans_in_any_order() {
+        let source = "# T\n<!-- first -->\nBody\n<!-- second -->\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+        let mut spans = deck.parsed_slides()[0].note_spans.clone();
+        spans.reverse();
+
+        let (rewritten, removed_bytes) = remove_comment_spans(source, &spans);
+
+        assert_eq!(rewritten, "# T\n\nBody\n");
+        assert_eq!(removed_bytes, source.len() - rewritten.len());
     }
 
     #[test]
@@ -1098,6 +1143,19 @@ mod tests {
         );
 
         let source = "<!-- a -->\ncontent\n<!-- b -->";
+        assert_rejected(
+            source,
+            SourceSpan {
+                start: 0,
+                end: source.len(),
+            },
+            &[SourceSpan {
+                start: 0,
+                end: source.len(),
+            }],
+        );
+
+        let source = "<!-- {\"key\":\"a\"} -->\n";
         assert_rejected(
             source,
             SourceSpan {

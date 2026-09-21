@@ -3413,18 +3413,22 @@ pub(crate) fn is_page_settings_body(body: &str) -> bool {
     body.starts_with('{')
 }
 
-fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
+pub(crate) fn page_settings_comment_body(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
-        return Ok(None);
+        return None;
     }
-    let json = trimmed
+    let body = trimmed
         .trim_start_matches("<!--")
         .trim_end_matches("-->")
         .trim();
-    if !is_page_settings_body(json) {
+    is_page_settings_body(body).then_some(body)
+}
+
+fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
+    let Some(json) = page_settings_comment_body(raw) else {
         return Ok(None);
-    }
+    };
     if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| {
         value
             .as_object()

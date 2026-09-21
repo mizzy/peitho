@@ -54,9 +54,10 @@ watcher remains the only rebuild trigger. This plan has no design deviations.
   `crates/peitho-core/src/phase.rs:492-505`. `process_html_chunk` already receives
   the exact HTML `SourceSpan` at `parser.rs:3256-3273`, but its settings branch
   records only `page_settings_line` at `parser.rs:3291-3305`.
-- `notes_edit.rs` already owns `strip_bom`/`restore_bom` at lines 125-139,
-  `canonical_comment` at 229-237, `line_context` at 296-336, and
-  `removal_edit` at 350-363. Those implementations are the extraction point;
+- `notes_edit.rs` owns the shared `spans_match_source` and
+  `remove_comment_spans` seams, while `parser.rs` owns
+  `page_settings_comment_body`. Those implementations, together with the
+  existing BOM and canonical-comment helpers, are the extraction points;
   `slide_source.rs` must not reproduce them.
 - `slide_edit::compare_non_target_slide` is currently private at
   `slide_edit.rs:155-193`, and the derived-key exception is inline at
@@ -187,22 +188,37 @@ let cases = [
 
 Add a multiple-note case proving every recorded note span is removed and an
 interior whitespace-only line is otherwise retained.
+Add `slide_body_rejects_spans_that_do_not_match_the_source` with these refusal
+rows: an equal-length source puts non-comment bytes under the settings span; a
+source is shorter than the recorded slide span; the settings span points at a
+real note comment; the settings span equals a note span; and an equal-length
+foreign source puts following body and note bytes inside a three-line settings
+span. Every row must return a parse error with reload help rather than panic.
 
 **Implementation (Green).** Create the required public function:
 
 ```rust
-pub fn slide_body(source: &str, slide: &ParsedSlide) -> String;
+pub fn slide_body(source: &str, slide: &ParsedSlide) -> Result<String>;
 ```
 
-It must call `notes_edit::strip_bom`, merge `settings_span` with every
-`note_span`, sort those spans by `start`, apply `line_context` plus
-`removal_edit` in reverse source order, slice the adjusted `source_span`,
-normalize CRLF/bare CR to LF, and remove only leading/trailing blank lines.
-Make `LineContext`, `line_context`,
-`removal_edit`, `canonical_comment`, and `source_line_ending` `pub(crate)`;
-reuse the already-`pub(crate)` `strip_bom` and `restore_bom`. Export
-`slide_source` from `lib.rs`. Keep the LF/edge-blank operation in one private
-`normalize_body(&str) -> String` that calls the existing
+It must call `notes_edit::strip_bom`, then the shared
+`notes_edit::spans_match_source` before slicing. Generalize that existing
+`rewrite_note` guard to accept an optional settings span and verify it is an
+in-bounds, character-boundary-safe page-settings comment disjoint from the
+note spans. `rewrite_note` passes no settings span and additionally refuses a
+supplied note span that classifies as a settings comment, which the parser
+never produces.
+Refuse a mismatch with a parse `BuildError` and reload help. Then merge
+`settings_span` with every `note_span`, call the shared
+`notes_edit::remove_comment_spans`, slice the adjusted `source_span`, normalize
+CRLF/bare CR to LF, and remove only leading/trailing blank lines. The shared
+helper accepts disjoint spans in any order and sorts its local copy by `start`.
+Lift the reverse-order removal loop from `splice_note` into that `pub(crate)`
+helper and make both callers use it; keep `LineContext`, `line_context`, and
+`removal_edit` private. Make `canonical_comment` and `source_line_ending`
+`pub(crate)`; reuse the already-`pub(crate)` `strip_bom` and `restore_bom`.
+Export `slide_source` from `lib.rs`. Keep the LF/edge-blank operation in one
+private `normalize_body(&str) -> String` that calls the existing
 `normalized_note_text` and is used by both `slide_body` and Task 3's submitted-
 body round trip. Do not create another comment-removal or line-ending
 normalizer.
@@ -211,8 +227,9 @@ normalizer.
 
 ```sh
 cargo test -p peitho-core slide_source::tests::slide_body_removes_only_settings_and_note_comments
+cargo test -p peitho-core slide_source::tests::slide_body_rejects_spans_that_do_not_match_the_source
 test "$(rg -n '^pub fn slide_body' crates | wc -l | tr -d ' ')" -eq 1
-test "$(rg -n '^pub\(crate\) fn (line_context|removal_edit|canonical_comment|strip_bom|restore_bom)' crates/peitho-core/src | wc -l | tr -d ' ')" -eq 5
+test "$(rg -n '^pub\(crate\) fn (spans_match_source|remove_comment_spans|page_settings_comment_body|canonical_comment|strip_bom|restore_bom)' crates/peitho-core/src | wc -l | tr -d ' ')" -eq 6
 ```
 
 #### Task 3: Rewrite and canonicalize one slide body after a successful reparse
@@ -323,12 +340,12 @@ pub(crate) fn target_key_change_allowed(
 Make `rewrite_block` consume those same helpers. The slide-source validator
 checks slide count, `settings().sections()`, every non-target slide, target
 layout/skip/page-number/notes, the shared key rule, and
-`slide_body(candidate, target_after) == normalized_new_body`. It must not
+`slide_body(candidate, target_after)? == normalized_new_body`. It must not
 compare fragment shape, editable spans, or reveal step count.
 
 Parse the candidate exactly once. The accepted `target_after` from that parse
 supplies both `SlideBodyRewrite.key` and `SlideBodyRewrite.body`; the latter is
-the same `slide_body(candidate, target_after)` value used by the round-trip
+the same `slide_body(candidate, target_after)?` value used by the round-trip
 comparison. No caller reparses the accepted source or re-derives post-save
 identity.
 
@@ -373,14 +390,14 @@ slides are observable. The test calls only `rewrite_slide_body`; it must not
 invoke a pre-validator.
 Add `rewrite_slide_body_is_parse_identity_preserving_and_idempotent`, which for
 a corpus containing settings, scattered/inline notes, CRLF, BOM, explicit and
-derived keys asserts: rewriting with `slide_body(before)` preserves sections
-and every slide's index/source index/key/key-source kind/layout/skip/page-
-number/notes/step count/body, then rewriting the reparsed result again yields
-byte-identical `SlideBodyRewrite.source`, with the same returned key and body.
-The first result's key and body must equal the target identity observed in the
-single candidate parse before the test reparses that source for its second
-idempotence call. Source coordinates and diagnostic line numbers are not
-identity because canonical comment movement can shift them.
+derived keys asserts: rewriting with `slide_body(before).unwrap()` preserves
+sections and every slide's index/source index/key/key-source
+kind/layout/skip/page-number/notes/step count/body, then rewriting the reparsed
+result again yields byte-identical `SlideBodyRewrite.source`, with the same
+returned key and body. The first result's key and body must equal the target
+identity observed in the single candidate parse before the test reparses that
+source for its second idempotence call. Source coordinates and diagnostic line
+numbers are not identity because canonical comment movement can shift them.
 
 **Implementation (Green).** Put every acceptance decision in one
 `validate_reparsed_slide_body` path called after candidate parsing. Have it
@@ -497,9 +514,11 @@ server::DeckWriteError>)`, so inline and whole-slide services assert the same
 409 without two helper implementations.
 
 Its order is fixed: `load_and_expand_deck_source` -> resolve highlighter ->
-parse-only `parse_deck` -> key lookup ->
-`peitho_core::slide_source::slide_body(combined, slide) == old` ->
-`rewrite_slide_body` -> destructure its accepted `{ source, key, body }` ->
+parse-only `parse_deck` -> key lookup -> call
+`peitho_core::slide_source::slide_body(combined, slide)`, map its error to
+`server::DeckWriteError::Unprocessable` with `plain_diagnostic_text`, and
+compare the returned body with `old` -> `rewrite_slide_body` -> destructure its
+accepted `{ source, key, body }` ->
 `write_preview_origin_rewrite` with `source` -> return `(key, body)`.
 The service must neither parse `source` again nor look up the rewritten target
 by index: the one candidate reparse inside `rewrite_slide_body` already proved
@@ -663,8 +682,9 @@ drift guard.
 binding export:
 
 ```rust
+let sources = SlideSources::from_slides(source, deck.parsed_slides()).unwrap();
 assert_eq!(
-    slide_sources_json(&SlideSources::from_slides(source, deck.parsed_slides())).unwrap(),
+    slide_sources_json(&sources).unwrap(),
     "{\n  \"version\": 1,\n  \"sources\": {\n    \"intro\": \"# Title\\n\\nBody\"\n  }\n}\n"
 );
 assert!(generated_binding.contains("sources: Record<string, string>"));
@@ -704,13 +724,14 @@ pub struct SlideSources {
 }
 
 impl SlideSources {
-    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Self;
+    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Result<Self>;
 }
 
 pub fn slide_sources_json(sources: &SlideSources) -> Result<String>;
 ```
 
-`from_slides` calls `slide_body` for every surviving parsed slide. In
+`from_slides` calls `slide_body` for every surviving parsed slide and
+propagates any source/span mismatch. In
 `build_artifacts_with_services`, construct the map from `loaded.source` and
 the same Parsed deck immediately before mapping consumes it. Add
 `slide_sources_json: String` to `BuildArtifacts` and populate it on every build,
