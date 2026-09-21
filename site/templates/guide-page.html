@@ -26,6 +26,7 @@
       {% endif %}
     </header>
 
-    {{ page.content | safe }}
+    {# A paragraph that is only a link to a guide video becomes an inline player; the Markdown stays a plain link for `peitho docs`. #}
+    {{ page.content | regex_replace(pattern=`<p><a href="(/guide-videos/[^"]+\.mp4)">([^<]*)</a></p>`, rep=`<video controls muted playsinline preload="metadata" src="$1" aria-label="$2"></video>`) | safe }}
   </article>
 {% endblock docs_content %}

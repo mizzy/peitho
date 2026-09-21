@@ -85,6 +85,12 @@ that slide.
 
 ![The overview view: every slide as a tile in a scrollable grid](/guide-shots/preview-overview.png)
 
+The single-slide view is also an editor: speaker notes are typed into the panel
+below the slide, and a click on slide text swaps it to its Markdown source. Both
+are written back into `deck.md`. This 35-second tour walks the whole loop:
+
+[Watch the 35-second preview tour: overview, single-slide view, editing a speaker note, and editing slide text in place](/guide-videos/preview-demo.mp4)
+
 ## Present
 
 Use present when you are ready to speak:
