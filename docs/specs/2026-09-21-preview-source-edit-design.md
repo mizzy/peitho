@@ -84,9 +84,14 @@ pub struct SlideBodyRewrite { pub source: String, pub key: SlideKey, pub body: S
   inline note (`text <!-- n --> more`) removes exactly the comment bytes, so
   the body shows `text  more`; surrounding whitespace is untouched (measured in
   `removal_edit`: the inline range ends at the comment's end, not the line's).
-- The parser already enforces "page settings comment must appear before slide
-  content", so re-emitting it first moves it only past a note comment that
-  preceded it.
+- The parser enforces "page settings comment must appear before slide
+  content", but `seen_content` only flips at the end of the first block, so an
+  *inline* settings comment inside the slide's first paragraph or heading
+  (`text <!-- {"key":"a"} -->`) is accepted (measured while reviewing Task 1).
+  Re-emitting the comment first therefore moves it past a preceding note
+  comment or out of that first block. Both are the same canonicalization, need
+  no special case (`removal_edit` handles inline and whole-line spans), and the
+  postcondition still proves the settings are unchanged.
 
 `rewrite_slide_body` builds the replacement for the whole `source_span` as
 

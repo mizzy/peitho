@@ -524,8 +524,8 @@ fn leading_frontmatter_start_line(source: &str) -> Option<usize> {
 
 /// A parsed deck whose code-image fences were not transformed.
 ///
-/// It exposes only what the preview notes writer needs: slide keys, source spans, note spans, and
-/// settings. It cannot enter mapping or rendering, which require the deck produced by
+/// It exposes only what parse-only preview deck writers need: slide keys, source spans, comment
+/// spans, and settings. It cannot enter mapping or rendering, which require the deck produced by
 /// [`crate::parse_deck_and_transform`].
 ///
 /// ```compile_fail
@@ -2187,7 +2187,7 @@ fn parse_slide(
     let mut draft_flag: Option<PageFlag> = None;
     let mut skip_flag: Option<bool> = None;
     let mut page_number_hidden_flag: Option<PageFlag> = None;
-    let mut page_settings_line: Option<usize> = None;
+    let mut settings_span: Option<SourceSpan> = None;
     let mut fragments = Vec::new();
     let mut next_reveal_step = 1usize;
     // Stack of open fenced divs. Each frame owns the children collected so far
@@ -2461,7 +2461,7 @@ fn parse_slide(
                         &mut draft_flag,
                         &mut skip_flag,
                         &mut page_number_hidden_flag,
-                        &mut page_settings_line,
+                        &mut settings_span,
                         SourceSpan {
                             start: global_start,
                             end: global_end,
@@ -2931,7 +2931,7 @@ fn parse_slide(
                         &mut draft_flag,
                         &mut skip_flag,
                         &mut page_number_hidden_flag,
-                        &mut page_settings_line,
+                        &mut settings_span,
                         span,
                         &mut notes,
                     )?;
@@ -3048,6 +3048,7 @@ fn parse_slide(
                 .map(|flag| flag.enabled)
                 .unwrap_or(false),
             notes,
+            settings_span,
             note_spans,
         },
         section: section_marker,
@@ -3267,7 +3268,7 @@ fn process_html_chunk(
     draft_flag: &mut Option<PageFlag>,
     skip_flag: &mut Option<bool>,
     page_number_hidden_flag: &mut Option<PageFlag>,
-    page_settings_line: &mut Option<usize>,
+    settings_span: &mut Option<SourceSpan>,
     span: SourceSpan,
     notes: &mut Vec<(String, SourceSpan)>,
 ) -> Result<()> {
@@ -3288,7 +3289,7 @@ fn process_html_chunk(
                 fragments,
             ));
         }
-        if page_settings_line.is_some() {
+        if settings_span.is_some() {
             let err = BuildError::new(
                 ErrorKind::Parse,
                 Some(line),
@@ -3302,7 +3303,7 @@ fn process_html_chunk(
                 fragments,
             ));
         }
-        *page_settings_line = Some(line);
+        *settings_span = Some(span);
         if let Some(key) = settings.key {
             *explicit_key = Some((key, line));
         }
@@ -7011,6 +7012,40 @@ After list
             "<!-- inline note -->"
         );
         assert_eq!(slide.notes.as_deref(), Some("block note\n\ninline note"));
+    }
+
+    #[test]
+    fn parsed_slide_records_page_settings_span_separately_from_notes() {
+        let source =
+            "<!-- {\"key\":\"intro\",\"layout\":\"cover\"} -->\n\n# Title\n\n<!-- note -->";
+        let slide = parse_first_slide(source);
+        let settings = slide.settings_span.expect("settings span");
+
+        assert_eq!(
+            &source[settings.start..settings.end],
+            "<!-- {\"key\":\"intro\",\"layout\":\"cover\"} -->\n"
+        );
+        assert_eq!(
+            &source[slide.note_spans[0].start..slide.note_spans[0].end],
+            "<!-- note -->"
+        );
+    }
+
+    #[test]
+    fn parsed_slide_records_inline_page_settings_span_as_comment_bytes() {
+        let source = "text <!-- {\"key\":\"a\"} -->";
+        let slide = parse_first_slide(source);
+        let settings = slide.settings_span.expect("settings span");
+
+        assert_eq!(
+            &source[settings.start..settings.end],
+            "<!-- {\"key\":\"a\"} -->"
+        );
+    }
+
+    #[test]
+    fn parsed_slide_without_page_settings_has_no_settings_span() {
+        assert_eq!(parse_first_slide("# Title").settings_span, None);
     }
 
     #[test]

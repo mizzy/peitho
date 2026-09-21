@@ -4092,6 +4092,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                settings_span: None,
                 note_spans: Vec::new(),
             }],
         )
@@ -4116,6 +4117,7 @@ mod tests {
                 step_count: 0,
                 page_number_hidden: false,
                 notes: None,
+                settings_span: None,
                 note_spans: Vec::new(),
             }],
         )
@@ -4175,6 +4177,7 @@ mod tests {
                 step_count: span.len,
                 page_number_hidden: false,
                 notes: None,
+                settings_span: None,
                 note_spans: Vec::new(),
             }],
         )
