@@ -7011,6 +7011,20 @@ contexts:
     }
 
     #[test]
+    fn write_preview_note_preserves_an_ideographic_space_last_content_line_when_tail_is_clipped() {
+        let included_source = "# I1\n\ntext\n\n\u{3000}\n";
+        let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, included_source);
+
+        write_preview_note(&deck, &SlideKey::new("i1").unwrap(), "n").unwrap();
+
+        assert_eq!(fs::read(&deck).unwrap(), top_source.as_bytes());
+        assert_eq!(
+            fs::read(&included).unwrap(),
+            "# I1\n\ntext\n\n\u{3000}\n\n<!-- n -->\n".as_bytes()
+        );
+    }
+
+    #[test]
     fn preview_slide_and_note_saves_do_not_leak_a_single_slide_include_tail() {
         {
             let (_dir, deck, included, top_source) = include_deck_fixture(TOP_SOURCE, "# Only\n");
