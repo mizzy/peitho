@@ -791,7 +791,7 @@ the `()` returned by `note` and `slide_edit` to the existing
 `{"saved":true}` bytes. Serialize only `SlideSourceSaved` as
 `{"key":"...","body":"..."}` through serde; its declared field order pins
 the exact response without JSON-map ordering. Keep a single
-`Arc<Mutex<Box<dyn DeckWriter>>>`, so content-type, request-size, 404-before-
+`Arc<Mutex<Box<dyn DeckWriter>>>`, so content-type, body-parse, 404-before-
 parsing, error mapping, and mutual exclusion remain in the shared handler.
 
 Make `PreviewDeckWriter` a small struct holding the input path and implement
