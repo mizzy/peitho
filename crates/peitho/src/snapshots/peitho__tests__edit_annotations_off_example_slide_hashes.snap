@@ -1,6 +1,5 @@
 ---
 source: crates/peitho/src/main.rs
-assertion_line: 5864
 expression: digest_index
 ---
 9deb4797462d755dcc44cd495d397d34b8f13eb4736c690a816e497b38eb8511  aspect-ratio-4-3/slides/000-4-3-canvas.html
@@ -10,9 +9,9 @@ b430d0bceb45ec8363c4fa14654506dcc66e36e6619b4f9aaf7bb987a15acac5  code-emphasis/
 e5753836946ec1f16bf8c5745b52483f0de2e408fd32bfd789128f7d9400b65f  code-emphasis/slides/002-ranges-and-no-language-tag.html
 2bf32c06765f5ce9fb57a09cb24e1b93ffd42bba670dee8e46972a3bf03560bc  code-emphasis/slides/003-sharing-steps-with-reveal.html
 753748c7329bcfe47e607499242e65b7b480c3b6126cd550e76868d1f6c15f22  code-emphasis/slides/004-ordinary-code-is-untouched.html
-55369fb06505d421e6e9885ff47b85fcb01320d069f829abe3521e4918167821  code-images/slides/000-mermaid-flow.html
+b808410f3aca9240a8a853eb7f409b8592ae1ef9fed13d73853c163a05649fbf  code-images/slides/000-mermaid-flow.html
 e835ca4b5666f27f8e7ccdda99b93bce69a895a51c4ada8104eb09ca0364992a  code-images/slides/001-graphviz-flow.html
-2e043a6dddfe0f333e3d72b07415c09e072a3287e83f6259d2a5d2ca5f96f006  code-images/slides/002-before-after.html
+e286c9af1f7df99d4d70223c340f23c74504ba55d49596b000c32fc5b6917484  code-images/slides/002-before-after.html
 33069585f328a8b72e8b2615182b2f63310422b4907d293817ee9227d2fb6ba1  code-images/slides/003-config-source.html
 cc6144c0041a39f65cf1908cd801601ec9e09d94dda09120a8e257d2398824a6  code-walkthrough/slides/000-markers.html
 ac545d26eda54f5a4291c4d398a96ae67be3ac56d335dbda827e18832b47d9d2  code-walkthrough/slides/001-constructors.html
