@@ -266,13 +266,23 @@ it("does not commit a discarded draft through a closed handle", async () => {
 it("posts the raw draft once and returns the server key and body verbatim", async () => {
   const pending = deferredResponse();
   const fetchMock = vi.fn(() => pending.promise);
-  const { edit, onCommitRequest, onCancelRequest } = openForTest({
+  const { edit, tile, onCommitRequest, onCancelRequest } = openForTest({
     fetcher: fetchMock as unknown as typeof fetch
   });
+  const parentKeys: string[] = [];
+  const onParentKeyDown = (event: KeyboardEvent): void => {
+    parentKeys.push(event.key);
+  };
+  tile.addEventListener("keydown", onParentKeyDown);
+  cleanups.push(() => tile.removeEventListener("keydown", onParentKeyDown));
   const draft = "\r\n# Typed\r\n";
   edit.textarea.value = draft;
   const submitted = edit.textarea.value;
   expect(submitted).toBe("\n# Typed\n");
+
+  dispatchKey(edit.textarea, "PageDown");
+  expect(parentKeys).toEqual(["PageDown"]);
+  parentKeys.length = 0;
 
   const first = edit.commit();
   const second = edit.commit();
@@ -290,9 +300,11 @@ it("posts the raw draft once and returns the server key and body verbatim", asyn
   const metaEnter = dispatchKey(edit.textarea, "Enter", { metaKey: true });
   const ctrlEnter = dispatchKey(edit.textarea, "Enter", { ctrlKey: true });
   const escape = dispatchKey(edit.textarea, "Escape");
+  dispatchKey(edit.textarea, "PageDown");
   expect(metaEnter.defaultPrevented).toBe(true);
   expect(ctrlEnter.defaultPrevented).toBe(true);
   expect(escape.defaultPrevented).toBe(true);
+  expect(parentKeys).toEqual(["PageDown"]);
   expect(onCommitRequest).not.toHaveBeenCalled();
   expect(onCancelRequest).not.toHaveBeenCalled();
 
