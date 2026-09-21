@@ -260,6 +260,11 @@ mod tests {
         let settings_deck =
             parse_markdown(&settings_source, frontmatter, &Highlighter::defaults()).unwrap();
         let swallowed_slide = &settings_deck.parsed_slides()[0];
+        let settings_lf_source = "<!-- {\"key\":\"a\"} -->\n# T\n";
+        let frontmatter = parse_frontmatter(settings_lf_source).unwrap();
+        let settings_lf_deck =
+            parse_markdown(settings_lf_source, frontmatter, &Highlighter::defaults()).unwrap();
+        let settings_lf_slide = &settings_lf_deck.parsed_slides()[0];
         assert_eq!(
             swallowed_slide.settings_span,
             Some(swallowed_slide.source_span)
@@ -281,6 +286,11 @@ mod tests {
                 "settings-span-swallows-following-text",
                 swallowed_source,
                 swallowed_slide,
+            ),
+            (
+                "settings-span-ends-inside-crlf",
+                "<!-- {\"key\":\"a\"} -->\r\n# T\n",
+                settings_lf_slide,
             ),
         ] {
             let error = slide_body(source, candidate).unwrap_err();

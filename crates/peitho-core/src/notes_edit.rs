@@ -98,6 +98,10 @@ pub(crate) fn spans_match_source(
             || span.end > slide.end
             || !source.is_char_boundary(span.start)
             || !source.is_char_boundary(span.end)
+            || source
+                .as_bytes()
+                .get(span.end.saturating_sub(1)..=span.end)
+                .is_some_and(|ending| ending == b"\r\n")
         {
             return None;
         }
@@ -355,7 +359,9 @@ fn line_context(source: &str, span: SourceSpan) -> LineContext {
     let whole_line = source[start..span.start]
         .bytes()
         .all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
-        && source[content_end..line_content_end].trim().is_empty();
+        && source
+            .get(content_end..line_content_end)
+            .is_some_and(|suffix| suffix.trim().is_empty());
 
     LineContext {
         start,
@@ -1166,6 +1172,15 @@ mod tests {
                 start: 0,
                 end: source.len(),
             }],
+        );
+
+        let note_lf_source = "# T\n<!-- n -->\n";
+        let note_lf_deck = parse(note_lf_source, &highlighter);
+        let note_lf_slide = &note_lf_deck.parsed_slides()[0];
+        assert_rejected(
+            "# T\n<!-- n -->\r\n",
+            note_lf_slide.source_span,
+            &note_lf_slide.note_spans,
         );
     }
 
