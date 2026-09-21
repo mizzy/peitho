@@ -60,7 +60,11 @@ the text compared at save time can never come from two implementations:
 /// The slide's body: `source[slide.source_span]` with the page settings
 /// comment and every note comment removed, then leading/trailing blank lines
 /// trimmed. Line endings normalized to LF.
-pub fn slide_body(source: &str, slide: &ParsedSlide) -> String;
+///
+/// Refuses (like `rewrite_note`'s span check) when the slide's spans do not
+/// belong to `source`, so a `ParsedSlide` from another parse is an error in
+/// the caller, never a slicing panic in a server request thread.
+pub fn slide_body(source: &str, slide: &ParsedSlide) -> Result<String>;
 
 /// Full source with `target`'s body replaced, or a refusal. `key` and `body`
 /// are read from the same reparse that accepted the candidate, so no caller
@@ -79,8 +83,9 @@ pub struct SlideBodyRewrite { pub source: String, pub key: SlideKey, pub body: S
   `process_html_chunk` and drops it on the settings branch. `ParsedSlide` gains
   `settings_span: Option<SourceSpan>` next to `note_spans`. It is parse-time
   bookkeeping like `note_spans`: it never reaches the manifest or `bindings/`.
-- Comment removal reuses `notes_edit`'s `line_context` / `removal_edit`
-  (lifted to `pub(crate)`), for notes and for the settings comment alike. An
+- Comment removal is one function, `notes_edit::remove_comment_spans`, lifted
+  out of `splice_note` and used by both (the reverse-order loop with its byte
+  accounting exists once), for notes and for the settings comment alike. An
   inline note (`text <!-- n --> more`) removes exactly the comment bytes, so
   the body shows `text  more`; surrounding whitespace is untouched (measured in
   `removal_edit`: the inline range ends at the comment's end, not the line's).
@@ -124,8 +129,8 @@ when:
   unchanged;
 - the key rule: the target key may change only when both key sources are
   `Derived` (same rule as `rewrite_block`, shared, not copied);
-- `slide_body(candidate, target_after) == normalized new body` (the round-trip
-  proof that what was typed is what the parser sees as body).
+- `slide_body(candidate, target_after)? == normalized new body` (the
+  round-trip proof that what was typed is what the parser sees as body).
 
 What this refuses without any dedicated code:
 
@@ -154,7 +159,9 @@ Request `{key, old, new}` (`application/json`, `deny_unknown_fields`).
   shared handler unchanged.
 - `write_preview_slide_source`: `load_and_expand_deck_source` → `parse_deck`
   → find the slide by `SlideKey` (gone → 409) → **drift guard**
-  `slide_body(combined, slide) == old`, else the single existing 409 "the deck
+  `slide_body(combined, slide)? == old` (a `slide_body` refusal cannot come
+  from a fresh parse of the same source; it maps to 422 like every other core
+  refusal, never to the drift 409), else the single existing 409 "the deck
   changed on disk; reload and retry" → `rewrite_slide_body` (refusal → 422)
   → `write_preview_origin_rewrite`.
 - Origin scope: the rewrite replaces a slide span whose edge blank runs are
@@ -262,6 +269,15 @@ is no "preview artifacts without sources" state to handle.
   rebuild, the stale page's notes map is keyed by the old key, so a note save
   answers 409 until the build is fixed. The source editor itself keeps working
   (that is what the response key is for), and fixing the body is the way out.
+- **Known tradeoff**: a whole-line note comment between two non-blank lines
+  is replaced by a blank line, not deleted (the shared rule that keeps `text`
+  from joining a following `---` into a setext heading). Between the items of
+  a tight list that blank line makes the list loose, so the body shows — and a
+  save writes — a loose list. Deleting the line instead would join two
+  paragraphs written without blank lines around the comment. The body the
+  author sees is the body that is saved; note saves have the same effect
+  (Issue #582).
+- Empty comments (`<!-- -->`) carry no span and stay in the body verbatim.
 - **Known tradeoff**: the shell's source map is refreshed by a generation
   reload or by its own source save. An *inline* edit or an external editor
   change followed by a failed rebuild leaves it stale, so `e` answers the

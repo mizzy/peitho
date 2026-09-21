@@ -23,6 +23,7 @@ pub mod present_config;
 pub mod rehearsal;
 pub mod render;
 pub mod slide_edit;
+pub mod slide_source;
 pub mod sync;
 pub mod theme;
 
