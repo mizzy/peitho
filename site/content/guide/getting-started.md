@@ -83,8 +83,6 @@ and overview tiles, and clicking a tile opens it. The single-slide view keeps a
 filmstrip of thumbnails on the left; Up/Down walk it and clicking one jumps to
 that slide.
 
-![The overview view: every slide as a tile in a scrollable grid](/guide-shots/preview-overview.png)
-
 The single-slide view is also an editor: speaker notes are typed into the panel
 below the slide, and a click on slide text swaps it to its Markdown source. Both
 are written back into `deck.md`. This 35-second tour walks the whole loop:

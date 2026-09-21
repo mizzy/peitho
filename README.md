@@ -79,11 +79,9 @@ Press `o` to flip between the single-slide view and a tile overview of the whole
 
 Type into the notes panel and the note autosaves on blur, slide changes, and page exit, written back into the deck's Markdown as the slide's `<!-- ... -->` comment (or into the file the slide is included from). While typing, only PageUp and PageDown change slides, and `Esc` leaves the panel before a second `Esc` opens the overview. The [CLI guide](https://peitho.gosu.ke/guide/cli/#editing-speaker-notes-in-preview) spells out exactly what a save writes.
 
+Thumbnails and overview tiles carry their slide number in the bottom-left corner. The whole loop — overview, single-slide view, a speaker note, and slide text edited in place:
+
 ![A tour of peitho preview: the overview grid, the single-slide view, typing a speaker note, and editing a list item and a heading in place as Markdown](docs/images/preview-demo.gif)
-
-Thumbnails and overview tiles carry their slide number in the bottom-left corner:
-
-![The preview overview: every slide as a tile in a scrollable grid](site/static/guide-shots/preview-overview.png)
 
 ### Present
 
