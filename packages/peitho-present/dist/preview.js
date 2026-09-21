@@ -291,6 +291,9 @@ var keyMap = new Map([...navigationKeyMap, [" ", "next"]]);
 function hasChordModifier(event) {
   return event.metaKey || event.ctrlKey || event.altKey;
 }
+function isComposingKey(event) {
+  return event.isComposing || event.keyCode === 229;
+}
 
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
@@ -586,6 +589,14 @@ var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "TABLE",
   "UL"
 ]);
+function isStringRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+function isSlideSources(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const sources = value;
+  return typeof sources.version === "number" && isStringRecord(sources.sources) && isStringRecord(sources.unavailable);
+}
 function isPreviewDraft(value) {
   if (typeof value !== "object" || value === null) return false;
   const draft = value;
@@ -702,9 +713,6 @@ function insertSourceNewline(win, editor, rangeProvider) {
   selected.select(range);
   return addSentinel;
 }
-function isComposingKey(event) {
-  return event.isComposing || event.keyCode === 229;
-}
 function isEditableTarget(event) {
   const target = event.composedPath()[0];
   if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
@@ -737,6 +745,11 @@ function installPreviewKeyboard(win = window, bus = win) {
     if (hasChordModifier(event) || isComposingKey(event)) return;
     const editable = isEditableTarget(event);
     if (editable && (event.shiftKey || event.key !== "PageUp" && event.key !== "PageDown")) {
+      return;
+    }
+    if (event.key === "e" && !event.shiftKey) {
+      event.preventDefault();
+      bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
       return;
     }
     if (event.key === "o") {
@@ -820,6 +833,7 @@ var PreviewShellController = class {
   restoredState;
   slides = [];
   notes = { version: 1, notes: {} };
+  sources = { version: 1, sources: {}, unavailable: {} };
   notesPanel;
   notesTextarea;
   notesStatus;
@@ -931,6 +945,9 @@ var PreviewShellController = class {
       this.setBuildError(initialSyncState.buildError);
       const manifest = await this.fetchJson("manifest.json");
       this.notes = await this.fetchJson("notes.json");
+      const loadedSources = await this.fetchJson("sources.json");
+      if (!isSlideSources(loadedSources)) throw new Error("Invalid sources.json");
+      this.sources = loadedSources;
       this.dimensions = {
         width: manifest.canvasWidth,
         height: manifest.canvasHeight

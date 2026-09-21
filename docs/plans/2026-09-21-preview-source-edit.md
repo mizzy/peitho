@@ -1010,6 +1010,7 @@ or save behavior, and load the preview-only source map with the generation.
 - `packages/peitho-present/src/keyboard.ts`
 - `packages/peitho-present/src/preview.ts`
 - `packages/peitho-present/test/preview.test.ts`
+- `packages/peitho-present/dist/preview.js`
 
 **Test (Red).** Add `preview_keyboard_only_emits_source_edit_request`:
 lowercase unshifted `e` dispatches once and is prevented;
@@ -1019,7 +1020,8 @@ nothing. Assert the keyboard handler performs no fetch or DOM mutation. Extend
 the existing `handshakes sync generation before fetching preview content`
 test so the successful sequence is `/sync`,
 `manifest.json`, `notes.json`, `sources.json`, CSS, and slide fragments, and a
-non-2xx `sources.json` leaves the shell in its existing load-error state.
+non-2xx `sources.json` or a JSON body that does not match `SlideSources` leaves
+the shell in its existing load-error state.
 
 **Implementation (Green).** Import the generated `SlideSources` type, store:
 
@@ -1029,7 +1031,9 @@ private sources: SlideSources = { version: 1, sources: {}, unavailable: {} };
 
 Give `PreviewFetchFixture` a cloned `SlideSources` value and a
 `sources.json` response, and add that response to each ad hoc successful-load
-mock in `preview.test.ts`. Fetch `sources.json` during `load`. In
+mock in `preview.test.ts`. Fetch `sources.json` during `load`, validate its
+number `version` and non-array, string-valued `sources` and `unavailable`
+records, and route an invalid shape through the existing load-error path. In
 `installPreviewKeyboard`, after the
 existing chord/composition/editable-target gates, map only
 `event.key === "e" && !event.shiftKey` to `preventDefault()` plus:
@@ -1044,8 +1048,9 @@ shared keyboard module as
 "keyCode">): boolean`, next to `hasChordModifier`; Task 10 imports that exact
 predicate. No keyboard code may open an editor, inspect the active slide, or
 call the network. Because `keyboard.ts` is shared by multiple entry graphs,
-defer assumptions about which generated bundles change until Task 13 rebuilds
-all entries.
+**every shell task** rebuilds all entries and commits every bundle whose bytes
+change; the bundle drift gate runs per commit, so source ownership alone does
+not determine which generated files belong to a task.
 
 **Verification.**
 
@@ -1298,9 +1303,8 @@ the shared TypeScript graph.
 - `packages/peitho-present/src/preview.ts`
 - `packages/peitho-present/test/previewSourceEdit.test.ts`
 - `packages/peitho-present/test/preview.test.ts`
-- `packages/peitho-present/dist/shell.js`
-- `packages/peitho-present/dist/preview.js`
-- `packages/peitho-present/dist/remote.js`
+- Whichever bundles change under `packages/peitho-present/dist/`
+  (`shell.js`, `preview.js`, and/or `remote.js`)
 
 **Test (Red).** Assert `pagehide` calls `saveForPageHide` only for a dirty
 source edit, repeats an in-flight normal save as unload insurance, sends

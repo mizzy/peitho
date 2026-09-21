@@ -17,6 +17,12 @@ export function hasChordModifier(event: ChordModifierEvent): boolean {
   return event.metaKey || event.ctrlKey || event.altKey;
 }
 
+export function isComposingKey(
+  event: Pick<KeyboardEvent, "isComposing" | "keyCode">
+): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
 function dispatchNavigate(bus: EventTarget, to: NavigateTarget): void {
   bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to } }));
 }

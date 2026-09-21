@@ -1,11 +1,12 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import type { Notes } from "../../../bindings/Notes";
+import type { SlideSources } from "../../../bindings/SlideSources";
 import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
-import { hasChordModifier } from "./keyboard";
+import { hasChordModifier, isComposingKey } from "./keyboard";
 import type { NavigateTarget, SlideChangeDetail } from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
 import {
@@ -134,6 +135,25 @@ const NESTED_LIST_ITEM_BLOCKS = new Set([
   "TABLE",
   "UL"
 ]);
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  );
+}
+
+function isSlideSources(value: unknown): value is SlideSources {
+  if (typeof value !== "object" || value === null) return false;
+  const sources = value as Partial<SlideSources>;
+  return (
+    typeof sources.version === "number" &&
+    isStringRecord(sources.sources) &&
+    isStringRecord(sources.unavailable)
+  );
+}
 
 function isPreviewDraft(value: unknown): value is PreviewDraft {
   if (typeof value !== "object" || value === null) return false;
@@ -293,10 +313,6 @@ function insertSourceNewline(
   return addSentinel;
 }
 
-function isComposingKey(event: KeyboardEvent): boolean {
-  return event.isComposing || event.keyCode === 229;
-}
-
 function isEditableTarget(event: KeyboardEvent): boolean {
   const target = event.composedPath()[0];
   if (
@@ -339,6 +355,11 @@ export function installPreviewKeyboard(
     if (hasChordModifier(event) || isComposingKey(event)) return;
     const editable = isEditableTarget(event);
     if (editable && (event.shiftKey || (event.key !== "PageUp" && event.key !== "PageDown"))) {
+      return;
+    }
+    if (event.key === "e" && !event.shiftKey) {
+      event.preventDefault();
+      bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
       return;
     }
     if (event.key === "o") {
@@ -430,6 +451,7 @@ class PreviewShellController implements PreviewShell {
   private readonly restoredState: PreviewState | null;
   private readonly slides: PreviewSlideView[] = [];
   private notes: Notes = { version: 1, notes: {} };
+  private sources: SlideSources = { version: 1, sources: {}, unavailable: {} };
   private readonly notesPanel: HTMLElement;
   private readonly notesTextarea: HTMLTextAreaElement;
   private readonly notesStatus: HTMLSpanElement;
@@ -545,6 +567,9 @@ class PreviewShellController implements PreviewShell {
       this.setBuildError(initialSyncState.buildError);
       const manifest = await this.fetchJson<Manifest>("manifest.json");
       this.notes = await this.fetchJson<Notes>("notes.json");
+      const loadedSources: unknown = await this.fetchJson<unknown>("sources.json");
+      if (!isSlideSources(loadedSources)) throw new Error("Invalid sources.json");
+      this.sources = loadedSources;
       this.dimensions = {
         width: manifest.canvasWidth,
         height: manifest.canvasHeight

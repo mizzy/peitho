@@ -9,6 +9,7 @@ import {
   type PreviewShell
 } from "../src/preview";
 import type { Notes } from "../../../bindings/Notes";
+import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncChannel } from "../src/sync";
 
 function okJson(value: unknown): Response {
@@ -61,6 +62,11 @@ const manifest = {
 };
 
 const notes = { version: 1, notes: { middle: "Pause here.\nThen ask." } };
+const slideSources: SlideSources = {
+  version: 1,
+  sources: { intro: "# Intro", middle: "# Middle", end: "# End" },
+  unavailable: {}
+};
 const cssText = ".slot-title { color: red; }";
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
@@ -104,6 +110,7 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typ
 type PreviewFetchFixture = {
   fetcher: typeof fetch;
   notes: Notes;
+  sources: SlideSources;
   notesPosts(): Array<[string, RequestInit]>;
   resolveNotesPost(response: Response): void;
   rejectNotesPost(error: unknown): void;
@@ -112,10 +119,16 @@ type PreviewFetchFixture = {
 function previewFetchFixture(
   deck: typeof manifest = manifest,
   css = cssText,
-  sourceNotes: Notes = notes
+  sourceNotes: Notes = notes,
+  sourceSlideSources: SlideSources = slideSources
 ): PreviewFetchFixture {
-  // The shell receives this same object from notes.json, so map assertions observe its updates.
+  // The shell receives these same objects, so map assertions observe their updates.
   const loadedNotes: Notes = { version: sourceNotes.version, notes: { ...sourceNotes.notes } };
+  const loadedSources: SlideSources = {
+    version: sourceSlideSources.version,
+    sources: { ...sourceSlideSources.sources },
+    unavailable: { ...sourceSlideSources.unavailable }
+  };
   const posts: Array<[string, RequestInit]> = [];
   const notesPostSettlers: Array<{
     resolve(response: Response): void;
@@ -134,6 +147,7 @@ function previewFetchFixture(
     }
     if (url === "manifest.json") return okJson(deck);
     if (url === "notes.json") return okJson(loadedNotes);
+    if (url === "sources.json") return okJson(loadedSources);
     if (url === "peitho.css") return okText(css);
     if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
@@ -141,6 +155,7 @@ function previewFetchFixture(
   return {
     fetcher,
     notes: loadedNotes,
+    sources: loadedSources,
     notesPosts: () => posts,
     resolveNotesPost(response: Response): void {
       const settler = notesPostSettlers.shift();
@@ -387,6 +402,87 @@ it("preview keyboard emits overview requests from o and ignores chord modifiers"
   expect(chord.defaultPrevented).toBe(false);
   expect(bare.defaultPrevented).toBe(true);
   expect(requests).toEqual([{ action: "toggle" }]);
+});
+
+it("preview_keyboard_only_emits_source_edit_request", () => {
+  const bus = new EventTarget();
+  const requests: Event[] = [];
+  const unrelatedRequest = vi.fn();
+  const onSourceEditRequest = (event: Event): void => {
+    requests.push(event);
+  };
+  bus.addEventListener("peitho:sourceeditrequest", onSourceEditRequest);
+  bus.addEventListener("peitho:navigate", unrelatedRequest);
+  bus.addEventListener("peitho:overviewrequest", unrelatedRequest);
+  cleanups.push(() => {
+    bus.removeEventListener("peitho:sourceeditrequest", onSourceEditRequest);
+    bus.removeEventListener("peitho:navigate", unrelatedRequest);
+    bus.removeEventListener("peitho:overviewrequest", unrelatedRequest);
+  });
+  cleanups.push(installPreviewKeyboard(window, bus));
+
+  const notesTextarea = document.createElement("textarea");
+  notesTextarea.dataset.peithoPreview = "note";
+  const input = document.createElement("input");
+  const select = document.createElement("select");
+  const contenteditableRoot = document.createElement("div");
+  contenteditableRoot.setAttribute("contenteditable", "true");
+  const contenteditableChild = document.createElement("span");
+  contenteditableRoot.appendChild(contenteditableChild);
+  const inlineHost = document.createElement("div");
+  const inlineEditor = document.createElement("span");
+  inlineEditor.setAttribute("contenteditable", "plaintext-only");
+  inlineHost.attachShadow({ mode: "open" }).appendChild(inlineEditor);
+  document.body.append(notesTextarea, input, select, contenteditableRoot, inlineHost);
+  cleanups.push(() => {
+    notesTextarea.remove();
+    input.remove();
+    select.remove();
+    contenteditableRoot.remove();
+    inlineHost.remove();
+  });
+
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const bodyMarkup = document.body.innerHTML;
+  const inlineMarkup = inlineHost.shadowRoot?.innerHTML;
+  const bare = new KeyboardEvent("keydown", { key: "e", cancelable: true });
+  window.dispatchEvent(bare);
+
+  const suppressed = [
+    new KeyboardEvent("keydown", { key: "E", cancelable: true }),
+    new KeyboardEvent("keydown", { key: "e", shiftKey: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "e", metaKey: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "e", ctrlKey: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "e", altKey: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "e", isComposing: true, cancelable: true })
+  ];
+  const safariComposition = new KeyboardEvent("keydown", { key: "e", cancelable: true });
+  Object.defineProperty(safariComposition, "keyCode", { value: 229 });
+  suppressed.push(safariComposition);
+  for (const event of suppressed) window.dispatchEvent(event);
+
+  const editableEvents = [notesTextarea, input, select, contenteditableChild, inlineEditor].map(
+    (target) => {
+      const event = new KeyboardEvent("keydown", {
+        key: "e",
+        bubbles: true,
+        composed: true,
+        cancelable: true
+      });
+      target.dispatchEvent(event);
+      return event;
+    }
+  );
+
+  expect(bare.defaultPrevented).toBe(true);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toBeInstanceOf(CustomEvent);
+  expect((requests[0] as CustomEvent).detail).toBeNull();
+  expect([...suppressed, ...editableEvents].every((event) => !event.defaultPrevented)).toBe(true);
+  expect(unrelatedRequest).not.toHaveBeenCalled();
+  expect(fetchSpy).not.toHaveBeenCalled();
+  expect(document.body.innerHTML).toBe(bodyMarkup);
+  expect(inlineHost.shadowRoot?.innerHTML).toBe(inlineMarkup);
 });
 
 it("preview_keyboard_only_dispatches_page_keys_from_editable_targets", () => {
@@ -1414,6 +1510,7 @@ it("ignores preview commands while content is still loading without clobbering s
     }
     if (url === "manifest.json") return Promise.resolve(okJson(manifest));
     if (url === "notes.json") return Promise.resolve(okJson(notes));
+    if (url === "sources.json") return Promise.resolve(okJson(slideSources));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
     if (url === "slides/000-intro.html") return Promise.resolve(okText("<section><h1>Intro</h1></section>"));
     if (url === "slides/001-middle.html") return Promise.resolve(okText("<section><h1>Middle</h1></section>"));
@@ -1512,6 +1609,7 @@ it("handshakes sync generation before fetching preview content", async () => {
     }
     if (url === "manifest.json") return okJson(manifest);
     if (url === "notes.json") return okJson(notes);
+    if (url === "sources.json") return okJson(slideSources);
     if (url === "peitho.css") return okText(cssText);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-middle.html") return okText("<section><h1>Middle</h1></section>");
@@ -1528,10 +1626,71 @@ it("handshakes sync generation before fetching preview content", async () => {
   });
   shells.push(shell);
 
-  expect(calls[0]).toBe("/sync");
-  expect(calls[1]).toBe("manifest.json");
-  expect(calls[2]).toBe("notes.json");
+  expect(calls).toEqual([
+    "/sync",
+    "manifest.json",
+    "notes.json",
+    "sources.json",
+    "peitho.css",
+    "slides/000-intro.html",
+    "slides/001-middle.html",
+    "slides/002-end.html"
+  ]);
   expect(shell.generation).toBe(4);
+
+  for (const testCase of [
+    {
+      response: { ok: false, status: 503, text: async () => "unavailable" } as Response,
+      message: "Failed to load sources.json: 503"
+    },
+    {
+      response: okJson({ version: 1, sources: { intro: 42 }, unavailable: {} }),
+      message: "Invalid sources.json"
+    },
+    {
+      response: okJson({ version: 1 }),
+      message: "Invalid sources.json"
+    },
+    {
+      response: okJson({ version: 1, sources: {} }),
+      message: "Invalid sources.json"
+    },
+    {
+      response: okJson(null),
+      message: "Invalid sources.json"
+    },
+    {
+      response: okJson({ version: 1, sources: [], unavailable: [] }),
+      message: "Invalid sources.json"
+    },
+    {
+      response: okJson({ version: "1", sources: {}, unavailable: {} }),
+      message: "Invalid sources.json"
+    }
+  ]) {
+    const failedRoot = document.createElement("main");
+    const failedFetcher = vi.fn(async (url: string) => {
+      if (url === "/sync") {
+        return okJson({ seq: 7, message: null, generation: 4, buildError: null });
+      }
+      if (url === "manifest.json") return okJson(manifest);
+      if (url === "notes.json") return okJson(notes);
+      if (url === "sources.json") return testCase.response;
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+    const failedShell = await mountPreviewShell({
+      root: failedRoot,
+      fetcher: failedFetcher,
+      window,
+      storage: sessionStorage,
+      viewport: () => ({ width: 1280, height: 720 })
+    });
+    shells.push(failedShell);
+
+    expect(failedShell.manifest).toBeNull();
+    expect(failedRoot.textContent).toContain(testCase.message);
+    expect(failedRoot.querySelectorAll(".peitho-preview-slide")).toHaveLength(0);
+  }
 });
 
 it("fetches preview slide fragments in parallel", async () => {
@@ -1546,6 +1705,7 @@ it("fetches preview slide fragments in parallel", async () => {
     }
     if (url === "manifest.json") return Promise.resolve(okJson(manifest));
     if (url === "notes.json") return Promise.resolve(okJson(notes));
+    if (url === "sources.json") return Promise.resolve(okJson(slideSources));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
     if (url.startsWith("slides/")) {
       requestedSlides.push(url);
