@@ -24,8 +24,9 @@ Branch: `preview-source-edit`
 | Modify | `crates/peitho/tests/publish.rs` | Prove `sources.json` contaminates a publishable distribution. | Task 8 contamination list. | 8 |
 | Create | `bindings/SlideSources.ts` | Commit the Rust-generated preview source-map contract. | Task 7 `SlideSources`. | 7 |
 | Create | `packages/peitho-present/src/previewSourceEdit.ts` | Encapsulate one complete source-editor session. | Tasks 6-7 HTTP/JSON contracts. | 10-13 |
+| Create | `packages/peitho-present/src/previewHttp.ts` | Parse preview write errors once while preserving each caller's fallback text. | Existing preview write response conventions. | 10 |
 | Modify | `packages/peitho-present/src/keyboard.ts` | Share the existing IME-key predicate with both preview keyboard layers. | Existing keyboard primitives. | 9-10 |
-| Modify | `packages/peitho-present/src/preview.ts` | Coordinate the closed edit union, navigation, reloads, notes, and source-map re-keying. | Tasks 7 and 10. | 9, 11-13 |
+| Modify | `packages/peitho-present/src/preview.ts` | Coordinate the closed edit union, navigation, reloads, notes, and source-map re-keying. | Tasks 7 and 10. | 9-13 |
 | Create | `packages/peitho-present/test/previewSourceEdit.test.ts` | Unit-test the source editor independently of controller coordination. | `previewSourceEdit.ts`. | 10, 13 |
 | Modify | `packages/peitho-present/test/preview.test.ts` | Regress keyboard requests and the cross-editor lifecycle. | Tasks 9-13 shell changes. | 9, 11-13 |
 | Modify | `packages/peitho-present/test/generated.test.ts` | Type-check the generated `SlideSources` shape. | Task 7 binding. | 7 |
@@ -1062,12 +1063,14 @@ cd packages/peitho-present && npm run typecheck
 
 #### Task 10: Build the isolated textarea and request state machine
 
-**Goal.** Put all source-editor DOM, local keyboard behavior, normalization,
-HTTP state, and teardown in the new module.
+**Goal.** Put all source-editor DOM, local keyboard behavior, HTTP state, and
+teardown in the new module.
 
 **Files.**
 
 - `packages/peitho-present/src/previewSourceEdit.ts`
+- `packages/peitho-present/src/previewHttp.ts`
+- `packages/peitho-present/src/preview.ts`
 - `packages/peitho-present/test/previewSourceEdit.test.ts`
 
 **Test (Red).** Unit-test this complete matrix:
@@ -1075,26 +1078,32 @@ HTTP state, and teardown in the new module.
 - The textarea is a light-DOM child of the stage tile, outside the slide
   shadow root; it has `data-peitho-preview="source"`, monospace styling,
   `tab-size: 2`, `spellcheck=false`, the supplied body, focus, and selection
-  `0..0`; the slide host is hidden.
+  `0..0`. The module never reads or writes the slide host's visibility.
 - `setFrame` writes the fitted stage rectangle without applying a scale
   transform.
 - Plain Enter is untouched. Composing Enter/Escape does nothing. Escape asks
   the controller to cancel. Cmd+Enter and Ctrl+Enter ask it to commit. Blur
   asks it to commit once.
-- Edge blank lines and CRLF feed only the unchanged shortcut: when
-  `normalizeSourceBody(textarea.value) === old`, close without POST. A dirty
-  value posts exactly `{key,old,new:textarea.value}` to `/slide-source`; it does
-  not replace `new` with the TypeScript-normalized string.
+- Only `textarea.value === old` takes the unchanged shortcut. Every other value,
+  including an added edge blank line or a line containing U+3000 or U+00A0,
+  posts exactly `{key,old,new:textarea.value}` to `/slide-source`. The DOM has
+  already normalized assigned CRLF to LF before `textarea.value` is read, so
+  there is no TypeScript line-ending or edge-blank normalizer to copy from the
+  server's ASCII-blank-only body rule.
 - During the request the textarea is `readOnly` and Cmd/Ctrl+Enter/Escape are
   swallowed. Success requires string `key` and `body` response fields and
   returns that server body byte-for-byte; a missing or non-string field is a
   failed response. 409/422/500 JSON and thrown fetches keep the draft, unlock,
-  refocus, and return the displayed message.
-- In a focused contract row, type a value whose TypeScript normalization is
-  `"# Typed"`, mock `{"key":"renamed","body":"# Server canonical"}`, and
-  assert `saved.body === "# Server canonical"`, not `"# Typed"`.
+  refocus, and return the displayed message. The shared preview HTTP helper
+  keeps `/slide-edit`'s existing fallback and gives this path `slide source save
+  failed (HTTP <status>)` when no string JSON `error` exists.
+- In a focused contract row, submit a draft, mock
+  `{"key":"renamed","body":"# Server canonical"}`, and assert
+  `saved.body === "# Server canonical"`, not the submitted draft.
 - Cancel, unchanged close, successful close, and `destroy` remove every local
-  listener/node and restore the host's prior `hidden` value.
+  listener and the textarea. A later `commit()` returns `closed` and never
+  fetches, so a discarded or already-saved draft cannot write through a stale
+  handle.
 
 **Implementation (Green).** Export these concrete boundaries:
 
@@ -1109,6 +1118,7 @@ export type PreviewSourceEditFrame = {
 export type PreviewSourceEditCommitResult =
   | { status: "saved"; previousKey: string; key: string; body: string }
   | { status: "unchanged"; key: string; body: string }
+  | { status: "closed" }
   | { status: "failed"; message: string };
 
 export type PreviewSourceEdit = {
@@ -1123,7 +1133,6 @@ export function openPreviewSourceEdit(options: {
   document: Document;
   fetcher: typeof fetch;
   tile: HTMLElement;
-  host: HTMLElement;
   key: string;
   body: string;
   onCommitRequest(): void;
@@ -1131,26 +1140,18 @@ export function openPreviewSourceEdit(options: {
 }): PreviewSourceEdit;
 ```
 
-Use the internal LF/edge-blank normalization function only for the
-unchanged-without-POST comparison. Send the textarea's current value as `new`.
-For an unchanged result return the existing `old` body; for a saved result use
-`response.body` verbatim and never the TypeScript-normalized draft. Serialize
-concurrent commits through one stored promise. The module does not know preview
-mode, navigation, notes, reloads, manifests, or session storage.
-
-```ts
-function normalizeSourceBody(value: string): string {
-  const lines = value.replace(/\r\n?/g, "\n").split("\n");
-  while (lines[0]?.trim() === "") lines.shift();
-  while (lines.at(-1)?.trim() === "") lines.pop();
-  return lines.join("\n");
-}
-```
+Compare the textarea value and existing body byte-for-byte for the
+unchanged-without-POST shortcut, and send the textarea's current value as
+`new` for every difference. For an unchanged result return the existing `old`
+body; for a saved result use `response.body` verbatim. Serialize concurrent
+commits through one stored promise, but check the closed state first. The
+module does not know preview mode, navigation, notes, slide-host visibility,
+reloads, manifests, or session storage.
 
 **Verification.**
 
 ```sh
-cd packages/peitho-present && npm test -- test/previewSourceEdit.test.ts
+cd packages/peitho-present && npm test -- test/previewSourceEdit.test.ts test/preview.test.ts
 cd packages/peitho-present && npm run typecheck
 ```
 
@@ -1170,18 +1171,20 @@ after a derived-key save without mutating stale manifest/note identity.
 is ignored in grid, while a transition settles, and while either edit kind is
 open; it opens only the current single-mode slide; source-open blocks inline-
 click start and an inline edit blocks source-open; the textarea replaces the
-fitted stage and resize updates its frame; Escape restores the stale rendered
-host. Using the recorded deck-wide bare-CR refusal as the
+fitted stage and resize updates its frame; Escape closes the editor and a
+controller layout pass restores the current rendered host without revealing a
+non-current host. Using the recorded deck-wide bare-CR refusal as the
 `sources.unavailable` fixture, assert that no editor opens and the
 `slide-source` status channel shows that recorded reason, including its
-actionable help. For a first draft whose
-TypeScript-normalized text is `"# Typed"`, return
+actionable help. For a first draft `"# Typed"`, return
 `{key:"renamed",body:"# Server canonical"}`. Assert the map moves from the old
 key to `renamed`, stores the response body verbatim, the source target uses
 `renamed`, and a second `e` opens with `"# Server canonical"`. Change that
 second draft, save again, and assert the second POST carries `key:"renamed"`
-and `old:"# Server canonical"`, not the first draft or its TypeScript-normalized
-form. Notes still use the manifest's old key until a successful rebuild.
+and `old:"# Server canonical"`, not the first draft. Notes still use the
+manifest's old key until a successful rebuild. A `closed` result means the
+editor was already torn down, not that this commit newly found an unchanged
+body, so the controller does not repeat close or release work.
 
 **Implementation (Green).** Replace `activeSlideEdit` with exactly one closed
 state and one generic predicate:
@@ -1208,12 +1211,15 @@ Otherwise it obtains `sources.sources[view.sourceKey]` and delegates to
 `openPreviewSourceEdit`. On keyed success, delete the old map entry, write
 `sources.sources[result.key] = result.body`, and set
 `view.sourceKey = result.key`; `result.body` is the unmodified server response,
-not a locally normalized draft. Deliberately leave `view.meta.key`, the notes
-map, and rendered HTML unchanged. Add `"slide-source"` to `PanelStatusSource`
+Deliberately leave `view.meta.key`, the notes map, and rendered HTML unchanged.
+Add `"slide-source"` to `PanelStatusSource`
 and its stable display order after notes and inline edit. In
 `applySingleLayout`, keep the active source view's host hidden and call
 `edit.setFrame` with the fitted slide's left/top and scaled width/height;
-ordinary active slides continue through `applyHostFrame` unchanged.
+ordinary active slides continue through `applyHostFrame` unchanged. Run a
+layout pass after the source editor closes so the current host reappears while
+non-current hosts stay hidden; the controller owns this visibility and the
+source-editor module never reads or writes `host.hidden`.
 
 **Verification.**
 
@@ -1310,8 +1316,8 @@ the shared TypeScript graph.
 source edit, repeats an in-flight normal save as unload insurance, sends
 `keepalive:true` when the UTF-8 encoded JSON request is at most 60,000 bytes,
 and sends `keepalive:false` above that threshold. Assert this path uses the
-server-returned `old` and the textarea value verbatim as `new`; normalization
-only decides whether the edit is clean. Clean, cancelled, and absent source
+server-returned `old` and the textarea value verbatim as `new`; byte equality
+alone decides whether the edit is clean. Clean, cancelled, and absent source
 edits make no source POST. Assert controller `destroy` removes its
 source-request, textarea key/blur, resize, pagehide, and tile listeners, while
 the existing bootstrap cleanup still removes keyboard and sync listeners.
