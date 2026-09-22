@@ -779,6 +779,8 @@ var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 var SOURCE_EDIT_HINT = "Cmd/Ctrl+Enter or click away saves \xB7 Enter inserts a newline \xB7 Esc cancels";
 var RESTORE_DRAFT_HINT = "Draft discarded \xB7 Press u to restore";
+var EDIT_AFFORDANCE_HINT = "Click text to edit \xB7 e for Markdown \xB7 notes below";
+var EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit \xB7 notes below";
 var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "BLOCKQUOTE",
@@ -1025,6 +1027,7 @@ var PreviewShellController = class {
   mode = DEFAULT_PREVIEW_MODE;
   generation = 0;
   firstLayoutDone = false;
+  destroyed = false;
   root;
   fetcher;
   win;
@@ -1292,6 +1295,7 @@ var PreviewShellController = class {
     this.writeState(state);
   }
   destroy() {
+    this.destroyed = true;
     this.advanceTransitionSequence();
     this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
@@ -1857,7 +1861,9 @@ var PreviewShellController = class {
     const combined = ["notes", "slide-edit", "slide-source"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
     this.notesStatus.textContent = combined;
     const restorable = this.restorableDraft();
-    const hint = restorable !== null ? RESTORE_DRAFT_HINT : this.activeEdit?.kind === "source" && combined === "" ? SOURCE_EDIT_HINT : "";
+    const currentSlide = this.slides[this.currentIndex];
+    const editAffordance = currentSlide !== void 0 && this.sources.unavailable[currentSlide.sourceKey] !== void 0 ? EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT : EDIT_AFFORDANCE_HINT;
+    const hint = this.destroyed ? "" : restorable !== null ? RESTORE_DRAFT_HINT : this.activeEdit?.kind === "source" && combined === "" ? SOURCE_EDIT_HINT : this.activeEdit === null && combined === "" ? editAffordance : "";
     this.sourceEditHint.textContent = hint;
     this.sourceEditHint.hidden = hint === "";
     const failed = combined !== "";
@@ -1872,6 +1878,7 @@ var PreviewShellController = class {
     const slide = this.slides[this.currentIndex];
     const key = slide?.meta.key ?? null;
     this.notesPositionText.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    this.renderPanelStatus();
     if (this.notesTextareaKey !== key) {
       this.notesTextareaKey = key;
       this.notesTextarea.value = key === null ? "" : this.notes.notes[key] ?? "";

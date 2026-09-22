@@ -103,6 +103,10 @@ const slideSources: SlideSources = {
   unavailable: {}
 };
 const cssText = ".slot-title { color: red; }";
+const EDIT_AFFORDANCE_TEXT = "Click text to edit · e for Markdown · notes below";
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT = "Click text to edit · notes below";
+const SOURCE_EDIT_HINT_TEXT =
+  "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
 const RESTORE_OFFER_TEXT = "Draft discarded · Press u to restore";
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
@@ -2887,8 +2891,10 @@ it("hides the speaker notes panel in grid mode", async () => {
   });
   shells.push(shell);
   const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
   expect(shell.mode).toBe("grid");
   expect(panel.hidden).toBe(true);
+  expect(status.textContent).toBe("");
 
   bus.dispatchEvent(new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } }));
   expect(panel.hidden).toBe(false);
@@ -3334,13 +3340,89 @@ it("source_edit_success_clears_a_prior_save_failure", async () => {
   expect(status.textContent).toBe("");
 });
 
+it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const panel = root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!;
+
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(status.textContent).toBe("");
+  expect(status.style.background).toBe("");
+  expect(panel.style.borderTop).toBe("1px solid rgba(255, 255, 255, 0.16)");
+  // CSSOM serializes the neutral #15181e background as rgb().
+  expect(panel.style.background).toBe("rgb(21, 24, 30)");
+
+  const editor = openSourceEditor(root, bus);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(SOURCE_EDIT_HINT_TEXT);
+  expect(status.textContent).toBe("");
+
+  editor.value = "# Discarded source draft";
+  press(editor, "Escape");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
+  expect(status.textContent).toBe("");
+
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  note.value = "Note that will fail";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  fixture.resolveNotesPost(errorJson(500, "note save failed"));
+  await vi.waitFor(() => expect(status.textContent).toBe("note save failed"));
+
+  expect(hint.hidden).toBe(true);
+  expect(hint.textContent).toBe("");
+});
+
+it("omits_only_the_Markdown_shortcut_when_the_current_slide_source_is_unavailable", async () => {
+  const fixture = sourceEditFetchFixture({
+    version: 1,
+    sources: { middle: "# Middle", end: "# End" },
+    unavailable: { intro: "bare CR line endings are not supported by preview editing" }
+  });
+  const { root } = await mountInlineEditForTest({ fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT);
+  expect(status.textContent).toBe("");
+});
+
+it("rederives_the_edit_affordance_when_navigation_changes_source_availability", async () => {
+  const fixture = sourceEditFetchFixture({
+    version: 1,
+    sources: { intro: "# Intro", end: "# End" },
+    unavailable: { middle: "bare CR line endings are not supported by preview editing" }
+  });
+  const { root, shell } = await mountInlineEditForTest({ fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+
+  expect(shell.currentIndex).toBe(0);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+
+  shell.navigate("next");
+  expect(shell.currentIndex).toBe(1);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT);
+
+  shell.navigate("next");
+  expect(shell.currentIndex).toBe(2);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+});
+
 it("source_edit_shows_key_hint_and_dark_styling_and_an_error_replaces_the_hint", async () => {
   const bus = new EventTarget();
   const fixture = sourceEditFetchFixture();
   const { root } = await mountInlineEditForTest({ bus, fixture });
   const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
   const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
-  expect(hint.hidden).toBe(true);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(status.textContent).toBe("");
 
   const editor = openSourceEditor(root, bus);
 
@@ -3365,7 +3447,7 @@ it("source_edit_shows_key_hint_and_dark_styling_and_an_error_replaces_the_hint",
   expect(hint.hidden).toBe(true);
 });
 
-it("source_edit_hint_disappears_when_the_editor_closes", async () => {
+it("source_edit_hint_returns_to_the_affordance_when_the_editor_closes", async () => {
   const bus = new EventTarget();
   const fixture = sourceEditFetchFixture();
   const { root } = await mountInlineEditForTest({ bus, fixture });
@@ -3376,8 +3458,8 @@ it("source_edit_hint_disappears_when_the_editor_closes", async () => {
   press(editor, "Escape");
 
   await vi.waitFor(() => expect(editor.isConnected).toBe(false));
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
 });
 
 it("dirty_source_escape_offers_and_restores_the_exact_draft_once", async () => {
@@ -3571,7 +3653,7 @@ it("restore_request_cannot_open_an_editor_while_a_transition_is_settling", async
   expect(root.querySelector('[data-peitho-preview="source"]')).not.toBeNull();
 });
 
-it("clean_escape_offers_nothing_for_either_editor", async () => {
+it("clean_escape_offers_no_restore_and_returns_to_the_affordance", async () => {
   const bus = new EventTarget();
   const fixture = sourceEditFetchFixture();
   const { root } = await mountInlineEditForTest({ bus, fixture });
@@ -3579,17 +3661,19 @@ it("clean_escape_offers_nothing_for_either_editor", async () => {
 
   const source = openSourceEditor(root, bus);
   press(source, "Escape");
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
 
   const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
     "#editable-paragraph"
   )!;
   dispatchShadowClick(paragraph);
-  press(paragraph, "Escape");
-  expect(paragraph.hasAttribute("contenteditable")).toBe(false);
   expect(hint.hidden).toBe(true);
   expect(hint.textContent).toBe("");
+  press(paragraph, "Escape");
+  expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
   expect(fixture.sourceEditPosts()).toHaveLength(0);
   expect(fixture.slideEditPosts()).toHaveLength(0);
 });
@@ -3671,7 +3755,8 @@ it("slide_and_mode_changes_drop_the_restore_offer", async () => {
   expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
   shell.navigate("next");
   expect(shell.currentIndex).toBe(1);
-  expect(hint.hidden).toBe(true);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
   shell.navigate("prev");
   expect(press(window, "u").defaultPrevented).toBe(false);
   expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
@@ -3684,11 +3769,15 @@ it("slide_and_mode_changes_drop_the_restore_offer", async () => {
     new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } })
   );
   expect(shell.mode).toBe("grid");
-  expect(hint.hidden).toBe(true);
+  expect(
+    root.querySelector<HTMLElement>('[data-peitho-preview="notes"]')!.hidden
+  ).toBe(true);
   bus.dispatchEvent(
     new CustomEvent("peitho:overviewrequest", { detail: { action: "toggle" } })
   );
   expect(shell.mode).toBe("single");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
   expect(press(window, "u").defaultPrevented).toBe(false);
   expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
 });
@@ -3710,8 +3799,8 @@ it("activate_selection_rerenders_after_dropping_a_same_position_restore_offer", 
   );
 
   expect(document.activeElement).toBe(note);
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
 });
 
 it("generation_reload_drops_the_restore_offer", async () => {
@@ -3730,8 +3819,8 @@ it("generation_reload_drops_the_restore_offer", async () => {
   channel.onmessage?.({ data: { generation: shell.generation + 1 } });
 
   expect(reload).toHaveBeenCalledTimes(1);
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
   expect(press(window, "u").defaultPrevented).toBe(false);
   expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
 });

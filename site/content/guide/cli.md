@@ -40,7 +40,10 @@ It watches the deck, its referenced images, and its assets, serves locally,
 and reloads while preserving the current slide and overview state. The
 single-slide view keeps a filmstrip of thumbnails on the left and shows the
 current slide's speaker notes in an editable panel below the slide, headed by
-the slide's position (`3 / 25`); the overview grid shows neither. See
+the slide's position (`3 / 25`); the overview grid shows neither. The position
+row names click-to-edit, `e` for Markdown, and notes below when no editor is
+open, nothing has failed, and no restore offer is showing; it omits `e` when
+Markdown editing is unavailable for that slide. See
 [Editing speaker notes in preview](#editing-speaker-notes-in-preview); text on
 the slide itself can be fixed in place too — see
 [Editing slide text in preview](#editing-slide-text-in-preview), or

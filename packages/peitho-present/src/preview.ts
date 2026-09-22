@@ -163,6 +163,8 @@ const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 const SOURCE_EDIT_HINT =
   "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
 const RESTORE_DRAFT_HINT = "Draft discarded · Press u to restore";
+const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · notes below";
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · notes below";
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
@@ -477,6 +479,7 @@ class PreviewShellController implements PreviewShell {
   mode: PreviewMode = DEFAULT_PREVIEW_MODE;
   generation = 0;
   private firstLayoutDone = false;
+  private destroyed = false;
   private readonly root: HTMLElement;
   private readonly fetcher: typeof fetch;
   private readonly win: Window;
@@ -767,6 +770,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.advanceTransitionSequence();
     this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
@@ -1430,12 +1434,22 @@ class PreviewShellController implements PreviewShell {
     // The restore hint and request handler share restorableDraft(), so a hidden
     // offer cannot remain keyboard-active.
     const restorable = this.restorableDraft();
+    const currentSlide = this.slides[this.currentIndex];
+    const editAffordance =
+      currentSlide !== undefined &&
+      this.sources.unavailable[currentSlide.sourceKey] !== undefined
+        ? EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT
+        : EDIT_AFFORDANCE_HINT;
     const hint =
-      restorable !== null
-        ? RESTORE_DRAFT_HINT
-        : this.activeEdit?.kind === "source" && combined === ""
-          ? SOURCE_EDIT_HINT
-          : "";
+      this.destroyed
+        ? ""
+        : restorable !== null
+          ? RESTORE_DRAFT_HINT
+          : this.activeEdit?.kind === "source" && combined === ""
+            ? SOURCE_EDIT_HINT
+            : this.activeEdit === null && combined === ""
+              ? editAffordance
+              : "";
     this.sourceEditHint.textContent = hint;
     this.sourceEditHint.hidden = hint === "";
     const failed = combined !== "";
@@ -1453,6 +1467,9 @@ class PreviewShellController implements PreviewShell {
     const slide = this.slides[this.currentIndex];
     const key = slide?.meta.key ?? null;
     this.notesPositionText.textContent = `${this.currentIndex + 1} / ${this.slides.length}`;
+    // Source availability is slide-specific; keep the hint in its sole derivation point
+    // while rendering it whenever the panel's current slide is rendered.
+    this.renderPanelStatus();
     if (this.notesTextareaKey !== key) {
       this.notesTextareaKey = key;
       this.notesTextarea.value = key === null ? "" : (this.notes.notes[key] ?? "");
