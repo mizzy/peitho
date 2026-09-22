@@ -78,12 +78,16 @@ to its saving state:
 
 With no editor open, an editable source uses the full affordance:
 
-    Click text to edit · e for Markdown · notes below
+    Click text to edit · e for Markdown · Enter for notes
 
 When whole-slide Markdown editing is unavailable, only that entry point is
 removed:
 
-    Click text to edit · notes below
+    Click text to edit · Enter for notes
+
+Every available entry point is named by its key or action, keeping the
+keyboard-only loop discoverable: Enter reaches notes, `e` reaches the Markdown
+editor, and a click reaches an inline block.
 
 ## State and exhaustiveness
 

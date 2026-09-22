@@ -176,8 +176,12 @@ const NOTES_EDIT_HINT = "Esc or click away saves · Enter inserts a newline";
 /** A locked editor swallows its own keys, so the slot must not keep promising them. */
 const SAVING_HINT = "Saving…";
 const RESTORE_DRAFT_HINT = "Draft discarded · Press u to restore";
-const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · notes below";
-const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · notes below";
+/**
+ * Every available editor entry point names its key or action; Enter reaches the
+ * notes textarea through activateSelection.
+ */
+const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · Enter for notes";
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · Enter for notes";
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",

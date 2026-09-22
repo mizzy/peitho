@@ -782,8 +782,8 @@ var INLINE_EDIT_HINT = "Enter or click away saves \xB7 Shift+Enter inserts a new
 var NOTES_EDIT_HINT = "Esc or click away saves \xB7 Enter inserts a newline";
 var SAVING_HINT = "Saving\u2026";
 var RESTORE_DRAFT_HINT = "Draft discarded \xB7 Press u to restore";
-var EDIT_AFFORDANCE_HINT = "Click text to edit \xB7 e for Markdown \xB7 notes below";
-var EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit \xB7 notes below";
+var EDIT_AFFORDANCE_HINT = "Click text to edit \xB7 e for Markdown \xB7 Enter for notes";
+var EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit \xB7 Enter for notes";
 var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "BLOCKQUOTE",

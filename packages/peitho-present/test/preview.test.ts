@@ -103,8 +103,8 @@ const slideSources: SlideSources = {
   unavailable: {}
 };
 const cssText = ".slot-title { color: red; }";
-const EDIT_AFFORDANCE_TEXT = "Click text to edit · e for Markdown · notes below";
-const EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT = "Click text to edit · notes below";
+const EDIT_AFFORDANCE_TEXT = "Click text to edit · e for Markdown · Enter for notes";
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT = "Click text to edit · Enter for notes";
 const SOURCE_EDIT_HINT_TEXT =
   "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
 const INLINE_EDIT_HINT_TEXT =
@@ -3414,6 +3414,26 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   expect(status.style.color).toBe("rgb(254, 226, 226)");
   expect(panel.style.borderTop).toBe("3px solid rgb(239, 68, 68)");
   expect(panel.style.background).toBe("rgb(36, 20, 22)");
+});
+
+it("affordance_names_enter_because_enter_focuses_the_notes_textarea", async () => {
+  const bus = new EventTarget();
+  const { root, shell } = await mountInlineEditForTest({ bus });
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(shell.mode).toBe("single");
+  expect(document.activeElement).not.toBe(note);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+
+  const enter = press(window, "Enter");
+
+  expect(enter.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(note);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
 });
 
 it("restore_offer_yields_to_notes_focus_because_u_cannot_reach_it", async () => {
