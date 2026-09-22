@@ -118,7 +118,12 @@ type ActiveSlideEdit = {
 
 type ActiveEdit =
   | { kind: "inline"; edit: ActiveSlideEdit }
-  | { kind: "source"; edit: PreviewSourceEdit; view: PreviewSlideView };
+  | {
+      kind: "source";
+      edit: PreviewSourceEdit;
+      view: PreviewSlideView;
+      commitPromise: Promise<boolean> | null;
+    };
 
 const PREVIEW_STATE_KEY = "peitho:preview-state";
 const DEFAULT_PREVIEW_MODE: PreviewMode = "grid";
@@ -843,28 +848,24 @@ class PreviewShellController implements PreviewShell {
       tile: view.tile,
       key: view.sourceKey,
       body,
-      onCommitRequest: () => this.commitSourceEdit(edit),
+      onCommitRequest: () => this.commitActiveEditAndRelease(),
       onCancelRequest: () => this.cancelSourceEdit(edit)
     });
-    this.activeEdit = { kind: "source", edit, view };
+    this.activeEdit = { kind: "source", edit, view, commitPromise: null };
     this.setSlideSourceStatus("");
     this.applyLayout();
-  }
-
-  private commitSourceEdit(edit: PreviewSourceEdit): void {
-    void edit.commit().then((result) => this.finishSourceEditCommit(edit, result));
   }
 
   private finishSourceEditCommit(
     edit: PreviewSourceEdit,
     result: PreviewSourceEditCommitResult
-  ): void {
-    if (result.status === "closed") return;
+  ): boolean {
     const active = this.activeEdit;
-    if (active?.kind !== "source" || active.edit !== edit) return;
+    if (active?.kind !== "source" || active.edit !== edit) return false;
+    if (result.status === "closed") return true;
     if (result.status === "failed") {
       this.setSlideSourceStatus(result.message);
-      return;
+      return false;
     }
     if (result.status === "saved") {
       delete this.sources.sources[result.previousKey];
@@ -873,8 +874,8 @@ class PreviewShellController implements PreviewShell {
     }
     this.activeEdit = null;
     this.setSlideSourceStatus("");
-    this.applyLayout();
-    if (this.pendingTransitionSettlements === 0) this.releaseDeferredReload();
+    if (this.pendingTransitionSettlements === 0) this.applyLayout();
+    return true;
   }
 
   private cancelSourceEdit(edit: PreviewSourceEdit): void {
@@ -949,7 +950,7 @@ class PreviewShellController implements PreviewShell {
       this.handleSlideEditKeyDown(edit, keyboardEvent);
     };
     const onBlur = (): void => {
-      this.commitSlideEditAndRelease();
+      this.commitActiveEditAndRelease();
     };
     edit = {
       key: slide.key,
@@ -1003,7 +1004,7 @@ class PreviewShellController implements PreviewShell {
         edit.trailingNewlineSentinel;
       return;
     }
-    this.commitSlideEditAndRelease();
+    this.commitActiveEditAndRelease();
   }
 
   private cancelSlideEdit(edit: ActiveSlideEdit): void {
@@ -1020,18 +1021,28 @@ class PreviewShellController implements PreviewShell {
     return true;
   }
 
-  private commitSlideEditAndRelease(): void {
-    void this.settleActiveEdit().then((committed) => {
+  private commitActiveEditAndRelease(): void {
+    void this.commitActiveEdit().then((committed) => {
       if (committed && this.pendingTransitionSettlements === 0) {
         this.releaseDeferredReload();
       }
     });
   }
 
-  private settleActiveEdit(): Promise<boolean> {
+  private commitActiveEdit(): Promise<boolean> {
     const active = this.activeEdit;
     if (active === null) return Promise.resolve(true);
-    if (active.kind === "source") return Promise.resolve(false);
+    if (active.kind === "source") {
+      if (active.commitPromise !== null) return active.commitPromise;
+      const commit = active.edit
+        .commit()
+        .then((result) => this.finishSourceEditCommit(active.edit, result))
+        .finally(() => {
+          active.commitPromise = null;
+        });
+      active.commitPromise = commit;
+      return commit;
+    }
     const edit = active.edit;
     if (edit.commitPromise !== null) return edit.commitPromise;
     const newText = this.slideEditText(edit);
@@ -1370,6 +1381,14 @@ class PreviewShellController implements PreviewShell {
       this.exitGrid();
       return;
     }
+    if (this.isEditOpen()) {
+      this.commitTransition(this.currentIndex, "single", () => this.focusNotes());
+      return;
+    }
+    this.focusNotes();
+  }
+
+  private focusNotes(): void {
     const length = this.notesTextarea.value.length;
     this.notesTextarea.setSelectionRange(length, length);
     this.notesTextarea.focus();
@@ -1380,9 +1399,20 @@ class PreviewShellController implements PreviewShell {
     this.commitTransition(index, this.mode);
   }
 
-  private commitTransition(index: number, mode: PreviewMode): void {
+  private commitTransition(
+    index: number,
+    mode: PreviewMode,
+    afterCommit?: () => void
+  ): void {
     index = this.clampIndex(index);
-    if (index === this.currentIndex && index === this.selectedIndex && mode === this.mode) return;
+    if (
+      afterCommit === undefined &&
+      index === this.currentIndex &&
+      index === this.selectedIndex &&
+      mode === this.mode
+    ) {
+      return;
+    }
     const sequence = ++this.transitionSequence;
     const needsFlush =
       (mode === "grid" && this.mode === "single") ||
@@ -1400,6 +1430,7 @@ class PreviewShellController implements PreviewShell {
       this.applyLayout();
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
       this.saveState();
+      afterCommit?.();
     };
 
     if (!this.isEditOpen() && (!needsFlush || this.notesSettled())) {
@@ -1426,7 +1457,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   private async settleForTransition(sequence: number): Promise<boolean> {
-    if (!(await this.settleActiveEdit())) return false;
+    if (!(await this.commitActiveEdit())) return false;
     if (sequence !== this.transitionSequence) return false;
     while (!this.notesSettled()) {
       if (!(await this.flushNotes())) return false;

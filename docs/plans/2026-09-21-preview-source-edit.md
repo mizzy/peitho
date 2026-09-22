@@ -1167,7 +1167,7 @@ after a derived-key save without mutating stale manifest/note identity.
 
 **Test (Red).** Add
 `source_edit_request_obeys_single_mode_and_one_edit_union` and
-`source_edit_success_uses_server_identity_for_the_next_save`. Prove the request
+`source_edit_derived_key_can_recover_after_build_failure`. Prove the request
 is ignored in grid, while a transition settles, and while either edit kind is
 open; it opens only the current single-mode slide; source-open blocks inline-
 click start and an inline edit blocks source-open; the textarea replaces the
@@ -1228,7 +1228,7 @@ textarea, draft, and deferred reload untouched.
 
 ```sh
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_request_obeys_single_mode_and_one_edit_union'
-cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_success_uses_server_identity_for_the_next_save'
+cd packages/peitho-present && npm test -- test/preview.test.ts -t 'source_edit_derived_key_can_recover_after_build_failure'
 ! rg -n 'activeSlideEdit' packages/peitho-present/src/preview.ts
 test "$(rg -n 'private isEditOpen\(' packages/peitho-present/src/preview.ts | wc -l | tr -d ' ')" -eq 1
 ```
