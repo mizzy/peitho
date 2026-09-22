@@ -8,6 +8,7 @@ use crate::{
     notes_edit::{
         canonical_comment, is_ascii_blank_line, last_nonblank_line_end, normalized_note_text,
         remove_comment_spans, restore_bom, source_line_ending, spans_match_source, strip_bom,
+        RemovalShapeContext,
     },
     parser::{parse_frontmatter, parse_markdown},
     phase::{Deck, Parsed, ParsedSlide},
@@ -57,11 +58,24 @@ impl SlideSources {
     ///
     /// An `unavailable` value is the refusal's `Display` text
     /// (`message\n  = help: …`). These extraction refusals have no line number.
-    pub fn from_slides(source: &str, slides: &[ParsedSlide]) -> Self {
+    pub fn from_slides(source: &str, slides: &[ParsedSlide], highlighter: &Highlighter) -> Self {
         let mut sources = BTreeMap::new();
         let mut unavailable = BTreeMap::new();
+        let parsed = parse_source(source, highlighter);
         for slide in slides {
-            match slide_body(source, slide) {
+            let body = match &parsed {
+                Ok(parsed) => parsed
+                    .parsed_slides()
+                    .iter()
+                    .find(|fresh| fresh.source_span == slide.source_span)
+                    .ok_or_else(slide_body_span_refusal)
+                    .and_then(|fresh| slide_body_with_shape(source, slide, fresh, highlighter)),
+                Err(error) => {
+                    unavailable.insert(slide.key.clone(), error.to_string());
+                    continue;
+                }
+            };
+            match body {
                 Ok(body) => {
                     sources.insert(slide.key.clone(), body);
                 }
@@ -94,7 +108,22 @@ pub fn slide_sources_json(sources: &SlideSources) -> Result<String> {
 /// Leading and trailing blank lines are removed, and line endings are
 /// normalized to LF. A parse error is returned when the deck uses bare CR line
 /// endings or the slide's recorded spans do not match `source`.
-pub fn slide_body(source: &str, slide: &ParsedSlide) -> Result<String> {
+pub fn slide_body(source: &str, slide: &ParsedSlide, highlighter: &Highlighter) -> Result<String> {
+    let parsed = parse_source(source, highlighter)?;
+    let fresh = parsed
+        .parsed_slides()
+        .iter()
+        .find(|fresh| fresh.source_span == slide.source_span)
+        .ok_or_else(slide_body_span_refusal)?;
+    slide_body_with_shape(source, slide, fresh, highlighter)
+}
+
+fn slide_body_with_shape(
+    source: &str,
+    slide: &ParsedSlide,
+    fresh: &ParsedSlide,
+    highlighter: &Highlighter,
+) -> Result<String> {
     let (source, _) = strip_bom(source);
     refuse_bare_cr(source)?;
     if !spans_match_source(
@@ -114,7 +143,8 @@ pub fn slide_body(source: &str, slide: &ParsedSlide) -> Result<String> {
     let mut spans = slide.note_spans.clone();
     spans.extend(slide.settings_span);
 
-    let (body_source, removed_bytes) = remove_comment_spans(source, &spans);
+    let (body_source, removed_bytes) =
+        remove_comment_spans(source, &spans, RemovalShapeContext::new(fresh, highlighter));
     let body = &body_source[slide.source_span.start..slide.source_span.end - removed_bytes];
     Ok(normalize_body(body))
 }
@@ -199,6 +229,7 @@ pub fn rewrite_slide_body(
         &after,
         target_index,
         &normalized_body,
+        highlighter,
     )?;
 
     Ok(SlideBodyRewrite {
@@ -220,6 +251,7 @@ fn validate_reparsed_slide_body(
     after: &Deck<Parsed>,
     target_index: usize,
     expected_body: &str,
+    highlighter: &Highlighter,
 ) -> Result<(SlideKey, String)> {
     let before_slides = before.parsed_slides();
     let after_slides = after.parsed_slides();
@@ -266,12 +298,21 @@ fn validate_reparsed_slide_body(
             "slide body edit would change the edited slide's settings comment",
         ));
     }
-    let body = slide_body(after_source, after_target)?;
+    let body = slide_body_with_shape(after_source, after_target, after_target, highlighter)?;
     if body != expected_body {
         return Err(round_trip_refusal());
     }
 
     Ok((after_target.key.clone(), body))
+}
+
+fn slide_body_span_refusal() -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        None,
+        "slide body spans do not match the deck source",
+        "reload the preview and retry",
+    )
 }
 
 fn edge_blank_runs(source: &str, slide: SourceSpan) -> Result<(Range<usize>, Range<usize>)> {
@@ -459,7 +500,7 @@ mod tests {
         domain::{SlideKey, SourceSpan},
         error::{BuildError, ErrorKind},
         highlight::Highlighter,
-        notes_edit::strip_bom,
+        notes_edit::{rewrite_note, strip_bom},
     };
     use std::{fs, path::Path};
     use ts_rs::{Config, TS};
@@ -546,7 +587,11 @@ mod tests {
             let target = &deck.parsed_slides()[0];
             let body = format!("{whitespace}\n# Title\n\nBody");
 
-            assert_eq!(slide_body(&source, target).unwrap(), body, "{name}: body");
+            assert_eq!(
+                slide_body(&source, target, &highlighter).unwrap(),
+                body,
+                "{name}: body"
+            );
             let rewritten = rewrite_slide_body(&source, target, &body, &highlighter).unwrap();
             assert_eq!(rewritten.source, source, "{name}: identity source");
 
@@ -996,22 +1041,24 @@ mod tests {
                     "the Markdown parser reads the saved text differently from what was typed, typically because of an unclosed code fence or HTML block; close it and retry",
                 ),
             },
-            // The split adds a slide; the comment swallows the next, preserving count before sections.
+            // Two splits replace the original slides; the fence swallows their source,
+            // preserving count before sections.
             Case {
                 name: "sections",
                 source: "<!-- {\"section\":\"One\",\"time\":\"1m\"} -->\n# A\n\n---\n\n<!-- {\"section\":\"Two\",\"time\":\"1m\"} -->\n# B\n\n---\n\n# C\n",
                 slide_index: 0,
-                body: "# A\n\n---\n\n<!--",
+                body: "# A\n\n---\n\n# B\n\n---\n\n# C\n\n```",
                 expected_message: "slide body edit would change the deck's sections",
                 expected_line: None,
                 expected_help: None,
             },
-            // The split adds a slide; the comment swallows the next, preserving count before notes.
+            // Two splits replace the original slides; the fence swallows their source,
+            // preserving count before notes.
             Case {
                 name: "another-slide-notes",
                 source: "# A\n\n---\n\n<!-- note -->\n# B\n\n---\n\n# C\n",
                 slide_index: 0,
-                body: "# A\n\n---\n\n<!--",
+                body: "# A\n\n---\n\n# B\n\n---\n\n# C\n\n```",
                 expected_message: "slide body edit would change another slide's notes",
                 expected_line: None,
                 expected_help: None,
@@ -1293,7 +1340,8 @@ mod tests {
             let before = parse_source(source, &highlighter).unwrap();
 
             for target_index in 0..before.parsed_slides().len() {
-                let body = slide_body(source, &before.parsed_slides()[target_index]).unwrap();
+                let body = slide_body(source, &before.parsed_slides()[target_index], &highlighter)
+                    .unwrap();
                 let first = rewrite_slide_body(
                     source,
                     &before.parsed_slides()[target_index],
@@ -1366,8 +1414,8 @@ mod tests {
                         "{case}/{target_index}/{slide_index}: step count"
                     );
                     assert_eq!(
-                        slide_body(&first.source, after_slide).unwrap(),
-                        slide_body(source, before_slide).unwrap(),
+                        slide_body(&first.source, after_slide, &highlighter).unwrap(),
+                        slide_body(source, before_slide, &highlighter).unwrap(),
                         "{case}/{target_index}/{slide_index}: body"
                     );
                 }
@@ -1379,7 +1427,7 @@ mod tests {
                 );
                 assert_eq!(
                     first.body,
-                    slide_body(&first.source, target_after).unwrap(),
+                    slide_body(&first.source, target_after, &highlighter).unwrap(),
                     "{case}/{target_index}: result body"
                 );
                 let second =
@@ -1442,7 +1490,10 @@ mod tests {
             let target = &deck.parsed_slides()[slide_index];
 
             for (operation, error) in [
-                ("slide-body", slide_body(source, target).unwrap_err()),
+                (
+                    "slide-body",
+                    slide_body(source, target, &highlighter).unwrap_err(),
+                ),
                 (
                     "rewrite",
                     rewrite_slide_body(source, target, new_body, &highlighter).unwrap_err(),
@@ -1470,7 +1521,7 @@ mod tests {
         let deck = parse_source(source, &highlighter).unwrap();
         let target = &deck.parsed_slides()[0];
 
-        assert_eq!(slide_body(source, target).unwrap(), body);
+        assert_eq!(slide_body(source, target, &highlighter).unwrap(), body);
     }
 
     #[test]
@@ -1481,7 +1532,7 @@ mod tests {
         let target = &deck.parsed_slides()[0];
 
         assert_eq!(
-            slide_body(source, target).unwrap(),
+            slide_body(source, target, &highlighter).unwrap(),
             "\u{3000}\n# Title\n\u{3000}"
         );
     }
@@ -1533,6 +1584,7 @@ mod tests {
             &after,
             0,
             "# Title",
+            &highlighter,
         )
         .unwrap_err();
 
@@ -1742,8 +1794,79 @@ mod tests {
 
             assert_eq!(settings, expected_settings, "{name}: settings span");
             assert_eq!(slide.note_spans.len(), note_count, "{name}: note spans");
-            assert_eq!(slide_body(source, slide).unwrap(), expected, "{name}: body");
+            assert_eq!(
+                slide_body(source, slide, &highlighter).unwrap(),
+                expected,
+                "{name}: body"
+            );
         }
+    }
+
+    #[test]
+    fn slide_body_and_rewrite_note_agree_on_tight_list_removal() {
+        let source = "# T\n\n- item\n  <!-- note -->\n- next\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let slide = &deck.parsed_slides()[0];
+
+        assert_eq!(
+            slide_body(source, slide, &highlighter).unwrap(),
+            "# T\n\n- item\n- next"
+        );
+        assert_eq!(
+            rewrite_note(
+                source,
+                slide.source_span,
+                &slide.note_spans,
+                "edited",
+                &highlighter,
+            )
+            .unwrap(),
+            "# T\n\n- item\n- next\n\n<!-- edited -->\n"
+        );
+    }
+
+    #[test]
+    fn later_slide_body_uses_its_own_shape_context() {
+        let source = "# A\n\npara\n\n<!-- first note -->\n\n---\n\n# B\n\n- x\n  <!-- second note -->\n- y\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let slide = &deck.parsed_slides()[1];
+        let expected = "# B\n\n- x\n- y";
+
+        assert_eq!(slide_body(source, slide, &highlighter).unwrap(), expected);
+
+        let sources = SlideSources::from_slides(source, deck.parsed_slides(), &highlighter);
+        assert_eq!(
+            sources.sources.get(&slide.key).map(String::as_str),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn slide_body_keeps_blank_residue_when_neither_removal_preserves_shape() {
+        let source = "# T\n\ntext\n> <!-- note -->\nmore\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+
+        assert_eq!(
+            slide_body(source, &deck.parsed_slides()[0], &highlighter).unwrap(),
+            "# T\n\ntext\n>\nmore"
+        );
+    }
+
+    #[test]
+    fn no_op_slide_body_save_keeps_tight_list_on_disk() {
+        let source = "# T\n\n- item\n  <!-- note -->\n- next\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let slide = &deck.parsed_slides()[0];
+        let body = slide_body(source, slide, &highlighter).unwrap();
+
+        let rewritten = rewrite_slide_body(source, slide, &body, &highlighter).unwrap();
+
+        assert_eq!(body, "# T\n\n- item\n- next");
+        assert_eq!(rewritten.source, "# T\n\n- item\n- next\n\n<!-- note -->\n");
     }
 
     #[test]
@@ -1797,7 +1920,7 @@ mod tests {
                 settings_lf_slide,
             ),
         ] {
-            let error = slide_body(source, candidate).unwrap_err();
+            let error = slide_body(source, candidate, &highlighter).unwrap_err();
 
             assert_eq!(error.kind, ErrorKind::Parse, "{name}: kind");
             assert_eq!(error.line, None, "{name}: line");
@@ -1812,8 +1935,9 @@ mod tests {
     #[test]
     fn slide_sources_json_uses_slide_body_for_every_editable_surviving_slide() {
         let source = "<!-- {\"key\":\"intro\"} -->\n# Title\n\nBody\n\n<!-- first note -->\n\n<!-- second note -->\n";
-        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
-        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides(), &highlighter);
 
         assert_eq!(
             slide_sources_json(&sources).unwrap(),
@@ -1824,8 +1948,9 @@ mod tests {
     #[test]
     fn slide_sources_include_skipped_slides_and_exclude_drafts() {
         let source = "<!-- {\"key\":\"intro\"} -->\n# Intro\n\n---\n\n<!-- {\"key\":\"draft\",\"draft\":true} -->\n# Draft\n\n---\n\n<!-- {\"key\":\"skipped\",\"skip\":true} -->\n# Skipped\n";
-        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
-        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides(), &highlighter);
 
         assert_eq!(
             sources
@@ -1841,8 +1966,9 @@ mod tests {
     #[test]
     fn slide_sources_record_every_slide_as_unavailable_for_bare_cr_deck() {
         let source = "<!-- {\"key\":\"first\"} -->\n# First\n\nBody\rTail\n\n---\n\n<!-- {\"key\":\"second\"} -->\n# Second\n";
-        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
-        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
+        let sources = SlideSources::from_slides(source, deck.parsed_slides(), &highlighter);
         let expected_reason = "bare CR line endings are not supported by preview editing\n  = help: convert the deck to LF or CRLF line endings, then reload the preview";
 
         assert!(sources.sources.is_empty());
@@ -1859,16 +1985,17 @@ mod tests {
     #[test]
     fn slide_sources_partition_genuine_and_foreign_slides_exactly_once() {
         let source = "<!-- {\"key\":\"genuine\"} -->\n# Genuine\n";
-        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
         let foreign_source =
             "<!-- {\"key\":\"foreign\"} -->\n# Foreign\n\nBody that extends beyond the genuine source\n";
-        let foreign_deck = parse_source(foreign_source, &Highlighter::defaults()).unwrap();
+        let foreign_deck = parse_source(foreign_source, &highlighter).unwrap();
         let slides = vec![
             deck.parsed_slides()[0].clone(),
             foreign_deck.parsed_slides()[0].clone(),
         ];
 
-        let sources = SlideSources::from_slides(source, &slides);
+        let sources = SlideSources::from_slides(source, &slides, &highlighter);
         let genuine = SlideKey::new("genuine").unwrap();
         let foreign = SlideKey::new("foreign").unwrap();
 
@@ -1894,12 +2021,13 @@ mod tests {
     fn slide_sources_include_issue_584_slide_with_measured_body() {
         let source =
             "<!-- {\"key\":\"issue-584\"} -->\n# Accepted\n\n<!-- first --> <!-- second -->\n";
-        let deck = parse_source(source, &Highlighter::defaults()).unwrap();
+        let highlighter = Highlighter::defaults();
+        let deck = parse_source(source, &highlighter).unwrap();
         let slide = &deck.parsed_slides()[0];
-        let body = slide_body(source, slide).unwrap();
+        let body = slide_body(source, slide, &highlighter).unwrap();
         assert_eq!(body.as_bytes(), b"# Accepted");
 
-        let sources = SlideSources::from_slides(source, deck.parsed_slides());
+        let sources = SlideSources::from_slides(source, deck.parsed_slides(), &highlighter);
         assert_eq!(sources.sources.get(&slide.key), Some(&body));
         assert!(sources.unavailable.is_empty());
     }
