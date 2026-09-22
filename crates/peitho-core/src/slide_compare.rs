@@ -1,6 +1,29 @@
 //! Shared comparisons for parsed slides across source-edit paths.
 
-use crate::phase::ParsedSlide;
+use crate::{
+    domain::{FragmentKind, SourceFragment},
+    parser::{is_html_only_container, same_block_skeleton},
+    phase::ParsedSlide,
+};
+
+#[derive(Clone, Copy)]
+pub(crate) enum HtmlBlockComparison {
+    Include,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FragmentShapeComparison {
+    Equal,
+    FragmentKindsDiffer,
+    BlockSkeletonsDiffer,
+}
+
+impl FragmentShapeComparison {
+    pub(crate) fn is_equal(self) -> bool {
+        self == Self::Equal
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlideDifference {
@@ -87,9 +110,102 @@ pub(crate) fn target_key_change_allowed(before: &ParsedSlide, after: &ParsedSlid
     before.key == after.key || (before.key_source.is_derived() && after.key_source.is_derived())
 }
 
+pub(crate) fn compare_fragment_shape(
+    before: &[SourceFragment],
+    after: &[SourceFragment],
+    html_blocks: HtmlBlockComparison,
+) -> FragmentShapeComparison {
+    let mut block_skeletons_match = true;
+    if !same_fragment_kinds(before, after, &mut block_skeletons_match, html_blocks) {
+        FragmentShapeComparison::FragmentKindsDiffer
+    } else if block_skeletons_match {
+        FragmentShapeComparison::Equal
+    } else {
+        FragmentShapeComparison::BlockSkeletonsDiffer
+    }
+}
+
+fn same_fragment_kinds(
+    before: &[SourceFragment],
+    after: &[SourceFragment],
+    block_skeletons_match: &mut bool,
+    html_blocks: HtmlBlockComparison,
+) -> bool {
+    let keep = |fragment: &&SourceFragment| {
+        matches!(html_blocks, HtmlBlockComparison::Include)
+            || !is_html_only_container(fragment.markdown())
+    };
+    let mut before = before.iter().filter(&keep);
+    let mut after = after.iter().filter(keep);
+    loop {
+        match (before.next(), after.next()) {
+            (Some(before), Some(after)) => {
+                if !same_fragment_kind(before, after, block_skeletons_match, html_blocks) {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            (Some(_), None) | (None, Some(_)) => return false,
+        }
+    }
+}
+
+fn same_fragment_kind(
+    before: &SourceFragment,
+    after: &SourceFragment,
+    block_skeletons_match: &mut bool,
+    html_blocks: HtmlBlockComparison,
+) -> bool {
+    let source_skeleton_matches = match (before.source_span(), after.source_span()) {
+        (Some(_), Some(_)) => same_block_skeleton(
+            before.markdown(),
+            after.markdown(),
+            matches!(html_blocks, HtmlBlockComparison::Ignore),
+        ),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    };
+    *block_skeletons_match &= source_skeleton_matches;
+
+    if std::mem::discriminant(before.kind()) != std::mem::discriminant(after.kind()) {
+        return false;
+    }
+
+    match before.kind() {
+        FragmentKind::Heading { level } => {
+            matches!(after.kind(), FragmentKind::Heading { level: other } if level == other)
+        }
+        FragmentKind::SlotGroup { name, children } => {
+            let FragmentKind::SlotGroup {
+                name: after_name,
+                children: after_children,
+            } = after.kind()
+            else {
+                return false;
+            };
+            name == after_name
+                && same_fragment_kinds(children, after_children, block_skeletons_match, html_blocks)
+        }
+        FragmentKind::Paragraph
+        | FragmentKind::Text
+        | FragmentKind::Code
+        | FragmentKind::Math { .. }
+        | FragmentKind::EmbedCard { .. }
+        | FragmentKind::GenericEmbedCard { .. }
+        | FragmentKind::Footnotes { .. }
+        | FragmentKind::Image { .. }
+        | FragmentKind::List
+        | FragmentKind::Blockquote
+        | FragmentKind::Table => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compare_except_key, SlideDifference};
+    use super::{
+        compare_except_key, compare_fragment_shape, FragmentShapeComparison, HtmlBlockComparison,
+        SlideDifference,
+    };
     use crate::{
         highlight::Highlighter,
         parser::{parse_frontmatter, parse_markdown},
@@ -116,6 +232,33 @@ mod tests {
         assert_eq!(
             compare_except_key(&before.parsed_slides()[0], &after.parsed_slides()[0]),
             Err(SlideDifference::Notes)
+        );
+    }
+
+    #[test]
+    fn fragment_shape_includes_block_skeleton_equality() {
+        let highlighter = Highlighter::defaults();
+        let tight_source = "# T\n\n- a\n- b\n";
+        let loose_source = "# T\n\n- a\n\n- b\n";
+        let tight = parse_markdown(
+            tight_source,
+            parse_frontmatter(tight_source).unwrap(),
+            &highlighter,
+        )
+        .unwrap();
+        let loose = parse_markdown(
+            loose_source,
+            parse_frontmatter(loose_source).unwrap(),
+            &highlighter,
+        )
+        .unwrap();
+        assert_eq!(
+            compare_fragment_shape(
+                &tight.parsed_slides()[0].fragments,
+                &loose.parsed_slides()[0].fragments,
+                HtmlBlockComparison::Include,
+            ),
+            FragmentShapeComparison::BlockSkeletonsDiffer
         );
     }
 }

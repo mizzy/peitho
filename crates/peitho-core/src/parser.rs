@@ -20,6 +20,7 @@ use crate::{
     emphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
+    notes_edit::is_ascii_blank_line,
     phase::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
         PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
@@ -29,6 +30,8 @@ use crate::{
         BODY_MARKDOWN_OPTIONS,
     },
 };
+
+const NOTE_SEPARATOR: &str = "\n\n";
 
 /// Page settings comment, deck-style:
 /// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true,"page_number":false} -->`.
@@ -716,7 +719,11 @@ fn split_slide_ranges(source: &str, content_start: usize) -> Result<Vec<SourceSp
     });
     let ranges = ranges
         .into_iter()
-        .filter(|range| !source[range.start..range.end].trim().is_empty())
+        .filter(|range| {
+            !source[range.start..range.end]
+                .lines()
+                .all(is_ascii_blank_line)
+        })
         .collect();
     Ok(ranges)
 }
@@ -3029,7 +3036,7 @@ fn parse_slide(
     let notes = if note_fragments.is_empty() {
         None
     } else {
-        Some(note_fragments.join("\n\n"))
+        Some(note_fragments.join(NOTE_SEPARATOR))
     };
 
     Ok(PendingSlide {
@@ -3330,11 +3337,25 @@ fn process_html_chunk(
         }
         return Ok(());
     }
-    if is_html_comment(raw) {
-        if let Some(text) = extract_html_comment_body(raw) {
-            notes.push((text, span));
+    match extract_html_comment_bodies(raw) {
+        HtmlCommentBodies::Comments(text) => {
+            if !text.is_empty() {
+                notes.push((text, span));
+            }
+            return Ok(());
         }
-        return Ok(());
+        HtmlCommentBodies::Mixed => {
+            // Refuse rather than silently discard visible text as note syntax.
+            let mut err = unsupported_construct(line, "html");
+            err.help = "put speaker-note comments in a comment-only block, separate from slide text, and close each comment before starting another".to_owned();
+            return Err(attach_slide_context(
+                err,
+                index,
+                explicit_key_ctx.as_ref(),
+                fragments,
+            ));
+        }
+        HtmlCommentBodies::NotComments => {}
     }
     if !raw.trim().is_empty() {
         let err = unsupported_construct(line, "html");
@@ -3346,6 +3367,49 @@ fn process_html_chunk(
         ));
     }
     Ok(())
+}
+
+enum HtmlCommentBodies {
+    NotComments,
+    Comments(String),
+    Mixed,
+}
+
+fn extract_html_comment_bodies(raw: &str) -> HtmlCommentBodies {
+    let Some(first_start) = raw.find("<!--") else {
+        return HtmlCommentBodies::NotComments;
+    };
+    if !raw[first_start..].contains("-->") {
+        return HtmlCommentBodies::NotComments;
+    }
+
+    let mut remaining = raw;
+    let mut bodies = Vec::new();
+
+    loop {
+        let Some(start) = remaining.find("<!--") else {
+            if !is_ascii_blank_line(remaining) {
+                return HtmlCommentBodies::Mixed;
+            }
+            break;
+        };
+        if !is_ascii_blank_line(&remaining[..start]) {
+            return HtmlCommentBodies::Mixed;
+        }
+        let comment = &remaining[start..];
+        let Some(end) = comment.find("-->").map(|end| end + 3) else {
+            return HtmlCommentBodies::Mixed;
+        };
+        if let Some(body) = extract_html_comment_body(&comment[..end]) {
+            if body.contains("<!--") || body.contains("-->") {
+                return HtmlCommentBodies::Mixed;
+            }
+            bodies.push(body);
+        }
+        remaining = &comment[end..];
+    }
+
+    HtmlCommentBodies::Comments(bodies.join(NOTE_SEPARATOR))
 }
 
 /// Extract the inner text of an HTML comment (between `<!--` and `-->`).
@@ -3555,11 +3619,6 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
     }))
 }
 
-fn is_html_comment(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    trimmed.starts_with("<!--") && trimmed.ends_with("-->")
-}
-
 /// Returns the 1-based line containing the byte at `offset`.
 ///
 /// `offset` must be within `source` and on a UTF-8 character boundary; slicing panics otherwise.
@@ -3688,8 +3747,38 @@ fn blocks(markdown: &str) -> impl Iterator<Item = Event<'_>> {
     Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).filter(is_block_event)
 }
 
-pub(crate) fn same_block_skeleton(before: &str, after: &str) -> bool {
-    blocks(before).eq(blocks(after))
+pub(crate) fn is_html_only_container(markdown: &str) -> bool {
+    let mut saw_html = false;
+    let only_container_events =
+        Parser::new_ext(markdown, BODY_MARKDOWN_OPTIONS).all(|event| match event {
+            Event::Start(Tag::HtmlBlock)
+            | Event::End(TagEnd::HtmlBlock)
+            | Event::Html(_)
+            | Event::InlineHtml(_) => {
+                saw_html = true;
+                true
+            }
+            Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item | Tag::Paragraph)
+            | Event::End(
+                TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item | TagEnd::Paragraph,
+            )
+            | Event::SoftBreak
+            | Event::HardBreak => true,
+            Event::Text(text) => is_ascii_blank_line(&text),
+            _ => false,
+        });
+    saw_html && only_container_events
+}
+
+pub(crate) fn same_block_skeleton(before: &str, after: &str, ignore_html_blocks: bool) -> bool {
+    let keep = |event: &Event<'_>| {
+        !ignore_html_blocks
+            || !matches!(
+                event,
+                Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock)
+            )
+    };
+    blocks(before).filter(&keep).eq(blocks(after).filter(keep))
 }
 
 /// Includes a leading backslash that pulldown-cmark excludes from its first
@@ -6917,6 +7006,19 @@ After list
     }
 
     #[test]
+    fn unterminated_html_comment_remains_unsupported_html() {
+        let err = parse_markdown(
+            "# T\n\n<!-- unfinished\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unsupported construct 'html'"));
+    }
+
+    #[test]
     fn collects_speaker_note_from_html_comment() {
         let deck = parse_markdown(
             "# Title\n\n<!-- speaker note body -->",
@@ -6940,6 +7042,73 @@ After list
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.notes.as_deref(), Some("first note\n\nsecond note"));
+    }
+
+    #[test]
+    fn joins_same_line_html_comment_bodies_without_delimiters() {
+        let deck = parse_markdown(
+            "# T\n\n<!-- a --> <!-- b -->\n<!-- note -->",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.notes.as_deref(), Some("a\n\nb\n\nnote"));
+        assert!(!slide.notes.as_deref().unwrap().contains("<!--"));
+        assert!(!slide.notes.as_deref().unwrap().contains("-->"));
+    }
+
+    #[test]
+    fn rejects_text_between_complete_html_comments_as_unsupported_content() {
+        for source in [
+            "# T\n\n<!-- a --> mid <!-- b -->\n",
+            "# T\n\n<!-- a -->x<!-- b -->\n",
+        ] {
+            let err =
+                parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(3));
+            assert!(err.to_string().contains("unsupported construct 'html'"));
+            assert_eq!(
+                err.help,
+                "put speaker-note comments in a comment-only block, separate from slide text, and close each comment before starting another"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_trailing_nonblank_bytes_after_complete_html_comment() {
+        let err = parse_markdown(
+            "# T\n\n<!-- a --> trailing -->\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unsupported construct 'html'"));
+        assert_eq!(
+            err.help,
+            "put speaker-note comments in a comment-only block, separate from slide text, and close each comment before starting another"
+        );
+    }
+
+    #[test]
+    fn rejects_nested_comment_opener_before_it_reaches_note_text() {
+        let err = parse_markdown(
+            "# T\n\n<!-- a <!-- b -->\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert!(err.to_string().contains("unsupported construct 'html'"));
+        assert_eq!(
+            err.help,
+            "put speaker-note comments in a comment-only block, separate from slide text, and close each comment before starting another"
+        );
     }
 
     #[test]
@@ -6978,6 +7147,19 @@ After list
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.key.as_str(), "cover");
         assert_eq!(slide.notes.as_deref(), Some("this is a note"));
+    }
+
+    #[test]
+    fn page_settings_comment_and_note_on_same_line_remains_invalid() {
+        let err = parse_markdown(
+            "<!-- {\"key\":\"cover\"} --> <!-- note -->\n# Title",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert!(err.message.starts_with("invalid page settings comment:"));
     }
 
     #[test]
@@ -7988,6 +8170,71 @@ After list
         assert_eq!(slides[1].index, 1);
         assert_eq!(slides[1].key.as_str(), "two");
         assert_eq!(slides[1].fragments[0].line(), 5);
+    }
+
+    #[test]
+    fn ideographic_space_slide_keeps_later_slide_index_and_key() {
+        let deck = parse_markdown(
+            "# One\n\n---\n\n\u{3000}\n\n---\n\n# Three\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[2].index, 2);
+        assert_eq!(slides[2].key.as_str(), "three");
+    }
+
+    #[test]
+    fn non_breaking_space_slide_keeps_later_slide_index_and_key() {
+        let deck = parse_markdown(
+            "# One\n\n---\n\n\u{00a0}\n\n---\n\n# Three\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[2].index, 2);
+        assert_eq!(slides[2].key.as_str(), "three");
+    }
+
+    #[test]
+    fn ascii_blank_range_is_dropped_while_unicode_space_range_is_kept() {
+        let deck = parse_markdown(
+            "# One\r\n\r\n---\r\n\r\n\u{3000}\r\n\r\n---\r\n \t\r\n\t \r\n---\r\n\r\n# Four\r\n",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(slides.len(), 3);
+        assert_eq!(slides[0].key.as_str(), "one");
+        assert_eq!(slides[1].key.as_str(), "slide-2");
+        assert_eq!(slides[2].index, 2);
+        assert_eq!(slides[2].key.as_str(), "four");
+    }
+
+    #[test]
+    fn ideographic_space_only_deck_reaches_layout_slot_check() {
+        let parsed =
+            parse_markdown("\u{3000}\n", &crate::highlight::Highlighter::defaults()).unwrap();
+        let layout = crate::layout::parse_layout(
+            "title-body-code",
+            include_str!("../../../layouts/title-body-code.html"),
+        )
+        .unwrap();
+        let mapped = crate::mapping::map_by_convention(parsed, &layout).unwrap();
+
+        let err = crate::check::check_deck(mapped).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Arity);
+        assert_eq!(
+            err.message,
+            "slot 'title' got 0 item(s), but layout 'title-body-code' allows 1"
+        );
+        assert_eq!(err.help, "add a heading for the title slot");
     }
 
     #[test]

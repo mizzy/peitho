@@ -8,7 +8,10 @@ use crate::{
         is_page_settings_body, line_for_offset, page_settings_comment_body, parse_frontmatter,
         parse_markdown,
     },
-    slide_compare::{compare_all, compare_except_notes},
+    phase::{Deck, Parsed, ParsedSlide},
+    slide_compare::{
+        compare_all, compare_except_notes, compare_fragment_shape, HtmlBlockComparison,
+    },
 };
 use std::ops::Range;
 
@@ -26,6 +29,26 @@ struct LineContext {
     end: usize,
     terminator: Option<Range<usize>>,
     whole_line: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RemovalShapeContext<'a> {
+    before: &'a ParsedSlide,
+    highlighter: &'a Highlighter,
+}
+
+impl<'a> RemovalShapeContext<'a> {
+    pub(crate) fn new(before: &'a ParsedSlide, highlighter: &'a Highlighter) -> Self {
+        Self {
+            before,
+            highlighter,
+        }
+    }
+}
+
+enum PreservationFailure {
+    FragmentShape,
+    Other,
 }
 
 /// Returns the full source after a validated speaker-note rewrite for one slide.
@@ -81,18 +104,42 @@ pub fn rewrite_note(
         return Ok(restore_bom(source.to_owned(), had_bom));
     }
 
-    let candidate = splice_note(source, slide, notes, text);
+    let Some(before) = parse_source(source, highlighter) else {
+        return Err(rewrite_refusal(error_line));
+    };
+    let Some(before_target) = before
+        .parsed_slides()
+        .iter()
+        .find(|candidate| candidate.source_span.start == slide.start)
+    else {
+        return Err(rewrite_refusal(error_line));
+    };
+    let removal_context = RemovalShapeContext::new(before_target, highlighter);
+    let candidate = splice_note(source, slide, notes, text, removal_context);
     let expected_text = normalized_note_text(text);
-    if !preserves_deck(source, &candidate, slide, &expected_text, highlighter) {
-        return Err(BuildError::new(
-            ErrorKind::Parse,
-            error_line,
-            "speaker note cannot be written at this position",
-            "the rewritten deck would not parse back to the same slides; edit the note in the deck file",
-        ));
+    match preserves_deck(&before, &candidate, slide, &expected_text, highlighter) {
+        Ok(()) => {}
+        Err(PreservationFailure::FragmentShape) => {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                error_line,
+                "speaker note rewrite would change the edited slide's fragment shape",
+                "move the note comment in the deck file, then reload the preview and retry",
+            ));
+        }
+        Err(PreservationFailure::Other) => return Err(rewrite_refusal(error_line)),
     }
 
     Ok(restore_bom(candidate, had_bom))
+}
+
+fn rewrite_refusal(line: Option<usize>) -> BuildError {
+    BuildError::new(
+        ErrorKind::Parse,
+        line,
+        "speaker note cannot be written at this position",
+        "the rewritten deck would not parse back to the same slides; edit the note in the deck file",
+    )
 }
 
 pub(crate) fn spans_match_source(
@@ -178,21 +225,32 @@ pub(crate) fn restore_bom(source: String, had_bom: bool) -> String {
 }
 
 /// Span order does not matter; spans must be disjoint.
-pub(crate) fn remove_comment_spans(source: &str, spans: &[SourceSpan]) -> (String, usize) {
+pub(crate) fn remove_comment_spans(
+    source: &str,
+    spans: &[SourceSpan],
+    context: RemovalShapeContext<'_>,
+) -> (String, usize) {
     let mut spans = spans.to_vec();
     spans.sort_by_key(|span| span.start);
     let mut rewritten = source.to_owned();
     let mut removed_bytes = 0;
     for span in spans.iter().rev() {
         let line = line_context(source, *span);
-        let (range, replacement) = removal_edit(&rewritten, *span, &line);
+        let edit = removal_edit(&rewritten, *span, &line);
+        let (range, replacement) = shape_preserving_removal_edit(&rewritten, &line, edit, context);
         removed_bytes += range.end - range.start - replacement.len();
         rewritten.replace_range(range, &replacement);
     }
     (rewritten, removed_bytes)
 }
 
-fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str) -> String {
+fn splice_note(
+    source: &str,
+    slide: SourceSpan,
+    notes: &[SourceSpan],
+    text: &str,
+    removal_context: RemovalShapeContext<'_>,
+) -> String {
     if notes.is_empty() {
         let line_ending = append_line_ending(source, slide);
         let comment = canonical_comment(text, line_ending);
@@ -213,7 +271,7 @@ fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str
         });
 
     if let Some(mut replacement) = in_place_comment {
-        let (mut rewritten, _) = remove_comment_spans(source, &notes[1..]);
+        let (mut rewritten, _) = remove_comment_spans(source, &notes[1..], removal_context);
         if let Some(terminator) = &first_line.terminator {
             replacement.push_str(&source[terminator.clone()]);
         }
@@ -221,7 +279,7 @@ fn splice_note(source: &str, slide: SourceSpan, notes: &[SourceSpan], text: &str
         return rewritten;
     }
 
-    let (rewritten, removed_bytes) = remove_comment_spans(source, notes);
+    let (rewritten, removed_bytes) = remove_comment_spans(source, notes, removal_context);
     if !text.is_empty() {
         let adjusted_slide = SourceSpan {
             start: slide.start,
@@ -281,56 +339,73 @@ pub(crate) fn canonical_comment(text: &str, line_ending: &str) -> String {
 }
 
 fn preserves_deck(
-    source: &str,
+    before: &Deck<Parsed>,
     candidate: &str,
     slide: SourceSpan,
     expected_text: &str,
     highlighter: &Highlighter,
-) -> bool {
-    let parse = |source: &str| {
-        let frontmatter = parse_frontmatter(source).ok()?;
-        parse_markdown(source, frontmatter, highlighter).ok()
-    };
-    let (Some(before), Some(after)) = (parse(source), parse(candidate)) else {
-        return false;
+) -> std::result::Result<(), PreservationFailure> {
+    let Some(after) = parse_source(candidate, highlighter) else {
+        return Err(PreservationFailure::Other);
     };
     let before_slides = before.parsed_slides();
     let after_slides = after.parsed_slides();
     if before_slides.len() != after_slides.len()
         || before.settings().sections() != after.settings().sections()
     {
-        return false;
+        return Err(PreservationFailure::Other);
     }
 
     let Some(before_target) = before_slides
         .iter()
         .position(|candidate| candidate.source_span.start == slide.start)
     else {
-        return false;
+        return Err(PreservationFailure::Other);
     };
     let Some(after_target) = after_slides
         .iter()
         .position(|candidate| candidate.source_span.start == slide.start)
     else {
-        return false;
+        return Err(PreservationFailure::Other);
     };
     if before_target != after_target {
-        return false;
+        return Err(PreservationFailure::Other);
     }
 
     for (index, (before, after)) in before_slides.iter().zip(after_slides).enumerate() {
-        let matches = if index == before_target {
-            compare_except_notes(before, after).is_ok()
-        } else {
-            compare_all(before, after).is_ok()
-        };
-        if !matches {
-            return false;
+        if index == before_target {
+            if compare_except_notes(before, after).is_err() {
+                return Err(PreservationFailure::Other);
+            }
+            if !fragment_shape_matches(before, after) {
+                return Err(PreservationFailure::FragmentShape);
+            }
+        } else if compare_all(before, after).is_err() {
+            return Err(PreservationFailure::Other);
         }
     }
 
-    after_slides[after_target].notes.as_deref()
-        == (!expected_text.is_empty()).then_some(expected_text)
+    if after_slides[after_target].notes.as_deref()
+        != (!expected_text.is_empty()).then_some(expected_text)
+    {
+        return Err(PreservationFailure::Other);
+    }
+
+    Ok(())
+}
+
+fn parse_source(source: &str, highlighter: &Highlighter) -> Option<Deck<Parsed>> {
+    let frontmatter = parse_frontmatter(source).ok()?;
+    parse_markdown(source, frontmatter, highlighter).ok()
+}
+
+fn fragment_shape_matches(before: &ParsedSlide, after: &ParsedSlide) -> bool {
+    compare_fragment_shape(
+        &before.fragments,
+        &after.fragments,
+        HtmlBlockComparison::Ignore,
+    )
+    .is_equal()
 }
 
 fn line_context(source: &str, span: SourceSpan) -> LineContext {
@@ -402,6 +477,45 @@ fn removal_edit(source: &str, span: SourceSpan, line: &LineContext) -> (Range<us
         ),
         _ => (line.start..line.end, String::new()),
     }
+}
+
+fn shape_preserving_removal_edit(
+    source: &str,
+    line: &LineContext,
+    current: (Range<usize>, String),
+    context: RemovalShapeContext<'_>,
+) -> (Range<usize>, String) {
+    if !line.whole_line || current.1.is_empty() {
+        return current;
+    }
+
+    if removal_preserves_fragment_shape(source, &current, context) {
+        return current;
+    }
+
+    let deletion = (line.start..line.end, String::new());
+    if removal_preserves_fragment_shape(source, &deletion, context) {
+        deletion
+    } else {
+        current
+    }
+}
+
+fn removal_preserves_fragment_shape(
+    source: &str,
+    edit: &(Range<usize>, String),
+    context: RemovalShapeContext<'_>,
+) -> bool {
+    let mut candidate = source.to_owned();
+    candidate.replace_range(edit.0.clone(), &edit.1);
+    let Some(after) = parse_source(&candidate, context.highlighter) else {
+        return false;
+    };
+    after
+        .parsed_slides()
+        .iter()
+        .find(|after| after.source_span.start == context.before.source_span.start)
+        .is_some_and(|after| fragment_shape_matches(context.before, after))
 }
 
 fn line_has_nonblank_neighbors(source: &str, line: &LineContext) -> bool {
@@ -583,7 +697,11 @@ mod tests {
         let mut spans = deck.parsed_slides()[0].note_spans.clone();
         spans.reverse();
 
-        let (rewritten, removed_bytes) = remove_comment_spans(source, &spans);
+        let (rewritten, removed_bytes) = remove_comment_spans(
+            source,
+            &spans,
+            RemovalShapeContext::new(&deck.parsed_slides()[0], &highlighter),
+        );
 
         assert_eq!(rewritten, "# T\n\nBody\n");
         assert_eq!(removed_bytes, source.len() - rewritten.len());
@@ -620,6 +738,69 @@ mod tests {
         .unwrap();
 
         assert_eq!(rewritten, "> para\n>\n> more\n");
+    }
+
+    #[test]
+    fn rewrite_note_keeps_list_tight_when_relocating_indented_note() {
+        let source = "# T\n\n- item\n  <!-- note -->\n- next\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+        let slide = &deck.parsed_slides()[0];
+
+        let rewritten = rewrite_note(
+            source,
+            slide.source_span,
+            &slide.note_spans,
+            "edited",
+            &highlighter,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten, "# T\n\n- item\n- next\n\n<!-- edited -->\n");
+    }
+
+    #[test]
+    fn rewrite_note_keeps_paragraphs_separate_when_relocating_note() {
+        let source = "# T\n\npara1\n <!-- note -->\npara2\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+        let slide = &deck.parsed_slides()[0];
+
+        let rewritten = rewrite_note(
+            source,
+            slide.source_span,
+            &slide.note_spans,
+            "edited",
+            &highlighter,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten, "# T\n\npara1\n\npara2\n\n<!-- edited -->\n");
+    }
+
+    #[test]
+    fn rewrite_note_refuses_when_no_removal_preserves_fragment_shape() {
+        let source = "# T\n\ntext\n> <!-- note -->\nmore\n";
+        let highlighter = Highlighter::defaults();
+        let deck = parse(source, &highlighter);
+        let slide = &deck.parsed_slides()[0];
+
+        let error = rewrite_note(
+            source,
+            slide.source_span,
+            &slide.note_spans,
+            "edited",
+            &highlighter,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Parse);
+        assert_eq!(error.line, Some(4));
+        assert_eq!(
+            error.message,
+            "speaker note rewrite would change the edited slide's fragment shape"
+        );
+        assert!(!error.help.is_empty());
     }
 
     #[test]

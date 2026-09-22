@@ -1876,7 +1876,11 @@ where
         &embeds_cache_dir(input),
     ))?;
     let slide_sources_json = core(peitho_core::slide_sources_json(
-        &peitho_core::SlideSources::from_slides(&loaded.source, parsed.parsed_slides()),
+        &peitho_core::SlideSources::from_slides(
+            &loaded.source,
+            parsed.parsed_slides(),
+            &highlighter,
+        ),
     ))?;
     let mapped = loaded.translate(peitho_core::dispatch_by_convention(parsed, &layouts))?;
     let checked = loaded.translate(peitho_core::check_deck(mapped))?;
@@ -2308,6 +2312,7 @@ fn write_preview_slide_source(
         .translate(peitho_core::slide_source::slide_body(
             combined_source,
             slide,
+            &highlighter,
         ))
         .map_err(preview_deck_unprocessable)?;
     if current_body != old {
@@ -6401,6 +6406,24 @@ contexts:
             "# Replacement",
         ));
         assert_eq!(fs::read_to_string(&deck).unwrap(), source);
+    }
+
+    #[test]
+    fn write_preview_slide_source_keeps_note_separated_list_tight_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let body = "# T\n\n- item\n- next";
+        fs::write(&deck, "# T\n\n- item\n  <!-- note -->\n- next\n").unwrap();
+
+        let (key, saved_body) =
+            write_preview_slide_source(&deck, &SlideKey::new("t").unwrap(), body, body).unwrap();
+
+        assert_eq!(key.as_str(), "t");
+        assert_eq!(saved_body, body);
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "# T\n\n- item\n- next\n\n<!-- note -->\n"
+        );
     }
 
     #[test]
@@ -12295,6 +12318,35 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         assert!(unavailable_generation
             .join("slides/001-second.html")
             .is_file());
+    }
+
+    #[test]
+    fn preview_notes_json_omits_same_line_comment_delimiters() {
+        let fixture = WatchFixture::new("# T\n\n<!-- a --> <!-- b -->\n<!-- note -->\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let cache = fixture._dir.path().join(".peitho/preview-cache");
+
+        let generation_dir = emit_preview_cache_generation(&cache, 0, &artifacts).unwrap();
+        let notes = fs::read_to_string(generation_dir.join("notes.json")).unwrap();
+
+        assert!(!notes.contains("-->"), "{notes}");
+    }
+
+    #[test]
+    fn preview_rejects_mixed_comment_text_before_writing_notes_json() {
+        for source in [
+            "# T\n\n<!-- a --> mid <!-- b -->\n",
+            "# T\n\n<!-- a -->x<!-- b -->\n",
+            "# T\n\n<!-- a --> trailing -->\n",
+        ] {
+            let fixture = WatchFixture::new(source);
+            let error = match build_artifacts(&fixture.options.input) {
+                Ok(_) => panic!("mixed comment text must not build"),
+                Err(error) => error,
+            };
+
+            assert!(plain_diagnostic_text(&error).contains("unsupported construct 'html'"));
+        }
     }
 
     #[test]

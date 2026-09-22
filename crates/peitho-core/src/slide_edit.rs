@@ -1,13 +1,16 @@
 //! Pure source rewriting for one parser-authorized slide block.
 
 use crate::{
-    domain::{EditableBlockKind, EditableSpan, FragmentKind, SourceFragment},
+    domain::{EditableBlockKind, EditableSpan},
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     notes_edit::{normalized_note_text, restore_bom, strip_bom},
-    parser::{line_for_offset, parse_frontmatter, parse_markdown, same_block_skeleton},
+    parser::{line_for_offset, parse_frontmatter, parse_markdown},
     phase::{Deck, Parsed, ParsedSlide},
-    slide_compare::{compare_all, compare_except_key, target_key_change_allowed},
+    slide_compare::{
+        compare_all, compare_except_key, compare_fragment_shape, target_key_change_allowed,
+        FragmentShapeComparison, HtmlBlockComparison,
+    },
 };
 
 const STRUCTURAL_EDIT_HELP: &str =
@@ -185,12 +188,12 @@ fn compare_target_slide_for_block_edit(
             ),
         ));
     }
-    let mut block_skeletons_match = true;
-    if !same_fragment_shape(
+    let fragment_shape = compare_fragment_shape(
         &before.fragments,
         &after.fragments,
-        &mut block_skeletons_match,
-    ) {
+        HtmlBlockComparison::Include,
+    );
+    if fragment_shape == FragmentShapeComparison::FragmentKindsDiffer {
         return Err(refusal(
             None,
             "inline edit would change the edited slide's block structure",
@@ -213,7 +216,7 @@ fn compare_target_slide_for_block_edit(
             "inline edit would change the edited slide's editable block kinds",
         ));
     }
-    if !block_skeletons_match {
+    if fragment_shape == FragmentShapeComparison::BlockSkeletonsDiffer {
         return Err(refusal(
             None,
             "inline edit would change the edited slide's block structure",
@@ -285,63 +288,6 @@ fn compare_editable_block_text(
 
 fn trim_ascii_horizontal(value: &str) -> &str {
     value.trim_matches(|character| matches!(character, ' ' | '\t'))
-}
-
-fn same_fragment_shape(
-    before: &[SourceFragment],
-    after: &[SourceFragment],
-    block_skeletons_match: &mut bool,
-) -> bool {
-    before.len() == after.len()
-        && before
-            .iter()
-            .zip(after)
-            .all(|(before, after)| same_fragment_kind(before, after, block_skeletons_match))
-}
-
-fn same_fragment_kind(
-    before: &SourceFragment,
-    after: &SourceFragment,
-    block_skeletons_match: &mut bool,
-) -> bool {
-    let source_skeleton_matches = match (before.source_span(), after.source_span()) {
-        (Some(_), Some(_)) => same_block_skeleton(before.markdown(), after.markdown()),
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-    };
-    *block_skeletons_match &= source_skeleton_matches;
-
-    if std::mem::discriminant(before.kind()) != std::mem::discriminant(after.kind()) {
-        return false;
-    }
-
-    match before.kind() {
-        FragmentKind::Heading { level } => {
-            matches!(after.kind(), FragmentKind::Heading { level: other } if level == other)
-        }
-        FragmentKind::SlotGroup { name, children } => {
-            let FragmentKind::SlotGroup {
-                name: after_name,
-                children: after_children,
-            } = after.kind()
-            else {
-                return false;
-            };
-            name == after_name
-                && same_fragment_shape(children, after_children, block_skeletons_match)
-        }
-        FragmentKind::Paragraph
-        | FragmentKind::Text
-        | FragmentKind::Code
-        | FragmentKind::Math { .. }
-        | FragmentKind::EmbedCard { .. }
-        | FragmentKind::GenericEmbedCard { .. }
-        | FragmentKind::Footnotes { .. }
-        | FragmentKind::Image { .. }
-        | FragmentKind::List
-        | FragmentKind::Blockquote
-        | FragmentKind::Table => true,
-    }
 }
 
 #[cfg(test)]
@@ -944,13 +890,14 @@ mod tests {
         let after_spans = after.parsed_slides()[0].editable_spans();
 
         assert_eq!(before_spans.len(), after_spans.len());
-        let mut block_skeletons_match = true;
-        assert!(same_fragment_shape(
-            &target.fragments,
-            &after.parsed_slides()[0].fragments,
-            &mut block_skeletons_match,
-        ));
-        assert!(!block_skeletons_match);
+        assert_eq!(
+            compare_fragment_shape(
+                &target.fragments,
+                &after.parsed_slides()[0].fragments,
+                HtmlBlockComparison::Include,
+            ),
+            FragmentShapeComparison::BlockSkeletonsDiffer
+        );
         assert_ne!(before_spans[1].kind(), after_spans[1].kind());
 
         let error = rewrite_block(source, target, span, "a\n\n  ", &highlighter).unwrap_err();
