@@ -127,9 +127,10 @@ runs, and the preview reloads on the same slide.
   stay inert. A click on a link still opens the link instead of starting an
   edit.
 - **Keys.** Enter saves and Shift+Enter inserts a newline (with
-  `breaks: true` that is a visible line break). Escape cancels and puts the
-  rendered block back — deliberately unlike the notes panel, where Escape
-  keeps the text, because a click on a slide is easier to make by accident.
+  `breaks: true` that is a visible line break). Escape discards the inline
+  edit immediately and puts the rendered block back; see
+  [Restoring a discarded slide edit](#restoring-a-discarded-slide-edit). The
+  notes panel is different: Escape only leaves its textarea and keeps the text.
   While a block is being edited the other preview shortcuts are off; only
   PageUp and PageDown still change slides, and they save first. The Enter
   that confirms an IME conversion never saves.
@@ -173,7 +174,9 @@ rather than the Markdown. Inline editing exists only in `peitho preview`;
 ### Editing a whole slide in preview
 
 Press `e` in single mode to replace the rendered slide with its body Markdown.
-Cmd/Ctrl+Enter or blur saves; plain Enter inserts a newline; Escape cancels.
+Cmd/Ctrl+Enter or blur saves; plain Enter inserts a newline; Escape discards
+immediately. The same one-shot restoration described under
+[Restoring a discarded slide edit](#restoring-a-discarded-slide-edit) applies.
 
 Where clicking a block is for a typo, this is for reworking the slide: the
 textarea holds the whole body, so you can add a list, split a paragraph, move
@@ -224,6 +227,19 @@ beginning of the text, and changing slides saves first, like the notes panel.
   included file, not to the deck that includes it.
 
 Like the other preview editors, this exists only in `peitho preview`.
+
+### Restoring a discarded slide edit
+
+Escape in either slide editor discards the edit immediately. When the discarded
+text differs from the last server version, the notes panel offers
+`Draft discarded · Press u to restore`. Press `u` to reopen the same editor —
+the whole-slide textarea or the clicked block — with the discarded text. The
+offer can be used once. Opening either editor, changing slides or modes, or a
+rebuild drops it silently. The retained text exists only in this page's memory
+and does not survive a reload.
+
+This does not change the notes textarea: Escape there leaves the textarea
+without discarding its text.
 
 ## `peitho lint`
 

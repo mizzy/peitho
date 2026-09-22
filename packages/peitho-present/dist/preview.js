@@ -778,6 +778,7 @@ var STRIP_PADDING = 12;
 var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
 var SOURCE_EDIT_HINT = "Cmd/Ctrl+Enter or click away saves \xB7 Enter inserts a newline \xB7 Esc cancels";
+var RESTORE_DRAFT_HINT = "Draft discarded \xB7 Press u to restore";
 var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "BLOCKQUOTE",
@@ -943,6 +944,14 @@ function installPreviewKeyboard(win = window, bus = win) {
     if (editable && (event.shiftKey || event.key !== "PageUp" && event.key !== "PageDown")) {
       return;
     }
+    if (event.key === "u") {
+      const request2 = new CustomEvent("peitho:restorerequest", { cancelable: true });
+      bus.dispatchEvent(request2);
+      if (request2.defaultPrevented) {
+        event.preventDefault();
+        return;
+      }
+    }
     if (event.key === "e" && !event.shiftKey) {
       event.preventDefault();
       bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
@@ -1038,6 +1047,7 @@ var PreviewShellController = class {
   sourceEditHint;
   buildErrorBanner;
   activeEdit = null;
+  discardedDraft = null;
   notesTextareaKey = null;
   swallowEnterRepeat = false;
   flushChain = Promise.resolve(true);
@@ -1070,6 +1080,7 @@ var PreviewShellController = class {
     else this.log.error("Invalid peitho:overviewrequest event");
   };
   onSourceEditRequest = () => this.tryStartSourceEdit();
+  onRestoreRequest = (event) => this.restoreDiscardedDraft(event);
   onResize = () => this.applyLayout();
   onNotesKeyDown = (event) => {
     if (event.key === "Enter" && event.repeat && this.swallowEnterRepeat) {
@@ -1140,6 +1151,7 @@ var PreviewShellController = class {
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.bus.addEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
+    this.bus.addEventListener("peitho:restorerequest", this.onRestoreRequest);
     this.win.addEventListener("resize", this.onResize);
     this.win.addEventListener("pagehide", this.onPageHide);
   }
@@ -1222,7 +1234,7 @@ var PreviewShellController = class {
       this.deferredReload = reload;
       return;
     }
-    reload();
+    this.performGenerationReload(reload);
   }
   flushNotes() {
     const key = this.notesTextareaKey;
@@ -1280,26 +1292,29 @@ var PreviewShellController = class {
     this.writeState(state);
   }
   destroy() {
-    this.transitionSequence += 1;
+    this.advanceTransitionSequence();
     this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.bus.removeEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
+    this.bus.removeEventListener("peitho:restorerequest", this.onRestoreRequest);
     this.win.removeEventListener("resize", this.onResize);
     this.win.removeEventListener("pagehide", this.onPageHide);
     while (this.tileListenerCleanups.length > 0) this.tileListenerCleanups.pop()?.();
     const active = this.activeEdit;
     if (active !== null) {
-      this.activeEdit = null;
       if (active.kind === "inline") {
         active.edit.removeListeners();
         this.restoreSlideEdit(active.edit);
       } else {
         active.edit.destroy();
-        this.setSlideSourceStatus("");
-        this.applyLayout();
       }
+    }
+    this.replaceActiveEdit(null);
+    if (active?.kind === "source") {
+      this.setSlideSourceStatus("");
+      this.applyLayout();
     }
     this.deferredReload = null;
     this.fontScopeCleanup?.();
@@ -1364,7 +1379,7 @@ var PreviewShellController = class {
     return { meta: slide, sourceKey: slide.key, tile, host, thumb, thumbHost, tileNumber };
   }
   tryStartSourceEdit() {
-    if (this.mode === "grid" || this.isEditOpen() || this.pendingTransitionSettlements > 0) {
+    if (this.mode === "grid" || !this.canStartEdit()) {
       return;
     }
     const view = this.slides[this.currentIndex];
@@ -1379,17 +1394,22 @@ var PreviewShellController = class {
       this.setSlideSourceStatus("this slide cannot be edited from preview");
       return;
     }
+    this.startSourceEdit(view, view.sourceKey, body, body);
+  }
+  startSourceEdit(view, key, body, text) {
     let edit;
     edit = openPreviewSourceEdit({
       document: this.doc,
       fetcher: this.fetcher,
       tile: view.tile,
-      key: view.sourceKey,
+      key,
       body,
       onCommitRequest: () => this.commitActiveEditAndRelease(),
       onCancelRequest: () => this.cancelSourceEdit(edit)
     });
-    this.activeEdit = { kind: "source", edit, view, commitPromise: null };
+    edit.textarea.value = text;
+    edit.textarea.setSelectionRange(0, 0);
+    this.replaceActiveEdit({ kind: "source", edit, view, key, body, commitPromise: null });
     this.setSlideSourceStatus("");
     this.applyLayout();
   }
@@ -1406,7 +1426,7 @@ var PreviewShellController = class {
       this.sources.sources[result.key] = result.body;
       active.view.sourceKey = result.key;
     }
-    this.activeEdit = null;
+    this.replaceActiveEdit(null);
     this.setSlideSourceStatus("");
     if (this.pendingTransitionSettlements === 0) this.applyLayout();
     return true;
@@ -1414,14 +1434,22 @@ var PreviewShellController = class {
   cancelSourceEdit(edit) {
     const active = this.activeEdit;
     if (active?.kind !== "source" || active.edit !== edit) return;
+    const text = edit.textarea.value;
+    const discarded = text === active.body ? void 0 : {
+      kind: "source",
+      view: active.view,
+      key: active.key,
+      body: active.body,
+      text
+    };
     edit.cancel();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null, discarded);
     this.setSlideSourceStatus("");
     this.applyLayout();
     this.releaseDeferredReload();
   }
   tryStartSlideEdit(slide, host, event) {
-    if (this.isEditOpen() || this.pendingTransitionSettlements > 0) return true;
+    if (!this.canStartEdit()) return true;
     if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
     const shadow = host.shadowRoot;
     if (shadow === null) return false;
@@ -1442,6 +1470,9 @@ var PreviewShellController = class {
     if (encodedRange === null || old === null) return false;
     const sourceRange = parseEditableSourceRange(encodedRange);
     if (sourceRange === null) return false;
+    return this.startSlideEdit(slide.key, target, sourceRange.start, sourceRange.end, old, old);
+  }
+  startSlideEdit(key, target, start, end, old, text) {
     let editor = target;
     let originalNodes;
     if (target.tagName === "LI") {
@@ -1459,7 +1490,7 @@ var PreviewShellController = class {
     }
     const originalContenteditable = editor.getAttribute("contenteditable");
     const originalStyle = editor.getAttribute("style");
-    editor.textContent = old;
+    editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
     editor.style.outline = INLINE_EDIT_OUTLINE;
     editor.style.outlineOffset = "2px";
@@ -1472,9 +1503,9 @@ var PreviewShellController = class {
       this.commitActiveEditAndRelease();
     };
     edit = {
-      key: slide.key,
-      start: sourceRange.start,
-      end: sourceRange.end,
+      key,
+      start,
+      end,
       old,
       target,
       editor,
@@ -1491,7 +1522,7 @@ var PreviewShellController = class {
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
-    this.activeEdit = { kind: "inline", edit };
+    this.replaceActiveEdit({ kind: "inline", edit });
     this.setSlideEditStatus("");
     editor.focus({ preventScroll: true });
     placeCaretAtEnd(this.win, editor);
@@ -1523,13 +1554,23 @@ var PreviewShellController = class {
     this.commitActiveEditAndRelease();
   }
   cancelSlideEdit(edit) {
-    if (!this.closeSlideEdit(edit)) return;
+    const text = this.slideEditText(edit);
+    const discarded = text === edit.old ? void 0 : {
+      kind: "inline",
+      key: edit.key,
+      target: edit.target,
+      start: edit.start,
+      end: edit.end,
+      old: edit.old,
+      text
+    };
+    if (!this.closeSlideEdit(edit, discarded)) return;
     this.releaseDeferredReload();
   }
-  closeSlideEdit(edit) {
+  closeSlideEdit(edit, discarded) {
     if (this.activeEdit?.kind !== "inline" || this.activeEdit.edit !== edit) return false;
     edit.removeListeners();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null, discarded);
     this.restoreSlideEdit(edit);
     this.setSlideEditStatus("");
     return true;
@@ -1590,7 +1631,7 @@ var PreviewShellController = class {
   }
   finishSlideEdit(edit, newText) {
     edit.removeListeners();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null);
     edit.editor.textContent = newText;
     this.restoreSlideEditorAttributes(edit);
     edit.target.removeAttribute("data-peitho-src");
@@ -1616,6 +1657,11 @@ var PreviewShellController = class {
     if (reload === null) return;
     this.deferredReload = null;
     this.saveState();
+    this.performGenerationReload(reload);
+  }
+  performGenerationReload(reload) {
+    this.advanceTransitionSequence();
+    this.renderPanelStatus();
     reload();
   }
   restoreSlideEdit(edit) {
@@ -1805,11 +1851,15 @@ var PreviewShellController = class {
   setPanelStatus(source, message) {
     if (message === "") this.panelStatuses.delete(source);
     else this.panelStatuses.set(source, message);
+    this.renderPanelStatus();
+  }
+  renderPanelStatus() {
     const combined = ["notes", "slide-edit", "slide-source"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
     this.notesStatus.textContent = combined;
-    const showHint = this.activeEdit?.kind === "source" && combined === "";
-    this.sourceEditHint.textContent = showHint ? SOURCE_EDIT_HINT : "";
-    this.sourceEditHint.hidden = !showHint;
+    const restorable = this.restorableDraft();
+    const hint = restorable !== null ? RESTORE_DRAFT_HINT : this.activeEdit?.kind === "source" && combined === "" ? SOURCE_EDIT_HINT : "";
+    this.sourceEditHint.textContent = hint;
+    this.sourceEditHint.hidden = hint === "";
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
@@ -1842,6 +1892,51 @@ var PreviewShellController = class {
   }
   isEditOpen() {
     return this.activeEdit !== null;
+  }
+  canStartEdit() {
+    return !this.isEditOpen() && this.pendingTransitionSettlements === 0;
+  }
+  replaceActiveEdit(activeEdit, discarded) {
+    if (activeEdit !== null) this.advanceTransitionSequence();
+    this.activeEdit = activeEdit;
+    if (discarded !== void 0) {
+      this.discardedDraft = discarded;
+    }
+    this.renderPanelStatus();
+  }
+  /** Eagerly release retained text and DOM references at the sole invalidation point. */
+  advanceTransitionSequence() {
+    this.transitionSequence += 1;
+    this.discardedDraft = null;
+    return this.transitionSequence;
+  }
+  restorableDraft() {
+    if (this.activeEdit !== null || !this.canStartEdit() || this.panelStatuses.size > 0) {
+      return null;
+    }
+    return this.discardedDraft;
+  }
+  restoreDiscardedDraft(event) {
+    const discarded = this.restorableDraft();
+    if (discarded === null) return;
+    if (discarded.kind === "source") {
+      this.startSourceEdit(
+        discarded.view,
+        discarded.key,
+        discarded.body,
+        discarded.text
+      );
+    } else {
+      this.startSlideEdit(
+        discarded.key,
+        discarded.target,
+        discarded.start,
+        discarded.end,
+        discarded.old,
+        discarded.text
+      );
+    }
+    event.preventDefault();
   }
   toggleOverview() {
     if (this.mode === "grid") this.exitGrid();
@@ -1878,7 +1973,8 @@ var PreviewShellController = class {
     if (afterCommit === void 0 && index === this.currentIndex && index === this.selectedIndex && mode === this.mode) {
       return;
     }
-    const sequence = ++this.transitionSequence;
+    const sequence = this.advanceTransitionSequence();
+    this.renderPanelStatus();
     const needsFlush = mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey;
     const commit = () => {
       const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
