@@ -43,7 +43,9 @@ current slide's speaker notes in an editable panel below the slide, headed by
 the slide's position (`3 / 25`); the overview grid shows neither. See
 [Editing speaker notes in preview](#editing-speaker-notes-in-preview); text on
 the slide itself can be fixed in place too — see
-[Editing slide text in preview](#editing-slide-text-in-preview). Every thumbnail
+[Editing slide text in preview](#editing-slide-text-in-preview), or
+[Editing a whole slide in preview](#editing-a-whole-slide-in-preview) to rework
+the entire slide body at once. Every thumbnail
 and grid tile carries its slide number in the bottom-left corner. These
 numbers are preview chrome only; a page number on the slide itself comes from
 the `page_numbers` frontmatter key.
@@ -167,6 +169,61 @@ settings and frontmatter, any block that contains a speaker-note comment
 (edit the note in the notes panel) or other inline HTML, and anything that comes from the layout HTML
 rather than the Markdown. Inline editing exists only in `peitho preview`;
 `peitho present`, `peitho build`, and `dist/` never see it.
+
+### Editing a whole slide in preview
+
+Press `e` in single mode to replace the rendered slide with its body Markdown.
+Cmd/Ctrl+Enter or blur saves; plain Enter inserts a newline; Escape cancels.
+
+Where clicking a block is for a typo, this is for reworking the slide: the
+textarea holds the whole body, so you can add a list, split a paragraph, move
+a code block, or rewrite the slide from scratch. The caret starts at the
+beginning of the text, and changing slides saves first, like the notes panel.
+
+- **Body only.** The textarea contains the slide's body Markdown and nothing
+  else. The page settings comment and the speaker notes are not in it, are not
+  shown, and cannot be changed from here — edit notes in the panel below and
+  settings in your editor. A note comment that sits in the middle of the body is
+  spliced out of the text you see, and the body is shown with LF line endings
+  and without its leading and trailing blank lines, whatever the file uses — the
+  original line endings and a leading BOM are restored when it is written back.
+- **Where it works.** The single-slide view, on the current slide. The overview
+  grid has no whole-slide editor.
+- **When `e` does nothing.** It is a no-op while another edit is open or a slide
+  change is still settling. Some slides cannot be edited this way at all, and
+  those say so next to the position line instead of opening: a deck containing a
+  lone CR (an old Mac line ending) makes every slide unavailable, since Peitho
+  will not guess how to rewrite it, and a slide whose recorded spans no longer
+  match the source asks you to reload. Inline block editing and the notes panel
+  still work on such a deck.
+- **Structure is allowed, inside one slide.** Unlike a click-to-edit block, this
+  edit may change the slide's structure freely. What it may not do is change the
+  deck around it: adding or removing a slide separator, changing the sections, or
+  touching another slide's content is refused, and so is anything that would
+  alter this slide's own settings or notes. Every refusal is reported with its
+  reason and the editor stays open with your text.
+- **Markdown that does not parse is refused** with the parser's message (422),
+  and nothing is written. Markdown that parses but fails a later check — two
+  code blocks where the layout allows one, say — is written to the file, and
+  then the rebuild fails: the last good slide stays on screen with the error
+  banner above it. Press `e` again and the editor reopens with the body you
+  saved, not the one still rendered, so you can fix it in place.
+- **Headings and slide keys.** Editing the heading may change a derived key, and
+  the save answers with the key the deck now has. The editor keeps using that
+  key, so if the rebuild is failing — a keyed CSS selector still naming the old
+  key, for instance — the next save from the same stale page still lands on the
+  right slide and can repair it.
+- **Two known tradeoffs.** The notes panel beside a renamed slide can still show
+  the previous key's note until the next successful rebuild. And after an inline
+  edit or an external change followed by a failed rebuild, a save against the
+  stale source map returns an honest 409 ("the deck changed on disk; reload and
+  retry") rather than writing over something it cannot see; the open editor keeps
+  your draft and the message until a successful generation reload.
+- **What is written.** The slide's body bytes. A CRLF file stays CRLF, a leading
+  BOM is kept, and a slide that comes from an `include` is written to the
+  included file, not to the deck that includes it.
+
+Like the other preview editors, this exists only in `peitho preview`.
 
 ## `peitho lint`
 
