@@ -112,6 +112,11 @@ const INLINE_EDIT_HINT_TEXT =
 const NOTES_EDIT_HINT_TEXT = "Esc or click away saves · Enter inserts a newline";
 const SAVING_HINT_TEXT = "Saving…";
 const RESTORE_OFFER_TEXT = "Draft discarded · Press u to restore";
+const KEY_HINT_COLOR = "rgb(203, 213, 225)";
+const keyTokens = (hint: HTMLSpanElement): string[] =>
+  Array.from(hint.children)
+    .filter((child) => (child as HTMLSpanElement).style.color === KEY_HINT_COLOR)
+    .map((child) => child.textContent ?? "");
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
 .peitho-preview-slide { color: red; }
@@ -3354,6 +3359,7 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
 
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(keyTokens(hint)).toEqual(["e", "Enter"]);
   expect(status.textContent).toBe("");
   expect(status.style.background).toBe("");
   expect(panel.style.borderTop).toBe("1px solid rgba(255, 255, 255, 0.16)");
@@ -3365,6 +3371,7 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   expect(document.activeElement).toBe(note);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
+  expect(keyTokens(hint)).toEqual(["Esc", "Enter"]);
   expect(hint.textContent).not.toBe(EDIT_AFFORDANCE_TEXT);
   expect(status.textContent).toBe("");
 
@@ -3372,6 +3379,7 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   expect(document.activeElement).not.toBe(note);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(keyTokens(hint)).toEqual(["e", "Enter"]);
 
   const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
     "#editable-paragraph"
@@ -3379,26 +3387,31 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   dispatchShadowClick(paragraph);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(INLINE_EDIT_HINT_TEXT);
+  expect(keyTokens(hint)).toEqual(["Enter", "Shift+Enter", "Esc"]);
   expect(status.textContent).toBe("");
   press(paragraph, "Escape");
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(keyTokens(hint)).toEqual(["e", "Enter"]);
 
   const editor = openSourceEditor(root, bus);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(SOURCE_EDIT_HINT_TEXT);
+  expect(keyTokens(hint)).toEqual(["Cmd/Ctrl+Enter", "Enter", "Esc"]);
   expect(status.textContent).toBe("");
 
   editor.value = "# Discarded source draft";
   press(editor, "Escape");
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
+  expect(keyTokens(hint)).toEqual(["u"]);
   expect(status.textContent).toBe("");
 
   note.focus();
   expect(document.activeElement).toBe(note);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
+  expect(keyTokens(hint)).toEqual(["Esc", "Enter"]);
 
   note.value = "Note that will fail";
   note.dispatchEvent(new Event("blur"));
@@ -3414,6 +3427,96 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   expect(status.style.color).toBe("rgb(254, 226, 226)");
   expect(panel.style.borderTop).toBe("3px solid rgb(239, 68, 68)");
   expect(panel.style.background).toBe("rgb(36, 20, 22)");
+});
+
+it("styles_only_affordance_key_tokens_so_the_prose_remains_neutral", async () => {
+  const { root } = await mountInlineEditForTest();
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(hint.style.color).toBe("rgb(156, 163, 175)");
+  expect(
+    Array.from(hint.children, (child) => ({
+      tagName: child.tagName,
+      text: child.textContent,
+      color: (child as HTMLSpanElement).style.color
+    }))
+  ).toEqual([
+    { tagName: "SPAN", text: "Click text to edit · ", color: "" },
+    { tagName: "SPAN", text: "e", color: KEY_HINT_COLOR },
+    { tagName: "SPAN", text: " for Markdown · ", color: "" },
+    { tagName: "SPAN", text: "Enter", color: KEY_HINT_COLOR },
+    { tagName: "SPAN", text: " for notes", color: "" }
+  ]);
+});
+
+it("styles_source_editor_key_tokens_so_chords_are_distinct_from_instructions", async () => {
+  const bus = new EventTarget();
+  const { root } = await mountInlineEditForTest({ bus });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+
+  openSourceEditor(root, bus);
+
+  expect(hint.textContent).toBe(SOURCE_EDIT_HINT_TEXT);
+  expect(
+    Array.from(hint.children, (child) => ({
+      text: child.textContent,
+      color: (child as HTMLSpanElement).style.color
+    }))
+  ).toEqual([
+    { text: "Cmd/Ctrl+Enter", color: KEY_HINT_COLOR },
+    { text: " or click away saves · ", color: "" },
+    { text: "Enter", color: KEY_HINT_COLOR },
+    { text: " inserts a newline · ", color: "" },
+    { text: "Esc", color: KEY_HINT_COLOR },
+    { text: " cancels", color: "" }
+  ]);
+});
+
+it("renders_saving_as_prose_because_it_contains_no_key", async () => {
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#editable-paragraph"
+  )!;
+
+  dispatchShadowClick(paragraph);
+  paragraph.textContent = "Inline save held open";
+  press(paragraph, "Enter");
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+
+  expect(hint.textContent).toBe(SAVING_HINT_TEXT);
+  expect(
+    Array.from(hint.children, (child) => ({
+      text: child.textContent,
+      color: (child as HTMLSpanElement).style.color
+    }))
+  ).toEqual([{ text: SAVING_HINT_TEXT, color: "" }]);
+
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("data-peitho-src")).toBe(false));
+});
+
+it("clears_hint_token_spans_when_the_single_slot_becomes_hidden", async () => {
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  expect(hint.hidden).toBe(false);
+  expect(hint.children.length).toBeGreaterThan(0);
+
+  note.value = "Note that will fail";
+  note.dispatchEvent(new Event("blur"));
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  fixture.resolveNotesPost(errorJson(500, "note save failed"));
+  await vi.waitFor(() => expect(status.textContent).toBe("note save failed"));
+
+  expect(hint.hidden).toBe(true);
+  expect(hint.textContent).toBe("");
+  expect(hint.children).toHaveLength(0);
 });
 
 it("affordance_names_enter_because_enter_focuses_the_notes_textarea", async () => {
@@ -3530,6 +3633,7 @@ it("omits_only_the_Markdown_shortcut_when_the_current_slide_source_is_unavailabl
 
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT);
+  expect(keyTokens(hint)).toEqual(["Enter"]);
   expect(status.textContent).toBe("");
 });
 

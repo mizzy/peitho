@@ -100,6 +100,11 @@ type PreviewState = {
 
 type PanelStatusSource = "notes" | "slide-edit" | "slide-source";
 
+type HintToken =
+  | { readonly kind: "key"; readonly text: string }
+  | { readonly kind: "text"; readonly text: string };
+type HintTokens = readonly HintToken[];
+
 type ActiveSlideEdit = {
   key: string;
   start: number;
@@ -155,33 +160,66 @@ export const PREVIEW_STRIP_WIDTH = 200;
 const STRIP_PADDING = 12;
 const STRIP_GAP = 10;
 const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+const hintKey = (text: string): HintToken => ({ kind: "key", text });
+const hintText = (text: string): HintToken => ({ kind: "text", text });
 /**
  * The save keys are not discoverable from the editor itself, and they differ from
  * the inline editor's (where plain Enter saves). Cmd and Ctrl are both accepted,
  * so both are named. A save error replaces this hint.
  */
-const SOURCE_EDIT_HINT =
-  "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
+const SOURCE_EDIT_HINT: HintTokens = [
+  hintKey("Cmd/Ctrl+Enter"),
+  hintText(" or click away saves · "),
+  hintKey("Enter"),
+  hintText(" inserts a newline · "),
+  hintKey("Esc"),
+  hintText(" cancels")
+];
 /**
  * Plain Enter saves in the inline editor, unlike source and notes where Enter
  * inserts a newline; clicking away saves in all three.
  */
-const INLINE_EDIT_HINT =
-  "Enter or click away saves · Shift+Enter inserts a newline · Esc cancels";
+const INLINE_EDIT_HINT: HintTokens = [
+  hintKey("Enter"),
+  hintText(" or click away saves · "),
+  hintKey("Shift+Enter"),
+  hintText(" inserts a newline · "),
+  hintKey("Esc"),
+  hintText(" cancels")
+];
 /**
  * Notes have no cancel action: Escape leaves the textarea, and leaving saves
  * through the blur flush.
  */
-const NOTES_EDIT_HINT = "Esc or click away saves · Enter inserts a newline";
+const NOTES_EDIT_HINT: HintTokens = [
+  hintKey("Esc"),
+  hintText(" or click away saves · "),
+  hintKey("Enter"),
+  hintText(" inserts a newline")
+];
 /** A locked editor swallows its own keys, so the slot must not keep promising them. */
-const SAVING_HINT = "Saving…";
-const RESTORE_DRAFT_HINT = "Draft discarded · Press u to restore";
+const SAVING_HINT: HintTokens = [hintText("Saving…")];
+const RESTORE_DRAFT_HINT: HintTokens = [
+  hintText("Draft discarded · Press "),
+  hintKey("u"),
+  hintText(" to restore")
+];
 /**
  * Every available editor entry point names its key or action; Enter reaches the
  * notes textarea through activateSelection.
  */
-const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · Enter for notes";
-const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · Enter for notes";
+const EDIT_AFFORDANCE_HINT: HintTokens = [
+  hintText("Click text to edit · "),
+  hintKey("e"),
+  hintText(" for Markdown · "),
+  hintKey("Enter"),
+  hintText(" for notes")
+];
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT: HintTokens = [
+  hintText("Click text to edit · "),
+  hintKey("Enter"),
+  hintText(" for notes")
+];
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
@@ -1450,7 +1488,7 @@ class PreviewShellController implements PreviewShell {
     this.renderPanelStatus();
   }
 
-  private editAffordanceHint(): string {
+  private editAffordanceHint(): HintTokens {
     const currentSlide = this.slides[this.currentIndex];
     return currentSlide !== undefined &&
       this.sources.unavailable[currentSlide.sourceKey] !== undefined
@@ -1459,7 +1497,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   /** Each editor names its own keys; they differ, and a new one must not silently blank the slot. */
-  private activeEditHint(edit: ActiveEdit): string {
+  private activeEditHint(edit: ActiveEdit): HintTokens {
     switch (edit.kind) {
       case "source":
         return SOURCE_EDIT_HINT;
@@ -1482,15 +1520,15 @@ class PreviewShellController implements PreviewShell {
    * it; otherwise show a reachable restore offer, an active editor's saving or key
    * state, focused notes keys, or finally the edit affordance.
    */
-  private panelHint(combined: string): string {
-    if (this.destroyed) return "";
+  private panelHint(combined: string): HintTokens {
+    if (this.destroyed) return [];
     const notesFocused = this.doc.activeElement === this.notesTextarea;
     // `u` reaches the restore handler only when focus is outside an editable target
     // (installPreviewKeyboard's editable guard swallows every other key), so the
     // offer is only named where it can actually be taken.
     if (!notesFocused && this.restorableDraft() !== null) return RESTORE_DRAFT_HINT;
     // Hoisted above every editor rung so a save failure silences every editor hint.
-    if (combined !== "") return "";
+    if (combined !== "") return [];
     if (this.activeEdit !== null) {
       return this.editCommitInFlight(this.activeEdit)
         ? SAVING_HINT
@@ -1500,6 +1538,17 @@ class PreviewShellController implements PreviewShell {
     return this.editAffordanceHint();
   }
 
+  private renderPanelHint(hint: HintTokens): void {
+    this.sourceEditHint.replaceChildren();
+    for (const token of hint) {
+      const span = this.doc.createElement("span");
+      span.textContent = token.text;
+      if (token.kind === "key") span.style.color = "#cbd5e1";
+      this.sourceEditHint.appendChild(span);
+    }
+    this.sourceEditHint.hidden = hint.length === 0;
+  }
+
   private renderPanelStatus(): void {
     const combined = (["notes", "slide-edit", "slide-source"] as const)
       .map((statusSource) => this.panelStatuses.get(statusSource))
@@ -1507,8 +1556,7 @@ class PreviewShellController implements PreviewShell {
       .join("\n");
     this.notesStatus.textContent = combined;
     const hint = this.panelHint(combined);
-    this.sourceEditHint.textContent = hint;
-    this.sourceEditHint.hidden = hint === "";
+    this.renderPanelHint(hint);
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";

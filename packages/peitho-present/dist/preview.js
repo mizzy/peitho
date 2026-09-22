@@ -777,13 +777,48 @@ var PREVIEW_STRIP_WIDTH = 200;
 var STRIP_PADDING = 12;
 var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
-var SOURCE_EDIT_HINT = "Cmd/Ctrl+Enter or click away saves \xB7 Enter inserts a newline \xB7 Esc cancels";
-var INLINE_EDIT_HINT = "Enter or click away saves \xB7 Shift+Enter inserts a newline \xB7 Esc cancels";
-var NOTES_EDIT_HINT = "Esc or click away saves \xB7 Enter inserts a newline";
-var SAVING_HINT = "Saving\u2026";
-var RESTORE_DRAFT_HINT = "Draft discarded \xB7 Press u to restore";
-var EDIT_AFFORDANCE_HINT = "Click text to edit \xB7 e for Markdown \xB7 Enter for notes";
-var EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit \xB7 Enter for notes";
+var hintKey = (text) => ({ kind: "key", text });
+var hintText = (text) => ({ kind: "text", text });
+var SOURCE_EDIT_HINT = [
+  hintKey("Cmd/Ctrl+Enter"),
+  hintText(" or click away saves \xB7 "),
+  hintKey("Enter"),
+  hintText(" inserts a newline \xB7 "),
+  hintKey("Esc"),
+  hintText(" cancels")
+];
+var INLINE_EDIT_HINT = [
+  hintKey("Enter"),
+  hintText(" or click away saves \xB7 "),
+  hintKey("Shift+Enter"),
+  hintText(" inserts a newline \xB7 "),
+  hintKey("Esc"),
+  hintText(" cancels")
+];
+var NOTES_EDIT_HINT = [
+  hintKey("Esc"),
+  hintText(" or click away saves \xB7 "),
+  hintKey("Enter"),
+  hintText(" inserts a newline")
+];
+var SAVING_HINT = [hintText("Saving\u2026")];
+var RESTORE_DRAFT_HINT = [
+  hintText("Draft discarded \xB7 Press "),
+  hintKey("u"),
+  hintText(" to restore")
+];
+var EDIT_AFFORDANCE_HINT = [
+  hintText("Click text to edit \xB7 "),
+  hintKey("e"),
+  hintText(" for Markdown \xB7 "),
+  hintKey("Enter"),
+  hintText(" for notes")
+];
+var EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = [
+  hintText("Click text to edit \xB7 "),
+  hintKey("Enter"),
+  hintText(" for notes")
+];
 var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "BLOCKQUOTE",
@@ -1895,22 +1930,31 @@ var PreviewShellController = class {
    * state, focused notes keys, or finally the edit affordance.
    */
   panelHint(combined) {
-    if (this.destroyed) return "";
+    if (this.destroyed) return [];
     const notesFocused = this.doc.activeElement === this.notesTextarea;
     if (!notesFocused && this.restorableDraft() !== null) return RESTORE_DRAFT_HINT;
-    if (combined !== "") return "";
+    if (combined !== "") return [];
     if (this.activeEdit !== null) {
       return this.editCommitInFlight(this.activeEdit) ? SAVING_HINT : this.activeEditHint(this.activeEdit);
     }
     if (notesFocused) return NOTES_EDIT_HINT;
     return this.editAffordanceHint();
   }
+  renderPanelHint(hint) {
+    this.sourceEditHint.replaceChildren();
+    for (const token of hint) {
+      const span = this.doc.createElement("span");
+      span.textContent = token.text;
+      if (token.kind === "key") span.style.color = "#cbd5e1";
+      this.sourceEditHint.appendChild(span);
+    }
+    this.sourceEditHint.hidden = hint.length === 0;
+  }
   renderPanelStatus() {
     const combined = ["notes", "slide-edit", "slide-source"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
     this.notesStatus.textContent = combined;
     const hint = this.panelHint(combined);
-    this.sourceEditHint.textContent = hint;
-    this.sourceEditHint.hidden = hint === "";
+    this.renderPanelHint(hint);
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
