@@ -107,6 +107,10 @@ const EDIT_AFFORDANCE_TEXT = "Click text to edit · e for Markdown · notes belo
 const EDIT_AFFORDANCE_WITHOUT_SOURCE_TEXT = "Click text to edit · notes below";
 const SOURCE_EDIT_HINT_TEXT =
   "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
+const INLINE_EDIT_HINT_TEXT =
+  "Enter or click away saves · Shift+Enter inserts a newline · Esc cancels";
+const NOTES_EDIT_HINT_TEXT = "Esc or click away saves · Enter inserts a newline";
+const SAVING_HINT_TEXT = "Saving…";
 const RESTORE_OFFER_TEXT = "Draft discarded · Press u to restore";
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
@@ -3356,6 +3360,30 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   // CSSOM serializes the neutral #15181e background as rgb().
   expect(panel.style.background).toBe("rgb(21, 24, 30)");
 
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  note.focus();
+  expect(document.activeElement).toBe(note);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
+  expect(hint.textContent).not.toBe(EDIT_AFFORDANCE_TEXT);
+  expect(status.textContent).toBe("");
+
+  note.blur();
+  expect(document.activeElement).not.toBe(note);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+
+  const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#editable-paragraph"
+  )!;
+  dispatchShadowClick(paragraph);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(INLINE_EDIT_HINT_TEXT);
+  expect(status.textContent).toBe("");
+  press(paragraph, "Escape");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+
   const editor = openSourceEditor(root, bus);
   expect(hint.hidden).toBe(false);
   expect(hint.textContent).toBe(SOURCE_EDIT_HINT_TEXT);
@@ -3367,13 +3395,105 @@ it("derives_one_exact_hint_from_the_total_panel_priority_chain", async () => {
   expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
   expect(status.textContent).toBe("");
 
-  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  note.focus();
+  expect(document.activeElement).toBe(note);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
+
   note.value = "Note that will fail";
   note.dispatchEvent(new Event("blur"));
+  expect(document.activeElement).toBe(note);
   await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
   fixture.resolveNotesPost(errorJson(500, "note save failed"));
   await vi.waitFor(() => expect(status.textContent).toBe("note save failed"));
 
+  expect(document.activeElement).toBe(note);
+  expect(hint.hidden).toBe(true);
+  expect(hint.textContent).toBe("");
+  expect(status.style.background).toBe("rgb(127, 29, 29)");
+  expect(status.style.color).toBe("rgb(254, 226, 226)");
+  expect(panel.style.borderTop).toBe("3px solid rgb(239, 68, 68)");
+  expect(panel.style.background).toBe("rgb(36, 20, 22)");
+});
+
+it("restore_offer_yields_to_notes_focus_because_u_cannot_reach_it", async () => {
+  const bus = new EventTarget();
+  const { root } = await mountInlineEditForTest({ bus });
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const draft = "# Restore after leaving notes";
+
+  const editor = openSourceEditor(root, bus);
+  editor.value = draft;
+  press(editor, "Escape");
+  expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
+
+  note.focus();
+  expect(document.activeElement).toBe(note);
+  expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
+  expect(hint.textContent).not.toBe(RESTORE_OFFER_TEXT);
+  expect(press(note, "u").defaultPrevented).toBe(false);
+  expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+
+  note.blur();
+  expect(document.activeElement).not.toBe(note);
+  expect(hint.textContent).toBe(RESTORE_OFFER_TEXT);
+
+  const restore = press(window, "u");
+  expect(restore.defaultPrevented).toBe(true);
+  expect(
+    root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="source"]')?.value
+  ).toBe(draft);
+});
+
+it("locked_editor_shows_saving_instead_of_keys_it_swallows", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#editable-paragraph"
+  )!;
+
+  dispatchShadowClick(paragraph);
+  paragraph.textContent = "Inline save held open";
+  press(paragraph, "Enter");
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(SAVING_HINT_TEXT);
+  const inlineEscape = press(paragraph, "Escape");
+  expect(inlineEscape.defaultPrevented).toBe(true);
+  expect(paragraph.getAttribute("contenteditable")).toBe("false");
+  expect(paragraph.hasAttribute("data-peitho-src")).toBe(true);
+  expect(hint.textContent).toBe(SAVING_HINT_TEXT);
+
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(paragraph.hasAttribute("data-peitho-src")).toBe(false);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+
+  const source = openSourceEditor(root, bus);
+  source.value = "# Source save held open";
+  press(source, "Enter", { metaKey: true });
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+
+  expect(source.readOnly).toBe(true);
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(SAVING_HINT_TEXT);
+  const sourceEscape = press(source, "Escape");
+  expect(sourceEscape.defaultPrevented).toBe(true);
+  expect(source.isConnected).toBe(true);
+  expect(hint.textContent).toBe(SAVING_HINT_TEXT);
+
+  fixture.resolveSourceEditPost(errorJson(500, "source save failed"));
+  await vi.waitFor(() => expect(status.textContent).toBe("source save failed"));
+  expect(source.readOnly).toBe(false);
+  expect(source.isConnected).toBe(true);
   expect(hint.hidden).toBe(true);
   expect(hint.textContent).toBe("");
 });
@@ -3668,8 +3788,8 @@ it("clean_escape_offers_no_restore_and_returns_to_the_affordance", async () => {
     "#editable-paragraph"
   )!;
   dispatchShadowClick(paragraph);
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(INLINE_EDIT_HINT_TEXT);
   press(paragraph, "Escape");
   expect(paragraph.hasAttribute("contenteditable")).toBe(false);
   expect(hint.hidden).toBe(false);
@@ -3703,8 +3823,8 @@ it("dirty_inline_escape_offers_and_restores_the_exact_same_block", async () => {
   expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(paragraph.textContent).toBe(draft);
   expect(heading.hasAttribute("contenteditable")).toBe(false);
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(INLINE_EDIT_HINT_TEXT);
   expect(status.textContent).toBe("");
   expect(fixture.slideEditPosts()).toHaveLength(0);
 
@@ -3733,8 +3853,8 @@ it("opening_an_editor_drops_the_restore_offer", async () => {
   )!;
   dispatchShadowClick(paragraph);
   expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
-  expect(hint.hidden).toBe(true);
-  expect(hint.textContent).toBe("");
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toBe(INLINE_EDIT_HINT_TEXT);
 
   press(paragraph, "Escape");
   const restore = press(window, "u");
@@ -3800,7 +3920,7 @@ it("activate_selection_rerenders_after_dropping_a_same_position_restore_offer", 
 
   expect(document.activeElement).toBe(note);
   expect(hint.hidden).toBe(false);
-  expect(hint.textContent).toBe(EDIT_AFFORDANCE_TEXT);
+  expect(hint.textContent).toBe(NOTES_EDIT_HINT_TEXT);
 });
 
 it("generation_reload_drops_the_restore_offer", async () => {
@@ -5463,13 +5583,18 @@ it("destroy_removes_an_open_source_edit_and_every_source_listener", async () => 
 it("destroy_removes_notes_textarea_listeners", async () => {
   const { root, shell, fixture } = await mountInlineEditForTest();
   const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const controller = Object.getPrototypeOf(shell) as { renderPanelStatus(): void };
+  const renderPanelStatus = vi.spyOn(controller, "renderPanelStatus");
 
   shell.destroy();
   shells.pop();
+  const renderCallsAfterDestroy = renderPanelStatus.mock.calls.length;
   note.value = "must not save after destroy";
+  expect(() => note.dispatchEvent(new FocusEvent("focus"))).not.toThrow();
   note.dispatchEvent(new FocusEvent("blur"));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
+  expect(renderPanelStatus).toHaveBeenCalledTimes(renderCallsAfterDestroy);
   expect(fixture.notesPosts()).toHaveLength(0);
 });
 
