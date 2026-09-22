@@ -296,6 +296,35 @@ function isComposingKey(event) {
 }
 
 // src/previewHttp.ts
+var inflightKeepaliveBytes = 0;
+function postJson(fetcher, url, payload, keepalive) {
+  const body = JSON.stringify(payload);
+  const bodyBytes = new TextEncoder().encode(body).length;
+  const useKeepalive = keepalive && inflightKeepaliveBytes + bodyBytes <= 6e4;
+  const init = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: useKeepalive
+  };
+  if (!useKeepalive) return fetcher(url, init);
+  let charged = false;
+  let released = false;
+  const release = () => {
+    if (!charged || released) return;
+    released = true;
+    inflightKeepaliveBytes -= bodyBytes;
+  };
+  try {
+    const request = fetcher(url, init);
+    inflightKeepaliveBytes += bodyBytes;
+    charged = true;
+    return request.finally(release);
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
 async function readErrorResponse(response, fallbackLabel) {
   const body = await response.text();
   try {
@@ -325,6 +354,8 @@ function openPreviewSourceEdit(options) {
   textarea.style.overflow = "auto";
   let closed = false;
   let commitPromise = null;
+  let committingBody = null;
+  let sentForPageHide = false;
   const onKeyDown = (event) => {
     if (isComposingKey(event)) return;
     if (event.key === "Enter") {
@@ -362,12 +393,12 @@ function openPreviewSourceEdit(options) {
   const post = async (newBody) => {
     let response;
     try {
-      response = await options.fetcher("/slide-source", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: options.key, old: options.body, new: newBody }),
-        keepalive: false
-      });
+      response = await postJson(
+        options.fetcher,
+        "/slide-source",
+        { key: options.key, old: options.body, new: newBody },
+        false
+      );
     } catch (error) {
       return fail(`failed to save slide source: ${String(error)}`);
     }
@@ -404,18 +435,46 @@ function openPreviewSourceEdit(options) {
       close();
       return Promise.resolve({ status: "unchanged", key: options.key, body: options.body });
     }
+    committingBody = newBody;
     textarea.readOnly = true;
     const request = post(newBody);
     commitPromise = request;
     const clearCommit = () => {
-      if (commitPromise === request) commitPromise = null;
+      if (commitPromise !== request) return;
+      commitPromise = null;
+      committingBody = null;
     };
     void request.then(clearCommit, clearCommit);
     return request;
   };
+  const saveForPageHide = () => {
+    if (closed || sentForPageHide) return;
+    const newBody = committingBody ?? textarea.value;
+    if (newBody === options.body) return;
+    sentForPageHide = true;
+    try {
+      const request = postJson(
+        options.fetcher,
+        "/slide-source",
+        { key: options.key, old: options.body, new: newBody },
+        true
+      );
+      void request.then(
+        (response) => {
+          if (!response.ok) sentForPageHide = false;
+        },
+        () => {
+          sentForPageHide = false;
+        }
+      );
+    } catch {
+      sentForPageHide = false;
+    }
+  };
   return {
     textarea,
     commit,
+    saveForPageHide,
     cancel: close,
     setFrame(frame) {
       textarea.style.left = `${frame.left}px`;
@@ -1021,6 +1080,8 @@ var PreviewShellController = class {
       if (text2 !== edit.old) {
         void this.sendSlideEdit(edit, text2, true).catch(() => void 0);
       }
+    } else if (active?.kind === "source") {
+      active.edit.saveForPageHide();
     }
     const key = this.notesTextareaKey;
     const text = this.notesTextarea.value;
@@ -1164,14 +1225,7 @@ var PreviewShellController = class {
       return true;
     }
     try {
-      const requestBody = JSON.stringify({ key, text });
-      if (keepalive && new TextEncoder().encode(requestBody).length > 6e4) keepalive = false;
-      const response = await this.fetcher("/notes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: requestBody,
-        keepalive
-      });
+      const response = await postJson(this.fetcher, "/notes", { key, text }, keepalive);
       if (response.ok) {
         if (text === "") delete this.notes.notes[key];
         else this.notes.notes[key] = text;
@@ -1526,18 +1580,18 @@ var PreviewShellController = class {
     this.setSlideEditStatus("");
   }
   sendSlideEdit(edit, newText, keepalive) {
-    return this.fetcher("/slide-edit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    return postJson(
+      this.fetcher,
+      "/slide-edit",
+      {
         key: edit.key,
         start: edit.start,
         end: edit.end,
         old: edit.old,
         new: newText
-      }),
+      },
       keepalive
-    });
+    );
   }
   releaseDeferredReload() {
     const reload = this.deferredReload;

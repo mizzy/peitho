@@ -1346,6 +1346,8 @@ the committed files. Moving `isComposingKey` into shared `keyboard.ts` may or
 may not change `dist/shell.js` or `dist/remote.js`, so old-versus-new byte
 identity is not an acceptance requirement.
 
+**Amendment:** One shared `previewHttp.postJson` helper supersedes the per-module size rule and payload-builder directions above so every preview write shares the aggregate keepalive budget. An editor-local latch permits only one source exit save in flight or after success, but re-arms after rejection or a non-OK response; an in-flight normal save is still repeated using its captured body as specified above.
+
 **Verification.**
 
 ```sh

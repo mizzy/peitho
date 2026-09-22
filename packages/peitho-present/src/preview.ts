@@ -7,7 +7,7 @@ import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
 import { hasChordModifier, isComposingKey } from "./keyboard";
-import { readErrorResponse } from "./previewHttp";
+import { postJson, readErrorResponse } from "./previewHttp";
 import {
   openPreviewSourceEdit,
   type PreviewSourceEdit,
@@ -520,6 +520,8 @@ class PreviewShellController implements PreviewShell {
       if (text !== edit.old) {
         void this.sendSlideEdit(edit, text, true).catch(() => undefined);
       }
+    } else if (active?.kind === "source") {
+      active.edit.saveForPageHide();
     }
     const key = this.notesTextareaKey;
     const text = this.notesTextarea.value;
@@ -681,14 +683,7 @@ class PreviewShellController implements PreviewShell {
     }
 
     try {
-      const requestBody = JSON.stringify({ key, text });
-      if (keepalive && new TextEncoder().encode(requestBody).length > 60_000) keepalive = false; // Chrome rejects in-flight keepalive bodies over 64 KiB.
-      const response = await this.fetcher("/notes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: requestBody,
-        keepalive
-      });
+      const response = await postJson(this.fetcher, "/notes", { key, text }, keepalive);
       if (response.ok) {
         if (text === "") delete this.notes.notes[key];
         else this.notes.notes[key] = text;
@@ -1098,18 +1093,18 @@ class PreviewShellController implements PreviewShell {
     newText: string,
     keepalive: boolean
   ): Promise<Response> {
-    return this.fetcher("/slide-edit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    return postJson(
+      this.fetcher,
+      "/slide-edit",
+      {
         key: edit.key,
         start: edit.start,
         end: edit.end,
         old: edit.old,
         new: newText
-      }),
+      },
       keepalive
-    });
+    );
   }
 
   private releaseDeferredReload(): void {

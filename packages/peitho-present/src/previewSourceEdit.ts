@@ -1,5 +1,5 @@
 import { isComposingKey } from "./keyboard";
-import { readErrorResponse } from "./previewHttp";
+import { postJson, readErrorResponse } from "./previewHttp";
 
 export type PreviewSourceEditFrame = {
   left: number;
@@ -17,6 +17,7 @@ export type PreviewSourceEditCommitResult =
 export type PreviewSourceEdit = {
   readonly textarea: HTMLTextAreaElement;
   commit(): Promise<PreviewSourceEditCommitResult>;
+  saveForPageHide(): void;
   cancel(): void;
   setFrame(frame: PreviewSourceEditFrame): void;
   destroy(): void;
@@ -51,6 +52,8 @@ export function openPreviewSourceEdit(options: {
 
   let closed = false;
   let commitPromise: Promise<PreviewSourceEditCommitResult> | null = null;
+  let committingBody: string | null = null;
+  let sentForPageHide = false;
 
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isComposingKey(event)) return;
@@ -93,12 +96,12 @@ export function openPreviewSourceEdit(options: {
   const post = async (newBody: string): Promise<PreviewSourceEditCommitResult> => {
     let response: Response;
     try {
-      response = await options.fetcher("/slide-source", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: options.key, old: options.body, new: newBody }),
-        keepalive: false
-      });
+      response = await postJson(
+        options.fetcher,
+        "/slide-source",
+        { key: options.key, old: options.body, new: newBody },
+        false
+      );
     } catch (error) {
       return fail(`failed to save slide source: ${String(error)}`);
     }
@@ -145,19 +148,49 @@ export function openPreviewSourceEdit(options: {
       return Promise.resolve({ status: "unchanged", key: options.key, body: options.body });
     }
 
+    committingBody = newBody;
     textarea.readOnly = true;
     const request = post(newBody);
     commitPromise = request;
     const clearCommit = (): void => {
-      if (commitPromise === request) commitPromise = null;
+      if (commitPromise !== request) return;
+      commitPromise = null;
+      committingBody = null;
     };
     void request.then(clearCommit, clearCommit);
     return request;
   };
 
+  const saveForPageHide = (): void => {
+    if (closed || sentForPageHide) return;
+    // Repeating the captured commit is unload insurance: its fetch is not keepalive, and the drift check refuses a same-old duplicate.
+    const newBody = committingBody ?? textarea.value;
+    if (newBody === options.body) return;
+    sentForPageHide = true;
+    try {
+      const request = postJson(
+        options.fetcher,
+        "/slide-source",
+        { key: options.key, old: options.body, new: newBody },
+        true
+      );
+      void request.then(
+        (response) => {
+          if (!response.ok) sentForPageHide = false;
+        },
+        () => {
+          sentForPageHide = false;
+        }
+      );
+    } catch {
+      sentForPageHide = false;
+    }
+  };
+
   return {
     textarea,
     commit,
+    saveForPageHide,
     cancel: close,
     setFrame(frame): void {
       textarea.style.left = `${frame.left}px`;

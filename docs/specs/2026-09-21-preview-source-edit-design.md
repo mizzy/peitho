@@ -293,9 +293,14 @@ is no "preview artifacts without sources" state to handle.
   a third `PanelStatusSource`, `"slide-source"`.
 - While typing, only PageUp/PageDown navigate (existing editable-target rule),
   and they go through `commitTransition`, so they commit first.
-- `pagehide` posts a dirty source edit with `keepalive`, downgraded to a plain
-  request above 60 KiB like `doFlush` (slide bodies with pasted code can exceed
-  Chrome's 64 KiB keepalive cap; `sendSlideEdit` never could).
+- `pagehide` routes every preview write through one shared helper that applies a
+  60,000-byte aggregate budget to in-flight UTF-8 keepalive bodies, leaving
+  margin below Chrome's 64 KiB aggregate keepalive cap, and sends requests
+  without `keepalive` when they do not fit. If a source commit is in flight,
+  pagehide repeats its captured body because the commit fetch is not keepalive;
+  the server's drift check refuses a same-`old` duplicate, so it cannot clobber.
+  Only one exit save may be in flight, and success latches it for the source
+  editor lifetime; rejection or a non-OK response re-arms a later `pagehide`.
 - The preview controller is already 1600 lines coordinating two channels. The
   source editor's DOM/state lives in its own module (`previewSourceEdit.ts`);
   `PreviewShellController` keeps only the `ActiveEdit` union and the

@@ -9,6 +9,7 @@ import {
   type PreviewShell
 } from "../src/preview";
 import { calculateCanvasFit } from "../src/canvas";
+import { resetKeepaliveBudgetForTests } from "../src/previewHttp";
 import type { Notes } from "../../../bindings/Notes";
 import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncChannel } from "../src/sync";
@@ -331,6 +332,7 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (shells.length > 0) shells.pop()?.destroy();
+  resetKeepaliveBudgetForTests();
   sessionStorage.clear();
   vi.restoreAllMocks();
 });
@@ -4675,6 +4677,103 @@ it("pagehide_does_not_post_clean_or_cancelled_slide_edit", async () => {
   expect(fixture.slideEditPosts()).toHaveLength(0);
 });
 
+it("pagehide_during_in_flight_source_commit_sends_a_keepalive_safety_post", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const editor = openSourceEditor(root, bus);
+  editor.value = "# Source page exit";
+  press(editor, "Enter", { metaKey: true });
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+
+  window.dispatchEvent(new Event("pagehide"));
+
+  expect(fixture.sourceEditPosts()).toHaveLength(2);
+  expect(fixture.sourceEditPosts().map(([, init]) => init.keepalive)).toEqual([false, true]);
+  expect(fixture.sourceEditPosts()[1][1].body).toBe(fixture.sourceEditPosts()[0][1].body);
+  expect(JSON.parse(fixture.sourceEditPosts()[1][1].body as string)).toEqual({
+    key: "intro",
+    old: "# Intro",
+    new: "# Source page exit"
+  });
+  fixture.resolveSourceEditPost(okJson({ key: "intro", body: "# Source page exit" }));
+  fixture.resolveSourceEditPost(okJson({ key: "intro", body: "# Source page exit" }));
+});
+
+it("pagehide_does_not_post_absent_clean_or_cancelled_source_edits", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+
+  window.dispatchEvent(new Event("pagehide"));
+  expect(fixture.sourceEditPosts()).toHaveLength(0);
+
+  const clean = openSourceEditor(root, bus);
+  window.dispatchEvent(new Event("pagehide"));
+  expect(fixture.sourceEditPosts()).toHaveLength(0);
+
+  clean.value = "# Cancelled source page exit";
+  press(clean, "Escape");
+  window.dispatchEvent(new Event("pagehide"));
+  expect(fixture.sourceEditPosts()).toHaveLength(0);
+});
+
+it("pagehide_shares_the_keepalive_budget_between_source_and_notes", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const editor = openSourceEditor(root, bus);
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const emptySourceSize = new TextEncoder().encode(
+    JSON.stringify({ key: "intro", old: "# Intro", new: "" })
+  ).length;
+  editor.value = "x".repeat(59_000 - emptySourceSize);
+  note.value = "n".repeat(1_500);
+  const sourceSize = new TextEncoder().encode(
+    JSON.stringify({ key: "intro", old: "# Intro", new: editor.value })
+  ).length;
+  const noteSize = new TextEncoder().encode(
+    JSON.stringify({ key: "intro", text: note.value })
+  ).length;
+  expect(sourceSize).toBe(59_000);
+  expect(sourceSize + noteSize).toBeGreaterThan(60_000);
+
+  window.dispatchEvent(new Event("pagehide"));
+
+  expect(fixture.sourceEditPosts()).toHaveLength(1);
+  expect(fixture.notesPosts()).toHaveLength(1);
+  expect(fixture.sourceEditPosts()[0][1].keepalive).toBe(true);
+  expect(fixture.notesPosts()[0][1].keepalive).toBe(false);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(fixture.notes.notes.intro).toBe(note.value));
+});
+
+it("pagehide_downgrades_an_oversized_inline_edit", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#editable-paragraph"
+  )!;
+  dispatchShadowClick(paragraph);
+  const emptyRequestSize = new TextEncoder().encode(
+    JSON.stringify({
+      key: "intro",
+      start: 120,
+      end: 143,
+      old: "Peitho is a *fast* tool",
+      new: ""
+    })
+  ).length;
+  paragraph.textContent = "x".repeat(60_001 - emptyRequestSize);
+
+  window.dispatchEvent(new Event("pagehide"));
+
+  expect(fixture.slideEditPosts()).toHaveLength(1);
+  expect(
+    new TextEncoder().encode(fixture.slideEditPosts()[0][1].body as string)
+  ).toHaveLength(60_001);
+  expect(fixture.slideEditPosts()[0][1].keepalive).toBe(false);
+});
+
 it("slide_edits_are_never_written_to_session_storage", async () => {
   const { root, shell } = await mountInlineEditForTest();
   const channel = mockChannel();
@@ -4710,11 +4809,69 @@ it("destroy_removes_editor_tile_and_pagehide_listeners", async () => {
   paragraph.dispatchEvent(new FocusEvent("blur"));
   window.dispatchEvent(new Event("pagehide"));
   root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(fixture.slideEditPosts()).toHaveLength(0);
   expect(fixture.notesPosts()).toHaveLength(0);
   expect(shell.currentIndex).toBe(0);
+});
+
+it("destroy_removes_an_open_source_edit_and_every_source_listener", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  let viewport = { width: 1280, height: 720 };
+  const { root, shell } = await mountInlineEditForTest({
+    bus,
+    fixture,
+    viewport: () => viewport
+  });
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+  const editor = openSourceEditor(root, bus);
+  editor.value = "# Refused before destroy";
+  press(editor, "Enter", { metaKey: true });
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  fixture.resolveSourceEditPost(errorJson(422, "source status before destroy"));
+  await vi.waitFor(() => expect(status.textContent).toBe("source status before destroy"));
+  expect(editor.isConnected).toBe(true);
+  note.value = "must not save notes after source destroy";
+
+  shell.destroy();
+  shells.pop();
+
+  expect(editor.isConnected).toBe(false);
+  expect(status.textContent).toBe("");
+  const htmlAfterDestroy = root.innerHTML;
+  const sourcePostsAfterDestroy = fixture.sourceEditPosts().length;
+  bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
+  press(editor, "Enter", { metaKey: true });
+  press(editor, "Escape");
+  editor.dispatchEvent(new FocusEvent("blur"));
+  viewport = { width: 900, height: 500 };
+  window.dispatchEvent(new Event("resize"));
+  window.dispatchEvent(new Event("pagehide"));
+  root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(root.innerHTML).toBe(htmlAfterDestroy);
+  expect(root.querySelector('[data-peitho-preview="source"]')).toBeNull();
+  expect(fixture.sourceEditPosts()).toHaveLength(sourcePostsAfterDestroy);
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+  expect(fixture.notesPosts()).toHaveLength(0);
+  expect(shell.currentIndex).toBe(0);
+});
+
+it("destroy_removes_notes_textarea_listeners", async () => {
+  const { root, shell, fixture } = await mountInlineEditForTest();
+  const note = root.querySelector<HTMLTextAreaElement>('[data-peitho-preview="note"]')!;
+
+  shell.destroy();
+  shells.pop();
+  note.value = "must not save after destroy";
+  note.dispatchEvent(new FocusEvent("blur"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(fixture.notesPosts()).toHaveLength(0);
 });
 
 it("installer_cleanups_remove_keyboard_and_sync_listeners", async () => {
@@ -4768,4 +4925,32 @@ it("destroy_discards_deferred_reload_and_pending_edit_completion", async () => {
   expect(shell.currentIndex).toBe(0);
   paragraph.dispatchEvent(new FocusEvent("blur"));
   expect(fixture.slideEditPosts()).toHaveLength(1);
+});
+
+it.each([
+  ["success", okJson({ key: "renamed", body: "# Late canonical" })],
+  ["failure", errorJson(422, "late source failure")]
+])("destroy_makes_late_source_commit_%s_inert", async (_outcome, response) => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root, shell } = await mountInlineEditForTest({ bus, fixture });
+  const finish = vi.spyOn(Object.getPrototypeOf(shell), "finishSourceEditCommit");
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const reload = vi.fn();
+  const beforeSources = { ...fixture.sources.sources };
+  const editor = openSourceEditor(root, bus);
+  editor.value = "# Pending source destroy";
+  press(editor, "Enter", { ctrlKey: true });
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  shell.requestGenerationReload(shell.generation + 1, reload);
+
+  shell.destroy();
+  shells.pop();
+  fixture.resolveSourceEditPost(response);
+  await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
+
+  expect(editor.isConnected).toBe(false);
+  expect(fixture.sources.sources).toEqual(beforeSources);
+  expect(status.textContent).toBe("");
+  expect(reload).not.toHaveBeenCalled();
 });

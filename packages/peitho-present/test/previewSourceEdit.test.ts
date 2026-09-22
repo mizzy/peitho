@@ -4,6 +4,7 @@ import {
   type PreviewSourceEdit,
   type PreviewSourceEditCommitResult
 } from "../src/previewSourceEdit";
+import { resetKeepaliveBudgetForTests } from "../src/previewHttp";
 
 function jsonResponse(status: number, value: unknown): Response {
   return {
@@ -59,6 +60,7 @@ const cleanups: Array<() => void> = [];
 
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
+  resetKeepaliveBudgetForTests();
   vi.restoreAllMocks();
 });
 
@@ -322,6 +324,263 @@ it("posts the raw draft once and returns the server key and body verbatim", asyn
   dispatchKey(edit.textarea, "Enter", { metaKey: true });
   dispatchKey(edit.textarea, "Escape");
   edit.textarea.dispatchEvent(new FocusEvent("blur"));
+  expect(onCommitRequest).not.toHaveBeenCalled();
+  expect(onCancelRequest).not.toHaveBeenCalled();
+});
+
+it("repeats an in-flight commit for pagehide with the captured body", async () => {
+  const pending = deferredResponse();
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => pending.promise);
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Typed draft\n";
+
+  const commit = edit.commit();
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.map(([, init]) => init?.keepalive)).toEqual([false, true]);
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(fetchMock.mock.calls[0][1]?.body);
+  expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual({
+    key: "server-key",
+    old: "# Server canonical",
+    new: "# Typed draft\n"
+  });
+
+  pending.resolve(jsonResponse(200, { key: "server-key", body: "# Saved" }));
+  await expect(commit).resolves.toMatchObject({ status: "saved" });
+});
+
+it("repeats the captured in-flight body when the textarea changes before pagehide", async () => {
+  const pending = deferredResponse();
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => pending.promise);
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Captured draft";
+
+  const commit = edit.commit();
+  edit.textarea.value = "# Later programmatic change";
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.map(([, init]) => init?.keepalive)).toEqual([false, true]);
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(fetchMock.mock.calls[0][1]?.body);
+  expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual({
+    key: "server-key",
+    old: "# Server canonical",
+    new: "# Captured draft"
+  });
+  pending.resolve(jsonResponse(200, { key: "server-key", body: "# Saved" }));
+  await expect(commit).resolves.toMatchObject({ status: "saved" });
+});
+
+it("retries a rejected pagehide save on the next pagehide", async () => {
+  const first = deferredResponse();
+  const second = deferredResponse();
+  const pending = [first, second];
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => {
+    const request = pending.shift();
+    if (request === undefined) throw new Error("unexpected fetch");
+    return request.promise;
+  });
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Dirty draft";
+
+  edit.saveForPageHide();
+  first.reject(new Error("network down"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.map(([, init]) => init?.keepalive)).toEqual([true, true]);
+  expect(fetchMock.mock.calls.map(([, init]) => init?.body)).toEqual([
+    JSON.stringify({ key: "server-key", old: "# Server canonical", new: "# Dirty draft" }),
+    JSON.stringify({ key: "server-key", old: "# Server canonical", new: "# Dirty draft" })
+  ]);
+  second.resolve(jsonResponse(200, { key: "server-key", body: "unused" }));
+});
+
+it("retries a non-ok pagehide save on the next pagehide", async () => {
+  const first = deferredResponse();
+  const second = deferredResponse();
+  const pending = [first, second];
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => {
+    const request = pending.shift();
+    if (request === undefined) throw new Error("unexpected fetch");
+    return request.promise;
+  });
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Dirty draft";
+
+  edit.saveForPageHide();
+  first.resolve(jsonResponse(409, { error: "deck changed" }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.map(([, init]) => init?.keepalive)).toEqual([true, true]);
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(fetchMock.mock.calls[0][1]?.body);
+  second.resolve(jsonResponse(200, { key: "server-key", body: "unused" }));
+});
+
+it("does not repeat a successful pagehide save", async () => {
+  const first = deferredResponse();
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => first.promise);
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Dirty draft";
+
+  edit.saveForPageHide();
+  first.resolve(jsonResponse(200, { key: "server-key", body: "unused" }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][1]?.keepalive).toBe(true);
+});
+
+it("sends at most one pagehide save while the first is in flight", () => {
+  const pending = deferredResponse();
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => pending.promise);
+  const { edit } = openForTest({
+    body: "# Server canonical",
+    key: "server-key",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+  edit.textarea.value = "# Dirty draft";
+
+  edit.saveForPageHide();
+  edit.saveForPageHide();
+  edit.saveForPageHide();
+
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledWith("/slide-source", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      key: "server-key",
+      old: "# Server canonical",
+      new: "# Dirty draft"
+    }),
+    keepalive: true
+  });
+  pending.resolve(jsonResponse(200, { key: "server-key", body: "unused" }));
+});
+
+it("uses the UTF-8 encoded JSON size for pagehide keepalive", () => {
+  const exactFetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    jsonResponse(200, { key: "old-key", body: "unused" })
+  );
+  const body = "# Old";
+  const { edit: exactEdit } = openForTest({
+    body,
+    fetcher: exactFetchMock as unknown as typeof fetch
+  });
+  const emptyRequestSize = new TextEncoder().encode(
+    JSON.stringify({ key: "old-key", old: body, new: "" })
+  ).length;
+  const exactLimitDraft = "x".repeat(60_000 - emptyRequestSize);
+  expect(
+    new TextEncoder().encode(
+      JSON.stringify({ key: "old-key", old: body, new: exactLimitDraft })
+    ).length
+  ).toBe(60_000);
+
+  exactEdit.textarea.value = exactLimitDraft;
+  exactEdit.saveForPageHide();
+
+  const multibyteFetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    jsonResponse(200, { key: "old-key", body: "unused" })
+  );
+  const { edit: multibyteEdit } = openForTest({
+    body,
+    fetcher: multibyteFetchMock as unknown as typeof fetch
+  });
+  const multibyteDraft = "界".repeat(20_000);
+  expect(JSON.stringify({ key: "old-key", old: body, new: multibyteDraft }).length).toBeLessThan(
+    60_000
+  );
+  expect(
+    new TextEncoder().encode(
+      JSON.stringify({ key: "old-key", old: body, new: multibyteDraft })
+    ).length
+  ).toBeGreaterThan(60_000);
+  multibyteEdit.textarea.value = multibyteDraft;
+  multibyteEdit.saveForPageHide();
+
+  expect(exactFetchMock.mock.calls[0][1]?.keepalive).toBe(true);
+  expect(multibyteFetchMock.mock.calls[0][1]?.keepalive).toBe(false);
+});
+
+it("pagehide skips only byte-identical or closed edits and leaves rejection inert", async () => {
+  const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+    Promise.reject(new Error("unload"))
+  );
+  const { edit, onCommitRequest, onCancelRequest } = openForTest({
+    body: "# Server body",
+    fetcher: fetchMock as unknown as typeof fetch
+  });
+
+  edit.saveForPageHide();
+  expect(fetchMock).not.toHaveBeenCalled();
+
+  edit.textarea.value = "# Server body\n";
+  focusAway();
+  onCommitRequest.mockClear();
+  edit.saveForPageHide();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][1]?.keepalive).toBe(true);
+  expect(edit.textarea.isConnected).toBe(true);
+  expect(edit.textarea.readOnly).toBe(false);
+  expect(document.activeElement).not.toBe(edit.textarea);
+  expect(onCommitRequest).not.toHaveBeenCalled();
+  expect(onCancelRequest).not.toHaveBeenCalled();
+
+  edit.cancel();
+  edit.saveForPageHide();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  const closed = openForTest();
+  closed.edit.textarea.value = "# Closed draft";
+  closed.edit.destroy();
+  closed.edit.saveForPageHide();
+  expect(closed.fetchMock).not.toHaveBeenCalled();
+});
+
+it("closes idempotently and never commits through a destroyed handle", async () => {
+  const { edit, fetchMock, onCommitRequest, onCancelRequest } = openForTest();
+  const { textarea } = edit;
+  textarea.value = "# Discarded draft";
+
+  edit.destroy();
+  edit.destroy();
+  edit.cancel();
+
+  expect(textarea.isConnected).toBe(false);
+  await expect(edit.commit()).resolves.toEqual({ status: "closed" });
+  expect(fetchMock).not.toHaveBeenCalled();
+  dispatchKey(textarea, "Enter", { metaKey: true });
+  dispatchKey(textarea, "Escape");
+  textarea.dispatchEvent(new FocusEvent("blur"));
   expect(onCommitRequest).not.toHaveBeenCalled();
   expect(onCancelRequest).not.toHaveBeenCalled();
 });
