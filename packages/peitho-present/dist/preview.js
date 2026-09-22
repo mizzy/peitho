@@ -1314,23 +1314,20 @@ var PreviewShellController = class {
       tile: view.tile,
       key: view.sourceKey,
       body,
-      onCommitRequest: () => this.commitSourceEdit(edit),
+      onCommitRequest: () => this.commitActiveEditAndRelease(),
       onCancelRequest: () => this.cancelSourceEdit(edit)
     });
-    this.activeEdit = { kind: "source", edit, view };
+    this.activeEdit = { kind: "source", edit, view, commitPromise: null };
     this.setSlideSourceStatus("");
     this.applyLayout();
   }
-  commitSourceEdit(edit) {
-    void edit.commit().then((result) => this.finishSourceEditCommit(edit, result));
-  }
   finishSourceEditCommit(edit, result) {
-    if (result.status === "closed") return;
     const active = this.activeEdit;
-    if (active?.kind !== "source" || active.edit !== edit) return;
+    if (active?.kind !== "source" || active.edit !== edit) return false;
+    if (result.status === "closed") return true;
     if (result.status === "failed") {
       this.setSlideSourceStatus(result.message);
-      return;
+      return false;
     }
     if (result.status === "saved") {
       delete this.sources.sources[result.previousKey];
@@ -1339,8 +1336,8 @@ var PreviewShellController = class {
     }
     this.activeEdit = null;
     this.setSlideSourceStatus("");
-    this.applyLayout();
-    if (this.pendingTransitionSettlements === 0) this.releaseDeferredReload();
+    if (this.pendingTransitionSettlements === 0) this.applyLayout();
+    return true;
   }
   cancelSourceEdit(edit) {
     const active = this.activeEdit;
@@ -1400,7 +1397,7 @@ var PreviewShellController = class {
       this.handleSlideEditKeyDown(edit, keyboardEvent);
     };
     const onBlur = () => {
-      this.commitSlideEditAndRelease();
+      this.commitActiveEditAndRelease();
     };
     edit = {
       key: slide.key,
@@ -1451,7 +1448,7 @@ var PreviewShellController = class {
       edit.trailingNewlineSentinel = insertSourceNewline(this.win, edit.editor, this.selectionRangeProvider) || edit.trailingNewlineSentinel;
       return;
     }
-    this.commitSlideEditAndRelease();
+    this.commitActiveEditAndRelease();
   }
   cancelSlideEdit(edit) {
     if (!this.closeSlideEdit(edit)) return;
@@ -1465,17 +1462,24 @@ var PreviewShellController = class {
     this.setSlideEditStatus("");
     return true;
   }
-  commitSlideEditAndRelease() {
-    void this.settleActiveEdit().then((committed) => {
+  commitActiveEditAndRelease() {
+    void this.commitActiveEdit().then((committed) => {
       if (committed && this.pendingTransitionSettlements === 0) {
         this.releaseDeferredReload();
       }
     });
   }
-  settleActiveEdit() {
+  commitActiveEdit() {
     const active = this.activeEdit;
     if (active === null) return Promise.resolve(true);
-    if (active.kind === "source") return Promise.resolve(false);
+    if (active.kind === "source") {
+      if (active.commitPromise !== null) return active.commitPromise;
+      const commit2 = active.edit.commit().then((result) => this.finishSourceEditCommit(active.edit, result)).finally(() => {
+        active.commitPromise = null;
+      });
+      active.commitPromise = commit2;
+      return commit2;
+    }
     const edit = active.edit;
     if (edit.commitPromise !== null) return edit.commitPromise;
     const newText = this.slideEditText(edit);
@@ -1771,6 +1775,13 @@ var PreviewShellController = class {
       this.exitGrid();
       return;
     }
+    if (this.isEditOpen()) {
+      this.commitTransition(this.currentIndex, "single", () => this.focusNotes());
+      return;
+    }
+    this.focusNotes();
+  }
+  focusNotes() {
     const length = this.notesTextarea.value.length;
     this.notesTextarea.setSelectionRange(length, length);
     this.notesTextarea.focus();
@@ -1779,9 +1790,11 @@ var PreviewShellController = class {
   setIndex(index) {
     this.commitTransition(index, this.mode);
   }
-  commitTransition(index, mode) {
+  commitTransition(index, mode, afterCommit) {
     index = this.clampIndex(index);
-    if (index === this.currentIndex && index === this.selectedIndex && mode === this.mode) return;
+    if (afterCommit === void 0 && index === this.currentIndex && index === this.selectedIndex && mode === this.mode) {
+      return;
+    }
     const sequence = ++this.transitionSequence;
     const needsFlush = mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey;
     const commit = () => {
@@ -1797,6 +1810,7 @@ var PreviewShellController = class {
       this.applyLayout();
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
       this.saveState();
+      afterCommit?.();
     };
     if (!this.isEditOpen() && (!needsFlush || this.notesSettled())) {
       commit();
@@ -1820,7 +1834,7 @@ var PreviewShellController = class {
     })();
   }
   async settleForTransition(sequence) {
-    if (!await this.settleActiveEdit()) return false;
+    if (!await this.commitActiveEdit()) return false;
     if (sequence !== this.transitionSequence) return false;
     while (!this.notesSettled()) {
       if (!await this.flushNotes()) return false;
