@@ -25,6 +25,14 @@ export type PreviewSourceEdit = {
 
 const INVALID_RESPONSE_MESSAGE = "slide source save returned an invalid response";
 
+/** Editor chrome, kept in step with the notes panel's dark palette. */
+const SOURCE_EDITOR_BACKGROUND = "#15181e";
+const SOURCE_EDITOR_COLOR = "#e5e7eb";
+const SOURCE_EDITOR_CARET = "#38bdf8";
+const SOURCE_EDITOR_FONT_SIZE = "18px";
+const SOURCE_EDITOR_LINE_HEIGHT = "1.6";
+const SOURCE_EDITOR_PADDING = "24px";
+
 export function openPreviewSourceEdit(options: {
   document: Document;
   fetcher: typeof fetch;
@@ -49,6 +57,15 @@ export function openPreviewSourceEdit(options: {
   textarea.style.tabSize = "2";
   textarea.style.whiteSpace = "pre";
   textarea.style.overflow = "auto";
+  // The browser default is small black-on-white, which is unreadable against the
+  // shell's dark ground. Deck CSS cannot reach this element, so it is styled here.
+  textarea.style.background = SOURCE_EDITOR_BACKGROUND;
+  textarea.style.color = SOURCE_EDITOR_COLOR;
+  textarea.style.caretColor = SOURCE_EDITOR_CARET;
+  textarea.style.fontSize = SOURCE_EDITOR_FONT_SIZE;
+  textarea.style.lineHeight = SOURCE_EDITOR_LINE_HEIGHT;
+  textarea.style.padding = SOURCE_EDITOR_PADDING;
+  textarea.style.border = "none";
 
   let closed = false;
   let commitPromise: Promise<PreviewSourceEditCommitResult> | null = null;

@@ -3295,6 +3295,52 @@ it("source_edit_success_clears_a_prior_save_failure", async () => {
   expect(status.textContent).toBe("");
 });
 
+it("source_edit_shows_key_hint_and_dark_styling_and_an_error_replaces_the_hint", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const status = root.querySelector<HTMLSpanElement>('[data-peitho-preview="status"]')!;
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+  expect(hint.hidden).toBe(true);
+
+  const editor = openSourceEditor(root, bus);
+
+  // The save keys differ from the inline editor's, so the editor must announce them.
+  expect(hint.hidden).toBe(false);
+  expect(hint.textContent).toContain("Cmd/Ctrl+Enter");
+  expect(hint.textContent).toContain("Esc cancels");
+  // A hint is not a failure: it must not ride the alerting status span.
+  expect(status.textContent).toBe("");
+  // Readable against the shell's dark ground rather than the browser default.
+  expect(editor.style.background).not.toBe("");
+  expect(editor.style.color).not.toBe("");
+  expect(parseFloat(editor.style.fontSize)).toBeGreaterThan(13);
+
+  editor.value = "# Intro edited";
+  press(editor, "Enter", { metaKey: true });
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  fixture.resolveSourceEditPost(errorJson(422, "refused for a reason"));
+
+  // An error replaces the hint rather than sitting beside it.
+  await vi.waitFor(() => expect(status.textContent).toBe("refused for a reason"));
+  expect(hint.hidden).toBe(true);
+});
+
+it("source_edit_hint_disappears_when_the_editor_closes", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const hint = root.querySelector<HTMLSpanElement>('[data-peitho-preview="source-hint"]')!;
+
+  const editor = openSourceEditor(root, bus);
+  expect(hint.hidden).toBe(false);
+  press(editor, "Escape");
+
+  await vi.waitFor(() => expect(editor.isConnected).toBe(false));
+  expect(hint.hidden).toBe(true);
+  expect(hint.textContent).toBe("");
+});
+
 it("source_edit_transition_commits_before_notes_and_navigation", async () => {
   const bus = new EventTarget();
   const fixture = sourceEditFetchFixture();

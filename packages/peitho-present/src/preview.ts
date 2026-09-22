@@ -135,6 +135,13 @@ export const PREVIEW_STRIP_WIDTH = 200;
 const STRIP_PADDING = 12;
 const STRIP_GAP = 10;
 const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+/**
+ * The save keys are not discoverable from the editor itself, and they differ from
+ * the inline editor's (where plain Enter saves). Cmd and Ctrl are both accepted,
+ * so both are named. A save error replaces this hint.
+ */
+const SOURCE_EDIT_HINT =
+  "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
@@ -460,6 +467,7 @@ class PreviewShellController implements PreviewShell {
   private readonly notesStatus: HTMLSpanElement;
   private readonly panelStatuses = new Map<PanelStatusSource, string>();
   private readonly notesPositionText: HTMLSpanElement;
+  private readonly sourceEditHint: HTMLSpanElement;
   private readonly buildErrorBanner: HTMLElement;
   private activeEdit: ActiveEdit | null = null;
   private notesTextareaKey: string | null = null;
@@ -556,6 +564,9 @@ class PreviewShellController implements PreviewShell {
     )!;
     this.notesPositionText = this.notesPanel.querySelector<HTMLSpanElement>(
       '[data-peitho-preview="position"]'
+    )!;
+    this.sourceEditHint = this.notesPanel.querySelector<HTMLSpanElement>(
+      '[data-peitho-preview="source-hint"]'
     )!;
     this.buildErrorBanner = this.createBuildErrorBanner();
     this.strip = this.createStrip();
@@ -847,6 +858,7 @@ class PreviewShellController implements PreviewShell {
       onCancelRequest: () => this.cancelSourceEdit(edit)
     });
     this.activeEdit = { kind: "source", edit, view, commitPromise: null };
+    // After activeEdit is set, so the derived hint in setPanelStatus can see it.
     this.setSlideSourceStatus("");
     this.applyLayout();
   }
@@ -1274,6 +1286,14 @@ class PreviewShellController implements PreviewShell {
     status.style.whiteSpace = "pre-wrap";
     status.style.overflowWrap = "anywhere";
     positionRow.appendChild(status);
+    const hint = this.doc.createElement("span");
+    hint.dataset.peithoPreview = "source-hint";
+    hint.hidden = true;
+    hint.style.marginLeft = "auto";
+    hint.style.color = "#9ca3af";
+    hint.style.paddingLeft = "12px";
+    hint.style.flexShrink = "0";
+    positionRow.appendChild(hint);
     panel.appendChild(positionRow);
     const textarea = this.doc.createElement("textarea");
     textarea.dataset.peithoPreview = "note";
@@ -1317,6 +1337,12 @@ class PreviewShellController implements PreviewShell {
       .filter((status): status is string => status !== undefined)
       .join("\n");
     this.notesStatus.textContent = combined;
+    // Derived, never set per call site: the hint is visible exactly while a source
+    // edit is open and nothing has failed, so it cannot be left stale by a close path.
+    // It is not a failure, so it stays out of the alerting status span.
+    const showHint = this.activeEdit?.kind === "source" && combined === "";
+    this.sourceEditHint.textContent = showHint ? SOURCE_EDIT_HINT : "";
+    this.sourceEditHint.hidden = !showHint;
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
