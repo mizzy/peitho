@@ -305,9 +305,12 @@ your narration, so freezing an arbitrary moment of it into a PDF would say
 something you never meant; `peitho preview`, PDF export, lint, and published
 output show the code unemphasized.
 
-Emphasis is styled by the theme. Decks that ship their own `css/` can restyle
-it through `--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
-`--peitho-emphasis-dim`.
+When a deck uses static emphasis, its default styling travels with the deck,
+including when the deck has its own `css/`. Restyle it with the
+`--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
+`--peitho-emphasis-dim` custom properties, or override
+`.code-line-emphasis` directly. Stepped emphasis is styled only by
+`peitho present`.
 
 Line numbers past the end of the block, malformed specs, stepped emphasis
 inside a `::: {reveal}` group (which would nest two step spaces), and emphasis

@@ -1,0 +1,13 @@
+.code-line {
+  display: inline-block;
+  width: 100%;
+}
+
+.code-line-emphasis {
+  background: var(--peitho-emphasis-background, rgba(217, 163, 0, 0.18));
+  box-shadow: inset 3px 0 0 var(--peitho-emphasis-marker, #d9a300);
+}
+
+pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis) {
+  opacity: var(--peitho-emphasis-dim, 0.45);
+}

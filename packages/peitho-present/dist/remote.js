@@ -352,11 +352,10 @@ var POINTER_CORE_MIX_TO_WHITE = 0.65;
 var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 var EMPHASIS_ACTIVE_CSS = [
   ".code-line{display:inline-block;width:100%}",
-  ".code-line-emphasis,[data-emphasis-active]{",
+  "[data-emphasis-active]{",
   "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
   "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
   "}",
-  "pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis),",
   "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
   "opacity:var(--peitho-emphasis-dim,0.45)",
   "}"

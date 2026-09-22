@@ -482,6 +482,36 @@ it("moves code line emphasis to the group owning the current step", async () => 
   expect(active()).toEqual(["1"]);
 });
 
+it("injects only stepped emphasis styling from the present shell", async () => {
+  const responseManifest = manifestWithSlides([{ key: "intro", revealSteps: 1 }]);
+  const root = document.createElement("main");
+
+  await mountForTest({
+    root,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url.includes("intro")) {
+        return okText(
+          '<section><pre><code><span class="code-line" data-emphasis-step="1">a</span></code></pre></section>'
+        );
+      }
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as unknown as typeof fetch,
+    window
+  });
+  const intro = root.querySelector<HTMLElement>('[data-slide-index="0"]')!;
+  const styles = intro.shadowRoot!.querySelectorAll("style");
+  const shellCss = styles[styles.length - 1].textContent ?? "";
+
+  expect(shellCss).toContain(".code-line{display:inline-block;width:100%}");
+  expect(shellCss).toContain("[data-emphasis-active]{");
+  expect(shellCss).toContain(
+    "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){"
+  );
+  expect(shellCss).not.toContain(".code-line-emphasis");
+});
+
 it("never hides an emphasis-only code block", async () => {
   // Emphasis marks where the speaker is; the code itself must stay visible,
   // so `data-reveal-hidden` must not land on emphasis markers.
