@@ -162,9 +162,26 @@ const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
  */
 const SOURCE_EDIT_HINT =
   "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
+/**
+ * Plain Enter saves in the inline editor, unlike source and notes where Enter
+ * inserts a newline; clicking away saves in all three.
+ */
+const INLINE_EDIT_HINT =
+  "Enter or click away saves · Shift+Enter inserts a newline · Esc cancels";
+/**
+ * Notes have no cancel action: Escape leaves the textarea, and leaving saves
+ * through the blur flush.
+ */
+const NOTES_EDIT_HINT = "Esc or click away saves · Enter inserts a newline";
+/** A locked editor swallows its own keys, so the slot must not keep promising them. */
+const SAVING_HINT = "Saving…";
 const RESTORE_DRAFT_HINT = "Draft discarded · Press u to restore";
-const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · notes below";
-const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · notes below";
+/**
+ * Every available editor entry point names its key or action; Enter reaches the
+ * notes textarea through activateSelection.
+ */
+const EDIT_AFFORDANCE_HINT = "Click text to edit · e for Markdown · Enter for notes";
+const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT = "Click text to edit · Enter for notes";
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
@@ -548,9 +565,13 @@ class PreviewShellController implements PreviewShell {
     event.preventDefault();
     this.notesTextarea.blur();
   };
+  private readonly onNotesFocus = (): void => {
+    this.renderPanelStatus();
+  };
   private readonly onNotesBlur = (): void => {
     this.swallowEnterRepeat = false;
     void this.flushNotes();
+    this.renderPanelStatus();
   };
   private readonly onPageHide = (): void => {
     this.saveState();
@@ -605,6 +626,7 @@ class PreviewShellController implements PreviewShell {
     this.buildErrorBanner = this.createBuildErrorBanner();
     this.strip = this.createStrip();
     this.notesTextarea.addEventListener("keydown", this.onNotesKeyDown);
+    this.notesTextarea.addEventListener("focus", this.onNotesFocus);
     this.notesTextarea.addEventListener("blur", this.onNotesBlur);
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
@@ -773,6 +795,7 @@ class PreviewShellController implements PreviewShell {
     this.destroyed = true;
     this.advanceTransitionSequence();
     this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
+    this.notesTextarea.removeEventListener("focus", this.onNotesFocus);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
@@ -1132,6 +1155,7 @@ class PreviewShellController implements PreviewShell {
           active.commitPromise = null;
         });
       active.commitPromise = commit;
+      this.renderPanelStatus();
       return commit;
     }
     const edit = active.edit;
@@ -1147,6 +1171,7 @@ class PreviewShellController implements PreviewShell {
     });
     edit.commitPromise = commit;
     this.lockSlideEdit(edit);
+    this.renderPanelStatus();
     return commit;
   }
 
@@ -1425,31 +1450,63 @@ class PreviewShellController implements PreviewShell {
     this.renderPanelStatus();
   }
 
+  private editAffordanceHint(): string {
+    const currentSlide = this.slides[this.currentIndex];
+    return currentSlide !== undefined &&
+      this.sources.unavailable[currentSlide.sourceKey] !== undefined
+      ? EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT
+      : EDIT_AFFORDANCE_HINT;
+  }
+
+  /** Each editor names its own keys; they differ, and a new one must not silently blank the slot. */
+  private activeEditHint(edit: ActiveEdit): string {
+    switch (edit.kind) {
+      case "source":
+        return SOURCE_EDIT_HINT;
+      case "inline":
+        return INLINE_EDIT_HINT;
+    }
+  }
+
+  private editCommitInFlight(edit: ActiveEdit): boolean {
+    switch (edit.kind) {
+      case "source":
+        return edit.commitPromise !== null;
+      case "inline":
+        return edit.edit.commitPromise !== null;
+    }
+  }
+
+  /**
+   * The panel's single hint slot is total and ordered: teardown and failures silence
+   * it; otherwise show a reachable restore offer, an active editor's saving or key
+   * state, focused notes keys, or finally the edit affordance.
+   */
+  private panelHint(combined: string): string {
+    if (this.destroyed) return "";
+    const notesFocused = this.doc.activeElement === this.notesTextarea;
+    // `u` reaches the restore handler only when focus is outside an editable target
+    // (installPreviewKeyboard's editable guard swallows every other key), so the
+    // offer is only named where it can actually be taken.
+    if (!notesFocused && this.restorableDraft() !== null) return RESTORE_DRAFT_HINT;
+    // Hoisted above every editor rung so a save failure silences every editor hint.
+    if (combined !== "") return "";
+    if (this.activeEdit !== null) {
+      return this.editCommitInFlight(this.activeEdit)
+        ? SAVING_HINT
+        : this.activeEditHint(this.activeEdit);
+    }
+    if (notesFocused) return NOTES_EDIT_HINT;
+    return this.editAffordanceHint();
+  }
+
   private renderPanelStatus(): void {
     const combined = (["notes", "slide-edit", "slide-source"] as const)
       .map((statusSource) => this.panelStatuses.get(statusSource))
       .filter((status): status is string => status !== undefined)
       .join("\n");
     this.notesStatus.textContent = combined;
-    // The restore hint and request handler share restorableDraft(), so a hidden
-    // offer cannot remain keyboard-active.
-    const restorable = this.restorableDraft();
-    const currentSlide = this.slides[this.currentIndex];
-    const editAffordance =
-      currentSlide !== undefined &&
-      this.sources.unavailable[currentSlide.sourceKey] !== undefined
-        ? EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT
-        : EDIT_AFFORDANCE_HINT;
-    const hint =
-      this.destroyed
-        ? ""
-        : restorable !== null
-          ? RESTORE_DRAFT_HINT
-          : this.activeEdit?.kind === "source" && combined === ""
-            ? SOURCE_EDIT_HINT
-            : this.activeEdit === null && combined === ""
-              ? editAffordance
-              : "";
+    const hint = this.panelHint(combined);
     this.sourceEditHint.textContent = hint;
     this.sourceEditHint.hidden = hint === "";
     const failed = combined !== "";

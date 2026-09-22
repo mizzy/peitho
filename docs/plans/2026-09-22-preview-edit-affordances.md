@@ -62,6 +62,9 @@ The unavailable-slide form drops only the entry point that cannot work:
 
     Click text to edit · notes below
 
+Issue #612 later replaced the trailing `notes below` in both forms with
+`Enter for notes`, making the keyboard path to notes explicit.
+
 ## Author decision
 
 The affordance stays permanently. Fading after an editor has been used would
