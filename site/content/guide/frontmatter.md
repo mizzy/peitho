@@ -2,7 +2,7 @@
 title = "Frontmatter"
 weight = 40
 template = "guide-page.html"
-description = "Use deck frontmatter for time, canvas, PDF, layout, CSS, syntax, font, and code image settings."
+description = "Use deck frontmatter for time, canvas, PDF, layout, theme, CSS override, syntax, font, and code image settings."
 +++
 
 ## Frontmatter belongs at the top
@@ -19,8 +19,8 @@ by a missing closing `---` all stop the build.
 ## Keys
 
 Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`,
-`page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `syntaxes`, `fonts`,
-and `code_images`.
+`page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `overrides`,
+`syntaxes`, `fonts`, and `code_images`.
 
 | Key | Purpose |
 | --- | --- |
@@ -32,7 +32,8 @@ and `code_images`.
 | `pointer_color` | Color of the laser pointer overlay driven from the phone remote: `#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`, or a CSS named color. |
 | `lang` | Deck language as a BCP 47 tag, emitted as `<html lang>` on every page that renders slides: `en` (default), `ja`, `zh-Hans`, … Language-sensitive CSS such as `word-break: auto-phrase` keys off this. |
 | `layouts` | Layout HTML file or directory. |
-| `css` | Theme CSS file or directory. |
+| `css` | Theme CSS file or directory. An explicit path or deck-adjacent `css/` replaces the built-in theme. |
+| `overrides` | CSS file or directory appended after the resolved theme. Use it to keep the built-in theme and change only what you need. |
 | `syntaxes` | Custom `.sublime-syntax` grammar file or directory, augmenting the built-in set. See [Syntax highlighting](@/guide/writing-decks.md#syntax-highlighting). |
 | `fonts` | Font asset file or directory, copied verbatim for your own `@font-face` rules. |
 | `code_images` | External commands or overrides that turn matching fenced code blocks into SVG images. |
@@ -163,10 +164,10 @@ Bare boolean values such as `mermaid: false` and `math: true` are reserved for
 possible future built-in opt-out syntax and are rejected with a line-numbered
 error. Use a command string when you want an override.
 
-Preview watches the deck, author-referenced images, layout, CSS, syntax, and
-font roots. It does not watch files read by the command itself, such as Mermaid
-theme files or config JSON. Restart preview or touch the deck after changing
-those command inputs.
+Preview watches the deck, author-referenced images, layout, theme CSS, override
+CSS, syntax, and font roots. It does not watch files read by the command itself,
+such as Mermaid theme files or config JSON. Restart preview or touch the deck
+after changing those command inputs.
 
 See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
 and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and
@@ -177,22 +178,36 @@ and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and
 For asset keys, Peitho resolves assets in this order:
 
 1. Explicit frontmatter path.
-2. Deck-adjacent auto-detect: `layouts/`, `css/`, `syntaxes/`, or `fonts/`
-   next to the deck.
-3. Built-in defaults for layouts, CSS, and syntaxes; no extra asset for fonts.
+2. A same-named deck-adjacent directory: `layouts/`, `css/`, `overrides/`,
+   `syntaxes/`, or `fonts/`.
+3. Built-in defaults for layouts, CSS, and syntaxes; no extra asset for
+   overrides or fonts.
 
 An explicit path that does not exist is a line-numbered build error, not a
 silent fallback to auto-detect or built-ins.
+
+`css` and `overrides` are separate layers. An explicit `css:` path or a
+deck-adjacent `css/` directory replaces the built-in theme, as before.
+`overrides` resolves independently and is appended after whichever CSS layer
+was selected. Therefore:
+
+- With `overrides/` but no `css/`, Peitho emits the built-in theme followed by
+  the overrides.
+- With both directories, Peitho emits the deck CSS followed by the overrides.
+
+Use `overrides` when you want the built-in theme plus a few tweaks. Before this
+key existed, that required copying the whole built-in theme into `css/` and
+maintaining the copy.
 
 ## File and directory behavior
 
 Each asset key may point at a file or a directory. Directories are read in
 deterministic filename order.
 
-Layouts read `*.html`. CSS reads `*.css`. Syntaxes read
-`*.sublime-syntax` and augment the built-in syntax set. Fonts copy files
-verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS
-files can live side by side.
+Layouts read `*.html`. Both `css` and `overrides` read `*.css`, preserving the
+layer order above. Syntaxes read `*.sublime-syntax` and augment the built-in
+syntax set. Fonts copy files verbatim without an extension filter, so `.woff2`,
+`.ttf`, and `@font-face` CSS files can live side by side.
 
 ## Using custom fonts
 

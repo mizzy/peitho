@@ -1343,6 +1343,97 @@ fn repository_example_builds_three_slide_distribution() {
 }
 
 #[test]
+fn explicit_overrides_file_layers_after_builtin_theme() {
+    const BUILTIN_THEME_MARKER: &str = "Inter-Regular.woff2";
+    const OVERRIDE_MARKER: &str = ".explicit-file-override {";
+
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let overrides = dir.path().join("tweaks.css");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        "---\noverrides: ./tweaks.css\n---\n# Explicit override file\n",
+    )
+    .unwrap();
+    fs::write(
+        &overrides,
+        format!("{OVERRIDE_MARKER}\n  color: rebeccapurple;\n}}\n"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+    let theme_index = css
+        .find(BUILTIN_THEME_MARKER)
+        .expect("built-in theme must be emitted");
+    let override_index = css
+        .find(OVERRIDE_MARKER)
+        .expect("explicit override file must be emitted");
+    assert!(
+        theme_index < override_index,
+        "built-in theme must be emitted before the explicit override file"
+    );
+}
+
+#[test]
+fn footnotes_example_layers_overrides_on_the_builtin_theme() {
+    const BUILTIN_THEME_MARKER: &str = "Inter-Regular.woff2";
+
+    let root = workspace_root();
+    let example = root.join("examples/footnotes");
+    assert!(
+        !example.join("css").exists(),
+        "footnotes must not vendor the built-in theme"
+    );
+    assert!(
+        example.join("overrides/outro.css").is_file(),
+        "footnotes must keep its deck-specific CSS in overrides/"
+    );
+    assert!(
+        !fs::read_to_string(example.join("overrides/outro.css"))
+            .unwrap()
+            .contains(BUILTIN_THEME_MARKER),
+        "footnotes must not copy the built-in theme into its override"
+    );
+
+    let out = tempdir().unwrap();
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .current_dir(&root)
+        .args([
+            "build",
+            "examples/footnotes/deck.md",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let css = fs::read_to_string(out.path().join("peitho.css")).unwrap();
+    let theme_index = css
+        .find(BUILTIN_THEME_MARKER)
+        .expect("built-in Inter @font-face must be emitted");
+    let override_index = css
+        .find(".slot-outro {")
+        .expect("footnotes outro override must be emitted");
+    assert!(
+        theme_index < override_index,
+        "built-in theme must be emitted before the footnotes override"
+    );
+}
+
+#[test]
 fn repository_example_css_is_root_size_lint_clean() {
     let root = workspace_root();
     let mut examples = fs::read_dir(root.join("examples"))
@@ -1354,14 +1445,14 @@ fn repository_example_css_is_root_size_lint_clean() {
     examples.sort();
     assert!(!examples.is_empty(), "expected at least one example deck");
 
-    let mut linted_examples = 0;
+    let mut linted_examples = BTreeSet::new();
     for example_dir in examples {
         let example = example_dir.file_name().unwrap().to_string_lossy();
         let Some(layouts) = example_lint_layouts(&example_dir) else {
             continue;
         };
-        linted_examples += 1;
-        let css_files = read_example_css_files(&example_dir.join("css"));
+        linted_examples.insert(example.to_string());
+        let css_files = read_example_css_layers(&example_dir);
         let layout_slots = layouts.slot_classes();
         let slide_slots = broad_slide_slots_for_css_keys(&css_files, &layout_slots);
 
@@ -1374,8 +1465,12 @@ fn repository_example_css_is_root_size_lint_clean() {
         .unwrap_or_else(|err| panic!("{example} CSS should be lint-clean: {err}"));
     }
     assert!(
-        linted_examples > 0,
+        !linted_examples.is_empty(),
         "expected at least one example with deck CSS to lint"
+    );
+    assert!(
+        linted_examples.contains("footnotes"),
+        "footnotes override CSS must be covered by the repository lint"
     );
 }
 
@@ -1974,7 +2069,8 @@ fn example_lint_layouts(example_dir: &Path) -> Option<peitho_core::Layouts> {
     let example = example_dir.file_name().unwrap().to_string_lossy();
     let has_layouts_dir = example_dir.join("layouts").is_dir();
     let has_css_dir = example_dir.join("css").is_dir();
-    let (layouts_key, css_key) = example_frontmatter_asset_values(example_dir);
+    let has_overrides_dir = example_dir.join("overrides").is_dir();
+    let (layouts_key, css_key, overrides_key) = example_frontmatter_asset_values(example_dir);
 
     if let Some(value) = layouts_key.as_deref() {
         assert_conventional_frontmatter_asset(&example, "layouts", value, "./layouts");
@@ -1982,14 +2078,25 @@ fn example_lint_layouts(example_dir: &Path) -> Option<peitho_core::Layouts> {
     if let Some(value) = css_key.as_deref() {
         assert_conventional_frontmatter_asset(&example, "css", value, "./css");
     }
+    if let Some(value) = overrides_key.as_deref() {
+        assert_conventional_frontmatter_asset(&example, "overrides", value, "./overrides");
+    }
 
-    if css_key.is_none() && !has_css_dir {
+    if css_key.is_none() && !has_css_dir && overrides_key.is_none() && !has_overrides_dir {
         return None;
     }
-    assert!(
-        has_css_dir,
-        "{example} has css: frontmatter but no css/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
-    );
+    if css_key.is_some() {
+        assert!(
+            has_css_dir,
+            "{example} has css: frontmatter but no css/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+        );
+    }
+    if overrides_key.is_some() {
+        assert!(
+            has_overrides_dir,
+            "{example} has overrides: frontmatter but no overrides/ directory; extend repository_example_css_is_root_size_lint_clean if this example intentionally diverges from the convention"
+        );
+    }
 
     if layouts_key.is_some() {
         assert!(
@@ -2010,15 +2117,18 @@ fn read_builtin_example_layout() -> peitho_core::Layouts {
     peitho_core::Layouts::single(peitho_core::parse_layout("title-body-code", &html).unwrap())
 }
 
-fn example_frontmatter_asset_values(example_dir: &Path) -> (Option<String>, Option<String>) {
+fn example_frontmatter_asset_values(
+    example_dir: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
     let deck = fs::read_to_string(example_dir.join("deck.md")).unwrap();
     let mut lines = deck.lines();
     if lines.next() != Some("---") {
-        return (None, None);
+        return (None, None, None);
     }
 
     let mut layouts = None;
     let mut css = None;
+    let mut overrides = None;
     for line in lines {
         if line.trim() == "---" {
             break;
@@ -2027,10 +2137,12 @@ fn example_frontmatter_asset_values(example_dir: &Path) -> (Option<String>, Opti
             layouts = Some(value);
         } else if let Some(value) = frontmatter_asset_value(line, "css") {
             css = Some(value);
+        } else if let Some(value) = frontmatter_asset_value(line, "overrides") {
+            overrides = Some(value);
         }
     }
 
-    (layouts, css)
+    (layouts, css, overrides)
 }
 
 fn frontmatter_asset_value(line: &str, key: &str) -> Option<String> {
@@ -2077,6 +2189,17 @@ fn read_example_css_files(css_dir: &Path) -> Vec<peitho_core::CssFile> {
             content: fs::read_to_string(path).unwrap(),
         })
         .collect()
+}
+
+fn read_example_css_layers(example_dir: &Path) -> Vec<peitho_core::CssFile> {
+    let mut files = Vec::new();
+    for directory in ["css", "overrides"] {
+        let path = example_dir.join(directory);
+        if path.is_dir() {
+            files.extend(read_example_css_files(&path));
+        }
+    }
+    files
 }
 
 fn broad_slide_slots_for_css_keys(
