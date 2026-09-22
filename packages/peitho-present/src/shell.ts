@@ -127,30 +127,22 @@ const POINTER_CORE_MIX_TO_WHITE = 0.65;
 const REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 
 /**
- * Code line emphasis defaults, injected by the shell rather than left to the
- * theme.
+ * Stepped code line emphasis defaults, injected by the present shell.
  *
- * A deck that ships its own `css/` replaces the built-in theme wholesale, so
- * emphasis rules living only in `themes/base.css` would silently do nothing
- * for exactly the decks most likely to use the feature. This mirrors how
- * `REVEAL_HIDDEN_CSS` guarantees reveal works regardless of deck CSS.
- *
- * Both forms are styled here so the shell never renders one and not the other:
- * static emphasis (`.code-line-emphasis`, baked into the build output) and
- * stepped emphasis (`[data-emphasis-active]`, toggled per step). `themes/base.css`
- * carries the same defaults for static emphasis, which must also render in
- * PDF and `dist/` where no shell runs.
+ * Static emphasis defaults ship in the rendered deck CSS so every output and
+ * every slot name receives them. The shell owns only stepped emphasis
+ * (`[data-emphasis-active]`, toggled per step). It retains the `.code-line`
+ * layout rule because stepped-only decks do not receive the static CSS block.
  *
  * Appearance stays themeable through the custom properties; a deck overriding
  * them in its own CSS wins, because these rules only supply the fallbacks.
  */
 const EMPHASIS_ACTIVE_CSS = [
   ".code-line{display:inline-block;width:100%}",
-  ".code-line-emphasis,[data-emphasis-active]{",
+  "[data-emphasis-active]{",
   "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
   "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
   "}",
-  "pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis),",
   "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
   "opacity:var(--peitho-emphasis-dim,0.45)",
   "}"

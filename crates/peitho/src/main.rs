@@ -6294,6 +6294,44 @@ contexts:
     }
 
     #[test]
+    fn build_artifacts_prepends_static_emphasis_css_before_theme() {
+        let fixture =
+            WatchFixture::new("# Code\n\n```rust {2}\nlet first = 1;\nlet second = 2;\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        write_shared_assets(&fixture.options.out, &artifacts).unwrap();
+        let css = fs::read_to_string(fixture.options.out.join("peitho.css")).unwrap();
+
+        assert!(artifacts.rendered.slides()[0]
+            .html()
+            .contains(r#"class="code-line code-line-emphasis""#));
+        assert!(css.contains(".code-line-emphasis {"), "{css}");
+        assert!(
+            css.contains("pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis)"),
+            "{css}"
+        );
+        let emphasis_index = css.find(".code-line-emphasis {").unwrap();
+        let theme_index = css.find(".slot-title { font-weight: 700; }").unwrap();
+        assert!(
+            emphasis_index < theme_index,
+            "static-emphasis CSS must come before author/theme CSS so author rules win"
+        );
+    }
+
+    #[test]
+    fn build_artifacts_omits_emphasis_css_for_stepped_only_decks() {
+        let fixture =
+            WatchFixture::new("# Code\n\n```rust {1|2}\nlet first = 1;\nlet second = 2;\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        write_shared_assets(&fixture.options.out, &artifacts).unwrap();
+        let css = fs::read_to_string(fixture.options.out.join("peitho.css")).unwrap();
+
+        assert!(artifacts.rendered.slides()[0]
+            .html()
+            .contains("data-emphasis-step"));
+        assert!(!css.contains(".code-line"), "{css}");
+    }
+
+    #[test]
     fn build_artifacts_uses_syntaxes_dir_next_to_the_deck() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");

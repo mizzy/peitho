@@ -139,15 +139,27 @@ So the shell gains a parallel, equally small mechanism alongside `applyRevealSta
 
 ### Styling
 
-Theme CSS (`themes/base.css`, next to the existing `hl-*` rules) defines the default:
+Static-emphasis defaults live in the embedded
+`crates/peitho-core/assets/code-emphasis.css`. When a checked deck contains at
+least one non-stepped emphasis annotation, the renderer prepends that asset
+once to `RenderedDeck::css()`, before author/theme CSS:
 
 ```css
-.slot-code .code-line-emphasis,
-.slot-code [data-emphasis-active] { background: …; }
-.slot-code:has([data-emphasis-active]) .code-line:not([data-emphasis-active]) { opacity: …; }
+.code-line-emphasis { background: …; }
+pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis) { opacity: …; }
 ```
 
-Colors stay in theme CSS, consistent with syntax highlighting: the build emits classes, the theme decides appearance.
+The selectors deliberately do not use a `.slot-code` prefix: explicit
+`::: {slot=name}` routing can place code in any code-accepting slot. Because
+all build, preview, present, PDF, and lint workspaces write the same rendered
+deck CSS, static markup and its defaults cannot diverge when a deck replaces
+the built-in theme with its own `css/`.
+
+The present shell injects only the stepped `[data-emphasis-active]` appearance
+and dimming rules. It also retains the shared `.code-line` layout rule because
+a stepped-only deck has no static-emphasis block to prepend. Both embedded
+blocks supply only `--peitho-emphasis-*` fallbacks; author/theme CSS remains
+last and can override the defaults.
 
 ## Errors (all line-numbered, with help)
 
@@ -191,14 +203,18 @@ Recorded here so that a future "emphasis pointed at the wrong line" report is re
 
 This split follows from what the two notations mean. Static emphasis says "these lines are the important ones" — a property of the content, which belongs in distributed artifacts. Stepped emphasis is a pointer that tracks the speaker's narration; freezing an arbitrary moment of it into a PDF would communicate something the author never asserted.
 
-It also requires no code in those paths: stepped emphasis is stamped as `data-emphasis-step` and only the present shell acts on it, so every other output shows no emphasis **by construction** — the same structure that already gives reveal its PDF/preview behavior.
+Static-emphasis markup and its conditional embedded CSS travel together in
+`RenderedDeck::css()` through every output writer. Stepped emphasis is stamped
+as `data-emphasis-step` and only the present shell acts on it, so every other
+output shows no stepped emphasis **by construction** — the same structure that
+already gives reveal its PDF/preview behavior.
 
 ## Test plan
 
 - **Parser**: valid specs (static / stepped / multi-item / untagged / with-language); every error row above, asserting line number and help text; unknown-language regression; `{.rust}` produces the Pandoc-specific help rather than a generic parse failure; an emphasis spec on a `mermaid`/`math`/external-renderer block is rejected at parse time (asserted before any transform runs, pinning the ordering the architecture depends on).
 - **Step counting**: stepped emphasis contributes `groups.len()`; static contributes `0`; a code block inside `::: {reveal}` with static emphasis still contributes `1`; `manifest.json` `revealSteps` reflects the total.
 - **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped step values match the counted span.
-- **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; listeners torn down per test.
+- **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; the injected shell CSS retains stepped rules and line layout but no static selector; listeners torn down per test.
 - **E2E (browser, required)**: emphasis is visible and moves with arrow keys in `peitho present`; PDF export of a stepped deck contains no emphasis while a static deck does. Per CLAUDE.md, jsdom cannot confirm the visual result.
 - **Example deck**: extend `examples/` with a walked-through code block so the feature is covered by the demo site build.
 
@@ -206,4 +222,6 @@ It also requires no code in those paths: stepped emphasis is stamped as `data-em
 
 Emphasis uses **both** a background tint on emphasized lines and dimming of the rest. Dimming is scoped by `:has()` so it applies only while some line in that block is emphasized — a block whose stepped emphasis has not yet started, or has been stepped past, renders as ordinary undimmed code. Untagged blocks get identical styling; the only difference is the absence of `hl-*` spans inside the line.
 
-Colors and opacity values live in theme CSS, changeable without touching the build.
+Default colors and opacity live in the renderer's embedded static CSS and the
+present shell's stepped CSS. Both use `--peitho-emphasis-*` fallbacks, so
+author/theme CSS can change the appearance without touching the build.

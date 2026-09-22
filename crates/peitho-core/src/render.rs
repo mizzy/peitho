@@ -26,8 +26,13 @@ use crate::{
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
+const CODE_EMPHASIS_CSS: &str = include_str!("../assets/code-emphasis.css");
 const EDIT_SOURCE_SPAN_ATTRIBUTE: &str = "data-peitho-src";
 const EDIT_MARKDOWN_ATTRIBUTE: &str = "data-peitho-md";
+
+pub(crate) fn code_emphasis_css() -> &'static str {
+    CODE_EMPHASIS_CSS
+}
 
 pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES
     .union(Options::ENABLE_STRIKETHROUGH)
@@ -93,10 +98,12 @@ pub fn render_deck(
     let mut uses_math = false;
     let mut uses_embed_card = false;
     let mut uses_generic_embed_card = false;
+    let mut uses_static_emphasis = false;
     for slide in checked_slides {
         uses_math |= slide_uses_math(slide.slots());
         uses_embed_card |= slide_uses_embed_card(slide.slots());
         uses_generic_embed_card |= slide_uses_generic_embed_card(slide.slots());
+        uses_static_emphasis |= slide_uses_static_emphasis(slide.slots());
         let (page_number, page_total) = match (slide.page_number_hidden(), page_numbers) {
             (true, _) | (false, None) => (None, None),
             (false, Some(PageNumberFormat::Current)) => (Some(slide.index() + 1), None),
@@ -138,6 +145,9 @@ pub fn render_deck(
     if uses_generic_embed_card {
         css_parts.push(generic_embed_card_css());
     }
+    if uses_static_emphasis {
+        css_parts.push(code_emphasis_css());
+    }
     css_parts.push(&theme_css);
     let css = css_parts.join("\n");
     Ok(Deck::rendered(settings, slides, css, math_assets))
@@ -166,6 +176,16 @@ fn slide_uses_generic_embed_card(
         slot.fragments()
             .iter()
             .any(|fragment| matches!(fragment.kind(), FragmentKind::GenericEmbedCard { .. }))
+    })
+}
+
+fn slide_uses_static_emphasis(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
+    slots.values().any(|slot| {
+        slot.fragments().iter().any(|fragment| {
+            fragment
+                .emphasis()
+                .is_some_and(|emphasis| !emphasis.stepped())
+        })
     })
 }
 
@@ -4460,6 +4480,74 @@ mod tests {
     }
 
     #[test]
+    fn rendered_deck_prepends_emphasis_css_before_theme_only_when_used() {
+        let theme_css = ".peitho-slide { color: red; }\n";
+        let with_static_emphasis = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust {2}\nlet a = 1;\nlet b = 2;\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let with_stepped_emphasis = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let without_emphasis = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust\nlet a = 1;\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let emphasis_css = code_emphasis_css();
+
+        assert_eq!(
+            with_static_emphasis.css(),
+            format!("{emphasis_css}\n{theme_css}")
+        );
+        assert_eq!(with_stepped_emphasis.css(), theme_css);
+        assert_eq!(without_emphasis.css(), theme_css);
+        assert_eq!(
+            with_static_emphasis
+                .css()
+                .matches(".code-line-emphasis {")
+                .count(),
+            1
+        );
+        assert!(!emphasis_css.contains("url("));
+        assert!(!emphasis_css.contains("@font-face"));
+        assert!(!emphasis_css.contains("[data-emphasis-active]"));
+        assert!(!emphasis_css.contains(".slot-code"));
+        assert_eq!(emphasis_css.matches("--peitho-emphasis-").count(), 3);
+    }
+
+    #[test]
+    fn static_emphasis_css_covers_code_in_non_code_slot() {
+        let layout = parse_layout(
+            "snippet",
+            r#"<section><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="snippet" accepts="code" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let rendered = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n::: {slot=snippet}\n\n```rust {2}\nlet a = 1;\nlet b = 2;\n```\n\n:::\n",
+            layout,
+            include_str!("../../../themes/base.css"),
+        );
+        let html = rendered.slides()[0].html();
+        let css = rendered.css();
+
+        assert!(html.contains(r#"class="slot-snippet""#), "{html}");
+        assert!(html.contains("code-line-emphasis"), "{html}");
+        assert!(
+            css.contains("pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis)"),
+            "{css}"
+        );
+        assert!(!css.contains(".slot-code .code-line"), "{css}");
+        assert!(
+            !css.contains(".slot-code:has(.code-line-emphasis)"),
+            "{css}"
+        );
+    }
+
+    #[test]
     fn x_card_only_render_keeps_issue_398_html_and_css_bytes() {
         let theme_css = ".theme { color: red; }\n";
         let rendered = render_checked_with_css(
@@ -4533,7 +4621,7 @@ mod tests {
 
     #[test]
     fn render_slot_opens_generic_card_permalink_in_new_tab() {
-        let rendered = render_checked(checked_deck_with_generic_card_body(false, false));
+        let rendered = render_checked(checked_deck_with_generic_card_body(false, false, false));
         let html = rendered.slides()[0].html();
         let permalink = opening_tag(html, r#"<a class="peitho-embed-card__permalink""#);
 
@@ -4691,8 +4779,10 @@ mod tests {
     #[test]
     fn generic_card_css_is_conditional_and_follows_base_card_css() {
         let theme_css = ".theme { color: red; }\n";
-        let generic =
-            render_checked_with_css(checked_deck_with_generic_card_body(false, false), theme_css);
+        let generic = render_checked_with_css(
+            checked_deck_with_generic_card_body(false, false, false),
+            theme_css,
+        );
         let plain = render_checked_deck_with_layout_and_css(
             "# Intro\n\nBody",
             title_body_layout(),
@@ -4732,16 +4822,19 @@ mod tests {
     #[test]
     fn math_x_and_generic_css_order_keeps_theme_last() {
         let theme_css = ".theme { color: rebeccapurple; }\n";
-        let rendered =
-            render_checked_with_css(checked_deck_with_generic_card_body(true, true), theme_css);
+        let rendered = render_checked_with_css(
+            checked_deck_with_generic_card_body(true, true, true),
+            theme_css,
+        );
 
         assert_eq!(
             rendered.css(),
             format!(
-                "{}\n{}\n{}\n{theme_css}",
+                "{}\n{}\n{}\n{}\n{theme_css}",
                 MathAssets::katex().css(),
                 EmbedCardAssets::builtin().css(),
                 crate::embed_card::generic_embed_card_css(),
+                code_emphasis_css(),
             )
         );
     }
@@ -4759,6 +4852,11 @@ mod tests {
             title_body_layout(),
             theme_css,
         );
+        let stepped = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
 
         assert_eq!(
             x.css(),
@@ -4769,6 +4867,7 @@ mod tests {
             format!("{}\n{theme_css}", MathAssets::katex().css())
         );
         assert_eq!(plain.css(), theme_css);
+        assert_eq!(stepped.css(), theme_css);
     }
 
     #[test]
@@ -6349,6 +6448,14 @@ Paragraph after heading.
         .unwrap()
     }
 
+    fn title_body_code_layout() -> Layout {
+        parse_layout(
+            "title-body-code",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
     fn render_with_edit_annotations(
         markdown: &str,
         layout: Layout,
@@ -6909,8 +7016,13 @@ Paragraph after heading.
     fn checked_deck_with_generic_card_body(
         include_math: bool,
         include_x_card: bool,
+        include_static_emphasis: bool,
     ) -> Deck<Checked> {
-        let layout = title_body_layout();
+        let layout = if include_static_emphasis {
+            title_body_code_layout()
+        } else {
+            title_body_layout()
+        };
         let title = SlotName::new("title").unwrap();
         let body = SlotName::new("body").unwrap();
         let mut fragments = Vec::new();
@@ -6950,6 +7062,19 @@ Paragraph after heading.
             body,
             CheckedSlot::new(layout.slot("body").unwrap().clone(), fragments),
         );
+        if include_static_emphasis {
+            let code = SlotName::new("code").unwrap();
+            slots.insert(
+                code,
+                CheckedSlot::new(
+                    layout.slot("code").unwrap().clone(),
+                    vec![
+                        SourceFragment::code(7, Some("rust".to_owned()), "let x = 1;")
+                            .with_emphasis(crate::emphasis::parse_emphasis_spec("1", 7).unwrap()),
+                    ],
+                ),
+            );
+        }
         Deck::checked(
             DeckSettings::default(),
             vec![CheckedSlide::new(

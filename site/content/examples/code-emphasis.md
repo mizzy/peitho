@@ -44,7 +44,9 @@ never did. Static emphasis says "these lines are the important ones", which is
 a property of the content, so it ships with the deck and is visible in the
 published version above.
 
-The deck uses no frontmatter, custom layouts, or custom CSS. Emphasis is styled
-by the theme, and decks that ship their own CSS can restyle it through
-`--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
-`--peitho-emphasis-dim`.
+The deck uses no frontmatter, custom layouts, or custom CSS. When a deck uses
+static emphasis, its default styling travels with the deck, including when the
+deck has its own `css/`. Restyle it with the `--peitho-emphasis-background`,
+`--peitho-emphasis-marker`, and `--peitho-emphasis-dim` custom properties, or
+override `.code-line-emphasis` directly. Stepped emphasis is styled only by
+`peitho present`.
