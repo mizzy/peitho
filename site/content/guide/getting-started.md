@@ -84,10 +84,11 @@ filmstrip of thumbnails on the left; Up/Down walk it and clicking one jumps to
 that slide.
 
 The single-slide view is also an editor: speaker notes are typed into the panel
-below the slide, and a click on slide text swaps it to its Markdown source. Both
-are written back into `deck.md`. This 35-second tour walks the whole loop:
+below the slide, a click on slide text swaps that block to its Markdown source,
+and `e` swaps the whole slide for its body Markdown. All three are written back
+into `deck.md`. This 45-second tour walks the whole loop:
 
-[Watch the 35-second preview tour: overview, single-slide view, editing a speaker note, and editing slide text in place](/guide-videos/preview-demo.mp4)
+[Watch the 45-second preview tour: overview, single-slide view, editing a speaker note, editing slide text in place, and rewriting a whole slide's Markdown with the e key](/guide-videos/preview-demo.mp4)
 
 ## Present
 

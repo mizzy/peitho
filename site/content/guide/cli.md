@@ -66,7 +66,7 @@ peitho preview --port 5173 --no-open
 
 ### Editing speaker notes in preview
 
-[Watch the 35-second preview tour: overview, single-slide view, editing a speaker note, and editing slide text in place](/guide-videos/preview-demo.mp4)
+[Watch the 45-second preview tour: overview, single-slide view, editing a speaker note, editing slide text in place, and rewriting a whole slide's Markdown with the e key](/guide-videos/preview-demo.mp4)
 
 The notes panel is an editable textarea. Type into it and the note is saved
 when the panel loses focus (click away), when you move to another slide, and

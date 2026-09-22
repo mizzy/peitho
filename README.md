@@ -81,9 +81,9 @@ Type into the notes panel and the note autosaves on blur, slide changes, and pag
 
 The slide itself is editable in two sizes. Edit a whole slide with `e`; click a rendered text block for a smaller inline edit. The `e` editor swaps the rendered slide for its body Markdown — page settings and speaker notes stay out of it — so a slide can be restructured, not just corrected; Cmd/Ctrl+Enter or blur saves, plain Enter inserts a newline, and `Esc` cancels. Clicking a paragraph, heading, tight list item, or table cell instead swaps just that block for its Markdown, where Enter saves. Both write back into the deck (or the file the slide is included from) and never convert rendered HTML to Markdown; the [CLI guide](https://peitho.gosu.ke/guide/cli/#editing-a-whole-slide-in-preview) covers what each save may change.
 
-Thumbnails and overview tiles carry their slide number in the bottom-left corner. The whole loop — overview, single-slide view, a speaker note, and slide text edited in place:
+Thumbnails and overview tiles carry their slide number in the bottom-left corner. The whole loop — overview, single-slide view, a speaker note, slide text edited in place, and a whole slide rewritten as Markdown:
 
-![A tour of peitho preview: the overview grid, the single-slide view, typing a speaker note, and editing a list item and a heading in place as Markdown](docs/images/preview-demo.gif)
+![A tour of peitho preview: the overview grid, the single-slide view, typing a speaker note, editing a list item and a heading in place as Markdown, and pressing e to rewrite a whole slide's body](docs/images/preview-demo.gif)
 
 ### Present
 
