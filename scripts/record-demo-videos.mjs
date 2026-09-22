@@ -2,7 +2,8 @@
 // Records the scripted demo videos committed under site/static/guide-videos/
 // (mp4, for the docs site) and docs/images/ (GIF, for the README — GitHub does
 // not play repo mp4s):
-//   preview-demo    `peitho preview`: grid, single mode, note editing, inline slide editing
+//   preview-demo    `peitho preview`: grid, single mode, note editing, inline slide
+//                   editing, whole-slide source editing (`e`)
 //   reveal-demo     `peitho present`: incremental reveal steps
 //   emphasis-demo   `peitho present`: stepped code line emphasis
 // Usage: node scripts/record-demo-videos.mjs [name...]   (default: all)
@@ -18,7 +19,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PEITHO = join(ROOT, "target", "debug", "peitho");
 const OUT_DIR = join(ROOT, "site", "static", "guide-videos");
 const GIF_DIR = join(ROOT, "docs", "images");
-// 880px ≈ the README column; 8fps + 64 colors + dropped duplicate frames keeps the tour near 1 MB.
+// 880px ≈ the README column; 8fps + 64 colors + dropped duplicate frames keeps a tour near 2 MB.
 const GIF_FILTER =
   "fps=8,scale=880:-1:flags=lanczos,mpdecimate,split[a][b];" +
   "[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle";
@@ -88,9 +89,36 @@ async function previewTour(page) {
   await beat(1500);
   await inlineEdit(page, 'h1 [data-peitho-md="Install"]', " in one line");
 
+  // `e` opens the whole slide's body Markdown — the edit an inline block cannot make.
+  await sourceEdit(page, (body) =>
+    body.replace(
+      /^Peitho ships.*$/m,
+      "- **Homebrew** — one formula, nothing else to install\n" +
+        "- **No runtime** — layouts, theme, and presenter shell are in the binary\n" +
+        "- **One file** — any directory with a `deck.md` is a deck"
+    )
+  );
+
   await page.keyboard.press("Escape"); // back to the grid, edited title visible
   await beat(2500);
   return gridShownAt;
+}
+
+// Press `e`, rewrite the current slide's body Markdown, Cmd+Enter commits.
+async function sourceEdit(page, rewrite) {
+  const beat = (ms) => page.waitForTimeout(ms);
+  await page.keyboard.press("e");
+  const editor = page.locator('textarea[data-peitho-preview="source"]');
+  await editor.waitFor();
+  await beat(1800); // let the viewer read the body Markdown and the hint line
+  const next = rewrite(await editor.inputValue());
+  await editor.fill("");
+  await page.keyboard.type(next, { delay: TYPE_DELAY_MS / 3 });
+  await beat(1200);
+  await page.keyboard.press("Meta+Enter");
+  // write → watch rebuild → reload; hold on the restructured slide
+  await editor.waitFor({ state: "detached" });
+  await beat(3500);
 }
 
 // Click a rendered block, append to its Markdown source, Enter commits.
