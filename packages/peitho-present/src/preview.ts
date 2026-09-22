@@ -122,7 +122,27 @@ type ActiveEdit =
       kind: "source";
       edit: PreviewSourceEdit;
       view: PreviewSlideView;
+      key: string;
+      body: string;
       commitPromise: Promise<boolean> | null;
+    };
+
+type DiscardedDraftData =
+  | {
+      kind: "inline";
+      key: string;
+      target: HTMLElement;
+      start: number;
+      end: number;
+      old: string;
+      text: string;
+    }
+  | {
+      kind: "source";
+      view: PreviewSlideView;
+      key: string;
+      body: string;
+      text: string;
     };
 
 const PREVIEW_STATE_KEY = "peitho:preview-state";
@@ -142,6 +162,7 @@ const NO_NOTES_PLACEHOLDER = "No notes for this slide.";
  */
 const SOURCE_EDIT_HINT =
   "Cmd/Ctrl+Enter or click away saves · Enter inserts a newline · Esc cancels";
+const RESTORE_DRAFT_HINT = "Draft discarded · Press u to restore";
 const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
@@ -367,6 +388,14 @@ export function installPreviewKeyboard(
     if (editable && (event.shiftKey || (event.key !== "PageUp" && event.key !== "PageDown"))) {
       return;
     }
+    if (event.key === "u") {
+      const request = new CustomEvent("peitho:restorerequest", { cancelable: true });
+      bus.dispatchEvent(request);
+      if (request.defaultPrevented) {
+        event.preventDefault();
+        return;
+      }
+    }
     if (event.key === "e" && !event.shiftKey) {
       event.preventDefault();
       bus.dispatchEvent(new CustomEvent("peitho:sourceeditrequest"));
@@ -470,6 +499,7 @@ class PreviewShellController implements PreviewShell {
   private readonly sourceEditHint: HTMLSpanElement;
   private readonly buildErrorBanner: HTMLElement;
   private activeEdit: ActiveEdit | null = null;
+  private discardedDraft: DiscardedDraftData | null = null;
   private notesTextareaKey: string | null = null;
   private swallowEnterRepeat = false;
   private flushChain: Promise<boolean> = Promise.resolve(true);
@@ -502,6 +532,7 @@ class PreviewShellController implements PreviewShell {
     else this.log.error("Invalid peitho:overviewrequest event");
   };
   private readonly onSourceEditRequest = (): void => this.tryStartSourceEdit();
+  private readonly onRestoreRequest = (event: Event): void => this.restoreDiscardedDraft(event);
   private readonly onResize = (): void => this.applyLayout();
   private readonly onNotesKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "Enter" && event.repeat && this.swallowEnterRepeat) {
@@ -575,6 +606,7 @@ class PreviewShellController implements PreviewShell {
     this.bus.addEventListener("peitho:navigate", this.onNavigate);
     this.bus.addEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.bus.addEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
+    this.bus.addEventListener("peitho:restorerequest", this.onRestoreRequest);
     this.win.addEventListener("resize", this.onResize);
     this.win.addEventListener("pagehide", this.onPageHide);
   }
@@ -667,7 +699,7 @@ class PreviewShellController implements PreviewShell {
       this.deferredReload = reload;
       return;
     }
-    reload();
+    this.performGenerationReload(reload);
   }
 
   private flushNotes(): Promise<boolean> {
@@ -735,26 +767,29 @@ class PreviewShellController implements PreviewShell {
   }
 
   destroy(): void {
-    this.transitionSequence += 1;
+    this.advanceTransitionSequence();
     this.notesTextarea.removeEventListener("keydown", this.onNotesKeyDown);
     this.notesTextarea.removeEventListener("blur", this.onNotesBlur);
     this.bus.removeEventListener("peitho:navigate", this.onNavigate);
     this.bus.removeEventListener("peitho:overviewrequest", this.onOverviewRequest);
     this.bus.removeEventListener("peitho:sourceeditrequest", this.onSourceEditRequest);
+    this.bus.removeEventListener("peitho:restorerequest", this.onRestoreRequest);
     this.win.removeEventListener("resize", this.onResize);
     this.win.removeEventListener("pagehide", this.onPageHide);
     while (this.tileListenerCleanups.length > 0) this.tileListenerCleanups.pop()?.();
     const active = this.activeEdit;
     if (active !== null) {
-      this.activeEdit = null;
       if (active.kind === "inline") {
         active.edit.removeListeners();
         this.restoreSlideEdit(active.edit);
       } else {
         active.edit.destroy();
-        this.setSlideSourceStatus("");
-        this.applyLayout();
       }
+    }
+    this.replaceActiveEdit(null);
+    if (active?.kind === "source") {
+      this.setSlideSourceStatus("");
+      this.applyLayout();
     }
     this.deferredReload = null;
     this.fontScopeCleanup?.();
@@ -827,11 +862,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   private tryStartSourceEdit(): void {
-    if (
-      this.mode === "grid" ||
-      this.isEditOpen() ||
-      this.pendingTransitionSettlements > 0
-    ) {
+    if (this.mode === "grid" || !this.canStartEdit()) {
       return;
     }
     const view = this.slides[this.currentIndex];
@@ -847,17 +878,28 @@ class PreviewShellController implements PreviewShell {
       return;
     }
 
+    this.startSourceEdit(view, view.sourceKey, body, body);
+  }
+
+  private startSourceEdit(
+    view: PreviewSlideView,
+    key: string,
+    body: string,
+    text: string
+  ): void {
     let edit!: PreviewSourceEdit;
     edit = openPreviewSourceEdit({
       document: this.doc,
       fetcher: this.fetcher,
       tile: view.tile,
-      key: view.sourceKey,
+      key,
       body,
       onCommitRequest: () => this.commitActiveEditAndRelease(),
       onCancelRequest: () => this.cancelSourceEdit(edit)
     });
-    this.activeEdit = { kind: "source", edit, view, commitPromise: null };
+    edit.textarea.value = text;
+    edit.textarea.setSelectionRange(0, 0);
+    this.replaceActiveEdit({ kind: "source", edit, view, key, body, commitPromise: null });
     // After activeEdit is set, so the derived hint in setPanelStatus can see it.
     this.setSlideSourceStatus("");
     this.applyLayout();
@@ -879,7 +921,7 @@ class PreviewShellController implements PreviewShell {
       this.sources.sources[result.key] = result.body;
       active.view.sourceKey = result.key;
     }
-    this.activeEdit = null;
+    this.replaceActiveEdit(null);
     this.setSlideSourceStatus("");
     if (this.pendingTransitionSettlements === 0) this.applyLayout();
     return true;
@@ -888,8 +930,19 @@ class PreviewShellController implements PreviewShell {
   private cancelSourceEdit(edit: PreviewSourceEdit): void {
     const active = this.activeEdit;
     if (active?.kind !== "source" || active.edit !== edit) return;
+    const text = edit.textarea.value;
+    const discarded: DiscardedDraftData | undefined =
+      text === active.body
+        ? undefined
+        : {
+            kind: "source",
+            view: active.view,
+            key: active.key,
+            body: active.body,
+            text
+          };
     edit.cancel();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null, discarded);
     this.setSlideSourceStatus("");
     this.applyLayout();
     this.releaseDeferredReload();
@@ -900,7 +953,7 @@ class PreviewShellController implements PreviewShell {
     host: HTMLElement,
     event: MouseEvent
   ): boolean {
-    if (this.isEditOpen() || this.pendingTransitionSettlements > 0) return true;
+    if (!this.canStartEdit()) return true;
     if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
     const shadow = host.shadowRoot;
     if (shadow === null) return false;
@@ -928,6 +981,17 @@ class PreviewShellController implements PreviewShell {
     const sourceRange = parseEditableSourceRange(encodedRange);
     if (sourceRange === null) return false;
 
+    return this.startSlideEdit(slide.key, target, sourceRange.start, sourceRange.end, old, old);
+  }
+
+  private startSlideEdit(
+    key: string,
+    target: HTMLElement,
+    start: number,
+    end: number,
+    old: string,
+    text: string
+  ): boolean {
     let editor = target;
     let originalNodes: Node[];
     if (target.tagName === "LI") {
@@ -946,7 +1010,7 @@ class PreviewShellController implements PreviewShell {
 
     const originalContenteditable = editor.getAttribute("contenteditable");
     const originalStyle = editor.getAttribute("style");
-    editor.textContent = old;
+    editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
     editor.style.outline = INLINE_EDIT_OUTLINE;
     editor.style.outlineOffset = "2px";
@@ -960,9 +1024,9 @@ class PreviewShellController implements PreviewShell {
       this.commitActiveEditAndRelease();
     };
     edit = {
-      key: slide.key,
-      start: sourceRange.start,
-      end: sourceRange.end,
+      key,
+      start,
+      end,
       old,
       target,
       editor,
@@ -979,7 +1043,7 @@ class PreviewShellController implements PreviewShell {
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
-    this.activeEdit = { kind: "inline", edit };
+    this.replaceActiveEdit({ kind: "inline", edit });
     this.setSlideEditStatus("");
     editor.focus({ preventScroll: true });
     placeCaretAtEnd(this.win, editor);
@@ -1015,14 +1079,30 @@ class PreviewShellController implements PreviewShell {
   }
 
   private cancelSlideEdit(edit: ActiveSlideEdit): void {
-    if (!this.closeSlideEdit(edit)) return;
+    const text = this.slideEditText(edit);
+    const discarded: DiscardedDraftData | undefined =
+      text === edit.old
+        ? undefined
+        : {
+            kind: "inline",
+            key: edit.key,
+            target: edit.target,
+            start: edit.start,
+            end: edit.end,
+            old: edit.old,
+            text
+          };
+    if (!this.closeSlideEdit(edit, discarded)) return;
     this.releaseDeferredReload();
   }
 
-  private closeSlideEdit(edit: ActiveSlideEdit): boolean {
+  private closeSlideEdit(
+    edit: ActiveSlideEdit,
+    discarded?: DiscardedDraftData
+  ): boolean {
     if (this.activeEdit?.kind !== "inline" || this.activeEdit.edit !== edit) return false;
     edit.removeListeners();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null, discarded);
     this.restoreSlideEdit(edit);
     this.setSlideEditStatus("");
     return true;
@@ -1092,7 +1172,7 @@ class PreviewShellController implements PreviewShell {
 
   private finishSlideEdit(edit: ActiveSlideEdit, newText: string): void {
     edit.removeListeners();
-    this.activeEdit = null;
+    this.replaceActiveEdit(null);
     edit.editor.textContent = newText;
     this.restoreSlideEditorAttributes(edit);
     edit.target.removeAttribute("data-peitho-src");
@@ -1124,6 +1204,12 @@ class PreviewShellController implements PreviewShell {
     if (reload === null) return;
     this.deferredReload = null;
     this.saveState();
+    this.performGenerationReload(reload);
+  }
+
+  private performGenerationReload(reload: () => void): void {
+    this.advanceTransitionSequence();
+    this.renderPanelStatus();
     reload();
   }
 
@@ -1332,17 +1418,26 @@ class PreviewShellController implements PreviewShell {
   private setPanelStatus(source: PanelStatusSource, message: string): void {
     if (message === "") this.panelStatuses.delete(source);
     else this.panelStatuses.set(source, message);
+    this.renderPanelStatus();
+  }
+
+  private renderPanelStatus(): void {
     const combined = (["notes", "slide-edit", "slide-source"] as const)
       .map((statusSource) => this.panelStatuses.get(statusSource))
       .filter((status): status is string => status !== undefined)
       .join("\n");
     this.notesStatus.textContent = combined;
-    // Derived, never set per call site: the hint is visible exactly while a source
-    // edit is open and nothing has failed, so it cannot be left stale by a close path.
-    // It is not a failure, so it stays out of the alerting status span.
-    const showHint = this.activeEdit?.kind === "source" && combined === "";
-    this.sourceEditHint.textContent = showHint ? SOURCE_EDIT_HINT : "";
-    this.sourceEditHint.hidden = !showHint;
+    // The restore hint and request handler share restorableDraft(), so a hidden
+    // offer cannot remain keyboard-active.
+    const restorable = this.restorableDraft();
+    const hint =
+      restorable !== null
+        ? RESTORE_DRAFT_HINT
+        : this.activeEdit?.kind === "source" && combined === ""
+          ? SOURCE_EDIT_HINT
+          : "";
+    this.sourceEditHint.textContent = hint;
+    this.sourceEditHint.hidden = hint === "";
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
@@ -1382,6 +1477,63 @@ class PreviewShellController implements PreviewShell {
 
   private isEditOpen(): boolean {
     return this.activeEdit !== null;
+  }
+
+  private canStartEdit(): boolean {
+    return !this.isEditOpen() && this.pendingTransitionSettlements === 0;
+  }
+
+  private replaceActiveEdit(
+    activeEdit: ActiveEdit | null,
+    discarded?: DiscardedDraftData
+  ): void {
+    if (activeEdit !== null) this.advanceTransitionSequence();
+    this.activeEdit = activeEdit;
+    if (discarded !== undefined) {
+      this.discardedDraft = discarded;
+    }
+    this.renderPanelStatus();
+  }
+
+  /** Eagerly release retained text and DOM references at the sole invalidation point. */
+  private advanceTransitionSequence(): number {
+    this.transitionSequence += 1;
+    this.discardedDraft = null;
+    return this.transitionSequence;
+  }
+
+  private restorableDraft(): DiscardedDraftData | null {
+    if (
+      this.activeEdit !== null ||
+      !this.canStartEdit() ||
+      this.panelStatuses.size > 0
+    ) {
+      return null;
+    }
+    return this.discardedDraft;
+  }
+
+  private restoreDiscardedDraft(event: Event): void {
+    const discarded = this.restorableDraft();
+    if (discarded === null) return;
+    if (discarded.kind === "source") {
+      this.startSourceEdit(
+        discarded.view,
+        discarded.key,
+        discarded.body,
+        discarded.text
+      );
+    } else {
+      this.startSlideEdit(
+        discarded.key,
+        discarded.target,
+        discarded.start,
+        discarded.end,
+        discarded.old,
+        discarded.text
+      );
+    }
+    event.preventDefault();
   }
 
   private toggleOverview(): void {
@@ -1434,7 +1586,8 @@ class PreviewShellController implements PreviewShell {
     ) {
       return;
     }
-    const sequence = ++this.transitionSequence;
+    const sequence = this.advanceTransitionSequence();
+    this.renderPanelStatus();
     const needsFlush =
       (mode === "grid" && this.mode === "single") ||
       (mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey);
