@@ -337,6 +337,12 @@ async function readErrorResponse(response, fallbackLabel) {
 
 // src/previewSourceEdit.ts
 var INVALID_RESPONSE_MESSAGE = "slide source save returned an invalid response";
+var SOURCE_EDITOR_BACKGROUND = "#15181e";
+var SOURCE_EDITOR_COLOR = "#e5e7eb";
+var SOURCE_EDITOR_CARET = "#38bdf8";
+var SOURCE_EDITOR_FONT_SIZE = "18px";
+var SOURCE_EDITOR_LINE_HEIGHT = "1.6";
+var SOURCE_EDITOR_PADDING = "24px";
 function openPreviewSourceEdit(options) {
   const textarea = options.document.createElement("textarea");
   textarea.dataset.peithoPreview = "source";
@@ -352,6 +358,13 @@ function openPreviewSourceEdit(options) {
   textarea.style.tabSize = "2";
   textarea.style.whiteSpace = "pre";
   textarea.style.overflow = "auto";
+  textarea.style.background = SOURCE_EDITOR_BACKGROUND;
+  textarea.style.color = SOURCE_EDITOR_COLOR;
+  textarea.style.caretColor = SOURCE_EDITOR_CARET;
+  textarea.style.fontSize = SOURCE_EDITOR_FONT_SIZE;
+  textarea.style.lineHeight = SOURCE_EDITOR_LINE_HEIGHT;
+  textarea.style.padding = SOURCE_EDITOR_PADDING;
+  textarea.style.border = "none";
   let closed = false;
   let commitPromise = null;
   let committingBody = null;
@@ -764,6 +777,7 @@ var PREVIEW_STRIP_WIDTH = 200;
 var STRIP_PADDING = 12;
 var STRIP_GAP = 10;
 var NO_NOTES_PLACEHOLDER = "No notes for this slide.";
+var SOURCE_EDIT_HINT = "Cmd/Ctrl+Enter or click away saves \xB7 Enter inserts a newline \xB7 Esc cancels";
 var INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
 var NESTED_LIST_ITEM_BLOCKS = /* @__PURE__ */ new Set([
   "BLOCKQUOTE",
@@ -1021,6 +1035,7 @@ var PreviewShellController = class {
   notesStatus;
   panelStatuses = /* @__PURE__ */ new Map();
   notesPositionText;
+  sourceEditHint;
   buildErrorBanner;
   activeEdit = null;
   notesTextareaKey = null;
@@ -1114,6 +1129,9 @@ var PreviewShellController = class {
     );
     this.notesPositionText = this.notesPanel.querySelector(
       '[data-peitho-preview="position"]'
+    );
+    this.sourceEditHint = this.notesPanel.querySelector(
+      '[data-peitho-preview="source-hint"]'
     );
     this.buildErrorBanner = this.createBuildErrorBanner();
     this.strip = this.createStrip();
@@ -1745,6 +1763,14 @@ var PreviewShellController = class {
     status.style.whiteSpace = "pre-wrap";
     status.style.overflowWrap = "anywhere";
     positionRow.appendChild(status);
+    const hint = this.doc.createElement("span");
+    hint.dataset.peithoPreview = "source-hint";
+    hint.hidden = true;
+    hint.style.marginLeft = "auto";
+    hint.style.color = "#9ca3af";
+    hint.style.paddingLeft = "12px";
+    hint.style.flexShrink = "0";
+    positionRow.appendChild(hint);
     panel.appendChild(positionRow);
     const textarea = this.doc.createElement("textarea");
     textarea.dataset.peithoPreview = "note";
@@ -1781,6 +1807,9 @@ var PreviewShellController = class {
     else this.panelStatuses.set(source, message);
     const combined = ["notes", "slide-edit", "slide-source"].map((statusSource) => this.panelStatuses.get(statusSource)).filter((status) => status !== void 0).join("\n");
     this.notesStatus.textContent = combined;
+    const showHint = this.activeEdit?.kind === "source" && combined === "";
+    this.sourceEditHint.textContent = showHint ? SOURCE_EDIT_HINT : "";
+    this.sourceEditHint.hidden = !showHint;
     const failed = combined !== "";
     this.notesStatus.style.background = failed ? "#7f1d1d" : "";
     this.notesStatus.style.color = failed ? "#fee2e2" : "#f87171";
