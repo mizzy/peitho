@@ -982,15 +982,28 @@ mod tests {
 
         let report = run_doctor(&deck, &env);
 
+        let asset_names = report
+            .checks
+            .iter()
+            .filter(|check| check.category == DoctorCategory::Assets)
+            .map(|check| check.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            asset_names,
+            ["layouts", "css", "overrides", "syntaxes", "fonts"]
+        );
+
         let layouts = find_check(&report, DoctorCategory::Assets, "layouts");
         let css = find_check(&report, DoctorCategory::Assets, "css");
+        let overrides = find_check(&report, DoctorCategory::Assets, "overrides");
         let syntaxes = find_check(&report, DoctorCategory::Assets, "syntaxes");
         let fonts = find_check(&report, DoctorCategory::Assets, "fonts");
         assert_eq!(layouts.status, DoctorStatus::Pass);
         assert!(layouts.message.contains("deck-adjacent"));
-        assert!(css.message.contains("built-in"));
-        assert!(syntaxes.message.contains("built-in"));
-        assert!(fonts.message.contains("built-in"));
+        assert_eq!(css.message, "built-in");
+        assert_eq!(overrides.message, "none");
+        assert_eq!(syntaxes.message, "built-in");
+        assert_eq!(fonts.message, "none");
     }
 
     #[test]
@@ -1025,6 +1038,7 @@ mod tests {
                 DoctorCategory::Displays,
                 DoctorCategory::EmbeddedShells,
                 DoctorCategory::EmbeddedShells,
+                DoctorCategory::Assets,
                 DoctorCategory::Assets,
                 DoctorCategory::Assets,
                 DoctorCategory::Assets,

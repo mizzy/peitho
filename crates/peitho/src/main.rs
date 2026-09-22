@@ -502,6 +502,12 @@ impl WatchTargets {
         roots.push(WatchRoot::asset(&input, &assets.css, "css", Some("css")));
         roots.push(WatchRoot::asset(
             &input,
+            &assets.overrides,
+            "overrides",
+            Some("css"),
+        ));
+        roots.push(WatchRoot::asset(
+            &input,
             &assets.syntaxes,
             "syntaxes",
             Some("sublime-syntax"),
@@ -887,6 +893,7 @@ enum ExportCommand {
 const BUILTIN_LAYOUT_NAME: &str = "title-body-code";
 const BUILTIN_LAYOUT_HTML: &str = include_str!("../../../layouts/title-body-code.html");
 const BUILTIN_BASE_CSS: &str = include_str!("../../../themes/base.css");
+const BUILTIN_CSS_FILE_NAME: &str = "base.css (built-in)";
 /// The committed esbuild bundle; CI rebuilds it and fails on drift, the same
 /// discipline as the generated TS types in bindings/.
 const BUILTIN_SHELL_JS: &str = include_str!("../../../packages/peitho-present/dist/shell.js");
@@ -1471,6 +1478,7 @@ fn provenance_human(source: &Provenance) -> String {
         Provenance::Explicit(path) => format!("explicit ({})", path.display()),
         Provenance::DeckAdjacent(path) => format!("deck-adjacent ({})", path.display()),
         Provenance::Builtin => "built-in".to_owned(),
+        Provenance::Absent => "none".to_owned(),
     }
 }
 
@@ -1663,8 +1671,9 @@ fn deck_only_watch_targets(input: &Path) -> WatchTargets {
         ResolvedAssets {
             layouts: Provenance::Builtin,
             css: Provenance::Builtin,
+            overrides: Provenance::Absent,
             syntaxes: Provenance::Builtin,
-            fonts: Provenance::Builtin,
+            fonts: Provenance::Absent,
         },
         Vec::new(),
         Vec::new(),
@@ -1698,6 +1707,7 @@ fn refresh_watch_targets(state: &mut WatchState, stderr: &mut dyn Write) -> miet
 fn resolved_asset_paths_changed(old: &ResolvedAssets, new: &ResolvedAssets) -> bool {
     old.layouts.path() != new.layouts.path()
         || old.css.path() != new.css.path()
+        || old.overrides.path() != new.overrides.path()
         || old.syntaxes.path() != new.syntaxes.path()
         || old.fonts.path() != new.fonts.path()
 }
@@ -1713,6 +1723,13 @@ fn describe_resolved_assets(assets: &ResolvedAssets) -> String {
     }
     if let Some(path) = assets.css.path() {
         parts.push(format!("css={}({})", assets.css.kind(), path.display()));
+    }
+    if let Some(path) = assets.overrides.path() {
+        parts.push(format!(
+            "overrides={}({})",
+            assets.overrides.kind(),
+            path.display()
+        ));
     }
     if let Some(path) = assets.syntaxes.path() {
         parts.push(format!(
@@ -1798,13 +1815,14 @@ fn load_layouts(layouts_path: Option<&Path>) -> miette::Result<peitho_core::Layo
     core(peitho_core::Layouts::new(layouts))
 }
 
-fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>> {
-    let Some(path) = css_path else {
-        return Ok(vec![peitho_core::CssFile {
-            name: "base.css (built-in)".to_owned(),
-            content: BUILTIN_BASE_CSS.to_owned(),
-        }]);
-    };
+fn builtin_css_file() -> peitho_core::CssFile {
+    peitho_core::CssFile {
+        name: BUILTIN_CSS_FILE_NAME.to_owned(),
+        content: BUILTIN_BASE_CSS.to_owned(),
+    }
+}
+
+fn load_css_files(path: &Path) -> miette::Result<Vec<peitho_core::CssFile>> {
     let mut files = Vec::new();
     for file in collect_asset_files(path, "css")? {
         files.push(peitho_core::CssFile {
@@ -1814,6 +1832,20 @@ fn load_css(css_path: Option<&Path>) -> miette::Result<Vec<peitho_core::CssFile>
                 .unwrap_or_else(|| file.display().to_string()),
             content: fs::read_to_string(&file).into_diagnostic()?,
         });
+    }
+    Ok(files)
+}
+
+fn load_css(
+    css_path: Option<&Path>,
+    overrides_path: Option<&Path>,
+) -> miette::Result<Vec<peitho_core::CssFile>> {
+    let mut files = match css_path {
+        Some(path) => load_css_files(path)?,
+        None => vec![builtin_css_file()],
+    };
+    if let Some(path) = overrides_path {
+        files.extend(load_css_files(path)?);
     }
     Ok(files)
 }
@@ -1864,7 +1896,7 @@ where
     let loaded = load_and_expand_deck_source(input)?;
     let (assets, highlighter) = resolve_assets_and_highlighter(input, &loaded.frontmatter)?;
     let layouts = load_layouts(assets.layouts.path())?;
-    let css_files = load_css(assets.css.path())?;
+    let css_files = load_css(assets.css.path(), assets.overrides.path())?;
     let parsed = loaded.translate(peitho_core::code_images::parse_deck_and_transform(
         &loaded.source,
         loaded.frontmatter.clone(),
@@ -6005,6 +6037,7 @@ contexts:
             ResolvedAssets {
                 layouts: Provenance::Explicit(layouts.clone()),
                 css: Provenance::Explicit(css.clone()),
+                overrides: Provenance::Absent,
                 syntaxes: Provenance::Explicit(syntaxes.clone()),
                 fonts: Provenance::Explicit(fonts.clone()),
             },
@@ -6145,6 +6178,19 @@ contexts:
 
         fs::remove_dir_all(&css).unwrap();
         assert_eq!(capture_input_snapshot(&targets), missing);
+    }
+
+    #[test]
+    fn missing_overrides_directory_is_captured_as_a_watch_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let overrides = dir.path().join("overrides");
+        fs::write(&deck, "# Intro\n").unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+        let snapshot = capture_input_snapshot(&targets);
+
+        assert_eq!(snapshot.get(&overrides), Some(&InputFingerprint::Missing));
     }
 
     fn render_example_slides(
@@ -8115,6 +8161,98 @@ contexts:
 
         assert_eq!(assets.layouts, Provenance::Builtin);
         assert_eq!(assets.css, Provenance::Builtin);
+    }
+
+    #[test]
+    fn no_overrides_leaves_css_loading_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let css = dir.path().join("css");
+        let content = ".slot-title { color: rebeccapurple; }\n";
+        fs::create_dir_all(&css).unwrap();
+        fs::write(css.join("overrides.css"), content).unwrap();
+
+        let custom_files = load_css(Some(&css), None).unwrap();
+        let builtin_files = load_css(None, None).unwrap();
+
+        assert_eq!(custom_files.len(), 1);
+        assert_eq!(custom_files[0].name, "overrides.css");
+        assert_eq!(custom_files[0].content, content);
+        assert_eq!(builtin_files.len(), 1);
+        assert_eq!(builtin_files[0].name, BUILTIN_CSS_FILE_NAME);
+        assert_eq!(builtin_files[0].content, BUILTIN_BASE_CSS);
+    }
+
+    #[test]
+    fn overrides_are_appended_after_the_builtin_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = dir.path().join("overrides");
+        let override_content = ".slot-title { color: rebeccapurple; }\n";
+        fs::create_dir_all(&overrides).unwrap();
+        fs::write(overrides.join("talk.css"), override_content).unwrap();
+
+        let files = load_css(None, Some(&overrides)).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![BUILTIN_CSS_FILE_NAME, "talk.css"]
+        );
+        assert_eq!(files[0].content, BUILTIN_BASE_CSS);
+        assert_eq!(files[1].content, override_content);
+    }
+
+    #[test]
+    fn overrides_are_appended_after_deck_css() {
+        let dir = tempfile::tempdir().unwrap();
+        let css = dir.path().join("css");
+        let overrides = dir.path().join("overrides");
+        let deck_content = ".peitho-slide { color: navy; }\n";
+        let override_content = ".slot-title { color: gold; }\n";
+        fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(&overrides).unwrap();
+        fs::write(css.join("deck.css"), deck_content).unwrap();
+        fs::write(overrides.join("talk.css"), override_content).unwrap();
+
+        let files = load_css(Some(&css), Some(&overrides)).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deck.css", "talk.css"]
+        );
+        assert_eq!(files[0].content, deck_content);
+        assert_eq!(files[1].content, override_content);
+    }
+
+    #[test]
+    fn overrides_directory_reads_multiple_files_in_filename_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = dir.path().join("overrides");
+        fs::create_dir_all(&overrides).unwrap();
+        fs::write(
+            overrides.join("z-last.css"),
+            ".slot-title { color: tomato; }\n",
+        )
+        .unwrap();
+        fs::write(
+            overrides.join("a-first.css"),
+            ".slot-title { color: navy; }\n",
+        )
+        .unwrap();
+
+        let files = load_css(None, Some(&overrides)).unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![BUILTIN_CSS_FILE_NAME, "a-first.css", "z-last.css"]
+        );
     }
 
     #[test]
@@ -13725,8 +13863,9 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
         ResolvedAssets {
             layouts: Provenance::Builtin,
             css: Provenance::Builtin,
+            overrides: Provenance::Absent,
             syntaxes: Provenance::Builtin,
-            fonts: Provenance::Builtin,
+            fonts: Provenance::Absent,
         }
     }
 

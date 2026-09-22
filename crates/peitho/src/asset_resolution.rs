@@ -9,6 +9,7 @@ use peitho_core::{
 pub struct ResolvedAssets {
     pub layouts: Provenance,
     pub css: Provenance,
+    pub overrides: Provenance,
     pub syntaxes: Provenance,
     pub fonts: Provenance,
 }
@@ -18,23 +19,32 @@ pub enum Provenance {
     Explicit(PathBuf),
     DeckAdjacent(PathBuf),
     Builtin,
+    Absent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetKey {
     Layouts,
     Css,
+    Overrides,
     Syntaxes,
     Fonts,
 }
 
 impl AssetKey {
-    pub(crate) const ALL: [Self; 4] = [Self::Layouts, Self::Css, Self::Syntaxes, Self::Fonts];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Layouts,
+        Self::Css,
+        Self::Overrides,
+        Self::Syntaxes,
+        Self::Fonts,
+    ];
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Layouts => "layouts",
             Self::Css => "css",
+            Self::Overrides => "overrides",
             Self::Syntaxes => "syntaxes",
             Self::Fonts => "fonts",
         }
@@ -45,7 +55,7 @@ impl Provenance {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::Explicit(path) | Self::DeckAdjacent(path) => Some(path),
-            Self::Builtin => None,
+            Self::Builtin | Self::Absent => None,
         }
     }
 
@@ -54,6 +64,7 @@ impl Provenance {
             Self::Explicit(_) => "explicit",
             Self::DeckAdjacent(_) => "deck-adjacent",
             Self::Builtin => "built-in",
+            Self::Absent => "none",
         }
     }
 }
@@ -65,6 +76,7 @@ pub fn resolve_assets(
     Ok(ResolvedAssets {
         layouts: core(resolve_asset(deck, frontmatter, AssetKey::Layouts))?,
         css: core(resolve_asset(deck, frontmatter, AssetKey::Css))?,
+        overrides: core(resolve_asset(deck, frontmatter, AssetKey::Overrides))?,
         syntaxes: core(resolve_asset(deck, frontmatter, AssetKey::Syntaxes))?,
         fonts: core(resolve_asset(deck, frontmatter, AssetKey::Fonts))?,
     })
@@ -81,6 +93,7 @@ pub(crate) fn resolve_asset(
         AssetKey::Css => settings.css(),
         AssetKey::Syntaxes => settings.syntaxes(),
         AssetKey::Fonts => settings.fonts(),
+        AssetKey::Overrides => settings.overrides(),
     };
     resolve_asset_value(deck, frontmatter, key, value)
 }
@@ -127,7 +140,10 @@ fn resolve_asset_value(
     if conventional.is_dir() {
         Ok(Provenance::DeckAdjacent(conventional))
     } else {
-        Ok(Provenance::Builtin)
+        Ok(match key {
+            AssetKey::Layouts | AssetKey::Css | AssetKey::Syntaxes => Provenance::Builtin,
+            AssetKey::Overrides | AssetKey::Fonts => Provenance::Absent,
+        })
     }
 }
 
@@ -236,6 +252,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_overrides_path_that_does_not_exist_is_a_build_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("---\ntime: 15m\noverrides: ./missing\n---\n# Intro\n");
+
+        let err = resolve_assets(&deck, &frontmatter).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("overrides path does not exist"));
+        assert!(message.contains("line 3"));
+        assert!(err
+            .help()
+            .expect("help must be present")
+            .to_string()
+            .contains("check the overrides: value"));
+        assert!(!message.contains("-->"));
+    }
+
+    #[test]
     fn explicit_css_path_records_explicit_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -288,6 +323,19 @@ mod tests {
     }
 
     #[test]
+    fn deck_adjacent_overrides_directory_records_deck_adjacent_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let overrides = dir.path().join("overrides");
+        std::fs::create_dir_all(&overrides).unwrap();
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.overrides, Provenance::DeckAdjacent(overrides));
+    }
+
+    #[test]
     fn deck_adjacent_syntaxes_directory_records_deck_adjacent_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -336,6 +384,17 @@ mod tests {
     }
 
     #[test]
+    fn missing_overrides_directory_records_absent_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let frontmatter = parse("# Intro\n");
+
+        let assets = resolve_assets(&deck, &frontmatter).unwrap();
+
+        assert_eq!(assets.overrides, Provenance::Absent);
+    }
+
+    #[test]
     fn missing_syntaxes_directory_records_builtin_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
@@ -347,13 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_fonts_directory_records_builtin_provenance() {
+    fn missing_fonts_directory_records_absent_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let frontmatter = parse("# Intro\n");
 
         let assets = resolve_assets(&deck, &frontmatter).unwrap();
 
-        assert_eq!(assets.fonts, Provenance::Builtin);
+        assert_eq!(assets.fonts, Provenance::Absent);
     }
 }

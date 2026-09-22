@@ -115,7 +115,8 @@ slide key stops the build.
 Put custom layout HTML and CSS next to the deck, or point at them from
 [frontmatter](@/guide/frontmatter.md).
 
-For layouts and CSS, asset resolution is: explicit frontmatter path, then a
-deck-adjacent `layouts/` or `css/` directory, then the built-in default. A
-frontmatter path can point at a file or a directory; layout directories read
-`*.html`, and CSS directories read `*.css`.
+`layouts` and `css` resolve from an explicit frontmatter path, then a
+deck-adjacent `layouts/` or `css/` directory, then the built-in default.
+`overrides` resolves from an explicit path or deck-adjacent `overrides/`, with
+no built-in default. A frontmatter path can point at a file or a directory;
+layout directories read `*.html`, and CSS directories read `*.css`.
