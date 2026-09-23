@@ -436,7 +436,10 @@ issue's closing comment. It found no product bug in the feature and filed two
 side findings (#645: layout asset errors say "image" for a `<script src>`; #646:
 the remote's dark color-scheme reaches slide form controls). Writing the guide
 then surfaced one cross-surface divergence — PDF/lint inline scripts are not
-scope-wrapped — recorded as #647 for the author.
+scope-wrapped — recorded as #647. The author kept it as documented (2026-09-23):
+the guide's "keep declarations inside a block" rule works on every surface, and
+the measured harm is limited to `document.currentScript`-based scripts, which
+present and preview cannot run anyway.
 
 ## Task 9: Documentation
 
