@@ -1,4 +1,14 @@
 // src/canvas.ts
+function attachSlideShadow(host, doc, css) {
+  const shadow = host.attachShadow({ mode: "open" });
+  const colorSchemeReset = doc.createElement("style");
+  colorSchemeReset.textContent = ":host{color-scheme:light !important}";
+  shadow.appendChild(colorSchemeReset);
+  const deckStyle = doc.createElement("style");
+  deckStyle.textContent = css;
+  shadow.appendChild(deckStyle);
+  return shadow;
+}
 function calculateCanvasFit(viewport, canvasWidth, canvasHeight) {
   const scale = Math.min(viewport.width / canvasWidth, viewport.height / canvasHeight);
   const width = canvasWidth * scale;
@@ -1292,10 +1302,7 @@ var PresentShellController = class {
         canvasHeight: dimensions.height
       })
     );
-    const shadow = host.attachShadow({ mode: "open" });
-    const style = this.doc.createElement("style");
-    style.textContent = css;
-    shadow.appendChild(style);
+    const shadow = attachSlideShadow(host, this.doc, css);
     const revealStyle = this.doc.createElement("style");
     revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
     shadow.appendChild(revealStyle);

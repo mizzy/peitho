@@ -19,6 +19,21 @@ export type CanvasScalerOptions = {
   canvasHeight: number;
 };
 
+export function attachSlideShadow(
+  host: HTMLElement,
+  doc: Document,
+  css: string
+): ShadowRoot {
+  const shadow = host.attachShadow({ mode: "open" });
+  const colorSchemeReset = doc.createElement("style");
+  colorSchemeReset.textContent = ":host{color-scheme:light !important}";
+  shadow.appendChild(colorSchemeReset);
+  const deckStyle = doc.createElement("style");
+  deckStyle.textContent = css;
+  shadow.appendChild(deckStyle);
+  return shadow;
+}
+
 export function calculateCanvasFit(
   viewport: CanvasViewport,
   canvasWidth: number,

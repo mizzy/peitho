@@ -123,12 +123,13 @@ it("deck_without_a_script_builds_an_unchanged_shadow_root", async () => {
   expect(shadow).not.toBeNull();
 
   const styles = Array.from(shadow?.querySelectorAll("style") ?? []);
-  expect(styles).toHaveLength(2);
-  expect(styles[0]?.textContent).toBe(deckCss);
+  expect(styles).toHaveLength(3);
+  expect(styles[0]?.textContent).toBe(":host{color-scheme:light !important}");
+  expect(styles[1]?.textContent).toBe(deckCss);
   const expected = document.createElement("div");
-  for (const [index, mountedStyle] of styles.entries()) {
+  for (const mountedStyle of styles) {
     const style = document.createElement("style");
-    style.textContent = index === 0 ? deckCss : mountedStyle.textContent;
+    style.textContent = mountedStyle.textContent;
     expected.appendChild(style);
   }
   const template = document.createElement("template");

@@ -472,6 +472,25 @@ function mockChannel() {
   return channel;
 }
 
+it("resets inherited color scheme before deck css for stage and thumbnail hosts", async () => {
+  const root = document.createElement("main");
+  await mountForTest(root);
+
+  for (const shadow of [
+    slideShadow(root, "intro"),
+    slideShadow(root, "intro", true)
+  ]) {
+    const styles = Array.from(shadow.querySelectorAll("style"));
+    const resetIndex = styles.findIndex((style) =>
+      style.textContent?.includes(":host{color-scheme:light !important}")
+    );
+    const deckCssIndex = styles.findIndex((style) => style.textContent === cssText);
+
+    expect(resetIndex).toBeGreaterThanOrEqual(0);
+    expect(deckCssIndex).toBeGreaterThan(resetIndex);
+  }
+});
+
 // jsdom never executes scripts because vitest does not opt into runScripts: "dangerously";
 // this test is structural, while real execution is covered by the plan's real-Chrome checklist.
 it("layout_script_runs_on_the_stage_but_never_in_a_thumbnail", async () => {

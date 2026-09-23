@@ -208,10 +208,13 @@ it("injects peitho css into each shadow root before fragment html", async () => 
   const hosts = [...root.querySelectorAll<HTMLElement>(".peitho-slide")];
   for (const host of hosts) {
     const firstChild = host.shadowRoot?.firstChild;
-    const style = host.shadowRoot?.querySelector("style");
+    const styles = host.shadowRoot?.querySelectorAll("style");
 
-    expect(firstChild).toBe(style);
-    expect(style?.textContent).toContain(cssText);
+    expect(firstChild).toBe(styles?.[0]);
+    expect(styles?.[0]?.textContent).toContain(
+      ":host{color-scheme:light !important}"
+    );
+    expect(styles?.[1]?.textContent).toContain(cssText);
   }
 });
 
