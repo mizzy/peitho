@@ -442,7 +442,7 @@ fn publish_rejects_manifest_slide_reference_outside_dist() {
 }
 
 #[test]
-fn publish_rejects_missing_manifest_image_reference() {
+fn publish_rejects_missing_manifest_asset_reference() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");
     write_valid_dist(&dist);
@@ -479,13 +479,13 @@ fn publish_rejects_missing_manifest_image_reference() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "manifest references missing image asset: assets/nonexistent.png",
+            "manifest references missing asset: assets/nonexistent.png",
         ))
         .stderr(predicate::str::contains("help: run `peitho build` first"));
 }
 
 #[test]
-fn publish_rejects_manifest_image_reference_outside_dist() {
+fn publish_rejects_manifest_asset_reference_outside_dist() {
     let dir = tempdir().unwrap();
     let dist = dir.path().join("dist");
     write_valid_dist(&dist);
@@ -522,16 +522,16 @@ fn publish_rejects_manifest_image_reference_outside_dist() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "manifest contains invalid image src: ../etc/passwd",
+            "manifest contains invalid asset src: ../etc/passwd",
         ))
         .stderr(predicate::str::contains(
-            "help: image src must be a relative path inside dist/",
+            "help: asset src must be a relative path inside dist/",
         ));
 }
 
 #[cfg(unix)]
 #[test]
-fn publish_rejects_manifest_image_reference_symlink_outside_dist() {
+fn publish_rejects_manifest_asset_reference_symlink_outside_dist() {
     use std::os::unix::fs::symlink;
 
     let dir = tempdir().unwrap();
@@ -575,10 +575,10 @@ fn publish_rejects_manifest_image_reference_symlink_outside_dist() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "manifest contains invalid image src: assets/leak.png",
+            "manifest contains invalid asset src: assets/leak.png",
         ))
         .stderr(predicate::str::contains(
-            "help: image src must be a relative path inside dist/",
+            "help: asset src must be a relative path inside dist/",
         ));
 }
 

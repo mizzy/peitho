@@ -410,7 +410,7 @@ impl ResolvedImagePath {
     pub fn from_hashed_asset(hash: &str, basename: &str) -> Result<Self, String> {
         let valid_hash = hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit());
         if !valid_hash {
-            return Err("image asset hash must be 16 hex characters".to_owned());
+            return Err("asset hash must be 16 hex characters".to_owned());
         }
         let valid_basename = !basename.is_empty()
             && !basename.contains('/')
@@ -423,8 +423,7 @@ impl ResolvedImagePath {
                 == Some(basename);
         if !valid_basename {
             return Err(
-                "image asset basename must not contain path separators, queries, or fragments"
-                    .to_owned(),
+                "asset basename must not contain path separators, queries, or fragments".to_owned(),
             );
         }
         Ok(Self(format!("assets/{hash}-{basename}")))
@@ -1809,19 +1808,25 @@ mod tests {
     }
 
     #[test]
+    fn resolved_image_path_rejects_invalid_hash() {
+        let err = ResolvedImagePath::from_hashed_asset("not-a-hash", "arch.png").unwrap_err();
+        assert_eq!(err, "asset hash must be 16 hex characters");
+    }
+
+    #[test]
     fn resolved_image_path_rejects_url_delimiters_in_basename() {
         let err =
             ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png#frag").unwrap_err();
         assert_eq!(
             err,
-            "image asset basename must not contain path separators, queries, or fragments"
+            "asset basename must not contain path separators, queries, or fragments"
         );
 
         let err =
             ResolvedImagePath::from_hashed_asset("0123456789abcdef", "arch.png?v=1").unwrap_err();
         assert_eq!(
             err,
-            "image asset basename must not contain path separators, queries, or fragments"
+            "asset basename must not contain path separators, queries, or fragments"
         );
     }
 }

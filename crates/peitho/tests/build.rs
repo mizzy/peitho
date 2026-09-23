@@ -1027,12 +1027,41 @@ fn build_fails_for_a_missing_layout_asset_naming_the_layout_and_attribute() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("layout 'cover'"))
-        .stderr(predicate::str::contains("poster=\"media/still.png\""))
-        .stderr(predicate::str::contains("image file not found"))
         .stderr(predicate::str::contains(
-            "help: fix the poster attribute in layout 'cover'",
+            "file not found: media/still.png (referenced by <video poster=\"media/still.png\"> in layout 'cover')",
+        ))
+        .stderr(predicate::str::contains(
+            "help: place the file at the deck-relative path or fix the path; the path comes from the poster attribute in layout 'cover'",
         ));
+}
+
+#[test]
+fn build_fails_for_a_missing_layout_script_without_calling_it_an_image() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, deck_with_assets("./cover.html", "# Cover\n")).unwrap();
+    fs::write(
+        dir.path().join("cover.html"),
+        r#"<section><script src="lib.js"></script><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "file not found: lib.js (referenced by <script src=\"lib.js\"> in layout 'cover')",
+        ))
+        .stderr(predicate::str::contains("image").not());
 }
 
 #[test]
@@ -1125,10 +1154,11 @@ fn build_fails_for_missing_markdown_image_with_line_and_help() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
-        .stderr(predicate::str::contains("image file not found:"))
+        .stderr(predicate::str::contains("file not found:"))
+        .stderr(predicate::str::contains("image file").not())
         .stderr(predicate::str::contains("missing.png"))
         .stderr(predicate::str::contains(
-            "help: place the image at the deck-relative path or fix the path",
+            "help: place the file at the deck-relative path or fix the path",
         ));
 }
 
@@ -1166,11 +1196,10 @@ fn build_fails_for_unreadable_markdown_image_with_line_and_help() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
-        .stderr(predicate::str::contains("image file unreadable:"))
+        .stderr(predicate::str::contains("file unreadable:"))
+        .stderr(predicate::str::contains("image file").not())
         .stderr(predicate::str::contains("img/locked.png"))
-        .stderr(predicate::str::contains(
-            "help: make the image file readable",
-        ));
+        .stderr(predicate::str::contains("help: make the file readable"));
 }
 
 #[cfg(unix)]
@@ -1207,13 +1236,12 @@ fn build_fails_for_symlinked_markdown_image_outside_deck_dir() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
-        .stderr(predicate::str::contains(
-            "image path escapes deck directory",
-        ))
+        .stderr(predicate::str::contains("path escapes deck directory"))
+        .stderr(predicate::str::contains("image path").not())
         .stderr(predicate::str::contains("img/"))
         .stderr(predicate::str::contains("link.png"))
         .stderr(predicate::str::contains(
-            "help: keep image files inside the deck directory",
+            "help: keep referenced files inside the deck directory",
         ));
 }
 

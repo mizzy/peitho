@@ -1597,7 +1597,7 @@ where
 
 fn watch_build(options: BuildOptions) -> miette::Result<()> {
     let (state, ()) = run_initial_action_after_watch_snapshot(options.input.clone(), || {
-        println!("watching deck, referenced images, and resolved asset paths");
+        println!("watching deck, referenced assets, and resolved asset paths");
         rebuild_once_for_watch(&options, &mut std::io::stdout(), &mut std::io::stderr())
     })?;
     watch_paths_loop(state, move |stdout, stderr| {
@@ -4378,8 +4378,8 @@ fn validate_manifest_refs(dist: &Path, manifest: &peitho_core::Manifest) -> miet
         validate_manifest_dist_ref(dist, slide.src(), ManifestRefKind::Slide)?;
     }
 
-    for image in manifest.images() {
-        validate_manifest_dist_ref(dist, image.src(), ManifestRefKind::Image)?;
+    for asset in manifest.images() {
+        validate_manifest_dist_ref(dist, asset.src(), ManifestRefKind::Asset)?;
     }
 
     Ok(())
@@ -4388,28 +4388,28 @@ fn validate_manifest_refs(dist: &Path, manifest: &peitho_core::Manifest) -> miet
 #[derive(Clone, Copy)]
 enum ManifestRefKind {
     Slide,
-    Image,
+    Asset,
 }
 
 impl ManifestRefKind {
     fn invalid_message(self, src: &str) -> String {
         match self {
             Self::Slide => format!("manifest contains invalid slide src: {src}"),
-            Self::Image => format!("manifest contains invalid image src: {src}"),
+            Self::Asset => format!("manifest contains invalid asset src: {src}"),
         }
     }
 
     fn invalid_help(self) -> &'static str {
         match self {
             Self::Slide => "slide src must be a relative path inside dist/",
-            Self::Image => "image src must be a relative path inside dist/",
+            Self::Asset => "asset src must be a relative path inside dist/",
         }
     }
 
     fn missing_message(self, src: &str) -> String {
         match self {
             Self::Slide => format!("manifest references missing slide fragment: {src}"),
-            Self::Image => format!("manifest references missing image asset: {src}"),
+            Self::Asset => format!("manifest references missing asset: {src}"),
         }
     }
 }
@@ -5412,16 +5412,15 @@ fn layout_asset_error(
     reference: &peitho_core::LayoutAssetRef,
     err: peitho_core::BuildError,
 ) -> miette::Report {
+    let message = err.message;
+    let help = err.help;
+    let element = reference.element();
+    let attribute = reference.attribute();
+    let raw = reference.raw();
     miette::miette!(
-        help = format!(
-            "fix the {} attribute in layout '{layout}', or place the file at that deck-relative path",
-            reference.attribute()
-        ),
-        "layout '{layout}' references a missing asset in <{} {}=\"{}\">: {}",
-        reference.element(),
-        reference.attribute(),
-        reference.raw(),
-        err.message
+        help =
+            format!("{help}; the path comes from the {attribute} attribute in layout '{layout}'"),
+        "{message} (referenced by <{element} {attribute}=\"{raw}\"> in layout '{layout}')",
     )
 }
 
@@ -5466,29 +5465,38 @@ impl AssetResolver {
         display_path: &str,
     ) -> peitho_core::Result<peitho_core::ResolvedImageAsset> {
         let source = self.deck_dir.join(display_path);
-        let deck_abs =
-            fs::canonicalize(&self.deck_dir).map_err(|err| image_read_error(display_path, err))?;
+        let deck_abs = fs::canonicalize(&self.deck_dir).map_err(|err| {
+            peitho_core::BuildError::new(
+                peitho_core::error::ErrorKind::Asset,
+                None,
+                format!(
+                    "deck directory unreadable: {}: {err}",
+                    self.deck_dir.display()
+                ),
+                "make the deck directory readable",
+            )
+        })?;
         let source_abs =
-            fs::canonicalize(&source).map_err(|err| image_metadata_error(display_path, err))?;
+            fs::canonicalize(&source).map_err(|err| asset_metadata_error(display_path, err))?;
         if !source_abs.starts_with(&deck_abs) {
             return Err(peitho_core::BuildError::new(
                 peitho_core::error::ErrorKind::Asset,
                 None,
-                format!("image path escapes deck directory: {display_path}"),
-                "keep image files inside the deck directory",
+                format!("path escapes deck directory: {display_path}"),
+                "keep referenced files inside the deck directory",
             ));
         }
         let metadata =
-            fs::metadata(&source_abs).map_err(|err| image_metadata_error(display_path, err))?;
+            fs::metadata(&source_abs).map_err(|err| asset_metadata_error(display_path, err))?;
         if !metadata.is_file() {
             return Err(peitho_core::BuildError::new(
                 peitho_core::error::ErrorKind::Asset,
                 None,
-                format!("image file not found: {display_path}"),
-                "place the image at the deck-relative path or fix the path",
+                format!("file not found: {display_path}"),
+                "place the file at the deck-relative path or fix the path",
             ));
         }
-        let bytes = fs::read(&source_abs).map_err(|err| image_read_error(display_path, err))?;
+        let bytes = fs::read(&source_abs).map_err(|err| asset_read_error(display_path, err))?;
         let hash = short_sha256_hex(&bytes, 16);
         if let Some(asset) = self.by_hash.get(&hash) {
             return Ok(asset.clone());
@@ -5500,8 +5508,8 @@ impl AssetResolver {
                 peitho_core::BuildError::new(
                     peitho_core::error::ErrorKind::Asset,
                     None,
-                    format!("image path has no file name: {display_path}"),
-                    "write a deck-relative image path with a file name",
+                    format!("path has no file name: {display_path}"),
+                    "write a deck-relative path with a file name",
                 )
             })?;
         let dist_rel = peitho_core::ResolvedImagePath::from_hashed_asset(&hash, basename).map_err(
@@ -5510,7 +5518,7 @@ impl AssetResolver {
                     peitho_core::error::ErrorKind::Asset,
                     None,
                     message,
-                    "keep generated image asset paths under assets/",
+                    "keep generated asset paths under assets/",
                 )
             },
         )?;
@@ -5523,36 +5531,36 @@ impl AssetResolver {
     }
 }
 
-fn image_metadata_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
+fn asset_metadata_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
     match err.kind() {
         std::io::ErrorKind::NotFound => peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Asset,
             None,
-            format!("image file not found: {path}"),
-            "place the image at the deck-relative path or fix the path",
+            format!("file not found: {path}"),
+            "place the file at the deck-relative path or fix the path",
         ),
         _ => peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Asset,
             None,
-            format!("image file unreadable: {path}"),
-            "make the image file readable",
+            format!("file unreadable: {path}"),
+            "make the file readable",
         ),
     }
 }
 
-fn image_read_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
+fn asset_read_error(path: &str, err: std::io::Error) -> peitho_core::BuildError {
     match err.kind() {
         std::io::ErrorKind::PermissionDenied => peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Asset,
             None,
-            format!("image file unreadable: {path}"),
-            "make the image file readable",
+            format!("file unreadable: {path}"),
+            "make the file readable",
         ),
         _ => peitho_core::BuildError::new(
             peitho_core::error::ErrorKind::Asset,
             None,
-            format!("failed to read image: {err}"),
-            "make sure the image exists and can be read",
+            format!("failed to read file {path}: {err}"),
+            "make sure the file exists and can be read",
         ),
     }
 }
@@ -5651,6 +5659,35 @@ contexts:
 "#;
     const TEST_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="body" accepts="blocks" arity="0..*"></slot><slot name="code" accepts="code" arity="0..1"></slot></section>"#;
     const TEST_IMAGE_LAYOUT_HTML: &str = r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="image" accepts="image" arity="1"></slot></section>"#;
+
+    #[test]
+    fn asset_read_error_includes_path_for_other_errors() {
+        let err = asset_read_error("media/hero.mp4", io::Error::other("disk failure"));
+
+        assert_eq!(
+            err.message,
+            "failed to read file media/hero.mp4: disk failure"
+        );
+    }
+
+    #[test]
+    fn asset_resolver_names_an_unreadable_deck_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let deck_dir = temp.path().join("missing");
+        let deck = deck_dir.join("deck.md");
+        let mut resolver = AssetResolver::new(&deck);
+
+        let err = resolver.resolve_deck_relative("lib.js").unwrap_err();
+
+        let expected_prefix = format!("deck directory unreadable: {}: ", deck_dir.display());
+        assert!(
+            err.message.starts_with(&expected_prefix),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(!err.message.contains("lib.js"), "{}", err.message);
+        assert_eq!(err.help, "make the deck directory readable");
+    }
 
     struct DeterministicSvgRunner;
 
