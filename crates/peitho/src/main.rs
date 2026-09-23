@@ -1628,7 +1628,8 @@ fn prepare_watch_loop(input: PathBuf) -> WatchState {
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
     let loaded = load_and_expand_deck_source(input)?;
     let assets = resolve_assets(input, &loaded.frontmatter)?;
-    let image_files = load_highlighter(assets.syntaxes.path())
+    let deck_dir = asset_resolution::deck_parent(input);
+    let mut referenced_files: Vec<PathBuf> = load_highlighter(assets.syntaxes.path())
         .ok()
         .and_then(|highlighter| {
             peitho_core::referenced_image_paths(
@@ -1641,15 +1642,28 @@ fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
         .map(|image_paths| {
             image_paths
                 .into_iter()
-                .map(|raw| asset_resolution::deck_parent(input).join(raw.as_str()))
+                .map(|raw| deck_dir.join(raw.as_str()))
                 .collect()
         })
         .unwrap_or_default();
+    // A layout's own `src`/`poster`/`href` files are build inputs too. The
+    // layouts watch root only globs *.html, so without this a video sitting
+    // beside the layout is invisible and replacing it never rebuilds.
+    if let Ok(layouts) = load_layouts(assets.layouts.path()) {
+        for layout in layouts.iter() {
+            for reference in layout.asset_refs() {
+                let path = deck_dir.join(reference.raw());
+                if !referenced_files.contains(&path) {
+                    referenced_files.push(path);
+                }
+            }
+        }
+    }
     Ok(WatchTargets::new(
         input.to_path_buf(),
         assets,
         loaded.included_files(),
-        image_files,
+        referenced_files,
     ))
 }
 
@@ -6160,6 +6174,39 @@ contexts:
 
         assert_eq!(rebuilds, 0);
         assert!(!capture_input_snapshot(&state.targets).contains_key(&lock));
+    }
+
+    #[test]
+    fn an_asset_a_layout_references_directly_is_a_watch_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        let video = dir.path().join("media/hero.mp4");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::write(&video, b"fake video bytes").unwrap();
+        fs::write(css.join("base.css"), ".slot-title { font-weight: 700; }\n").unwrap();
+        fs::write(
+            layouts.join("cover.html"),
+            r#"<section><video src="media/hero.mp4"></video><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+
+        // The layouts watch root only globs *.html, so without this the video is
+        // invisible and swapping it leaves preview serving the old copy.
+        assert!(
+            matches!(
+                capture_input_snapshot(&targets).get(&video),
+                Some(InputFingerprint::Metadata { .. })
+            ),
+            "layout-referenced video should be tracked: {:?}",
+            capture_input_snapshot(&targets).get(&video)
+        );
     }
 
     #[test]
