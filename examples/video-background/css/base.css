@@ -1,0 +1,154 @@
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("theme-fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.peitho-slide {
+  --paper: #f6f5f1;
+  --ink: #17171a;
+  --body: #3f3f45;
+  --muted: #6d6d74;
+  --ink-blue: #2244bb;
+  --vermillion: #cc3b1f;
+  --rule: rgba(23, 23, 26, 0.14);
+  --panel: #fffdfa;
+  --font-sans: "Inter", "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+    "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--body);
+  font-family: var(--font-sans);
+}
+
+.peitho-slide *,
+.peitho-slide *::before,
+.peitho-slide *::after {
+  box-sizing: border-box;
+}
+
+
+/* Video cover: the layout references media/loop.mp4 and media/poster.png
+   directly, so peitho resolves and copies them like any Markdown image. */
+.video-cover {
+  position: relative;
+  display: grid;
+  background: #101014;
+}
+
+.video-cover .backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-cover .scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    rgba(16, 16, 20, 0.88) 0%,
+    rgba(16, 16, 20, 0.66) 45%,
+    rgba(16, 16, 20, 0.22) 100%
+  );
+}
+
+.video-cover .content {
+  position: relative;
+  align-self: end;
+  padding: 0 88px 84px;
+  max-width: 900px;
+}
+
+.video-cover h1 {
+  margin: 0 0 18px;
+  color: #fffdfa;
+  font-size: 76px;
+  line-height: 1.04;
+  letter-spacing: -0.024em;
+}
+
+.video-cover .lede p {
+  margin: 0;
+  color: rgba(255, 253, 250, 0.82);
+  font-size: 34px;
+  line-height: 1.5;
+}
+
+.plain {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+  background: var(--paper);
+}
+
+.plain h1 {
+  margin: 0 0 28px;
+  color: var(--ink);
+  font-size: 58px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.plain .body p {
+  margin: 0 0 18px;
+  font-size: 34px;
+  line-height: 1.62;
+}
+
+.plain .body ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 34px;
+  line-height: 1.66;
+}
+
+.plain .body li {
+  margin: 0 0 10px;
+}
+
+.plain .body code {
+  padding: 0.14em 0.4em;
+  border-radius: 4px;
+  background: rgba(23, 23, 26, 0.07);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 1em;
+}
+
+.plain .body strong {
+  color: var(--ink);
+}
