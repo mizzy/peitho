@@ -233,6 +233,21 @@ from `shell.ts`, re-export from `index.ts`. `shadowRootsRegistry(win)` lazily
 creates `win.__peithoShadowRoots`. Dispatch inside `load()`'s append loop,
 immediately after `this.root.appendChild(view.host)` so the host is connected.
 
+*As implemented (Issue #632), three changes from the text above, all found in
+review:*
+- The helpers (`SHADOW_MOUNTED_EVENT`, `ShadowMountedDetail`,
+  `shadowMountedBacklog`, `announceShadowMounted`) live in `scripts.ts`, which
+  both shells already import, so task 5 reuses them without adding the first
+  runtime import of `shell.ts` to the preview bundle. `index.ts` re-exports them.
+- The backlog holds the same `ShadowMountedDetail` objects the event carries, not
+  bare roots: one shape for draining and for listening, with no second way to
+  recover `key`/`index` for a light-DOM root.
+- `load()` creates the backlog before the first host connects (a slide's classic
+  inline script runs *during* `appendChild`, so it must already find the array),
+  and announces every host in a separate pass **after** `show()`. Announcing
+  mid-loop let listeners see every slide stacked and visible, and a listener that
+  navigated synchronously left two slides rendered.
+
 **Verification.**
 ```sh
 cd packages/peitho-present && npm test -- test/shell-shadow-mounted.test.ts
@@ -285,6 +300,15 @@ every interactive-target rule, and a drift test can pin strings but not logic).
 
 Note this is the one surface that re-runs a script on every visit, which is what
 the IIFE wrap exists for.
+
+Re-injection also shapes the backlog (task 4 review): each visit pushes a new
+entry, so without care `window.__peithoShadowRoots` grows without bound, holds
+detached sections alive, and a late module script drains stale roots from
+earlier visits. Drop entries whose `root` is no longer connected before pushing
+the current injection's. Create the backlog when the viewer script starts, so it
+exists before any injected script runs, as it does in present. Pin the
+`"peitho:shadow-mounted"` and `"__peithoShadowRoots"` literals in the drift test
+alongside the mirrored strings.
 
 **Verification.**
 ```sh
@@ -363,6 +387,26 @@ in every output mode. Guide: a worked example with the
 `document.currentScript.getRootNode()` caveat — a re-created script executes in
 the *document* global scope, not inside the shadow root, so `document.querySelector`
 in a layout script does not see its own slide.
+
+Correction from measurement (task 2 review): `document.currentScript` is `null`
+while a script inside a shadow root runs, so `currentScript.getRootNode()` is not
+a way to reach the slide on any shell surface — the event and backlog are. The
+guide must also cover what tasks 1–4 established:
+- the backlog exists before any layout script runs, and its entries are the same
+  `{root, key, index}` detail the event carries; a script drains it *and* listens;
+- a layout script runs once per slide that uses the layout, and in every shell
+  that mounts it (the presenter mounts two), while the event is global, so a
+  script installs its handler once (a global guard) and mounts idempotently per
+  root (mark the root);
+- the IIFE wrap makes top-level `var`/`function` local; publish shared API as
+  `window.x = …`;
+- an external classic `<script src>` runs once per slide per shell, so load
+  libraries as modules (the module map dedupes by URL) or guard them;
+- an inline script after a blocking `<script src>` runs after it loads, as in a
+  parsed document;
+- external SVG scripts run in load order, not document order;
+- `window.__peithoShadowRoots` must stay an array; replacing it with a shim is an
+  error, not a supported pattern.
 
 Remember: the guide is Zola, and a line starting with four backticks swallows
 everything after it (see `zola-guide-fence-hazard`).

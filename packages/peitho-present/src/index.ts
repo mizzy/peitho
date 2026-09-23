@@ -34,6 +34,7 @@ export {
 } from "./keyboard";
 export { mountPresenterView } from "./presenter";
 export { installPointerOverlay, mountPresentShell } from "./shell";
+export { SHADOW_MOUNTED_EVENT } from "./scripts";
 export { installSwapShortcut, swapRoute } from "./swap";
 export { installSyncBridge, serverSyncChannelFactory } from "./sync";
 export {
@@ -69,6 +70,7 @@ export type {
   TimerControlDetail,
   TimerStateDetail
 } from "./shell";
+export type { ShadowMountedDetail } from "./scripts";
 export type {
   BeforeCloseDetail,
   ServerSyncOptions,
