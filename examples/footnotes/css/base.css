@@ -1,0 +1,236 @@
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("theme-fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.peitho-slide {
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  padding: 64px 72px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: #f7f7f2;
+  color: #181818;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.peitho-slide:where([data-peitho-page-number]) {
+  position: relative;
+}
+
+.peitho-slide[data-peitho-page-number]::after {
+  content: attr(data-peitho-page-number);
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  font-size: 18px;
+  color: #8a8578;
+  font-variant-numeric: tabular-nums;
+}
+
+.peitho-slide[data-peitho-page-total]::after {
+  content: attr(data-peitho-page-number) " / " attr(data-peitho-page-total);
+}
+
+.peitho-slide h1 {
+  margin: 0;
+  font-size: 56px;
+  line-height: 1.05;
+  font-weight: 760;
+}
+
+.slot-title {
+  display: inline-block;
+}
+
+.body {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.slot-body {
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.slot-body p {
+  margin: 0 0 24px;
+}
+
+.slot-body blockquote {
+  margin: 0 0 var(--peitho-blockquote-spacing, 24px);
+  padding-left: var(--peitho-blockquote-spacing, 24px);
+  border-left: 4px solid var(--peitho-blockquote-border-color, #8a8578);
+  color: var(--peitho-blockquote-color, #8a8578);
+}
+
+.slot-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.slot-body table {
+  width: 100%;
+  margin: 0 0 var(--peitho-table-spacing, 24px);
+  border-collapse: collapse;
+}
+
+.slot-body th,
+.slot-body td {
+  padding: var(--peitho-table-cell-padding, 8px 12px);
+  border: 1px solid var(--peitho-table-border-color, #8a8578);
+  vertical-align: top;
+}
+
+.slot-body th {
+  font-weight: var(--peitho-table-header-weight, 600);
+}
+
+.slot-body ul {
+  margin: 0;
+  padding-left: 34px;
+}
+
+.footnotes {
+  min-width: 0;
+  margin-top: auto;
+  overflow: hidden;
+  font-size: 30px;
+  line-height: 1.35;
+}
+
+.peitho-slide[data-empty-slots~="footnotes"] .footnotes {
+  display: none;
+}
+
+.peitho-footnotes {
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid #8a8578;
+  font-size: 0.62em;
+  line-height: 1.35;
+  color: #8a8578;
+}
+
+.peitho-footnotes ol {
+  margin: 0;
+  padding-left: 1.45em;
+}
+
+.peitho-footnotes li {
+  padding-left: 0.25em;
+}
+
+.peitho-footnotes p {
+  margin: 0 0 10px;
+}
+
+.peitho-footnote-ref {
+  font-size: 0.62em;
+  line-height: 0;
+  vertical-align: super;
+}
+
+.code {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.slot-code,
+.slot-body pre {
+  display: block;
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.slot-body pre {
+  margin-bottom: 24px;
+}
+
+.peitho-slide .hl-comment {
+  color: #8a8578;
+}
+
+.peitho-slide .hl-string {
+  color: #2f7d4f;
+}
+
+.peitho-slide .hl-keyword,
+.peitho-slide .hl-storage {
+  color: #7141d8;
+}
+
+.peitho-slide .hl-constant {
+  color: #b45309;
+}
+
+.peitho-slide .hl-function {
+  color: #1d4ed8;
+}
+
+.peitho-slide .hl-type {
+  color: #0f766e;
+}
+
+/*
+ * Static code line emphasis — "these lines are the important ones".
+ *
+ * A separate layer from syntax highlighting above: `hl-*` colors code by what
+ * it is, emphasis points at what the speaker is discussing.
+ *
+ * Only the *static* form lives here, because it is baked into the build output
+ * and must render with no shell present (PDF, preview, dist/). Stepped
+ * emphasis is styled by the present shell itself, so that it keeps working for
+ * decks that ship their own CSS and thus never load this file.
+ */
+.slot-code .code-line {
+  display: inline-block;
+  width: 100%;
+}
+
+.slot-code .code-line-emphasis {
+  background: var(--peitho-emphasis-background, rgba(217, 163, 0, 0.18));
+  box-shadow: inset 3px 0 0 var(--peitho-emphasis-marker, #d9a300);
+}
+
+/*
+ * Dim the surrounding lines, scoped by `:has()` so a block with no emphasis
+ * never renders faded.
+ */
+.slot-code:has(.code-line-emphasis) .code-line:not(.code-line-emphasis) {
+  opacity: var(--peitho-emphasis-dim, 0.45);
+}

@@ -283,8 +283,8 @@ mod tests {
     #[test]
     fn non_tty_width_keeps_logical_lines_whole() {
         insta::assert_snapshot!(render_diagnostic_parts(
-            "deck.md:3: invalid deck frontmatter: unknown field `fontss`, expected one of `time`, `aspect_ratio`, `resolution`, `breaks`, `page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `overrides`, `syntaxes`, `fonts`, `code_images`",
-            Some("use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, overrides, syntaxes, fonts, code_images"),
+            "deck.md:3: invalid deck frontmatter: unknown field `fontss`, expected one of `time`, `aspect_ratio`, `resolution`, `breaks`, `page_numbers`, `pointer_color`, `lang`, `layouts`, `css`, `syntaxes`, `fonts`, `code_images`",
+            Some("use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"),
             TerminalStyle::plain(usize::MAX),
         ));
     }

@@ -4068,7 +4068,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             code_images,
         )
         .unwrap()
