@@ -484,7 +484,12 @@
       return;
     }
     published = true;
-    var payload = base64EncodeUtf8(JSON.stringify(results));
+    var payload = base64EncodeUtf8(JSON.stringify({
+      shadowMountedError: document.documentElement.getAttribute(
+        "data-peitho-shadow-mounted-error"
+      ),
+      slides: results
+    }));
     var total = Math.max(1, Math.ceil(payload.length / CHUNK_SIZE));
     for (var index = 0; index < total; index += 1) {
       console.log(

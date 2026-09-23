@@ -42,6 +42,58 @@ fn export_pdf_writes_nonempty_pdf() {
 
 #[test]
 #[ignore]
+// Chrome-backed E2E test; run explicitly with cargo test -- --ignored.
+fn export_pdf_reports_shadow_mounted_failure_without_writing_pdf() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping export_pdf_reports_shadow_mounted_failure_without_writing_pdf: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let layouts = dir.path().join("layouts");
+    let out = dir.path().join("out.pdf");
+    fs::create_dir_all(&layouts).unwrap();
+    fs::write(
+        layouts.join("duplicating.html"),
+        r#"<section class="peitho-slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <figure class="code"><slot name="code" accepts="code" arity="0..1"></slot></figure>
+  <footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
+  <script>
+    (() => {
+      const slide = document.currentScript.closest(".peitho-slide");
+      const duplicate = slide.cloneNode(true);
+      duplicate.querySelector("script").remove();
+      document.body.appendChild(duplicate);
+    })();
+  </script>
+</section>"#,
+    )
+    .unwrap();
+    fs::write(&deck, "---\nlayouts: ./layouts\n---\n# Duplicated\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .args(["export", "pdf"])
+        .arg(&deck)
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("PDF slide initialization failed"))
+        .stderr(predicate::str::contains(
+            "Unable to announce parsed slides: \"duplicated\" matched 2",
+        ));
+
+    assert!(!out.exists(), "failed export must not write a PDF");
+}
+
+#[test]
+#[ignore]
 // Chromeを実行するE2Eテスト。cargo test -- --ignored で明示的に実行。
 fn export_pdf_flattens_gradient_backgrounds_to_images() {
     let Some(chrome) = test_chrome_path() else {

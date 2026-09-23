@@ -1,10 +1,12 @@
 // jsdom never executes <script> because vitest does not opt into runScripts: "dangerously";
-// these tests are structural only, with parser-blocking progress simulated by dispatching events.
-// The real-Chrome checklist is in docs/plans/2026-09-23-layout-scripts.md.
+// script-rehydration tests are structural, with parser-blocking progress simulated by events.
+// Plain DOM helpers are executed directly here.
 import { expect, it } from "vitest";
 import {
+  announceParsedSlides,
   dropDisconnectedShadowMounted,
   executeInlineScripts,
+  SHADOW_MOUNTED_EVENT,
   shadowMountedBacklog
 } from "../src/scripts";
 
@@ -12,8 +14,134 @@ const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
 
+type WindowWithShadowMountedBacklog = Window & { __peithoShadowRoots?: unknown };
+
+function slide(key: string): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "peitho-slide";
+  section.dataset.slideKey = key;
+  return section;
+}
+
+function resetParsedSlideTestState(): void {
+  document.body.replaceChildren();
+  delete (window as WindowWithShadowMountedBacklog).__peithoShadowRoots;
+}
+
+it("announces parsed slides once in deck order by key with exact details", () => {
+  const first = slide("first");
+  const second = slide("second");
+  const third = slide("third");
+  document.body.append(third, first, second);
+  const details: Array<{ root: Element; key: string; index: number }> = [];
+  const listener = (event: Event): void => {
+    details.push((event as CustomEvent).detail);
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+
+  try {
+    announceParsedSlides(document, window, [
+      { key: "first", index: 7 },
+      { key: "second", index: 3 },
+      { key: "third", index: 11 }
+    ]);
+
+    expect(details).toEqual([
+      { root: first, key: "first", index: 7 },
+      { root: second, key: "second", index: 3 },
+      { root: third, key: "third", index: 11 }
+    ]);
+    const backlog = shadowMountedBacklog(window);
+    expect(backlog).toEqual(details);
+    expect(backlog).toHaveLength(3);
+    backlog.forEach((detail, index) => expect(detail).toBe(details[index]));
+  } finally {
+    document.removeEventListener(SHADOW_MOUNTED_EVENT, listener);
+    resetParsedSlideTestState();
+  }
+});
+
+it("announces nothing when a parsed slide key has duplicate matches", () => {
+  document.body.append(slide("duplicate"), slide("duplicate"), slide("valid"));
+  const details: unknown[] = [];
+  const listener = (event: Event): void => {
+    details.push((event as CustomEvent).detail);
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+
+  try {
+    expect(() =>
+      announceParsedSlides(document, window, [
+        { key: "valid", index: 0 },
+        { key: "duplicate", index: 1 }
+      ])
+    ).toThrowError(/duplicate.*2/);
+    expect(details).toEqual([]);
+    expect(shadowMountedBacklog(window)).toEqual([]);
+  } finally {
+    document.removeEventListener(SHADOW_MOUNTED_EVENT, listener);
+    resetParsedSlideTestState();
+  }
+});
+
+it("announces nothing when a parsed slide key is missing", () => {
+  document.body.append(slide("valid"));
+  const details: unknown[] = [];
+  const listener = (event: Event): void => {
+    details.push((event as CustomEvent).detail);
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+
+  try {
+    expect(() =>
+      announceParsedSlides(document, window, [
+        { key: "valid", index: 0 },
+        { key: "missing", index: 1 }
+      ])
+    ).toThrowError(/missing.*0/);
+    expect(details).toEqual([]);
+    expect(shadowMountedBacklog(window)).toEqual([]);
+  } finally {
+    document.removeEventListener(SHADOW_MOUNTED_EVENT, listener);
+    resetParsedSlideTestState();
+  }
+});
+
+it("reports every parsed-slide resolution failure before announcing anything", () => {
+  document.body.append(slide("valid"), slide("duplicate"), slide("duplicate"));
+  const details: unknown[] = [];
+  const listener = (event: Event): void => {
+    details.push((event as CustomEvent).detail);
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+
+  try {
+    let thrown: unknown;
+    try {
+      announceParsedSlides(document, window, [
+        { key: "valid", index: 0 },
+        { key: "missing-first", index: 1 },
+        { key: "duplicate", index: 2 },
+        { key: "missing-last", index: 3 }
+      ]);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toMatch(/missing-first.*0/);
+    expect(message).toMatch(/duplicate.*2/);
+    expect(message).toMatch(/missing-last.*0/);
+    expect(details).toEqual([]);
+    expect(shadowMountedBacklog(window)).toEqual([]);
+  } finally {
+    document.removeEventListener(SHADOW_MOUNTED_EVENT, listener);
+    resetParsedSlideTestState();
+  }
+});
+
 it("rejects a pre-existing non-array shadow-root backlog without overwriting it", () => {
-  type WindowWithShadowMountedBacklog = Window & { __peithoShadowRoots?: unknown };
   const backlogWindow = window as WindowWithShadowMountedBacklog;
   const existingValue = { ownedBy: "layout" };
   backlogWindow.__peithoShadowRoots = existingValue;

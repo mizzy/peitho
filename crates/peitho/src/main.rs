@@ -3492,6 +3492,7 @@ fn run_chrome_print_with_timeout(
         client.page_enable(deadline)?;
         client.page_navigate(&url, deadline)?;
         cdp::wait_for_pdf_flattening(&mut client, deadline)?;
+        client.ensure_shadow_mounted_succeeded(deadline)?;
 
         let pdf = client.page_print_to_pdf(deadline)?;
         if pdf.is_empty() {
