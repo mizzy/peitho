@@ -19,7 +19,7 @@ use crate::{
     emphasis::LineEmphasis,
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
-    layout::Layout,
+    layout::{Layout, LayoutAssets},
     math::MathAssets,
     phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, Rendered},
 };
@@ -89,6 +89,7 @@ pub fn render_deck(
     highlighter: &Highlighter,
     theme_css: String,
     edit_annotations: EditAnnotations,
+    layout_assets: &LayoutAssets,
 ) -> Result<Deck<Rendered>> {
     let (settings, checked_slides) = deck.into_checked_parts();
     let breaks = settings.breaks();
@@ -121,8 +122,11 @@ pub fn render_deck(
                 page_total,
                 reveal_steps: slide.step_count(),
             },
-            highlighter,
-            edit_annotations,
+            DeckRenderContext {
+                highlighter,
+                edit_annotations,
+                layout_assets,
+            },
         )?;
         let notes = slide.notes().map(|s| s.to_owned());
         slides.push(RenderedSlide::new(
@@ -196,15 +200,28 @@ struct SlideRenderAttributes {
     reveal_steps: usize,
 }
 
+/// Deck-wide rendering inputs, the same for every slide in one `render_deck`
+/// call — unlike [`SlideRenderAttributes`], which differs per slide.
+#[derive(Clone, Copy)]
+struct DeckRenderContext<'a> {
+    highlighter: &'a Highlighter,
+    edit_annotations: EditAnnotations,
+    layout_assets: &'a LayoutAssets,
+}
+
 fn render_slide(
     key: &SlideKey,
     slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>,
     layout: &Layout,
     breaks: bool,
     attrs: SlideRenderAttributes,
-    highlighter: &Highlighter,
-    edit_annotations: EditAnnotations,
+    context: DeckRenderContext<'_>,
 ) -> Result<String> {
+    let DeckRenderContext {
+        highlighter,
+        edit_annotations,
+        layout_assets,
+    } = context;
     let mut output = Vec::new();
     let key_value = key.as_str().to_owned();
     let footnote_numbers = collect_footnote_numbers(slots);
@@ -223,76 +240,100 @@ fn render_slide(
         .collect::<Vec<_>>();
     let empty_slots_value = (!empty_slot_names.is_empty()).then(|| empty_slot_names.join(" "));
     let slot_values = slots.clone();
+    let mut handlers = vec![
+        element!("section", move |el| {
+            el.set_attribute("data-slide-key", &key_value)?;
+            if let Some(empty_slots) = &empty_slots_value {
+                el.set_attribute("data-empty-slots", empty_slots)?;
+            }
+            if let Some(number) = &page_number_value {
+                el.set_attribute("data-peitho-page-number", number)?;
+            }
+            if let Some(total) = &page_total_value {
+                el.set_attribute("data-peitho-page-total", total)?;
+            }
+            if let Some(total) = &reveal_steps_value {
+                el.set_attribute("data-reveal-steps", total)?;
+            }
+            let existing = el.get_attribute("class").unwrap_or_default();
+            let class = if existing
+                .split_whitespace()
+                .any(|part| part == "peitho-slide")
+            {
+                existing
+            } else if existing.is_empty() {
+                "peitho-slide".to_owned()
+            } else {
+                format!("{existing} peitho-slide")
+            };
+            el.set_attribute("class", &class)?;
+            Ok(())
+        }),
+        element!("slot", move |el| {
+            let raw_name = el.get_attribute("name").ok_or_else(|| {
+                box_build_error(BuildError::new(
+                    ErrorKind::Layout,
+                    None,
+                    "slot is missing 'name'",
+                    "add a name attribute to the slot",
+                ))
+            })?;
+            let slot = SlotName::new(raw_name).map_err(|message| {
+                box_build_error(BuildError::new(
+                    ErrorKind::Layout,
+                    None,
+                    message,
+                    "rename the slot",
+                ))
+            })?;
+            let checked_slot = slot_values.get(&slot).ok_or_else(|| {
+                box_build_error(BuildError::new(
+                    ErrorKind::Layout,
+                    None,
+                    format!("checked slot '{}' is missing its contract", slot.as_str()),
+                    "keep checked slides synchronized with layout slots",
+                ))
+            })?;
+            let html = render_slot(
+                &slot,
+                checked_slot.contract().accepts,
+                checked_slot.fragments(),
+                breaks,
+                &footnote_numbers,
+                highlighter,
+                edit_annotations,
+            )
+            .map_err(box_build_error)?;
+            el.replace(&html, ContentType::Html);
+            Ok(())
+        }),
+    ];
+
+    // Point the layout's own asset references at the copies the resolver placed
+    // under `assets/`. Skipped entirely for a layout that references nothing, so
+    // such decks emit byte-identical HTML.
+    if layout_assets.has_any(layout.name()) {
+        for (tag, attributes) in crate::layout::ASSET_ATTRIBUTES {
+            let layout_name = layout.name().to_owned();
+            handlers.push(element!(*tag, move |el| {
+                for attribute in *attributes {
+                    let Some(raw) = el.get_attribute(attribute) else {
+                        continue;
+                    };
+                    // A reference the resolver did not register (external, data:,
+                    // fragment, rooted) is left exactly as the author wrote it.
+                    if let Some(resolved) = layout_assets.get(&layout_name, &raw) {
+                        el.set_attribute(attribute, resolved.as_str())?;
+                    }
+                }
+                Ok(())
+            }));
+        }
+    }
+
     let mut rewriter = HtmlRewriter::new(
         Settings {
-            element_content_handlers: vec![
-                element!("section", move |el| {
-                    el.set_attribute("data-slide-key", &key_value)?;
-                    if let Some(empty_slots) = &empty_slots_value {
-                        el.set_attribute("data-empty-slots", empty_slots)?;
-                    }
-                    if let Some(number) = &page_number_value {
-                        el.set_attribute("data-peitho-page-number", number)?;
-                    }
-                    if let Some(total) = &page_total_value {
-                        el.set_attribute("data-peitho-page-total", total)?;
-                    }
-                    if let Some(total) = &reveal_steps_value {
-                        el.set_attribute("data-reveal-steps", total)?;
-                    }
-                    let existing = el.get_attribute("class").unwrap_or_default();
-                    let class = if existing
-                        .split_whitespace()
-                        .any(|part| part == "peitho-slide")
-                    {
-                        existing
-                    } else if existing.is_empty() {
-                        "peitho-slide".to_owned()
-                    } else {
-                        format!("{existing} peitho-slide")
-                    };
-                    el.set_attribute("class", &class)?;
-                    Ok(())
-                }),
-                element!("slot", move |el| {
-                    let raw_name = el.get_attribute("name").ok_or_else(|| {
-                        box_build_error(BuildError::new(
-                            ErrorKind::Layout,
-                            None,
-                            "slot is missing 'name'",
-                            "add a name attribute to the slot",
-                        ))
-                    })?;
-                    let slot = SlotName::new(raw_name).map_err(|message| {
-                        box_build_error(BuildError::new(
-                            ErrorKind::Layout,
-                            None,
-                            message,
-                            "rename the slot",
-                        ))
-                    })?;
-                    let checked_slot = slot_values.get(&slot).ok_or_else(|| {
-                        box_build_error(BuildError::new(
-                            ErrorKind::Layout,
-                            None,
-                            format!("checked slot '{}' is missing its contract", slot.as_str()),
-                            "keep checked slides synchronized with layout slots",
-                        ))
-                    })?;
-                    let html = render_slot(
-                        &slot,
-                        checked_slot.contract().accepts,
-                        checked_slot.fragments(),
-                        breaks,
-                        &footnote_numbers,
-                        highlighter,
-                        edit_annotations,
-                    )
-                    .map_err(box_build_error)?;
-                    el.replace(&html, ContentType::Html);
-                    Ok(())
-                }),
-            ],
+            element_content_handlers: handlers,
             ..Settings::default()
         },
         |chunk: &[u8]| output.extend_from_slice(chunk),
@@ -2829,7 +2870,7 @@ mod tests {
         check::check_deck,
         domain::{AspectRatio, FootnoteEntry, RawImagePath, RevealSpan},
         embed_card::{build_embed_card_html, EmbedCardAssets, OEmbedDocument},
-        layout::{parse_layout, Layout},
+        layout::{parse_layout, Layout, LayoutAssets},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
@@ -2972,6 +3013,7 @@ mod tests {
             &crate::highlight::Highlighter::defaults(),
             String::new(),
             EditAnnotations::Off,
+            &LayoutAssets::default(),
         )
         .unwrap()
         .slides()[0]
@@ -6478,8 +6520,14 @@ Paragraph after heading.
         })
         .unwrap();
         assert!(assets.is_empty());
-        let rendered =
-            render_deck(resolved, &highlighter, String::new(), edit_annotations).unwrap();
+        let rendered = render_deck(
+            resolved,
+            &highlighter,
+            String::new(),
+            edit_annotations,
+            &LayoutAssets::default(),
+        )
+        .unwrap();
         (rendered, spans)
     }
 
@@ -7137,12 +7185,118 @@ Paragraph after heading.
             &crate::highlight::Highlighter::defaults(),
             theme_css.to_owned(),
             EditAnnotations::Off,
+            &LayoutAssets::default(),
         )
         .unwrap()
     }
 
     fn render_checked(checked: Deck<Checked>) -> Deck<Rendered> {
         render_checked_with_css(checked, "")
+    }
+
+    fn layout_with_video() -> Layout {
+        parse_layout(
+            "cover",
+            r#"<section><video src="hero.mp4" poster="still.png" muted></video><h1><slot name="title" accepts="inline" arity="1"></slot></h1><slot name="body" accepts="blocks" arity="0..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
+    fn resolved_layout_assets(pairs: &[(&str, &str, &str)]) -> LayoutAssets {
+        let mut by_layout: BTreeMap<String, BTreeMap<String, ResolvedImagePath>> = BTreeMap::new();
+        for (layout, raw, basename) in pairs {
+            by_layout.entry((*layout).to_owned()).or_default().insert(
+                (*raw).to_owned(),
+                ResolvedImagePath::from_hashed_asset("0123456789abcdef", basename).unwrap(),
+            );
+        }
+        LayoutAssets::new(by_layout)
+    }
+
+    fn render_with_layout_assets(
+        markdown: &str,
+        layout: Layout,
+        layout_assets: LayoutAssets,
+    ) -> Deck<Rendered> {
+        let checked = check_deck(
+            map_by_convention(
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap(),
+                &layout,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (resolved, _) = crate::phase::resolve_image_paths(checked, |request| {
+            panic!("no images: {:?}", request)
+        })
+        .unwrap();
+        render_deck(
+            resolved,
+            &crate::highlight::Highlighter::defaults(),
+            String::new(),
+            EditAnnotations::Off,
+            &layout_assets,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rewrites_a_layouts_asset_attributes_to_their_resolved_paths() {
+        let rendered = render_with_layout_assets(
+            "# Intro\n\nBody",
+            layout_with_video(),
+            resolved_layout_assets(&[
+                ("cover", "hero.mp4", "hero.mp4"),
+                ("cover", "still.png", "still.png"),
+            ]),
+        );
+
+        let html = rendered.slides()[0].html();
+        assert!(
+            html.contains(r#"src="assets/0123456789abcdef-hero.mp4""#),
+            "video src should be rewritten: {html}"
+        );
+        assert!(
+            html.contains(r#"poster="assets/0123456789abcdef-still.png""#),
+            "poster should be rewritten: {html}"
+        );
+        assert!(
+            !html.contains(r#"src="hero.mp4""#),
+            "raw path must not survive: {html}"
+        );
+        assert!(
+            html.contains("muted"),
+            "unrelated attributes are preserved: {html}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_layout_reference_is_emitted_unchanged() {
+        let rendered = render_with_layout_assets(
+            "# Intro\n\nBody",
+            layout_with_video(),
+            LayoutAssets::default(),
+        );
+
+        let html = rendered.slides()[0].html();
+        assert!(html.contains(r#"src="hero.mp4""#), "{html}");
+        assert!(html.contains(r#"poster="still.png""#), "{html}");
+    }
+
+    #[test]
+    fn a_deck_whose_layout_references_nothing_is_byte_identical_with_and_without_assets() {
+        let without = render_with_layout_assets(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            LayoutAssets::default(),
+        );
+        let with = render_with_layout_assets(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            resolved_layout_assets(&[("other-layout", "hero.mp4", "hero.mp4")]),
+        );
+
+        assert_eq!(without.slides()[0].html(), with.slides()[0].html());
     }
 
     fn render_checked_with_css(checked: Deck<Checked>, theme_css: &str) -> Deck<Rendered> {
@@ -7160,6 +7314,7 @@ Paragraph after heading.
             &crate::highlight::Highlighter::defaults(),
             theme_css.to_owned(),
             EditAnnotations::Off,
+            &LayoutAssets::default(),
         )
         .unwrap()
     }

@@ -9,8 +9,8 @@ use peitho_core::{
     domain::CodeImageCommand,
     highlight::Highlighter,
     parse_deck_and_transform, parse_frontmatter, parse_layout, render_deck, resolve_image_paths,
-    EditAnnotations, ResolvedImageAsset, ResolvedImagePath, Result, CODE_IMAGES_CACHE_DIR,
-    EMBEDS_CACHE_DIR,
+    EditAnnotations, LayoutAssets, ResolvedImageAsset, ResolvedImagePath, Result,
+    CODE_IMAGES_CACHE_DIR, EMBEDS_CACHE_DIR,
 };
 
 struct FakeRunner;
@@ -110,6 +110,7 @@ fn renders_code_image_as_resolved_svg_img() {
         &Highlighter::defaults(),
         String::new(),
         EditAnnotations::Off,
+        &LayoutAssets::default(),
     )
     .unwrap();
     let html = rendered.slides()[0].html();
@@ -165,6 +166,7 @@ fn renders_builtin_embed_through_existing_png_image_pipeline() {
         &Highlighter::defaults(),
         String::new(),
         EditAnnotations::Off,
+        &LayoutAssets::default(),
     )
     .unwrap();
     let html = rendered.slides()[0].html();

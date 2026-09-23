@@ -1,0 +1,8 @@
+<section class="video-cover">
+  <video class="backdrop" src="media/loop.mp4" poster="media/poster.png" autoplay muted loop playsinline></video>
+  <div class="scrim"></div>
+  <div class="content">
+    <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+    <div class="lede"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  </div>
+</section>

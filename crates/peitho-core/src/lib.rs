@@ -39,7 +39,10 @@ pub use code_images::parse_deck_and_transform;
 pub use domain::{AspectRatio, RawImagePath, ResolvedImageAsset, ResolvedImagePath};
 pub use embed_card::builtin_oembed_request_url;
 pub use error::{BuildError, Result};
-pub use layout::{describe_layouts, parse_layout, Layout, LayoutSummary, Layouts, SlotSummary};
+pub use layout::{
+    describe_layouts, parse_layout, Layout, LayoutAssetRef, LayoutAssets, LayoutSummary, Layouts,
+    SlotSummary,
+};
 pub use manifest::{
     build_manifest, fragment_src, manifest_json, Manifest, ManifestImage, ManifestSection,
     ManifestSlide, ManifestSlideText,

@@ -1628,7 +1628,8 @@ fn prepare_watch_loop(input: PathBuf) -> WatchState {
 fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
     let loaded = load_and_expand_deck_source(input)?;
     let assets = resolve_assets(input, &loaded.frontmatter)?;
-    let image_files = load_highlighter(assets.syntaxes.path())
+    let deck_dir = asset_resolution::deck_parent(input);
+    let mut referenced_files: Vec<PathBuf> = load_highlighter(assets.syntaxes.path())
         .ok()
         .and_then(|highlighter| {
             peitho_core::referenced_image_paths(
@@ -1641,15 +1642,28 @@ fn resolve_watch_targets(input: &Path) -> miette::Result<WatchTargets> {
         .map(|image_paths| {
             image_paths
                 .into_iter()
-                .map(|raw| asset_resolution::deck_parent(input).join(raw.as_str()))
+                .map(|raw| deck_dir.join(raw.as_str()))
                 .collect()
         })
         .unwrap_or_default();
+    // A layout's own `src`/`poster`/`href` files are build inputs too. The
+    // layouts watch root only globs *.html, so without this a video sitting
+    // beside the layout is invisible and replacing it never rebuilds.
+    if let Ok(layouts) = load_layouts(assets.layouts.path()) {
+        for layout in layouts.iter() {
+            for reference in layout.asset_refs() {
+                let path = deck_dir.join(reference.raw());
+                if !referenced_files.contains(&path) {
+                    referenced_files.push(path);
+                }
+            }
+        }
+    }
     Ok(WatchTargets::new(
         input.to_path_buf(),
         assets,
         loaded.included_files(),
-        image_files,
+        referenced_files,
     ))
 }
 
@@ -1891,11 +1905,14 @@ where
         &layouts.slot_classes(),
         &layouts.root_classes(),
     ))?;
-    let mut image_resolver = ImageResolver::new(input);
-    let (resolved, image_assets) = loaded
+    let mut asset_resolver = AssetResolver::new(input);
+    let (resolved, mut image_assets) = loaded
         .translate(peitho_core::resolve_image_paths(checked, |request| {
-            image_resolver.resolve(request)
+            asset_resolver.resolve(request)
         }))?;
+    // Resolved after Markdown images so a file referenced from both dedupes onto
+    // the copy the Markdown path already registered.
+    let layout_assets = resolve_layout_assets(&layouts, &mut asset_resolver, &mut image_assets)?;
     let manifest = peitho_core::build_manifest(&resolved, &image_assets);
     let manifest_json = core(peitho_core::manifest_json(&manifest))?;
     let rendered = loaded.translate(peitho_core::render_deck(
@@ -1903,6 +1920,7 @@ where
         &highlighter,
         theme_css,
         edit_annotations,
+        &layout_assets,
     ))?;
 
     Ok(BuildArtifacts {
@@ -5353,12 +5371,73 @@ fn write_image_assets(
     Ok(())
 }
 
-struct ImageResolver {
+/// Resolve every layout's own asset references, appending new copies to
+/// `image_assets` and returning the rewrite map the renderer needs.
+///
+/// Keyed by layout name, then by the raw attribute value, because the renderer
+/// rewrites per layout and two layouts may write the same raw path.
+fn resolve_layout_assets(
+    layouts: &peitho_core::Layouts,
+    resolver: &mut AssetResolver,
+    image_assets: &mut Vec<peitho_core::ResolvedImageAsset>,
+) -> miette::Result<peitho_core::LayoutAssets> {
+    let mut per_layout = BTreeMap::new();
+    for layout in layouts.iter() {
+        let mut resolved = BTreeMap::new();
+        for reference in layout.asset_refs() {
+            let asset = resolver
+                .resolve_deck_relative(reference.raw())
+                .map_err(|err| layout_asset_error(layout.name(), reference, err))?;
+            if !image_assets
+                .iter()
+                .any(|existing| existing.dist_rel == asset.dist_rel)
+            {
+                image_assets.push(asset.clone());
+            }
+            resolved.insert(reference.raw().to_owned(), asset.dist_rel);
+        }
+        if !resolved.is_empty() {
+            per_layout.insert(layout.name().to_owned(), resolved);
+        }
+    }
+    Ok(peitho_core::LayoutAssets::new(per_layout))
+}
+
+/// Report a layout asset failure with the layout, element, and attribute that
+/// wrote the reference. A layout has no slide or line to blame, so naming the
+/// attribute is what makes the error actionable.
+fn layout_asset_error(
+    layout: &str,
+    reference: &peitho_core::LayoutAssetRef,
+    err: peitho_core::BuildError,
+) -> miette::Report {
+    miette::miette!(
+        help = format!(
+            "fix the {} attribute in layout '{layout}', or place the file at that deck-relative path",
+            reference.attribute()
+        ),
+        "layout '{layout}' references a missing asset in <{} {}=\"{}\">: {}",
+        reference.element(),
+        reference.attribute(),
+        reference.raw(),
+        err.message
+    )
+}
+
+/// Copies deck-relative assets into the hashed `assets/<hash>-<name>` namespace.
+///
+/// Both sources of asset references funnel through here — Markdown `![](…)`
+/// fragments via [`AssetResolver::resolve`] and the `src`/`poster`/`href`
+/// attributes a layout writes directly via
+/// [`AssetResolver::resolve_deck_relative`] — so one hash table dedupes across
+/// both. Identical bytes referenced from a layout and from Markdown produce one
+/// copy and one dist path.
+struct AssetResolver {
     deck_dir: PathBuf,
     by_hash: BTreeMap<String, peitho_core::ResolvedImageAsset>,
 }
 
-impl ImageResolver {
+impl AssetResolver {
     fn new(input: &Path) -> Self {
         let deck_dir = asset_resolution::deck_parent(input).to_path_buf();
         Self {
@@ -5367,12 +5446,25 @@ impl ImageResolver {
         }
     }
 
+    /// Resolve a Markdown image fragment. The caller-supplied slide and line
+    /// context is attached to any error by `resolve_image_paths`.
     fn resolve(
         &mut self,
         request: peitho_core::ImageRequest<'_>,
     ) -> peitho_core::Result<peitho_core::ResolvedImageAsset> {
-        let source = self.deck_dir.join(request.raw.as_str());
-        let display_path = request.raw.as_str();
+        self.resolve_deck_relative(request.raw.as_str())
+    }
+
+    /// Resolve any deck-relative path, whatever referenced it.
+    ///
+    /// Existence, the deck-directory escape check, content hashing, and dedupe
+    /// are identical for every reference source; only the error context differs,
+    /// and callers add that.
+    fn resolve_deck_relative(
+        &mut self,
+        display_path: &str,
+    ) -> peitho_core::Result<peitho_core::ResolvedImageAsset> {
+        let source = self.deck_dir.join(display_path);
         let deck_abs =
             fs::canonicalize(&self.deck_dir).map_err(|err| image_read_error(display_path, err))?;
         let source_abs =
@@ -5400,14 +5492,14 @@ impl ImageResolver {
         if let Some(asset) = self.by_hash.get(&hash) {
             return Ok(asset.clone());
         }
-        let basename = Path::new(request.raw.as_str())
+        let basename = Path::new(display_path)
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
                 peitho_core::BuildError::new(
                     peitho_core::error::ErrorKind::Asset,
                     None,
-                    format!("image path has no file name: {}", request.raw.as_str()),
+                    format!("image path has no file name: {display_path}"),
                     "write a deck-relative image path with a file name",
                 )
             })?;
@@ -6082,6 +6174,39 @@ contexts:
 
         assert_eq!(rebuilds, 0);
         assert!(!capture_input_snapshot(&state.targets).contains_key(&lock));
+    }
+
+    #[test]
+    fn an_asset_a_layout_references_directly_is_a_watch_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let layouts = dir.path().join("layouts");
+        let css = dir.path().join("css");
+        let video = dir.path().join("media/hero.mp4");
+        fs::create_dir_all(&layouts).unwrap();
+        fs::create_dir_all(&css).unwrap();
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        fs::write(&deck, "# Intro\n").unwrap();
+        fs::write(&video, b"fake video bytes").unwrap();
+        fs::write(css.join("base.css"), ".slot-title { font-weight: 700; }\n").unwrap();
+        fs::write(
+            layouts.join("cover.html"),
+            r#"<section><video src="media/hero.mp4"></video><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+        )
+        .unwrap();
+
+        let targets = resolve_watch_targets(&deck).unwrap();
+
+        // The layouts watch root only globs *.html, so without this the video is
+        // invisible and swapping it leaves preview serving the old copy.
+        assert!(
+            matches!(
+                capture_input_snapshot(&targets).get(&video),
+                Some(InputFingerprint::Metadata { .. })
+            ),
+            "layout-referenced video should be tracked: {:?}",
+            capture_input_snapshot(&targets).get(&video)
+        );
     }
 
     #[test]
@@ -12774,7 +12899,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
 
     #[test]
     fn image_resolver_handles_bare_deck_filename() {
-        let resolver = ImageResolver::new(Path::new("deck.md"));
+        let resolver = AssetResolver::new(Path::new("deck.md"));
 
         assert_eq!(resolver.deck_dir, PathBuf::from("."));
     }
