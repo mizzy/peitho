@@ -2,7 +2,11 @@
 // these tests are structural only, with parser-blocking progress simulated by dispatching events.
 // The real-Chrome checklist is in docs/plans/2026-09-23-layout-scripts.md.
 import { expect, it } from "vitest";
-import { executeInlineScripts, shadowMountedBacklog } from "../src/scripts";
+import {
+  dropDisconnectedShadowMounted,
+  executeInlineScripts,
+  shadowMountedBacklog
+} from "../src/scripts";
 
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -20,6 +24,35 @@ it("rejects a pre-existing non-array shadow-root backlog without overwriting it"
     );
     expect(backlogWindow.__peithoShadowRoots).toBe(existingValue);
   } finally {
+    delete backlogWindow.__peithoShadowRoots;
+  }
+});
+
+it("drops disconnected shadow-mounted entries in place", () => {
+  type WindowWithShadowMountedBacklog = Window & { __peithoShadowRoots?: unknown };
+  const backlogWindow = window as WindowWithShadowMountedBacklog;
+  const detached = document.createElement("section");
+  const connected = document.createElement("section");
+  const connectedShadowHost = document.createElement("div");
+  const connectedShadow = connectedShadowHost.attachShadow({ mode: "open" });
+  document.body.append(connected, connectedShadowHost);
+  const backlog = shadowMountedBacklog(window);
+  const connectedEntry = { root: connected, key: "connected", index: 1 };
+  const connectedShadowEntry = { root: connectedShadow, key: "shadow", index: 2 };
+  backlog.push(
+    { root: detached, key: "detached", index: 0 },
+    connectedEntry,
+    connectedShadowEntry
+  );
+
+  try {
+    dropDisconnectedShadowMounted(window);
+
+    expect(shadowMountedBacklog(window)).toBe(backlog);
+    expect(backlog).toEqual([connectedEntry, connectedShadowEntry]);
+  } finally {
+    connected.remove();
+    connectedShadowHost.remove();
     delete backlogWindow.__peithoShadowRoots;
   }
 });

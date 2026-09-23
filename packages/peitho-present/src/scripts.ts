@@ -1,8 +1,7 @@
 // jsdom never executes <script> because vitest does not opt into runScripts: "dangerously";
 // the tests are structural only; real execution and order are covered by the real-Chrome
 // checklist in docs/plans/2026-09-23-layout-scripts.md.
-// The embedded distribution-viewer copy in crates/peitho-core/src/render.rs is the
-// hand-mirrored twin; it runs as a plain <script> and cannot import this module.
+// The distribution viewer consumes these helpers through the IIFE bundle built from viewer.ts.
 
 const CLASSIC_JAVASCRIPT_TYPES = new Set(["text/javascript", "application/javascript"]);
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
@@ -32,6 +31,17 @@ export function shadowMountedBacklog(win: Window): ShadowMountedDetail[] {
     throw new TypeError("window.__peithoShadowRoots must be an array");
   }
   return backlog as ShadowMountedDetail[];
+}
+
+export function dropDisconnectedShadowMounted(win: Window): void {
+  const backlog = shadowMountedBacklog(win);
+  let writeIndex = 0;
+  for (const detail of backlog) {
+    if (!detail.root.isConnected) continue;
+    backlog[writeIndex] = detail;
+    writeIndex += 1;
+  }
+  backlog.length = writeIndex;
 }
 
 export function announceShadowMounted(

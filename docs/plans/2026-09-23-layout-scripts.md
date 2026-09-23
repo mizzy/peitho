@@ -211,6 +211,12 @@ navigation consult it; no installer carries its own check.
 
 Accepted: Escape inside a slide text field does not close present; blur first.
 
+*Superseded by task 6 (Issue #634):* the dist viewer's hand-mirrored copy and
+its string-drift tests are gone; the viewer consumes `interactiveTarget.ts`
+through the embedded `viewer.js` bundle, and "inside a slide" became any
+`[data-slide-key]` element in the origin's tree or an enclosing one, which
+covers the light-DOM section and nested shadow roots with one rule.
+
 ## Task 4: The `peitho:shadow-mounted` event in the present shell
 
 **Goal.** A layout script can obtain its own slide root, including one that
@@ -319,6 +325,29 @@ exists before any injected script runs, as it does in present. Pin the
 `"peitho:shadow-mounted"` and `"__peithoShadowRoots"` literals in the drift test
 alongside the mirrored strings.
 
+*As implemented (Issue #634):*
+- No hand mirror. `packages/peitho-present/src/viewer.ts` re-exports the
+  helpers from `scripts.ts` and `interactiveTarget.ts`; esbuild builds it as an
+  IIFE (`dist/viewer.js`, committed and drift-checked like the other bundles),
+  and `render_distribution_index` embeds it with `include_str!` — the same
+  cross-crate embedding the binary already uses for `shell.js`. The premise that
+  the viewer "cannot import the bundle" did not hold: an IIFE inlines.
+- The bundle and the viewer code share ONE IIFE, so neither `PeithoViewer` nor
+  any viewer name (`slides`, `showSlide`, …) is a global a layout script could
+  redeclare or clobber — the classic viewer script made them globals, and an
+  unwrapped external layout script declaring `let slides` would have failed in
+  dist only. `window.__peithoShadowRoots` is the one intended global.
+- `showSlide` returns early when the clamped index is already mounted: a
+  boundary no-op (next on the last slide, prev on the first, popstate to the
+  same slide) used to re-inject harmlessly, but now it would re-run every
+  script and reset widget state.
+- Per navigation: inject → capture the sections and the manifest key/index →
+  drop disconnected backlog entries → rehydrate scripts → announce each
+  still-connected section. Key and index come from the manifest, because
+  rendered fragments carry only `data-slide-key`.
+- Tests pin the bundle's HTML safety (no `</script`, `<!--`, `<script`) and
+  that it stays slide runtime (no shell strings such as `peitho:navigate`).
+
 **Verification.**
 ```sh
 cargo test -p peitho-core distribution_index
@@ -409,8 +438,11 @@ guide must also cover what tasks 1–4 established:
   root (mark the root);
 - the IIFE wrap makes top-level `var`/`function` local; publish shared API as
   `window.x = …`;
-- an external classic `<script src>` runs once per slide per shell, so load
-  libraries as modules (the module map dedupes by URL) or guard them;
+- an external classic `<script src>` is not scope-wrapped and runs once per
+  slide per shell, and again on every dist-viewer visit, so its top-level
+  `let`/`const`/`class` throws "already declared" from the second run on
+  (measured in dist, task 6): load libraries as modules (the module map dedupes
+  by URL) or guard them;
 - an inline script after a blocking `<script src>` runs after it loads, as in a
   parsed document;
 - external SVG scripts run in load order, not document order;

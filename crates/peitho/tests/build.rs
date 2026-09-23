@@ -1758,7 +1758,7 @@ fn build_keeps_slide_html_only_in_fragment_files() {
     let index = fs::read_to_string(out.join("index.html")).unwrap();
     let first = fs::read_to_string(out.join("slides/000-arch-1.html")).unwrap();
 
-    assert!(!index.contains("data-slide-key"));
+    assert!(!index.contains(r#"data-slide-key=""#));
     assert!(first.contains(r#"data-slide-key="arch-1""#));
 }
 

@@ -27,3 +27,12 @@ await build({
   outfile: "dist/remote.js",
   sourcemap: true
 });
+
+await build({
+  ...shared,
+  entryPoints: ["src/viewer.ts"],
+  format: "iife",
+  globalName: "PeithoViewer",
+  outfile: "dist/viewer.js",
+  sourcemap: false
+});

@@ -156,6 +156,30 @@ describe("keyBelongsToTarget", () => {
     expect(keyResult(button, " ")).toBe(true);
   });
 
+  it("lets a button in a light-DOM data-slide-key section own Enter and Space", () => {
+    const section = document.createElement("section");
+    section.dataset.slideKey = "intro";
+    const button = document.createElement("button");
+    section.appendChild(button);
+    document.body.appendChild(section);
+
+    expect(keyResult(button, "Enter")).toBe(true);
+    expect(keyResult(button, " ")).toBe(true);
+  });
+
+  it("finds a light-DOM data-slide-key ancestor outside a nested shadow root", () => {
+    const section = document.createElement("section");
+    section.dataset.slideKey = "intro";
+    const innerHost = document.createElement("div");
+    const button = document.createElement("button");
+    innerHost.attachShadow({ mode: "open" }).appendChild(button);
+    section.appendChild(innerHost);
+    document.body.appendChild(section);
+
+    expect(keyResult(button, "Enter")).toBe(true);
+    expect(keyResult(button, " ")).toBe(true);
+  });
+
   it("lets a slide checkbox own Space but not shell shortcut keys", () => {
     const { input } = slideInputFixture("checkbox");
 

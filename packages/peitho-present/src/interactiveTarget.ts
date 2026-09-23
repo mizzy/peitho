@@ -1,7 +1,4 @@
-// The embedded distribution-viewer copy in crates/peitho-core/src/render.rs
-// `render_distribution_index` is the hand-mirrored twin; its
-// `distribution_index_interactive_target_strings_match_typescript_source` drift test pins the
-// shared selector, input-type, and key strings.
+// The distribution viewer consumes these helpers through the IIFE bundle built from viewer.ts.
 
 const CONTENTEDITABLE_SELECTOR = "[contenteditable]";
 const INPUT_SELECTOR = "input";
@@ -26,12 +23,19 @@ const arrowKeys = new Set(ARROW_KEYS.split(" "));
 const rangeKeys = new Set(RANGE_KEYS.split(" "));
 
 function isInsideSlide(origin: Node): boolean {
-  let root = origin.getRootNode();
-  while (root instanceof ShadowRoot) {
+  let current = origin;
+  while (true) {
+    if (
+      current instanceof Element &&
+      current.closest("[data-slide-key]") !== null
+    ) {
+      return true;
+    }
+    const root = current.getRootNode();
+    if (!(root instanceof ShadowRoot)) return false;
     if (root.host.hasAttribute("data-slide-key")) return true;
-    root = root.host.getRootNode();
+    current = root.host;
   }
-  return false;
 }
 
 export function isEditableTarget(event: Event): boolean {
