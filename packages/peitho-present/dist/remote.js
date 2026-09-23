@@ -303,6 +303,70 @@ async function raceReadyWithTimeout(fonts, win, ms) {
   return result === "timeout";
 }
 
+// src/scripts.ts
+var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["text/javascript", "application/javascript"]);
+var HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+function isHtmlScriptElement(script) {
+  return script.namespaceURI === HTML_NAMESPACE && script.localName === "script";
+}
+function isClassicType(script) {
+  const type = script.getAttribute("type");
+  if (type === null || type === "") return true;
+  return CLASSIC_JAVASCRIPT_TYPES.has(type.trim().toLowerCase());
+}
+function needsScopeWrap(script) {
+  if (script.hasAttribute("src") || script.hasAttribute("href") || script.hasAttribute("xlink:href")) {
+    return false;
+  }
+  return isClassicType(script);
+}
+function isParserBlocking(script) {
+  return isHtmlScriptElement(script) && script.hasAttribute("src") && isClassicType(script) && !script.hasAttribute("async") && !script.hasAttribute("defer");
+}
+function executeInlineScripts(root, doc) {
+  const scripts = Array.from(
+    root.querySelectorAll("script")
+  );
+  const replaceFrom = (startIndex) => {
+    for (let index = startIndex; index < scripts.length; index += 1) {
+      const oldScript = scripts[index];
+      const newScript = doc.createElementNS(
+        oldScript.namespaceURI,
+        oldScript.localName
+      );
+      for (const attr of Array.from(oldScript.attributes)) {
+        newScript.setAttributeNode(attr.cloneNode());
+      }
+      if (isHtmlScriptElement(newScript) && !oldScript.hasAttribute("async")) {
+        newScript.async = false;
+      }
+      if (oldScript.nonce) {
+        newScript.nonce = oldScript.nonce;
+      }
+      const text = oldScript.textContent ?? "";
+      newScript.textContent = needsScopeWrap(oldScript) ? `(function () {
+${text}
+})();` : text;
+      const parserBlocking = isParserBlocking(oldScript);
+      if (parserBlocking) {
+        let resumed = false;
+        const resume = () => {
+          if (resumed) return;
+          resumed = true;
+          newScript.removeEventListener("load", resume);
+          newScript.removeEventListener("error", resume);
+          replaceFrom(index + 1);
+        };
+        newScript.addEventListener("load", resume, { once: true });
+        newScript.addEventListener("error", resume, { once: true });
+      }
+      oldScript.replaceWith(newScript);
+      if (parserBlocking) return;
+    }
+  };
+  replaceFrom(0);
+}
+
 // src/skipnav.ts
 function nextNonSkippedIndex(slides, from, direction) {
   let index = from + direction;
@@ -926,7 +990,9 @@ var PresentShellController = class {
     shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
-    shadow.appendChild(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true);
+    executeInlineScripts(fragment, this.doc);
+    shadow.appendChild(fragment);
     return host;
   }
   mountPointerOverlay() {
