@@ -184,10 +184,36 @@
 }
 
 .playground .editor {
-  resize: none;
+  overflow: auto;
   color: var(--ink);
   caret-color: var(--sky);
   outline: none;
+}
+
+.playground .editor pre {
+  margin: 0;
+  font: inherit;
+}
+
+.playground .hl-comment {
+  color: var(--muted);
+}
+
+.playground .hl-string {
+  color: #86efac;
+}
+
+.playground .hl-keyword,
+.playground .hl-storage {
+  color: var(--violet);
+}
+
+.playground .hl-constant {
+  color: #fdba74;
+}
+
+.playground .hl-entity {
+  color: var(--sky);
 }
 
 .playground .editor:focus {
