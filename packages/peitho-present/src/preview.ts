@@ -9,7 +9,11 @@ import { deckText, waitForFontsReady } from "./fontsReady";
 import { isEditableTarget, keyBelongsToTarget } from "./interactiveTarget";
 import { hasChordModifier, isComposingKey } from "./keyboard";
 import { postJson, readErrorResponse } from "./previewHttp";
-import { executeInlineScripts } from "./scripts";
+import {
+  announceShadowMounted,
+  executeInlineScripts,
+  shadowMountedBacklog
+} from "./scripts";
 import {
   openPreviewSourceEdit,
   type PreviewSourceEdit,
@@ -71,6 +75,7 @@ type PreviewSlideView = {
   sourceKey: string;
   tile: HTMLElement;
   host: HTMLElement;
+  shadow: ShadowRoot;
   thumb: HTMLElement;
   thumbHost: HTMLElement;
   tileNumber: HTMLElement;
@@ -684,6 +689,7 @@ class PreviewShellController implements PreviewShell {
         log: this.log,
         text: deckText(sources.map((source) => source.html))
       });
+      shadowMountedBacklog(this.win);
       const pending = sources.map(({ slide, html }) => this.createSlideView(slide, html, css));
       this.manifest = manifest;
       this.doc.title = manifest.title;
@@ -710,6 +716,17 @@ class PreviewShellController implements PreviewShell {
       this.restoreDraft(restored?.draft);
       this.markReady();
       this.dispatchSlideChange(null);
+      for (const view of pending) {
+        announceShadowMounted(
+          view.host,
+          {
+            root: view.shadow,
+            key: view.meta.key,
+            index: view.meta.index
+          },
+          this.win
+        );
+      }
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -888,7 +905,7 @@ class PreviewShellController implements PreviewShell {
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
 
-    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide", true);
+    const { host, shadow } = this.createStageHost(slide, html, css);
     tile.appendChild(host);
     const tileNumber = this.createSlideNumber(slide);
     tile.appendChild(tileNumber);
@@ -902,17 +919,20 @@ class PreviewShellController implements PreviewShell {
     const onThumbClick = (): void => this.setIndex(slide.index);
     thumb.addEventListener("click", onThumbClick);
     this.tileListenerCleanups.push(() => thumb.removeEventListener("click", onThumbClick));
-    const thumbHost = this.createSlideHost(
-      slide,
-      html,
-      css,
-      "peitho-preview-thumb-slide",
-      false
-    );
+    const thumbHost = this.createThumbHost(slide, html, css);
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
-    return { meta: slide, sourceKey: slide.key, tile, host, thumb, thumbHost, tileNumber };
+    return {
+      meta: slide,
+      sourceKey: slide.key,
+      tile,
+      host,
+      shadow,
+      thumb,
+      thumbHost,
+      tileNumber
+    };
   }
 
   private tryStartSourceEdit(): void {
@@ -1322,13 +1342,39 @@ class PreviewShellController implements PreviewShell {
     return badge;
   }
 
-  private createSlideHost(
+  private createStageHost(
+    slide: ManifestSlide,
+    html: string,
+    css: string
+  ): { host: HTMLElement; shadow: ShadowRoot } {
+    const { host, shadow, fragment } = this.buildSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-slide"
+    );
+    executeInlineScripts(fragment, this.doc);
+    shadow.appendChild(fragment);
+    return { host, shadow };
+  }
+
+  private createThumbHost(slide: ManifestSlide, html: string, css: string): HTMLElement {
+    const { host, shadow, fragment } = this.buildSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-thumb-slide"
+    );
+    shadow.appendChild(fragment);
+    return host;
+  }
+
+  private buildSlideHost(
     slide: ManifestSlide,
     html: string,
     css: string,
-    className: string,
-    executeScripts: boolean
-  ): HTMLElement {
+    className: string
+  ): { host: HTMLElement; shadow: ShadowRoot; fragment: DocumentFragment } {
     const host = this.doc.createElement("section");
     host.classList.add(className);
     host.dataset.slideKey = slide.key;
@@ -1341,11 +1387,7 @@ class PreviewShellController implements PreviewShell {
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     const fragment = template.content.cloneNode(true) as DocumentFragment;
-    if (executeScripts) {
-      executeInlineScripts(fragment, this.doc);
-    }
-    shadow.appendChild(fragment);
-    return host;
+    return { host, shadow, fragment };
   }
 
   private createStrip(): HTMLElement {

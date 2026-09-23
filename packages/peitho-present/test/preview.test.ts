@@ -10,9 +10,14 @@ import {
 } from "../src/preview";
 import { calculateCanvasFit } from "../src/canvas";
 import { resetKeepaliveBudgetForTests } from "../src/previewHttp";
+import { SHADOW_MOUNTED_EVENT, type ShadowMountedDetail } from "../src/scripts";
 import type { Notes } from "../../../bindings/Notes";
 import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncChannel } from "../src/sync";
+
+type WindowWithShadowMountedBacklog = Window & {
+  __peithoShadowRoots?: unknown;
+};
 
 function okJson(value: unknown): Response {
   return { ok: true, status: 200, json: async () => value } as Response;
@@ -342,12 +347,14 @@ function mockSelection(isCollapsed: boolean): void {
 
 const shells: PreviewShell[] = [];
 const cleanups: Array<() => void> = [];
+const testWindow = window as WindowWithShadowMountedBacklog;
 
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
   while (shells.length > 0) shells.pop()?.destroy();
   resetKeepaliveBudgetForTests();
   sessionStorage.clear();
+  delete testWindow.__peithoShadowRoots;
   vi.restoreAllMocks();
 });
 
@@ -495,6 +502,106 @@ it("layout_script_runs_on_the_stage_but_never_in_a_thumbnail", async () => {
   const thumbnailScripts = slideShadow(root, "intro", true).querySelectorAll("script");
   expect(thumbnailScripts).toHaveLength(1);
   expect(thumbnailScripts[0]?.textContent).toBe("let n = 0");
+});
+
+// jsdom coverage is structural; real behaviour is covered by the real-Chrome checklist.
+it("shadow_mounted_fires_for_the_stage_only", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0 })
+  );
+
+  let backlogAtFirstTileAppend: unknown;
+  let backlogLengthAtFirstTileAppend: number | null = null;
+  const appendChild = root.appendChild.bind(root);
+  vi.spyOn(root, "appendChild").mockImplementation(<T extends Node>(node: T): T => {
+    if (
+      backlogLengthAtFirstTileAppend === null &&
+      node instanceof HTMLElement &&
+      node.classList.contains("peitho-preview-tile")
+    ) {
+      backlogAtFirstTileAppend = testWindow.__peithoShadowRoots;
+      backlogLengthAtFirstTileAppend = Array.isArray(backlogAtFirstTileAppend)
+        ? backlogAtFirstTileAppend.length
+        : -1;
+    }
+    return appendChild(node) as T;
+  });
+
+  const events: CustomEvent<ShadowMountedDetail>[] = [];
+  let visibilityAtFirstAnnouncement: boolean[] | null = null;
+  let visibilityAfterSynchronousNavigation: boolean[] | null = null;
+  const listener: EventListener = (event) => {
+    if (events.length === 0) {
+      const stageHosts = Array.from(
+        root.querySelectorAll<HTMLElement>(".peitho-preview-slide")
+      );
+      visibilityAtFirstAnnouncement = stageHosts.map((host) => Boolean(host.hidden));
+      window.dispatchEvent(
+        new CustomEvent("peitho:navigate", { detail: { to: "last" } })
+      );
+      visibilityAfterSynchronousNavigation = stageHosts.map((host) =>
+        Boolean(host.hidden)
+      );
+      window.dispatchEvent(
+        new CustomEvent("peitho:navigate", { detail: { to: "first" } })
+      );
+    }
+    events.push(event as CustomEvent<ShadowMountedDetail>);
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+  cleanups.push(() => document.removeEventListener(SHADOW_MOUNTED_EVENT, listener));
+
+  const shell = await mountPreviewShell({
+    root,
+    fetcher: standardFetch(),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  const stageHosts = Array.from(
+    root.querySelectorAll<HTMLElement>(".peitho-preview-slide")
+  );
+  const thumbHosts = Array.from(
+    root.querySelectorAll<HTMLElement>(".peitho-preview-thumb-slide")
+  );
+  const thumbRoots = new Set<Element | ShadowRoot | null>(
+    thumbHosts.map((host) => host.shadowRoot)
+  );
+
+  expect(Array.isArray(backlogAtFirstTileAppend)).toBe(true);
+  expect(backlogLengthAtFirstTileAppend).toBe(0);
+  expect(stageHosts).toHaveLength(manifest.slides.length);
+  expect(thumbHosts).toHaveLength(manifest.slides.length);
+  expect(events).toHaveLength(stageHosts.length);
+  expect(events.map((event) => event.detail.key)).toEqual(
+    manifest.slides.map((slide) => slide.key)
+  );
+  expect(visibilityAtFirstAnnouncement).toEqual([false, true, true]);
+  expect(visibilityAfterSynchronousNavigation).toEqual([true, true, false]);
+
+  for (const [index, host] of stageHosts.entries()) {
+    const event = events[index];
+    expect(event.target).toBe(host);
+    expect(event.bubbles).toBe(true);
+    expect(event.composed).toBe(true);
+    expect(event.detail.root).toBe(host.shadowRoot);
+    expect(thumbRoots.has(event.detail.root)).toBe(false);
+    expect(event.detail.key).toBe(host.dataset.slideKey);
+    expect(event.detail.index).toBe(Number(host.dataset.slideIndex));
+  }
+
+  const backlog = testWindow.__peithoShadowRoots;
+  expect(backlog).toBe(backlogAtFirstTileAppend);
+  expect(backlog).toHaveLength(events.length);
+  for (const [index, event] of events.entries()) {
+    expect((backlog as ShadowMountedDetail[])[index]).toBe(event.detail);
+  }
 });
 
 it("sets the document title from the manifest", async () => {

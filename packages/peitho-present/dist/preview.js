@@ -401,6 +401,30 @@ async function readErrorResponse(response, fallbackLabel) {
 // src/scripts.ts
 var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["text/javascript", "application/javascript"]);
 var HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+var SHADOW_MOUNTED_EVENT = "peitho:shadow-mounted";
+function shadowMountedBacklog(win) {
+  const backlogWindow = win;
+  if (!("__peithoShadowRoots" in backlogWindow)) {
+    const backlog2 = [];
+    backlogWindow.__peithoShadowRoots = backlog2;
+    return backlog2;
+  }
+  const backlog = backlogWindow.__peithoShadowRoots;
+  if (!Array.isArray(backlog)) {
+    throw new TypeError("window.__peithoShadowRoots must be an array");
+  }
+  return backlog;
+}
+function announceShadowMounted(target, detail, win) {
+  shadowMountedBacklog(win).push(detail);
+  target.dispatchEvent(
+    new CustomEvent(SHADOW_MOUNTED_EVENT, {
+      detail,
+      bubbles: true,
+      composed: true
+    })
+  );
+}
 function isHtmlScriptElement(script) {
   return script.namespaceURI === HTML_NAMESPACE && script.localName === "script";
 }
@@ -1339,6 +1363,7 @@ var PreviewShellController = class {
         log: this.log,
         text: deckText(sources.map((source) => source.html))
       });
+      shadowMountedBacklog(this.win);
       const pending = sources.map(({ slide, html }) => this.createSlideView(slide, html, css));
       this.manifest = manifest;
       this.doc.title = manifest.title;
@@ -1362,6 +1387,17 @@ var PreviewShellController = class {
       this.restoreDraft(restored?.draft);
       this.markReady();
       this.dispatchSlideChange(null);
+      for (const view of pending) {
+        announceShadowMounted(
+          view.host,
+          {
+            root: view.shadow,
+            key: view.meta.key,
+            index: view.meta.index
+          },
+          this.win
+        );
+      }
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -1520,7 +1556,7 @@ var PreviewShellController = class {
     };
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
-    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide", true);
+    const { host, shadow } = this.createStageHost(slide, html, css);
     tile.appendChild(host);
     const tileNumber = this.createSlideNumber(slide);
     tile.appendChild(tileNumber);
@@ -1533,17 +1569,20 @@ var PreviewShellController = class {
     const onThumbClick = () => this.setIndex(slide.index);
     thumb.addEventListener("click", onThumbClick);
     this.tileListenerCleanups.push(() => thumb.removeEventListener("click", onThumbClick));
-    const thumbHost = this.createSlideHost(
-      slide,
-      html,
-      css,
-      "peitho-preview-thumb-slide",
-      false
-    );
+    const thumbHost = this.createThumbHost(slide, html, css);
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
-    return { meta: slide, sourceKey: slide.key, tile, host, thumb, thumbHost, tileNumber };
+    return {
+      meta: slide,
+      sourceKey: slide.key,
+      tile,
+      host,
+      shadow,
+      thumb,
+      thumbHost,
+      tileNumber
+    };
   }
   tryStartSourceEdit() {
     if (this.mode === "grid" || !this.canStartEdit()) {
@@ -1880,7 +1919,28 @@ var PreviewShellController = class {
     style.pointerEvents = "none";
     return badge;
   }
-  createSlideHost(slide, html, css, className, executeScripts) {
+  createStageHost(slide, html, css) {
+    const { host, shadow, fragment } = this.buildSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-slide"
+    );
+    executeInlineScripts(fragment, this.doc);
+    shadow.appendChild(fragment);
+    return { host, shadow };
+  }
+  createThumbHost(slide, html, css) {
+    const { host, shadow, fragment } = this.buildSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-thumb-slide"
+    );
+    shadow.appendChild(fragment);
+    return host;
+  }
+  buildSlideHost(slide, html, css, className) {
     const host = this.doc.createElement("section");
     host.classList.add(className);
     host.dataset.slideKey = slide.key;
@@ -1893,11 +1953,7 @@ var PreviewShellController = class {
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     const fragment = template.content.cloneNode(true);
-    if (executeScripts) {
-      executeInlineScripts(fragment, this.doc);
-    }
-    shadow.appendChild(fragment);
-    return host;
+    return { host, shadow, fragment };
   }
   createStrip() {
     const strip = this.doc.createElement("nav");

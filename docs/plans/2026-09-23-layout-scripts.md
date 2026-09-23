@@ -267,6 +267,15 @@ never from a thumb host, backlog contains only stage roots.
 `executeScripts` parameter: one flag decides both, so a surface can never run
 scripts while withholding their root, nor the reverse.
 
+*As implemented (Issue #633):* the flag cannot carry the announcement, because
+it no longer exists when the host is connected and the announcement fires. The
+guarantee is a type split instead, which also replaces task 3's boolean:
+`createStageHost` always rehydrates and returns `{host, shadow}`, while
+`createThumbHost` never rehydrates and returns only the host, so a thumbnail's
+root is never in hand to announce. The task-3 and task-5 tests pin both sides. As in present, the
+backlog exists before the first tile connects, and the stage hosts are announced
+after the load has applied its final layout.
+
 **Verification.**
 ```sh
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'shadow_mounted_fires_for_the_stage_only'
