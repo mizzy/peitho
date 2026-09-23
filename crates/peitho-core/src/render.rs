@@ -25,6 +25,8 @@ use crate::{
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
+const DISTRIBUTION_VIEWER_JS: &str =
+    include_str!("../../../packages/peitho-present/dist/viewer.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 const CODE_EMPHASIS_CSS: &str = include_str!("../assets/code-emphasis.css");
 const EDIT_SOURCE_SPAN_ATTRIBUTE: &str = "data-peitho-src";
@@ -1981,77 +1983,14 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     <div id="peitho-canvas"></div>
   </main>
   <script>
+(() => {
+__PEITHO_DISTRIBUTION_VIEWER_JS__
     const CANVAS_WIDTH = __PEITHO_CANVAS_WIDTH__;
     const CANVAS_HEIGHT = __PEITHO_CANVAS_HEIGHT__;
-    const CONTENTEDITABLE_SELECTOR = "[contenteditable]";
-    const INPUT_SELECTOR = "input";
-    const ENTER_ACTIVATABLE_SELECTOR = "a[href], button, summary";
-    const SPACE_ACTIVATABLE_SELECTOR = "button, summary";
-    const CLICK_INTERACTIVE_SELECTOR = "a, button, summary, input, textarea, select, label";
-    const TEXT_ENTRY_INPUT_TYPES = "text search email url tel password number date datetime-local month week time";
-    const SPACE_ACTIVATABLE_INPUT_TYPES = "checkbox radio button submit reset image color file";
-    const ENTER_ACTIVATABLE_INPUT_TYPES = "button submit reset image color file";
-    const ARROW_ACTIVATABLE_INPUT_TYPES = "radio range";
-    const ARROW_KEYS = "ArrowLeft ArrowRight ArrowUp ArrowDown";
-    const RANGE_KEYS = "Home End PageUp PageDown";
-    const textEntryInputTypes = new Set(TEXT_ENTRY_INPUT_TYPES.split(" "));
-    const spaceActivatableInputTypes = new Set(SPACE_ACTIVATABLE_INPUT_TYPES.split(" "));
-    const enterActivatableInputTypes = new Set(ENTER_ACTIVATABLE_INPUT_TYPES.split(" "));
-    const arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "));
-    const arrowKeys = new Set(ARROW_KEYS.split(" "));
-    const rangeKeys = new Set(RANGE_KEYS.split(" "));
     let slides = [];
     let currentIndex = 0;
-
-    function isInsideSlide(origin) {
-      return origin instanceof Element && origin.closest('.peitho-slide') !== null;
-    }
-
-    function isEditableTarget(event) {
-      const target = event.composedPath()[0];
-      if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
-        return true;
-      }
-      if (target instanceof HTMLInputElement) return textEntryInputTypes.has(target.type);
-      if (!(target instanceof HTMLElement)) return false;
-      if (target.isContentEditable) return true;
-      const editable = target.closest(CONTENTEDITABLE_SELECTOR);
-      return editable !== null && editable.getAttribute('contenteditable') !== 'false';
-    }
-
-    function keyBelongsToTarget(event) {
-      if (
-        isEditableTarget(event) &&
-        (event.shiftKey || (event.key !== 'PageUp' && event.key !== 'PageDown'))
-      ) {
-        return true;
-      }
-      const origin = event.composedPath()[0];
-      if (!(origin instanceof Element) || !isInsideSlide(origin)) return false;
-      if (
-        event.key === 'Enter' &&
-        origin.closest(ENTER_ACTIVATABLE_SELECTOR) !== null
-      ) {
-        return true;
-      }
-      if (event.key === ' ' && origin.closest(SPACE_ACTIVATABLE_SELECTOR) !== null) {
-        return true;
-      }
-      const input = origin.closest(INPUT_SELECTOR);
-      if (!(input instanceof HTMLInputElement)) return false;
-      if (event.key === ' ') return spaceActivatableInputTypes.has(input.type);
-      if (event.key === 'Enter') return enterActivatableInputTypes.has(input.type);
-      if (arrowKeys.has(event.key)) return arrowActivatableInputTypes.has(input.type);
-      return input.type === 'range' && rangeKeys.has(event.key);
-    }
-
-    function pointerBelongsToTarget(event) {
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest(CLICK_INTERACTIVE_SELECTOR) !== null) {
-        return true;
-      }
-      return isEditableTarget(event);
-    }
+    let mountedIndex = null;
+    PeithoViewer.shadowMountedBacklog(window);
 
     function showError(message) {
       const root = document.getElementById('peitho-slides');
@@ -2100,10 +2039,25 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
         return;
       }
       const next = Math.max(0, Math.min(index, slides.length - 1));
+      if (mountedIndex !== null && next === currentIndex) return;
       currentIndex = next;
       writeSlideIndexToUrl(currentIndex + 1);
       const canvas = document.getElementById('peitho-canvas');
       canvas.innerHTML = slides[next].html;
+      const sections = Array.from(canvas.querySelectorAll('.peitho-slide'));
+      const key = slides[next].key;
+      const slideIndex = slides[next].index;
+      mountedIndex = next;
+      PeithoViewer.dropDisconnectedShadowMounted(window);
+      PeithoViewer.executeInlineScripts(canvas, document);
+      for (const section of sections) {
+        if (!section.isConnected) continue;
+        PeithoViewer.announceShadowMounted(
+          section,
+          { root: section, key, index: slideIndex },
+          window
+        );
+      }
     }
 
     function writeSlideIndexToUrl(oneBased) {
@@ -2125,6 +2079,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
         document.title = manifest.title || 'Peitho Deck';
         slides = await Promise.all(
           manifest.slides.map(async (slide) => ({
+            index: slide.index,
             key: slide.key,
             html: await fetchOk(slide.src).then((response) => response.text())
           }))
@@ -2152,7 +2107,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     }
 
     document.addEventListener('keydown', (event) => {
-      if (keyBelongsToTarget(event)) return;
+      if (PeithoViewer.keyBelongsToTarget(event)) return;
       if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
         event.preventDefault();
         navigate('next');
@@ -2169,7 +2124,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       }
     });
     // Click-selection guard. Kept in sync with
-    // packages/peitho-present/src/interactiveTarget.ts and clickNavigationGuard.ts.
+    // packages/peitho-present/src/clickNavigationGuard.ts.
     let __clickStart = null;
     document.addEventListener('mousedown', (event) => {
       __clickStart = { x: event.clientX, y: event.clientY };
@@ -2181,7 +2136,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     function shouldIgnoreNavigationClick(event) {
       const start = __clickStart;
       __clickStart = null;
-      if (pointerBelongsToTarget(event)) return true;
+      if (PeithoViewer.pointerBelongsToTarget(event)) return true;
       if (hasNonCollapsedSelection()) {
         return true;
       }
@@ -2196,7 +2151,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     document.addEventListener('touchstart', (event) => {
       if (__swipeState !== null) return;
       if (event.touches.length !== 1) return;
-      if (pointerBelongsToTarget(event)) return;
+      if (PeithoViewer.pointerBelongsToTarget(event)) return;
       const t = event.touches[0];
       __swipeState = { x: t.clientX, y: t.clientY, t: performance.now() };
     }, { passive: true });
@@ -2224,11 +2179,13 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     });
     window.addEventListener('resize', resizeCanvas);
     loadDeck();
+})();
   </script>
 </body>
 </html>"#;
 
     fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
+        .replace("__PEITHO_DISTRIBUTION_VIEWER_JS__", DISTRIBUTION_VIEWER_JS)
 }
 
 pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
@@ -2943,34 +2900,6 @@ mod tests {
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
     };
-
-    const INTERACTIVE_TARGET_TS: &str =
-        include_str!("../../../packages/peitho-present/src/interactiveTarget.ts");
-    const MIRRORED_INTERACTIVE_TARGET_STRINGS: &[(&str, &str)] = &[
-        ("CONTENTEDITABLE_SELECTOR", "[contenteditable]"),
-        ("INPUT_SELECTOR", "input"),
-        ("ENTER_ACTIVATABLE_SELECTOR", "a[href], button, summary"),
-        ("SPACE_ACTIVATABLE_SELECTOR", "button, summary"),
-        (
-            "CLICK_INTERACTIVE_SELECTOR",
-            "a, button, summary, input, textarea, select, label",
-        ),
-        (
-            "TEXT_ENTRY_INPUT_TYPES",
-            "text search email url tel password number date datetime-local month week time",
-        ),
-        (
-            "SPACE_ACTIVATABLE_INPUT_TYPES",
-            "checkbox radio button submit reset image color file",
-        ),
-        (
-            "ENTER_ACTIVATABLE_INPUT_TYPES",
-            "button submit reset image color file",
-        ),
-        ("ARROW_ACTIVATABLE_INPUT_TYPES", "radio range"),
-        ("ARROW_KEYS", "ArrowLeft ArrowRight ArrowUp ArrowDown"),
-        ("RANGE_KEYS", "Home End PageUp PageDown"),
-    ];
 
     fn parse_markdown(
         source: &str,
@@ -5423,6 +5352,160 @@ Paragraph after heading.
     }
 
     #[test]
+    fn distribution_index_viewer_bundle_cannot_change_script_tokenizer_state() {
+        let lowercase = DISTRIBUTION_VIEWER_JS.to_ascii_lowercase();
+
+        for forbidden in ["</script", "<!--", "<script"] {
+            assert!(
+                !lowercase.contains(forbidden),
+                "viewer bundle contains forbidden script-data marker {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distribution_index_viewer_bundle_excludes_shell_runtime() {
+        for forbidden in [
+            "peitho:navigate",
+            "/sync",
+            "notes.json",
+            "mountPresentShell",
+        ] {
+            assert!(
+                !DISTRIBUTION_VIEWER_JS.contains(forbidden),
+                "viewer bundle contains shell runtime marker {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distribution_index_scopes_bundle_and_viewer_code_in_one_iife() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert_eq!(html.matches(DISTRIBUTION_VIEWER_JS).count(), 1);
+        assert_eq!(html.matches("<script>").count(), 1);
+        let script_body = html
+            .split_once("  <script>\n")
+            .unwrap()
+            .1
+            .split_once("\n  </script>")
+            .unwrap();
+        let scoped_body = script_body
+            .0
+            .strip_prefix("(() => {\n")
+            .unwrap()
+            .strip_suffix("\n})();")
+            .unwrap();
+        let bundle_index = scoped_body.find(DISTRIBUTION_VIEWER_JS).unwrap();
+        let viewer_index = scoped_body.find("const CANVAS_WIDTH = 1280;").unwrap();
+
+        assert!(bundle_index < viewer_index);
+        assert!(scoped_body.contains("let slides = [];"));
+        assert!(scoped_body.contains("function showSlide(index)"));
+    }
+
+    #[test]
+    fn distribution_index_does_not_remount_the_current_slide() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        assert!(html.contains("let mountedIndex = null;"));
+        let show_slide = html
+            .split_once("function showSlide(index)")
+            .unwrap()
+            .1
+            .split_once("function writeSlideIndexToUrl")
+            .unwrap()
+            .0;
+
+        let clamp_index = show_slide
+            .find("const next = Math.max(0, Math.min(index, slides.length - 1));")
+            .unwrap();
+        let no_op_index = show_slide
+            .find("if (mountedIndex !== null && next === currentIndex) return;")
+            .unwrap();
+        let current_index = show_slide.find("currentIndex = next;").unwrap();
+        let inject_index = show_slide
+            .find("canvas.innerHTML = slides[next].html;")
+            .unwrap();
+        let mounted_index = show_slide.find("mountedIndex = next;").unwrap();
+
+        assert!(clamp_index < no_op_index);
+        assert!(no_op_index < current_index);
+        assert!(current_index < inject_index);
+        assert!(inject_index < mounted_index);
+    }
+
+    #[test]
+    fn distribution_index_rehydrates_then_announces_each_injected_slide() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let show_slide = html
+            .split_once("function showSlide(index)")
+            .unwrap()
+            .1
+            .split_once("function writeSlideIndexToUrl")
+            .unwrap()
+            .0;
+
+        let inner_html_index = show_slide
+            .find("canvas.innerHTML = slides[next].html;")
+            .unwrap();
+        let sections_index = show_slide
+            .find("const sections = Array.from(canvas.querySelectorAll('.peitho-slide'));")
+            .unwrap();
+        let key_index = show_slide.find("const key = slides[next].key;").unwrap();
+        let slide_index = show_slide
+            .find("const slideIndex = slides[next].index;")
+            .unwrap();
+        let drop_index = show_slide
+            .find("PeithoViewer.dropDisconnectedShadowMounted(window);")
+            .unwrap();
+        let execute_index = show_slide
+            .find("PeithoViewer.executeInlineScripts(canvas, document);")
+            .unwrap();
+        let announce_loop_index = show_slide.find("for (const section of sections)").unwrap();
+        let connected_index = show_slide
+            .find("if (!section.isConnected) continue;")
+            .unwrap();
+        let announce_index = show_slide
+            .find("PeithoViewer.announceShadowMounted(")
+            .unwrap();
+
+        assert!(inner_html_index < sections_index);
+        assert!(inner_html_index < key_index);
+        assert!(inner_html_index < slide_index);
+        assert!(inner_html_index < drop_index);
+        assert!(sections_index < execute_index);
+        assert!(key_index < execute_index);
+        assert!(slide_index < execute_index);
+        assert!(drop_index < execute_index);
+        assert!(execute_index < announce_loop_index);
+        assert!(announce_loop_index < connected_index);
+        assert!(connected_index < announce_index);
+        assert!(execute_index < announce_index);
+        assert!(show_slide.contains("{ root: section, key, index: slideIndex }"));
+        assert!(!show_slide.contains("section.dataset.slide"));
+        assert!(!show_slide.contains("typeof slides[next].index"));
+        assert!(!show_slide.contains("showError("));
+        assert!(html.contains("index: slide.index"));
+        assert!(html.contains("key: slide.key"));
+        assert!(DISTRIBUTION_VIEWER_JS.contains("(function () {\n"));
+        assert!(DISTRIBUTION_VIEWER_JS.contains("hasAttribute(\"src\")"));
+        assert!(DISTRIBUTION_VIEWER_JS.contains("text/javascript"));
+    }
+
+    #[test]
+    fn distribution_index_creates_backlog_before_showing_the_first_slide() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        let backlog_index = html
+            .find("PeithoViewer.shadowMountedBacklog(window);")
+            .unwrap();
+        let first_show_index = html
+            .find("showSlide(readSlideIndexFromUrl() - 1);")
+            .unwrap();
+        assert!(backlog_index < first_show_index);
+    }
+
+    #[test]
     fn distribution_index_click_navigation_ignores_selection_gestures() {
         let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
@@ -5436,51 +5519,37 @@ Paragraph after heading.
     fn distribution_index_click_navigation_ignores_interactive_targets() {
         let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
-        assert!(html.contains("const origin = event.composedPath()[0]"));
-        assert!(html.contains("if (pointerBelongsToTarget(event)) return true;"));
-    }
-
-    #[test]
-    fn distribution_index_pins_mirrored_interactive_target_strings() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        for (name, value) in MIRRORED_INTERACTIVE_TARGET_STRINGS {
-            let declaration = format!(r#"const {name} = "{value}";"#);
-            assert!(html.contains(&declaration), "missing {declaration:?}");
-        }
-    }
-
-    #[test]
-    fn distribution_index_interactive_target_strings_match_typescript_source() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        for (name, value) in MIRRORED_INTERACTIVE_TARGET_STRINGS {
-            let marker = format!("const {name}");
-            let start = INTERACTIVE_TARGET_TS
-                .find(&marker)
-                .unwrap_or_else(|| panic!("missing TypeScript constant {name}"));
-            let declaration = INTERACTIVE_TARGET_TS[start..]
-                .split_once(';')
-                .map(|(declaration, _)| declaration)
-                .unwrap_or_else(|| panic!("unterminated TypeScript constant {name}"));
-            assert!(
-                declaration.contains(&format!(r#""{value}""#)),
-                "TypeScript constant {name} does not equal {value:?}: {declaration}"
-            );
-            assert!(
-                html.contains(value),
-                "distribution index is missing {name} value {value:?}"
-            );
-        }
+        assert!(html.contains("if (PeithoViewer.pointerBelongsToTarget(event)) return true;"));
     }
 
     #[test]
     fn distribution_index_navigation_defers_to_interactive_slide_content() {
         let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let keydown = html
+            .split_once("document.addEventListener('keydown'")
+            .unwrap()
+            .1
+            .split_once("// Click-selection guard")
+            .unwrap()
+            .0;
+        let click_guard = html
+            .split_once("function shouldIgnoreNavigationClick(event)")
+            .unwrap()
+            .1
+            .split_once("document.addEventListener('click'")
+            .unwrap()
+            .0;
+        let touchstart = html
+            .split_once("document.addEventListener('touchstart'")
+            .unwrap()
+            .1
+            .split_once("document.addEventListener('touchend'")
+            .unwrap()
+            .0;
 
-        assert!(html.contains("origin.closest('.peitho-slide') !== null"));
-        assert!(html.contains("if (keyBelongsToTarget(event)) return;"));
-        assert!(html.contains("if (pointerBelongsToTarget(event)) return;"));
+        assert!(keydown.contains("PeithoViewer.keyBelongsToTarget(event)"));
+        assert!(click_guard.contains("PeithoViewer.pointerBelongsToTarget(event)"));
+        assert!(touchstart.contains("PeithoViewer.pointerBelongsToTarget(event)"));
     }
 
     #[test]

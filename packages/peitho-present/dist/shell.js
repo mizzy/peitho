@@ -2367,12 +2367,16 @@ var arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "
 var arrowKeys = new Set(ARROW_KEYS.split(" "));
 var rangeKeys = new Set(RANGE_KEYS.split(" "));
 function isInsideSlide(origin) {
-  let root = origin.getRootNode();
-  while (root instanceof ShadowRoot) {
+  let current = origin;
+  while (true) {
+    if (current instanceof Element && current.closest("[data-slide-key]") !== null) {
+      return true;
+    }
+    const root = current.getRootNode();
+    if (!(root instanceof ShadowRoot)) return false;
     if (root.host.hasAttribute("data-slide-key")) return true;
-    root = root.host.getRootNode();
+    current = root.host;
   }
-  return false;
 }
 function isEditableTarget(event) {
   const target = event.composedPath()[0];
