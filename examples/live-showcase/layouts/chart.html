@@ -1,0 +1,58 @@
+<section class="chart">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="lede"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <div class="data"><slot name="code" accepts="code" arity="1"></slot></div>
+  <svg class="plot" viewBox="0 0 1088 400" role="img"></svg>
+  <script>
+    if (!window.showcaseChartInstalled) {
+      window.showcaseChartInstalled = true;
+      const NS = "http://www.w3.org/2000/svg";
+      const el = (name, attrs, text = "") => {
+        const node = document.createElementNS(NS, name);
+        for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+        node.textContent = text;
+        return node;
+      };
+      const mount = ({ root }) => {
+        const svg = root.querySelector(".chart .plot");
+        const source = root.querySelector(".chart .data");
+        if (!svg || !source || svg.dataset.mounted) return;
+        svg.dataset.mounted = "true";
+        let data;
+        try {
+          data = Object.entries(JSON.parse(source.textContent));
+        } catch (error) {
+          svg.replaceWith(Object.assign(document.createElement("p"), {
+            className: "error",
+            textContent: `chart data is not valid JSON: ${error.message}`,
+          }));
+          return;
+        }
+        source.hidden = true;
+        const max = Math.max(...data.map(([, value]) => value));
+        const slot = 1088 / data.length;
+        data.forEach(([label, value], i) => {
+          const h = (value / max) * 290;
+          const x = i * slot + slot * 0.18;
+          const w = slot * 0.64;
+          const bar = el("rect", { x, y: 350 - h, width: w, height: h, rx: 8, class: "bar" });
+          bar.style.setProperty("--delay", `${i * 70}ms`);
+          svg.append(
+            bar,
+            el("text", { x: x + w / 2, y: 338 - h, class: "value" }, String(value)),
+            el("text", { x: x + w / 2, y: 394, class: "label" }, label),
+          );
+        });
+        // Replay the grow-in each time the slide becomes visible again.
+        new IntersectionObserver((entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          svg.classList.remove("play");
+          void svg.getBoundingClientRect();
+          svg.classList.add("play");
+        }).observe(svg);
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

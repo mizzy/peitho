@@ -1,0 +1,255 @@
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("theme-fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.peitho-slide {
+  --night: #0b1020;
+  --panel: #131a2e;
+  --ink: #f1f5f9;
+  --body: #b6c2d6;
+  --muted: #7c89a3;
+  --sky: #7dd3fc;
+  --violet: #a78bfa;
+  --rule: rgba(148, 163, 184, 0.18);
+  --font-sans: "Inter", "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+    "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--night);
+  color: var(--body);
+  font-family: var(--font-sans);
+}
+
+.peitho-slide *,
+.peitho-slide *::before,
+.peitho-slide *::after {
+  box-sizing: border-box;
+}
+
+.peitho-slide h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 60px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+/* cover */
+
+.cover {
+  position: relative;
+  background: radial-gradient(ellipse at 30% 20%, #1e2a55 0%, var(--night) 65%);
+}
+
+.cover .field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.cover .content {
+  position: relative;
+  display: grid;
+  align-content: center;
+  height: 100%;
+  padding: 0 110px;
+}
+
+.cover h1 {
+  justify-self: start;
+  font-size: 104px;
+  background: linear-gradient(90deg, var(--sky), var(--violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.cover .lede p {
+  margin: 28px 0 0;
+  color: var(--body);
+  font-size: 34px;
+}
+
+/* chart */
+
+.chart,
+.playground,
+.plain {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+}
+
+.chart .lede p {
+  margin: 16px 0 12px;
+  font-size: 32px;
+  line-height: 1.5;
+}
+
+.chart .plot {
+  width: 100%;
+  height: 400px;
+}
+
+.chart .bar {
+  fill: var(--sky);
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+
+.chart .bar:nth-of-type(even) {
+  fill: var(--violet);
+}
+
+.chart .play .bar {
+  animation: grow 700ms cubic-bezier(0.2, 0.8, 0.2, 1) var(--delay) both;
+}
+
+.chart .value,
+.chart .label {
+  text-anchor: middle;
+  font-family: var(--font-mono);
+}
+
+.chart .value {
+  fill: var(--ink);
+  font-size: 32px;
+}
+
+.chart .label {
+  fill: var(--muted);
+  font-size: 32px;
+}
+
+.chart .play .value {
+  animation: fade 400ms ease-out calc(var(--delay, 0ms) + 500ms) both;
+}
+
+.chart .error {
+  color: #fca5a5;
+  font: 24px var(--font-mono);
+}
+
+@keyframes grow {
+  from { transform: scaleY(0); }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+}
+
+/* playground */
+
+.playground .panes {
+  display: grid;
+  grid-template-columns: 1fr 330px;
+  gap: 28px;
+  height: 460px;
+  margin-top: 32px;
+}
+
+.playground .editor,
+.playground .output {
+  margin: 0;
+  padding: 24px 28px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--panel);
+  font: 26px/1.55 var(--font-mono);
+}
+
+.playground .editor {
+  resize: none;
+  color: var(--ink);
+  caret-color: var(--sky);
+  outline: none;
+}
+
+.playground .editor:focus {
+  border-color: var(--sky);
+}
+
+.playground .side {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 18px;
+  min-height: 0;
+}
+
+.playground .run {
+  justify-self: start;
+  padding: 14px 34px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--sky), var(--violet));
+  color: var(--night);
+  font: 700 34px var(--font-sans);
+  cursor: pointer;
+}
+
+.playground .run:focus-visible {
+  outline: 4px solid var(--ink);
+  outline-offset: 4px;
+}
+
+.playground .output {
+  overflow: auto;
+  color: #86efac;
+}
+
+.playground .output:empty::before {
+  content: "// press Run";
+  color: var(--muted);
+}
+
+/* plain */
+
+.plain .body ul {
+  margin: 36px 0 0;
+  padding-left: 1.1em;
+  font-size: 32px;
+  line-height: 1.6;
+}
+
+.plain .body li {
+  margin: 0 0 14px;
+}
+
+.plain .body li::marker {
+  color: var(--sky);
+}
+
+.plain .body code {
+  padding: 0.1em 0.35em;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--sky);
+  font-family: var(--font-mono);
+  font-size: 1em;
+  white-space: nowrap;
+}

@@ -1,0 +1,63 @@
+<section class="cover">
+  <canvas class="field" width="1280" height="720"></canvas>
+  <div class="content">
+    <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+    <div class="lede"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  </div>
+  <script>
+    if (!window.showcaseCoverInstalled) {
+      window.showcaseCoverInstalled = true;
+      const mount = ({ root }) => {
+        const canvas = root.querySelector(".cover .field");
+        if (!canvas || canvas.dataset.mounted) return;
+        canvas.dataset.mounted = "true";
+        const ctx = canvas.getContext("2d");
+        const { width, height } = canvas;
+        let seed = 7;
+        const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+        const points = Array.from({ length: 90 }, () => ({
+          x: random() * width,
+          y: random() * height,
+          vx: (random() - 0.5) * 1.2,
+          vy: (random() - 0.5) * 1.2,
+        }));
+        const draw = () => {
+          ctx.clearRect(0, 0, width, height);
+          for (const p of points) {
+            p.x = (p.x + p.vx + width) % width;
+            p.y = (p.y + p.vy + height) % height;
+          }
+          for (let i = 0; i < points.length; i++) {
+            for (let j = i + 1; j < points.length; j++) {
+              const a = points[i];
+              const b = points[j];
+              const d = Math.hypot(a.x - b.x, a.y - b.y);
+              if (d < 140) {
+                ctx.strokeStyle = `rgba(125, 211, 252, ${0.35 * (1 - d / 140)})`;
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+              }
+            }
+          }
+          ctx.fillStyle = "rgba(224, 242, 254, 0.9)";
+          for (const p of points) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        };
+        draw();
+        const tick = () => {
+          if (!canvas.isConnected) return;
+          if (canvas.offsetParent !== null) draw();
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>
