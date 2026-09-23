@@ -140,8 +140,6 @@ struct DeckFrontmatter {
     #[serde(default)]
     css: Option<AssetPath>,
     #[serde(default)]
-    overrides: Option<AssetPath>,
-    #[serde(default)]
     syntaxes: Option<AssetPath>,
     #[serde(default)]
     fonts: Option<AssetPath>,
@@ -1058,7 +1056,6 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         Vec::new(),
         parsed.layouts,
         parsed.css,
-        parsed.overrides,
         parsed.syntaxes,
         parsed.fonts,
         code_images,
@@ -1194,7 +1191,6 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "lang",
             "layouts",
             "css",
-            "overrides",
             "syntaxes",
             "fonts",
             "code_images",
@@ -1438,7 +1434,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, overrides, syntaxes, fonts, code_images"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -1457,8 +1453,6 @@ fn frontmatter_help(message: &str) -> &'static str {
         "provide a path (relative to the deck file), or remove the layouts: key"
     } else if frontmatter_message_mentions_key(message, "css") {
         "provide a path (relative to the deck file), or remove the css: key"
-    } else if frontmatter_message_mentions_key(message, "overrides") {
-        "provide a path (relative to the deck file), or remove the overrides: key"
     } else if frontmatter_message_mentions_key(message, "syntaxes") {
         "provide a path (relative to the deck file), or remove the syntaxes: key"
     } else if frontmatter_message_mentions_key(message, "fonts") {
@@ -5569,20 +5563,6 @@ mod tests {
     }
 
     #[test]
-    fn overrides_frontmatter_key_is_accepted_as_a_path() {
-        let frontmatter = parse_frontmatter("---\noverrides: ./overrides\n---\n# Intro").unwrap();
-
-        assert_eq!(frontmatter.key_line("overrides"), Some(2));
-        assert_eq!(
-            frontmatter
-                .settings()
-                .overrides()
-                .map(|path| path.as_path()),
-            Some(Path::new("./overrides"))
-        );
-    }
-
-    #[test]
     fn parses_frontmatter_syntaxes_key_carries_to_settings() {
         let deck = parse_markdown(
             "---\nsyntaxes: ./syntaxes\n---\n# Intro",
@@ -8528,7 +8508,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, overrides, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -8563,26 +8543,6 @@ After list
         assert_eq!(
             err.help,
             "provide a path (relative to the deck file), or remove the css: key"
-        );
-    }
-
-    #[test]
-    fn overrides_frontmatter_key_rejects_an_invalid_value() {
-        let err = parse_markdown(
-            "---\noverrides: \"\"\n---\n# Intro",
-            &crate::highlight::Highlighter::defaults(),
-        )
-        .unwrap_err();
-
-        assert_eq!(err.kind, ErrorKind::Parse);
-        assert_eq!(err.line, Some(2));
-        assert!(
-            err.to_string().contains("overrides: value is empty"),
-            "{err}"
-        );
-        assert_eq!(
-            err.help,
-            "provide a path (relative to the deck file), or remove the overrides: key"
         );
     }
 
@@ -8753,7 +8713,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, overrides, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -8810,7 +8770,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, overrides, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 

@@ -336,7 +336,6 @@ pub struct DeckSettings {
     sections: Vec<DeckSection>,
     layouts: Option<AssetPath>,
     css: Option<AssetPath>,
-    overrides: Option<AssetPath>,
     syntaxes: Option<AssetPath>,
     fonts: Option<AssetPath>,
     code_images: CodeImagesConfig,
@@ -361,7 +360,6 @@ impl DeckSettings {
         sections: Vec<DeckSection>,
         layouts: Option<AssetPath>,
         css: Option<AssetPath>,
-        overrides: Option<AssetPath>,
         syntaxes: Option<AssetPath>,
         fonts: Option<AssetPath>,
         code_images: CodeImagesConfig,
@@ -381,7 +379,6 @@ impl DeckSettings {
             sections,
             layouts,
             css,
-            overrides,
             syntaxes,
             fonts,
             code_images,
@@ -426,10 +423,6 @@ impl DeckSettings {
 
     pub fn css(&self) -> Option<&AssetPath> {
         self.css.as_ref()
-    }
-
-    pub fn overrides(&self) -> Option<&AssetPath> {
-        self.overrides.as_ref()
     }
 
     pub fn syntaxes(&self) -> Option<&AssetPath> {
@@ -1090,7 +1083,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             Default::default(),
         )
         .unwrap();
@@ -1123,7 +1115,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             Default::default(),
         )
         .unwrap()
@@ -1144,7 +1135,6 @@ mod tests {
             None,
             DeckLang::default(),
             Vec::new(),
-            None,
             None,
             None,
             None,
@@ -1172,7 +1162,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             Default::default(),
         )
         .unwrap_err();
@@ -1191,7 +1180,6 @@ mod tests {
             None,
             DeckLang::default(),
             Vec::new(),
-            None,
             None,
             None,
             None,

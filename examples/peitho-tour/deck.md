@@ -118,16 +118,16 @@ A quoted `toml` fence still gets bundled highlighting and full code validation.
 <!-- {"key":"frontmatter"} -->
 # Frontmatter configures the whole deck
 
-Deck frontmatter sets `time`, `aspect_ratio`, and `resolution`, plus five asset keys: `layouts`, `css`, `overrides`, `syntaxes`, and `fonts`. `css` replaces the built-in theme; `overrides` layers a few tweaks after the resolved theme. Missing explicit paths and unknown keys are line-numbered build errors.
+The YAML at the top of the deck accepts seven keys: `time`, `aspect_ratio`, `resolution`, `layouts`, `css`, `syntaxes`, and `fonts`. Anything you omit falls back to a deck-adjacent directory of the same name, then to a built-in default. Missing paths and unknown keys are line-numbered build errors.
 
 ```yaml
 ---
-time: 20m              # planned talk time
-layouts: ./layouts     # layout HTML (file or directory)
-css: ./css             # theme CSS (file or directory)
-overrides: ./overrides # CSS layered after the theme
-syntaxes: ./syntaxes   # extra sublime-syntax definitions
-fonts: ./fonts         # bundled webfonts
+time: 20m            # planned talk time
+aspect_ratio: 16:9   # 16:9 or 4:3
+layouts: ./layouts   # layout HTML (file or directory)
+css: ./css           # theme CSS (file or directory)
+syntaxes: ./syntaxes # extra sublime-syntax definitions
+fonts: ./fonts       # bundled webfonts
 ---
 ```
 
@@ -256,7 +256,7 @@ A slide with a `key` gets a `data-slide-key` attribute in the HTML, so CSS can s
 <!-- {"key":"preview","section":"Run","time":"7m"} -->
 # The edit loop lives in peitho preview
 
-Preview watches the deck, its layouts, its theme CSS, and its override CSS. Every save triggers a rebuild and a browser reload. The currently visible slide and the overview state survive the reload, so the slide you were tweaking does not disappear on you.
+Preview watches the deck, its layouts, and its CSS. Every save triggers a rebuild and a browser reload. The currently visible slide and the overview state survive the reload, so the slide you were tweaking does not disappear on you.
 
 ![peitho preview showing a single slide in the browser](img/preview-single.png)
 

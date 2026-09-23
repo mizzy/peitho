@@ -258,7 +258,7 @@ the [Code Images example](https://peitho.gosu.ke/examples/code-images/), the
 
 ### Deck frontmatter
 
-All deck-intrinsic settings live in YAML frontmatter at the top of the deck. For styling, `css` resolves the theme first; `overrides` is appended after whatever `css` resolves to. Supported keys:
+All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Supported keys:
 
 | Key | Purpose | Value |
 |---|---|---|
@@ -268,16 +268,11 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. For
 | `breaks` | Render single newlines in slide body Markdown as hard line breaks | `true` / `false` (default) |
 | `layouts` | Layout HTML file or directory | Deck-relative path, e.g. `./layouts` |
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
-| `overrides` | CSS appended after the resolved theme | Deck-relative path, e.g. `./overrides` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
 | `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
 | `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid, math, and embed are built in unless overridden) |
 
-Each asset key first uses its explicit frontmatter path, then a same-named deck-adjacent directory. Layouts, CSS, and syntaxes finally fall back to the binary's built-in default; overrides and fonts add nothing when absent. A key that points at a non-existent path is a build error with the frontmatter line number.
-
-An explicit `css:` path or deck-adjacent `css/` replaces the built-in theme. If you want the built-in theme plus a few tweaks, use `overrides:` or deck-adjacent `overrides/`; those files are appended after whichever CSS layer was selected. Previously, keeping the theme while changing a few rules required copying the whole built-in theme into the deck.
-
-Asset values may be a file or a directory. `layouts` reads `*.html`; `css` and `overrides` read `*.css`; `syntaxes` reads `*.sublime-syntax`. Directories use filename order. `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
+Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
 ## Layouts and themes
 
@@ -438,11 +433,11 @@ reporting the smallest size in pt and a short excerpt. It exits 1 when any
 warning is found and 0 when the deck is clean; it uses the same Chrome
 discovery as `peitho export pdf`.
 
-Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `overrides:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `overrides/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
+Layouts, themes, and the presentation shell use defaults embedded in the binary, so a single deck file works in any directory. Point at your own assets from the deck's frontmatter (`layouts:`, `css:`, `syntaxes:`, `fonts:`) or drop `layouts/`, `css/`, `syntaxes/`, and `fonts/` next to the deck for zero-config pickup. Only `--shell` remains as a CLI-side dev/debug swap for the presentation shell bundle itself.
 
 ## Examples
 
-`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/`, `css/`, or `overrides/` when the deck brings its own design. All of them except the `pdf-export` fixture and `draft-skip` (whose behavior is only observable locally) are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
+`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture and `draft-skip` (whose behavior is only observable locally) are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
@@ -478,7 +473,7 @@ Diagrams as code: the code-images deck's fenced `mermaid` block, rendered to an 
 ![Code images: a fenced mermaid block rendered to an SVG diagram at build time](docs/images/example-code-images.png)
 
 ```sh
-# Samples keep layouts/, css/, or overrides/ alongside the deck, so no flags are needed
+# Each sample has its layouts/ and css/ alongside it, so no flags are needed by convention
 peitho present examples/keynote/deck.md
 ```
 
