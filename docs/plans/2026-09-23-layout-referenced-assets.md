@@ -7,9 +7,9 @@ first half at a different seam and takes the second half close to as-written.
 
 ## Author decisions (2026-09-23)
 
-1. **CSS `url()` is out of scope** — a separate issue, filed before this
-   merges. Same bug class, but it needs a CSS parser rather than one more
-   lol_html handler, i.e. a different mechanism, not a different call site.
+1. **CSS `url()` is out of scope** — filed as #625. Same bug class, but it
+   needs a CSS parser rather than one more lol_html handler, i.e. a different
+   mechanism, not a different call site.
 2. **`srcset` is refused in v1** with a line-numbered error naming the
    layout and attribute. Slides render at a fixed resolution decided by
    peitho, not by the browser, so a responsive candidate list has no clear
