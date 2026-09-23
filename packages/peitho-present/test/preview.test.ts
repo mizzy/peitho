@@ -465,6 +465,38 @@ function mockChannel() {
   return channel;
 }
 
+// jsdom never executes scripts because vitest does not opt into runScripts: "dangerously";
+// this test is structural, while real execution is covered by the plan's real-Chrome checklist.
+it("layout_script_runs_on_the_stage_but_never_in_a_thumbnail", async () => {
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "slides/000-intro.html") {
+      return okText("<section><script>let n = 0</script></section>");
+    }
+    return fixture.fetcher(input, init);
+  }) as unknown as typeof fetch;
+
+  const shell = await mountPreviewShell({
+    root,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  const stageScripts = slideShadow(root, "intro").querySelectorAll("script");
+  expect(stageScripts).toHaveLength(1);
+  expect(stageScripts[0]?.textContent).toBe("(function () {\nlet n = 0\n})();");
+
+  const thumbnailScripts = slideShadow(root, "intro", true).querySelectorAll("script");
+  expect(thumbnailScripts).toHaveLength(1);
+  expect(thumbnailScripts[0]?.textContent).toBe("let n = 0");
+});
+
 it("sets the document title from the manifest", async () => {
   const root = document.createElement("main");
   document.body.appendChild(root);
@@ -750,28 +782,69 @@ it("preview_keyboard_only_dispatches_page_keys_from_editable_targets", () => {
   }
 });
 
-it("preview_keyboard_leaves_enter_on_links_untouched", () => {
+it("preview keyboard leaves Enter on links in a slide shadow root untouched", () => {
   const bus = new EventTarget();
   const overviewRequests: unknown[] = [];
   bus.addEventListener("peitho:overviewrequest", (event) =>
     overviewRequests.push((event as CustomEvent).detail)
   );
   cleanups.push(installPreviewKeyboard(window, bus));
+  const host = document.createElement("div");
+  host.dataset.slideKey = "intro";
   const link = document.createElement("a");
   link.href = "#x";
-  document.body.appendChild(link);
-  cleanups.push(() => link.remove());
+  host.attachShadow({ mode: "open" }).appendChild(link);
+  document.body.appendChild(host);
+  cleanups.push(() => host.remove());
   link.focus();
 
   const enter = new KeyboardEvent("keydown", {
     key: "Enter",
     bubbles: true,
+    composed: true,
     cancelable: true
   });
   link.dispatchEvent(enter);
 
   expect(overviewRequests).toEqual([]);
   expect(enter.defaultPrevented).toBe(false);
+});
+
+it("preview keyboard leaves Enter on a shadow-root button untouched", () => {
+  const bus = new EventTarget();
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:overviewrequest", (event) =>
+    overviewRequests.push((event as CustomEvent).detail)
+  );
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const host = document.createElement("div");
+  host.dataset.slideKey = "intro";
+  const button = document.createElement("button");
+  host.attachShadow({ mode: "open" }).appendChild(button);
+  document.body.appendChild(host);
+  cleanups.push(() => host.remove());
+
+  const enter = press(button, "Enter");
+
+  expect(enter.defaultPrevented).toBe(false);
+  expect(overviewRequests).toEqual([]);
+});
+
+it("preview keyboard handles Enter from a focused light-DOM chrome button", () => {
+  const bus = new EventTarget();
+  const overviewRequests: unknown[] = [];
+  bus.addEventListener("peitho:overviewrequest", (event) =>
+    overviewRequests.push((event as CustomEvent).detail)
+  );
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const button = document.createElement("button");
+  document.body.appendChild(button);
+  cleanups.push(() => button.remove());
+
+  const enter = press(button, "Enter");
+
+  expect(enter.defaultPrevented).toBe(true);
+  expect(overviewRequests).toEqual([{ action: "activate" }]);
 });
 
 it("editable_page_navigation_is_prevented_only_when_accepted", async () => {
@@ -1576,6 +1649,36 @@ it("clicking a grid tile shows that slide in single mode", async () => {
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(2);
+});
+
+it("clicking a layout button in a shadow-root grid tile does not open the slide", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const fixture = previewFetchFixture();
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "slides/002-end.html") {
+      return okText('<section><button id="layout-button">Run</button></section>');
+    }
+    return fixture.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  mockSelection(true);
+
+  const button = slideShadow(root, "end").querySelector<HTMLButtonElement>("#layout-button")!;
+  dispatchShadowClick(button);
+
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentIndex).toBe(0);
 });
 
 it("dragging across a grid tile does not activate it on the follow-up click", async () => {

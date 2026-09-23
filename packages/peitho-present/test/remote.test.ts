@@ -802,7 +802,11 @@ it("remote preview shell reuses the already loaded manifest", async () => {
 
   expect(root.className).not.toContain("peitho-remote-error");
   expect(manifestFetches).toBe(1);
-  expect(root.querySelector('[data-peitho-remote="preview"] .peitho-slide')).not.toBeNull();
+  const slideHost = root.querySelector<HTMLElement>(
+    '[data-peitho-remote="preview"] .peitho-slide'
+  );
+  expect(slideHost).not.toBeNull();
+  expect(slideHost?.hasAttribute("inert")).toBe(true);
 });
 
 it("remote timer interval updates turtle fill and delta in place without touching rabbit or notes", async () => {

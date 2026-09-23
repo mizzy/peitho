@@ -62,12 +62,17 @@ function fetcherFor(html: string): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-async function mountForTest(root: HTMLElement, html: string): Promise<void> {
+async function mountForTest(
+  root: HTMLElement,
+  html: string,
+  options: { inertSlides?: boolean } = {}
+): Promise<void> {
   const shell = await mountPresentShell({
     root,
     fetcher: fetcherFor(html),
     window,
-    document
+    document,
+    inertSlides: options.inertSlides
   });
   mountedShells.push(shell);
 }
@@ -81,6 +86,29 @@ it("layout_script_is_re_created_so_it_can_execute", async () => {
   expect(shadow).not.toBeNull();
   expect(shadow?.querySelectorAll("script")).toHaveLength(1);
   expect(shadow?.querySelector("script")?.textContent).toBe(
+    "(function () {\nlet n = 0\n})();"
+  );
+});
+
+it("keeps audience slide hosts interactive by default", async () => {
+  const root = document.createElement("main");
+  await mountForTest(root, "<section><button>Run</button></section>");
+
+  const host = root.querySelector<HTMLElement>('[data-slide-key="intro"]');
+  expect(host?.hasAttribute("inert")).toBe(false);
+});
+
+it("makes opted-in slide hosts inert while still re-creating scripts", async () => {
+  const root = document.createElement("main");
+  await mountForTest(
+    root,
+    "<section><button>Run</button><script>let n = 0</script></section>",
+    { inertSlides: true }
+  );
+
+  const host = root.querySelector<HTMLElement>('[data-slide-key="intro"]');
+  expect(host?.hasAttribute("inert")).toBe(true);
+  expect(host?.shadowRoot?.querySelector("script")?.textContent).toBe(
     "(function () {\nlet n = 0\n})();"
   );
 });

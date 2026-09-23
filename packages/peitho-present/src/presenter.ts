@@ -262,6 +262,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     document: doc,
     bus,
     now,
+    inertSlides: true,
     viewport: paneViewport(currentRoot)
   });
   const previewShell = await mountPresentShell({
@@ -271,6 +272,7 @@ export async function mountPresenterView(options: PresenterOptions): Promise<Pre
     document: doc,
     bus: previewBus,
     now,
+    inertSlides: true,
     viewport: paneViewport(previewRoot)
   });
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);

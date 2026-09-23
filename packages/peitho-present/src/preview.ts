@@ -6,8 +6,10 @@ import { calculateCanvasFit, type CanvasViewport } from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
+import { isEditableTarget, keyBelongsToTarget } from "./interactiveTarget";
 import { hasChordModifier, isComposingKey } from "./keyboard";
 import { postJson, readErrorResponse } from "./previewHttp";
+import { executeInlineScripts } from "./scripts";
 import {
   openPreviewSourceEdit,
   type PreviewSourceEdit,
@@ -401,21 +403,6 @@ function insertSourceNewline(
   return addSentinel;
 }
 
-function isEditableTarget(event: KeyboardEvent): boolean {
-  const target = event.composedPath()[0];
-  if (
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLSelectElement
-  ) {
-    return true;
-  }
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  const editable = target.closest<HTMLElement>("[contenteditable]");
-  return editable !== null && editable.getAttribute("contenteditable") !== "false";
-}
-
 export function previewGridColumnCount(rootWidth: number): number {
   const columns = Math.floor(
     (rootWidth - GRID_PADDING * 2 + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)
@@ -441,10 +428,7 @@ export function installPreviewKeyboard(
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event) || isComposingKey(event)) return;
-    const editable = isEditableTarget(event);
-    if (editable && (event.shiftKey || (event.key !== "PageUp" && event.key !== "PageDown"))) {
-      return;
-    }
+    if (keyBelongsToTarget(event)) return;
     if (event.key === "u") {
       const request = new CustomEvent("peitho:restorerequest", { cancelable: true });
       bus.dispatchEvent(request);
@@ -471,14 +455,13 @@ export function installPreviewKeyboard(
     }
     if (event.key === "Enter") {
       if (event.repeat) return;
-      const target = event.composedPath()[0];
-      if (target instanceof Element && target.closest("a") !== null) return;
       event.preventDefault();
       dispatchOverviewRequest(bus, "activate");
       return;
     }
     const to = previewNavigationKeyMap.get(event.key);
     if (!to) return;
+    const editable = isEditableTarget(event);
     const request = new CustomEvent<PreviewNavigateDetail>("peitho:navigate", {
       cancelable: true,
       detail: { to }
@@ -905,7 +888,7 @@ class PreviewShellController implements PreviewShell {
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
 
-    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
+    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide", true);
     tile.appendChild(host);
     const tileNumber = this.createSlideNumber(slide);
     tile.appendChild(tileNumber);
@@ -919,7 +902,13 @@ class PreviewShellController implements PreviewShell {
     const onThumbClick = (): void => this.setIndex(slide.index);
     thumb.addEventListener("click", onThumbClick);
     this.tileListenerCleanups.push(() => thumb.removeEventListener("click", onThumbClick));
-    const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
+    const thumbHost = this.createSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-thumb-slide",
+      false
+    );
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
@@ -1337,7 +1326,8 @@ class PreviewShellController implements PreviewShell {
     slide: ManifestSlide,
     html: string,
     css: string,
-    className: string
+    className: string,
+    executeScripts: boolean
   ): HTMLElement {
     const host = this.doc.createElement("section");
     host.classList.add(className);
@@ -1350,7 +1340,11 @@ class PreviewShellController implements PreviewShell {
     shadow.appendChild(style);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
-    shadow.appendChild(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    if (executeScripts) {
+      executeInlineScripts(fragment, this.doc);
+    }
+    shadow.appendChild(fragment);
     return host;
   }
 

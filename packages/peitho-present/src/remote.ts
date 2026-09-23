@@ -655,6 +655,7 @@ class RemoteController implements RemoteView {
           bus: this.previewBus,
           manifest,
           now: this.now,
+          inertSlides: true,
           viewport: paneViewport(previewRoot)
         });
         this.pointerCleanup = installRemotePointerBridge({

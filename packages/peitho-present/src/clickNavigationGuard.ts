@@ -1,3 +1,5 @@
+import { pointerBelongsToTarget } from "./interactiveTarget";
+
 export type ClickNavigationGuardOptions = {
   target: HTMLElement;
   window?: Window;
@@ -34,8 +36,7 @@ export function createClickNavigationGuard(
     shouldIgnoreClick(event: MouseEvent): boolean {
       const start = clickStart;
       clickStart = null;
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest("a") !== null) return true;
+      if (pointerBelongsToTarget(event)) return true;
       if (hasNonCollapsedSelection(win)) return true;
       if (start === null) return false;
       return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;

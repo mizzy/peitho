@@ -65,3 +65,27 @@ it("dispatches swaprequest on s keydown, ignores repeats, and cleans up", () => 
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", cancelable: true }));
   expect(requests).toEqual([null, null]);
 });
+
+it("leaves S in a shadow-root input for the input", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:swaprequest", (event) => requests.push((event as CustomEvent).detail));
+  const cleanup = installSwapShortcut(window, bus);
+  cleanups.push(cleanup);
+  const host = document.createElement("div");
+  const input = document.createElement("input");
+  host.attachShadow({ mode: "open" }).appendChild(input);
+  document.body.appendChild(host);
+  cleanups.push(() => host.remove());
+
+  const event = new KeyboardEvent("keydown", {
+    key: "S",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  input.dispatchEvent(event);
+
+  expect(event.defaultPrevented).toBe(false);
+  expect(requests).toEqual([]);
+});

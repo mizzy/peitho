@@ -803,6 +803,76 @@ it("keyboard navigation ignores chord-modified navigation keys", () => {
   expect(requests).toEqual([]);
 });
 
+it("keyboard navigation leaves Space in a shadow-root input but still handles PageDown", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const host = document.createElement("div");
+  const input = document.createElement("input");
+  host.attachShadow({ mode: "open" }).appendChild(input);
+  document.body.appendChild(host);
+  windowListenerCleanups.push(() => host.remove());
+
+  const teardown = installKeyboardNavigation(window, bus);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", {
+    key: " ",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  const pageDown = new KeyboardEvent("keydown", {
+    key: "PageDown",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  input.dispatchEvent(space);
+  input.dispatchEvent(pageDown);
+
+  expect(space.defaultPrevented).toBe(false);
+  expect(pageDown.defaultPrevented).toBe(true);
+  expect(requests).toEqual([{ to: "next" }]);
+});
+
+it("keyboard navigation handles Space from a slide link but leaves Enter to the link", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const host = document.createElement("div");
+  host.dataset.slideKey = "intro";
+  const link = document.createElement("a");
+  link.href = "#target";
+  host.attachShadow({ mode: "open" }).appendChild(link);
+  document.body.appendChild(host);
+  windowListenerCleanups.push(() => host.remove());
+
+  const teardown = installKeyboardNavigation(window, bus);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", {
+    key: " ",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  const enter = new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  link.dispatchEvent(space);
+  link.dispatchEvent(enter);
+
+  expect(space.defaultPrevented).toBe(true);
+  expect(enter.defaultPrevented).toBe(false);
+  expect(requests).toEqual([{ to: "next" }]);
+});
+
 it("keyboard emits navigate events to an injected bus", () => {
   const bus = new EventTarget();
   const requests: unknown[] = [];
@@ -888,6 +958,50 @@ it("presenter keyboard ignores chord-modified shortcuts", () => {
   expect(arrowRight.defaultPrevented).toBe(false);
   expect(onPlaypause).not.toHaveBeenCalled();
   expect(requests).toEqual([]);
+});
+
+it("presenter keyboard leaves Space in a shadow-root input", () => {
+  const bus = new EventTarget();
+  const onPlaypause = vi.fn();
+  const host = document.createElement("div");
+  const input = document.createElement("input");
+  host.attachShadow({ mode: "open" }).appendChild(input);
+  document.body.appendChild(host);
+  windowListenerCleanups.push(() => host.remove());
+
+  const teardown = installPresenterKeyboard(window, bus, onPlaypause);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", {
+    key: " ",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  input.dispatchEvent(space);
+
+  expect(space.defaultPrevented).toBe(false);
+  expect(onPlaypause).not.toHaveBeenCalled();
+});
+
+it("presenter keyboard handles Space from a focused light-DOM button", () => {
+  const bus = new EventTarget();
+  const onPlaypause = vi.fn();
+  const button = document.createElement("button");
+  document.body.appendChild(button);
+  windowListenerCleanups.push(() => button.remove());
+
+  const teardown = installPresenterKeyboard(window, bus, onPlaypause);
+  windowListenerCleanups.push(teardown);
+  const space = new KeyboardEvent("keydown", {
+    key: " ",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  button.dispatchEvent(space);
+
+  expect(space.defaultPrevented).toBe(true);
+  expect(onPlaypause).toHaveBeenCalledTimes(1);
 });
 
 it("shows a visible error when a fragment fetch fails", async () => {

@@ -176,6 +176,41 @@ must state its intent rather than inherit a default. Pass `true` at
 cd packages/peitho-present && npm test -- test/preview.test.ts -t 'layout_script_runs_on_the_stage_but_never_in_a_thumbnail'
 ```
 
+## Task 3a: Shell shortcuts defer to interactive slide content
+
+Found in task 3's review, landed with it (Issue #631). Not a new feature: one
+missing invariant with symptoms on every surface.
+
+**Cause.** Every shell shortcut and navigation gesture assumed slide content is
+inert. It never was — layout HTML already ships plain `<details>`/`<input>` to
+`dist/`, present, and preview — and tasks 2–3 make it common. Measured on main:
+clicking a `<summary>` toggles it *and* advances; a space typed into a layout
+`<input>` becomes "next slide" and never reaches the field. Preview had a
+private editable check and exempted only `<a>` on Enter; present had none.
+
+**Fix.** One module, `packages/peitho-present/src/interactiveTarget.ts`, decides
+whether a key or pointer event belongs to slide content, from
+`composedPath()[0]`. Every window keydown installer, the click guard, and swipe
+navigation consult it; no installer carries its own check.
+
+- Text-entry fields (textarea, select, contenteditable, text-type `<input>`) keep
+  every key except unshifted PageUp/PageDown, so a clicker still navigates.
+- Inside a slide — an enclosing shadow host with `data-slide-key`, walking up
+  through nested shadow roots — Enter belongs to `a[href]`/`button`/`summary`/
+  button-like inputs, Space to `button`/`summary`/checkbox-like inputs, arrows
+  to radio/range, and Home/End/PageUp/PageDown to range (a clicker's PageDown
+  moves a focused slider, not the deck). Shell chrome is outside a slide, so
+  Space on a focused presenter button still toggles the timer.
+- The presenter's panes and the remote's preview are mirrors: they still run
+  layout scripts (author decision above) but mount with `inertSlides`, so a
+  click there can never operate a copy the audience does not see.
+- The distribution viewer's hand-mirrored copy in `render_distribution_index`
+  follows the same rules (light DOM, so "inside a slide" is
+  `closest('.peitho-slide')`), pinned by a Rust test that asserts every
+  selector/type-list string from `interactiveTarget.ts` appears verbatim.
+
+Accepted: Escape inside a slide text field does not close present; blur first.
+
 ## Task 4: The `peitho:shadow-mounted` event in the present shell
 
 **Goal.** A layout script can obtain its own slide root, including one that
@@ -240,6 +275,14 @@ the bundle; both copies carry a comment naming the other). In `showSlide`, after
 the `innerHTML` assignment, rehydrate and then dispatch the event per
 `.peitho-slide` section — light DOM, so `root` is the section element.
 
+Once scripts run here, the dist copy of the task-3a interactive-target rules
+must also see controls inside a web component a layout script mounts: its
+light-DOM `closest('.peitho-slide')` does not cross a nested shadow root, while
+`interactiveTarget.ts` walks up through them. Prefer embedding one built bundle
+of `scripts.ts` + `interactiveTarget.ts` over growing the hand mirror (task 2
+and 3a reviews: the mirror now has to track seven script-rehydration rules and
+every interactive-target rule, and a drift test can pin strings but not logic).
+
 Note this is the one surface that re-runs a script on every visit, which is what
 the IIFE wrap exists for.
 
@@ -298,6 +341,14 @@ demonstrates a script running.
    silent hang under headless Chrome).
 9. A `<script type="module">` slide drains `window.__peithoShadowRoots` and
    mounts correctly — the backlog's reason for existing.
+10. `<script src="lib.js">` followed by an inline script that uses the library —
+    the inline script sees the library in present, preview, and `dist/`, as it
+    does in PDF/lint (parser-blocking order, found in task 2's review).
+11. Clicking a layout `<button>`/`<summary>` does not advance, and a space typed
+    into a layout `<input>` is inserted, in present, the preview stage, and
+    `dist/index.html`; PageDown from that input still advances (task 3a).
+12. The presenter's panes and the remote's preview do not react to clicks,
+    while the laser pointer on the remote still works (task 3a).
 
 ## Task 9: Documentation
 

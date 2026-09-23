@@ -77,6 +77,7 @@ export type ShellOptions = {
   bus?: EventTarget;
   now?: () => number;
   viewport?: () => CanvasViewport;
+  inertSlides?: boolean;
 };
 
 export type PointerOverlayOptions = {
@@ -569,6 +570,7 @@ class PresentShellController implements PresentShell {
   private readonly bus: EventTarget;
   private readonly now: () => number;
   private readonly viewport?: () => CanvasViewport;
+  private readonly inertSlides: boolean;
   private readonly canvasCleanups: Array<() => void> = [];
   private fontScopeCleanup: (() => void) | null = null;
   private pointerCleanup: (() => void) | null = null;
@@ -605,6 +607,7 @@ class PresentShellController implements PresentShell {
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
     this.viewport = options.viewport;
+    this.inertSlides = options.inertSlides ?? false;
     this.root.classList.add("peitho-shell-viewport");
     const rootPosition = this.win.getComputedStyle(this.root).position;
     if (rootPosition === "static" || rootPosition === "") {
@@ -748,6 +751,9 @@ class PresentShellController implements PresentShell {
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
+    if (this.inertSlides) {
+      host.setAttribute("inert", "");
+    }
     host.style.position = "absolute";
     host.style.left = "0";
     host.style.top = "0";
