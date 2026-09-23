@@ -72,8 +72,9 @@ fences covered by `code_images:` entries are image fragments by the time
 dispatch runs, so they route to `accepts="image"` slots rather than
 `accepts="code"` slots. Layouts intended for rendered diagrams should expose an
 image slot. Source panes that must stay visible should wrap the fence in a
-````md block (as in the [Code Images example](@/examples/code-images.md)) or
-use a different language tag.
+four-backtick ``` ````md ``` block (as in the
+[Code Images example](@/examples/code-images.md)) or use a different language
+tag.
 
 ## Inspecting layouts
 
@@ -119,3 +120,40 @@ For layouts and CSS, asset resolution is: explicit frontmatter path, then a
 deck-adjacent `layouts/` or `css/` directory, then the built-in default. A
 frontmatter path can point at a file or a directory; layout directories read
 `*.html`, and CSS directories read `*.css`.
+
+## Files a layout references
+
+A layout may name a file directly rather than going through Markdown:
+
+```html
+<video class="backdrop" src="media/loop.mp4" poster="media/poster.png"
+       autoplay muted loop playsinline></video>
+```
+
+Peitho reads that reference at parse time, resolves it against the deck
+directory, copies the file under a content-hashed name, and rewrites the
+attribute to point at the copy. The same applies to `<img src>`,
+`<script src>`, `<link href>`, `<object data>`, and the other attributes that
+load a subresource. A missing path is a build error naming the layout and the
+attribute, and while `peitho preview` runs, replacing the file rebuilds the
+deck.
+
+This is where a background image or video belongs. CSS `url()` is not
+scanned, so a file named only from a stylesheet is never copied and never
+checked — see
+[Referencing files from CSS](@/guide/frontmatter.md#referencing-files-from-css).
+Put the element in the layout and keep the styling in CSS:
+
+```css
+.cover .backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+```
+
+External, protocol-relative, `data:`, fragment, and rooted values are left
+untouched. `srcset` and `imagesrcset` are refused with a named error rather
+than silently ignored.

@@ -222,6 +222,60 @@ copied too. See the
 [Custom Fonts example](https://peitho.gosu.ke/examples/custom-fonts/) for a
 complete deck.
 
+## Referencing files from CSS
+
+A `url()` resolves only when Peitho already emits the directory it names, at a
+path that is stable by construction. That is true of the font directories, and
+nothing else:
+
+- `fonts/`, copied verbatim from your own font assets.
+- `theme-fonts/`, the bundled Inter and JetBrains Mono faces, written on every
+  build and used by the built-in theme.
+- `katex-fonts/`, written only when a deck contains math.
+
+All three sit next to the emitted `peitho.css`, which is what makes the
+relative URL above resolve.
+
+Peitho does not scan CSS for `url()`, so no other reference is resolved,
+copied, or checked. A stylesheet that names an image directly leaves nothing
+in the output to point at:
+
+```css
+/* Not resolved: the file is never copied, and the build does not warn. */
+.cover {
+  background: url("media/hero.jpg");
+}
+```
+
+Reference such a file from the layout instead, where Peitho resolves it
+against the deck directory, copies it under a content-hashed name, and fails
+the build if it is missing:
+
+```html
+<section class="cover">
+  <img class="backdrop" src="media/hero.jpg" alt="">
+  <div class="content">…</div>
+</section>
+```
+
+```css
+.cover {
+  position: relative;
+}
+
+.cover .backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+```
+
+The CSS still owns the design; only the reference moves. See
+[Files a layout references](@/guide/layouts.md#files-a-layout-references) and
+the [Video Background example](https://peitho.gosu.ke/examples/video-background/).
+
 ## Error behavior
 
 Unknown keys, bad values, missing explicit paths, invalid `time`, and malformed
