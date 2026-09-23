@@ -8,14 +8,18 @@ use std::{
 use lol_html::{element, errors::RewritingError, HtmlRewriter, Settings};
 
 use crate::{
-    domain::{Accepts, Arity, SlotContract, SlotName},
+    domain::{Accepts, Arity, ResolvedImagePath, SlotContract, SlotName},
     error::{BuildError, ErrorKind, Result},
 };
 
 /// The element/attribute pairs that load a subresource, in document order per
 /// element. `<a href>` is deliberately absent: it navigates rather than loading,
 /// and rewriting it would collide with `open_external_links_in_new_tab`.
-const ASSET_ATTRIBUTES: &[(&str, &[&str])] = &[
+///
+/// This is the single definition shared by discovery here and the rewrite in
+/// `render.rs`. Two tables would let the renderer skip an attribute the parser
+/// resolved, leaving a copied asset that nothing points at.
+pub const ASSET_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("img", &["src"]),
     ("video", &["src", "poster"]),
     ("audio", &["src"]),
@@ -62,6 +66,41 @@ impl LayoutAssetRef {
     /// the lookup key used to rewrite the attribute at render time.
     pub fn raw(&self) -> &str {
         &self.raw
+    }
+}
+
+/// Resolved distribution paths for every layout's own asset references, keyed by
+/// layout name and then by the raw attribute value the layout author wrote.
+///
+/// The renderer rewrites a layout attribute only when its raw value appears
+/// here, so an unresolved reference is emitted unchanged rather than pointing at
+/// a path that was never copied. Empty for a deck whose layouts reference
+/// nothing, which is what keeps such decks byte-identical.
+#[derive(Debug, Clone, Default)]
+pub struct LayoutAssets {
+    by_layout: BTreeMap<String, BTreeMap<String, ResolvedImagePath>>,
+}
+
+impl LayoutAssets {
+    pub fn new(by_layout: BTreeMap<String, BTreeMap<String, ResolvedImagePath>>) -> Self {
+        Self { by_layout }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_layout.values().all(BTreeMap::is_empty)
+    }
+
+    /// Resolved path for one raw reference in one layout, if it was resolved.
+    pub fn get(&self, layout: &str, raw: &str) -> Option<&ResolvedImagePath> {
+        self.by_layout.get(layout)?.get(raw)
+    }
+
+    /// Does this layout have any resolved references at all? Used to skip the
+    /// rewrite entirely for layouts that reference nothing.
+    pub fn has_any(&self, layout: &str) -> bool {
+        self.by_layout
+            .get(layout)
+            .is_some_and(|refs| !refs.is_empty())
     }
 }
 

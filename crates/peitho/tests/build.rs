@@ -948,6 +948,159 @@ fn build_copies_nested_unicode_markdown_image_path() {
 }
 
 #[test]
+fn build_copies_and_rewrites_assets_a_layout_references_directly() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, deck_with_assets("./cover.html", "# Cover\n")).unwrap();
+    write_video_background_layout(dir.path());
+    write_base_css(dir.path());
+    fs::create_dir_all(dir.path().join("media")).unwrap();
+    fs::write(dir.path().join("media/hero.mp4"), b"fake video bytes").unwrap();
+    write_test_png(&dir.path().join("media/still.png"), TEST_PNG);
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Both files are copied under hashed names, even though no Markdown image
+    // syntax references either one.
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 2, "assets: {assets:?}");
+    let video = assets
+        .iter()
+        .find(|path| path.to_string_lossy().ends_with("-hero.mp4"))
+        .expect("video copied");
+    let poster = assets
+        .iter()
+        .find(|path| path.to_string_lossy().ends_with("-still.png"))
+        .expect("poster copied");
+    assert_eq!(fs::read(video).unwrap(), b"fake video bytes");
+
+    // The emitted HTML points at the copies, not at the author's raw paths.
+    let video_name = video.file_name().unwrap().to_string_lossy();
+    let poster_name = poster.file_name().unwrap().to_string_lossy();
+    let slide = fs::read_to_string(out.join("slides/000-cover.html")).unwrap();
+    assert!(
+        slide.contains(&format!(r#"src="assets/{video_name}""#)),
+        "slide: {slide}"
+    );
+    assert!(
+        slide.contains(&format!(r#"poster="assets/{poster_name}""#)),
+        "slide: {slide}"
+    );
+    assert!(!slide.contains("media/hero.mp4"), "slide: {slide}");
+    assert!(slide.contains("autoplay"), "slide: {slide}");
+
+    // In the manifest, so `peitho publish` validates their presence in dist.
+    let manifest = fs::read_to_string(out.join("manifest.json")).unwrap();
+    assert!(manifest.contains(video_name.as_ref()), "{manifest}");
+    assert!(manifest.contains(poster_name.as_ref()), "{manifest}");
+}
+
+#[test]
+fn build_fails_for_a_missing_layout_asset_naming_the_layout_and_attribute() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, deck_with_assets("./cover.html", "# Cover\n")).unwrap();
+    write_video_background_layout(dir.path());
+    write_base_css(dir.path());
+    fs::create_dir_all(dir.path().join("media")).unwrap();
+    fs::write(dir.path().join("media/hero.mp4"), b"fake video bytes").unwrap();
+    // media/still.png is deliberately absent.
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("layout 'cover'"))
+        .stderr(predicate::str::contains("poster=\"media/still.png\""))
+        .stderr(predicate::str::contains("image file not found"))
+        .stderr(predicate::str::contains(
+            "help: fix the poster attribute in layout 'cover'",
+        ));
+}
+
+#[test]
+fn build_fails_for_a_layout_srcset_rather_than_dropping_it_silently() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(&deck, deck_with_assets("./cover.html", "# Cover\n")).unwrap();
+    fs::write(
+        dir.path().join("cover.html"),
+        r#"<section><img src="a.png" srcset="a.png 1x, a2.png 2x"><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("srcset"))
+        .stderr(predicate::str::contains("cover"));
+}
+
+#[test]
+fn build_deduplicates_a_file_referenced_by_both_a_layout_and_markdown() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        deck_with_assets("./cover.html", "# Cover\n\n![Same](media/still.png)\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("cover.html"),
+        r#"<section><img src="media/still.png"><h1><slot name="title" accepts="inline" arity="1"></slot></h1><figure><slot name="hero" accepts="image" arity="1"></slot></figure></section>"#,
+    )
+    .unwrap();
+    write_base_css(dir.path());
+    write_test_png(&dir.path().join("media/still.png"), TEST_PNG);
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // One file on disk, one manifest entry: the shared hash table dedupes across
+    // both reference sources.
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1, "assets: {assets:?}");
+    let manifest = fs::read_to_string(out.join("manifest.json")).unwrap();
+    let name = assets[0].file_name().unwrap().to_string_lossy();
+    assert_eq!(manifest.matches(name.as_ref()).count(), 1, "{manifest}");
+}
+
+#[test]
 fn build_fails_for_missing_markdown_image_with_line_and_help() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
@@ -2115,6 +2268,18 @@ fn extract_data_slide_keys(css: &str) -> Vec<String> {
     }
 
     keys
+}
+
+/// A layout that references a video and its poster directly, the shape from
+/// Issue #529 — no Markdown image syntax anywhere.
+fn write_video_background_layout(dir: &Path) -> PathBuf {
+    let path = dir.join("cover.html");
+    fs::write(
+        &path,
+        r#"<section><video src="media/hero.mp4" poster="media/still.png" autoplay muted loop></video><h1><slot name="title" accepts="inline" arity="1"></slot></h1></section>"#,
+    )
+    .unwrap();
+    path
 }
 
 fn deck_with_assets(layouts: &str, body: &str) -> String {
