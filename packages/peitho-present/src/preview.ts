@@ -2,7 +2,11 @@ import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import type { Notes } from "../../../bindings/Notes";
 import type { SlideSources } from "../../../bindings/SlideSources";
-import { calculateCanvasFit, type CanvasViewport } from "./canvas";
+import {
+  attachSlideShadow,
+  calculateCanvasFit,
+  type CanvasViewport
+} from "./canvas";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
@@ -1380,10 +1384,7 @@ class PreviewShellController implements PreviewShell {
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
-    const shadow = host.attachShadow({ mode: "open" });
-    const style = this.doc.createElement("style");
-    style.textContent = css;
-    shadow.appendChild(style);
+    const shadow = attachSlideShadow(host, this.doc, css);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     const fragment = template.content.cloneNode(true) as DocumentFragment;

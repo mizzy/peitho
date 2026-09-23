@@ -1,6 +1,10 @@
 import type { Manifest } from "../../../bindings/Manifest";
 import type { ManifestSlide } from "../../../bindings/ManifestSlide";
-import { installCanvasScaler, type CanvasViewport } from "./canvas";
+import {
+  attachSlideShadow,
+  installCanvasScaler,
+  type CanvasViewport
+} from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
 import {
@@ -783,10 +787,7 @@ class PresentShellController implements PresentShell {
         canvasHeight: dimensions.height
       })
     );
-    const shadow = host.attachShadow({ mode: "open" });
-    const style = this.doc.createElement("style");
-    style.textContent = css;
-    shadow.appendChild(style);
+    const shadow = attachSlideShadow(host, this.doc, css);
     const revealStyle = this.doc.createElement("style");
     revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
     shadow.appendChild(revealStyle);
