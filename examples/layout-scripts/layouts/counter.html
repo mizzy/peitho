@@ -1,0 +1,22 @@
+<section class="counter-layout">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <button class="counter" type="button">0</button>
+  <script>
+    if (!window.counterLayoutInstalled) {
+      window.counterLayoutInstalled = true;
+      const mount = ({ root }) => {
+        const button = root.querySelector(".counter");
+        if (!button || button.dataset.mounted) return;
+        button.dataset.mounted = "true";
+        let count = 0;
+        button.addEventListener("click", () => {
+          count += 1;
+          button.textContent = String(count);
+        });
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

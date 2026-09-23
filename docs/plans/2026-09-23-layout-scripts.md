@@ -430,6 +430,14 @@ demonstrates a script running.
 12. The presenter's panes and the remote's preview do not react to clicks,
     while the laser pointer on the remote still works (task 3a).
 
+*As executed (Issue #636):* all twelve items passed on main after tasks 1–7
+merged, driven over CDP with real input in headless Chrome; the report is the
+issue's closing comment. It found no product bug in the feature and filed two
+side findings (#645: layout asset errors say "image" for a `<script src>`; #646:
+the remote's dark color-scheme reaches slide form controls). Writing the guide
+then surfaced one cross-surface divergence — PDF/lint inline scripts are not
+scope-wrapped — recorded as #647 for the author.
+
 ## Task 9: Documentation
 
 **Goal.** The contract is discoverable and §16 stays authoritative.
