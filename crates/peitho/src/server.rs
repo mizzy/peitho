@@ -362,12 +362,154 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
         "woff2" => "font/woff2",
         "woff" => "font/woff",
         "ttf" => "font/ttf",
         "otf" => "font/otf",
         _ => "application/octet-stream",
     }
+}
+
+/// Bytes to serve for one static request, plus the range they represent.
+///
+/// `range` is `Some((range, total_len))` only when a satisfiable `Range` header
+/// was sent, which is exactly when the response is a `206`.
+struct StaticBody {
+    bytes: Vec<u8>,
+    range: Option<(ByteRange, u64)>,
+}
+
+/// Read a static file, honoring a satisfiable `Range` header.
+///
+/// A ranged read seeks and reads only the requested span. WebKit's `<video>`
+/// requires Range support to leave `networkState: NETWORK_NO_SOURCE` (measured
+/// by @kfly8 on a real device, Issue #529) and probes with small ranges, so
+/// reading the whole file per probe would load a large background video into
+/// memory repeatedly.
+fn read_static_body(path: &Path, headers: &[Header]) -> std::io::Result<StaticBody> {
+    let requested = headers
+        .iter()
+        .find(|header| header.field.equiv("Range"))
+        .map(|header| header.value.as_str().to_owned());
+    let Some(requested) = requested else {
+        return Ok(StaticBody {
+            bytes: fs::read(path)?,
+            range: None,
+        });
+    };
+
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let Some(range) = ByteRange::parse(&requested, len) else {
+        // Unsatisfiable or unsupported: serve the whole body as a plain 200.
+        return Ok(StaticBody {
+            bytes: fs::read(path)?,
+            range: None,
+        });
+    };
+
+    file.seek(SeekFrom::Start(range.start()))?;
+    // `ByteRange` guarantees the span lies inside the file, so the cast is
+    // bounded by the file length and `read_exact` cannot be short.
+    let mut bytes = vec![0u8; range.len() as usize];
+    file.read_exact(&mut bytes)?;
+    Ok(StaticBody {
+        bytes,
+        range: Some((range, len)),
+    })
+}
+
+/// A satisfiable single byte range, inclusive of both endpoints.
+///
+/// The only constructor is [`ByteRange::parse`], which returns `None` unless the
+/// range is fully inside the resource, so a value of this type can always be
+/// served: `start <= last < len`. Keeping the inclusive-end convention in the
+/// type is deliberate — a bare `(u64, u64)` invites a start/end swap at the one
+/// call site that slices with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ByteRange {
+    start: u64,
+    last: u64,
+}
+
+impl ByteRange {
+    /// Parse one `Range: bytes=…` header value against a known resource length.
+    ///
+    /// Returns `None` for every range this server will not serve: a non-`bytes`
+    /// unit, a multi-range request, an inverted or out-of-bounds range, an empty
+    /// resource, and malformed or overflowing offsets. Callers answer `None` with
+    /// a normal whole-body `200`, so an unsatisfiable range degrades to a full
+    /// response rather than a `416` — no client here depends on `416`, and a
+    /// deliberately friendlier fallback keeps video playable.
+    pub(crate) fn parse(header_value: &str, len: u64) -> Option<Self> {
+        if len == 0 {
+            return None;
+        }
+        let last_byte = len - 1;
+        let (unit, spec) = header_value.split_once('=')?;
+        if !unit.trim().eq_ignore_ascii_case("bytes") {
+            return None;
+        }
+        let spec = spec.trim();
+        // Multi-range responses need multipart/byteranges, which this server
+        // does not build; a client that asked for one gets the whole body.
+        if spec.contains(',') {
+            return None;
+        }
+        let (start_text, end_text) = spec.split_once('-')?;
+        let (start, last) = if start_text.is_empty() {
+            // `bytes=-500` is the last 500 bytes, clamped to the whole body.
+            let suffix_len: u64 = parse_offset(end_text)?;
+            if suffix_len == 0 {
+                return None;
+            }
+            (len.saturating_sub(suffix_len), last_byte)
+        } else {
+            let start = parse_offset(start_text)?;
+            let last = if end_text.is_empty() {
+                last_byte
+            } else {
+                parse_offset(end_text)?
+            };
+            (start, last)
+        };
+        if start > last || last > last_byte {
+            return None;
+        }
+        Some(Self { start, last })
+    }
+
+    pub(crate) fn start(self) -> u64 {
+        self.start
+    }
+
+    pub(crate) fn last(self) -> u64 {
+        self.last
+    }
+
+    /// Byte count, counting both endpoints.
+    pub(crate) fn len(self) -> u64 {
+        self.last - self.start + 1
+    }
+}
+
+/// Parse a range offset, rejecting anything that is not plain ASCII digits.
+///
+/// `u64::from_str` already rejects signs, whitespace, and overflow, which is
+/// what keeps `bytes=99999999999999999999-` from wrapping into a valid range.
+fn parse_offset(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Font directories are the only cacheable responses.
@@ -1263,13 +1405,32 @@ impl PresentServer {
             );
             return;
         };
-        match fs::read(&path) {
-            Ok(bytes) => {
+        match read_static_body(&path, request.headers()) {
+            Ok(body) => {
                 let Ok(header) = Header::from_bytes("Content-Type", content_type(&path)) else {
                     eprintln!("warning: failed to build Content-Type header");
                     return;
                 };
-                let mut response = Response::from_data(bytes).with_header(header);
+                let Ok(accept_ranges) = Header::from_bytes("Accept-Ranges", "bytes") else {
+                    eprintln!("warning: failed to build Accept-Ranges header");
+                    return;
+                };
+                let StaticBody { bytes, range } = body;
+                let mut response = Response::from_data(bytes)
+                    .with_header(header)
+                    .with_header(accept_ranges);
+                if let Some((range, total)) = range {
+                    let Ok(content_range) = Header::from_bytes(
+                        "Content-Range",
+                        format!("bytes {}-{}/{total}", range.start(), range.last()),
+                    ) else {
+                        eprintln!("warning: failed to build Content-Range header");
+                        return;
+                    };
+                    response = response
+                        .with_status_code(StatusCode(206))
+                        .with_header(content_range);
+                }
                 if let Some(directive) = cache_control(request.url()) {
                     match Header::from_bytes("Cache-Control", directive) {
                         Ok(header) => response = response.with_header(header),
@@ -2645,6 +2806,214 @@ mod tests {
         assert_eq!(content_type(Path::new("fonts/Custom.woff")), "font/woff");
         assert_eq!(content_type(Path::new("fonts/Custom.ttf")), "font/ttf");
         assert_eq!(content_type(Path::new("fonts/Custom.otf")), "font/otf");
+    }
+
+    fn media_server(bytes: &[u8]) -> (tempfile::TempDir, PresentServer) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("hero.mp4"), bytes).unwrap();
+        let server = PresentServer::bind(dir.path().to_path_buf(), 0, "present.html").unwrap();
+        (dir, server)
+    }
+
+    #[test]
+    fn static_route_spec_a_range_request_returns_a_206_with_the_requested_slice() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response =
+            http_request_with_headers(&server, "GET", "/hero.mp4", "", &[("Range", "bytes=4-7")]);
+
+        assert_eq!(response.status, 206);
+        assert!(response.has_header("content-range", "bytes 4-7/16"));
+        assert!(response.has_header("accept-ranges", "bytes"));
+        assert!(response.has_header("content-type", "video/mp4"));
+        assert_eq!(response.body, "4567");
+    }
+
+    #[test]
+    fn static_route_spec_an_open_ended_range_serves_through_the_last_byte() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response =
+            http_request_with_headers(&server, "GET", "/hero.mp4", "", &[("Range", "bytes=12-")]);
+
+        assert_eq!(response.status, 206);
+        assert!(response.has_header("content-range", "bytes 12-15/16"));
+        assert_eq!(response.body, "cdef");
+    }
+
+    #[test]
+    fn static_route_spec_a_suffix_range_serves_the_tail() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response =
+            http_request_with_headers(&server, "GET", "/hero.mp4", "", &[("Range", "bytes=-3")]);
+
+        assert_eq!(response.status, 206);
+        assert!(response.has_header("content-range", "bytes 13-15/16"));
+        assert_eq!(response.body, "def");
+    }
+
+    #[test]
+    fn static_route_spec_a_single_byte_range_is_served() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response =
+            http_request_with_headers(&server, "GET", "/hero.mp4", "", &[("Range", "bytes=0-0")]);
+
+        assert_eq!(response.status, 206);
+        assert!(response.has_header("content-range", "bytes 0-0/16"));
+        assert_eq!(response.body, "0");
+    }
+
+    #[test]
+    fn static_route_adversarial_an_unsatisfiable_range_falls_back_to_a_full_200_response() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response = http_request_with_headers(
+            &server,
+            "GET",
+            "/hero.mp4",
+            "",
+            &[("Range", "bytes=0-99999")],
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(!response.mentions_header("content-range"));
+        assert!(response.has_header("accept-ranges", "bytes"));
+        assert_eq!(response.body, "0123456789abcdef");
+    }
+
+    #[test]
+    fn static_route_spec_a_plain_request_still_advertises_accept_ranges() {
+        let (_dir, server) = media_server(b"0123456789abcdef");
+
+        let response = http_request(&server, "GET", "/hero.mp4", "");
+
+        assert_eq!(response.status, 200);
+        assert!(response.has_header("accept-ranges", "bytes"));
+        assert!(!response.mentions_header("content-range"));
+        assert_eq!(response.body, "0123456789abcdef");
+    }
+
+    #[test]
+    fn static_route_adversarial_a_range_on_an_empty_file_serves_an_empty_200() {
+        let (_dir, server) = media_server(b"");
+
+        let response =
+            http_request_with_headers(&server, "GET", "/hero.mp4", "", &[("Range", "bytes=0-3")]);
+
+        assert_eq!(response.status, 200);
+        assert!(!response.mentions_header("content-range"));
+        assert_eq!(response.body, "");
+    }
+
+    fn parsed_range(header: &str, len: u64) -> Option<(u64, u64)> {
+        ByteRange::parse(header, len).map(|range| (range.start(), range.last()))
+    }
+
+    #[test]
+    fn byte_range_spec_a_bounded_range_is_parsed() {
+        assert_eq!(parsed_range("bytes=0-3", 16), Some((0, 3)));
+        assert_eq!(parsed_range("bytes=4-15", 16), Some((4, 15)));
+    }
+
+    #[test]
+    fn byte_range_spec_an_open_ended_range_extends_to_the_last_byte() {
+        assert_eq!(parsed_range("bytes=10-", 16), Some((10, 15)));
+    }
+
+    #[test]
+    fn byte_range_spec_a_suffix_range_counts_back_from_the_end() {
+        assert_eq!(parsed_range("bytes=-4", 16), Some((12, 15)));
+    }
+
+    #[test]
+    fn byte_range_spec_a_suffix_longer_than_the_resource_clamps_to_the_whole_body() {
+        assert_eq!(parsed_range("bytes=-99", 16), Some((0, 15)));
+    }
+
+    #[test]
+    fn byte_range_spec_whitespace_around_the_spec_is_tolerated() {
+        assert_eq!(parsed_range("bytes= 0-3 ", 16), Some((0, 3)));
+    }
+
+    #[test]
+    fn byte_range_spec_the_unit_is_matched_case_insensitively() {
+        assert_eq!(parsed_range("BYTES=0-3", 16), Some((0, 3)));
+    }
+
+    #[test]
+    fn byte_range_adversarial_an_out_of_bounds_end_is_rejected() {
+        assert_eq!(parsed_range("bytes=0-99", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_a_start_past_the_end_is_rejected() {
+        assert_eq!(parsed_range("bytes=16-", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_an_inverted_range_is_rejected() {
+        assert_eq!(parsed_range("bytes=10-2", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_a_non_bytes_unit_is_rejected() {
+        assert_eq!(parsed_range("items=0-3", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_a_multi_range_request_is_rejected() {
+        assert_eq!(parsed_range("bytes=0-3,8-11", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_an_empty_resource_is_rejected() {
+        assert_eq!(parsed_range("bytes=0-3", 0), None);
+        assert_eq!(parsed_range("bytes=-4", 0), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_a_zero_length_suffix_is_rejected() {
+        assert_eq!(parsed_range("bytes=-0", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_garbage_is_rejected() {
+        assert_eq!(parsed_range("bytes=abc-def", 16), None);
+        assert_eq!(parsed_range("bytes=", 16), None);
+        assert_eq!(parsed_range("bytes=-", 16), None);
+        assert_eq!(parsed_range("nonsense", 16), None);
+        assert_eq!(parsed_range("bytes=1-2-3", 16), None);
+    }
+
+    #[test]
+    fn byte_range_adversarial_an_overflowing_offset_is_rejected_not_wrapped() {
+        assert_eq!(parsed_range("bytes=99999999999999999999-", 16), None);
+    }
+
+    #[test]
+    fn byte_range_length_counts_both_endpoints() {
+        let range = ByteRange::parse("bytes=4-7", 16).unwrap();
+        assert_eq!(range.start(), 4);
+        assert_eq!(range.last(), 7);
+        assert_eq!(range.len(), 4);
+    }
+
+    #[test]
+    fn maps_media_content_types() {
+        assert_eq!(content_type(Path::new("assets/hero.mp4")), "video/mp4");
+        assert_eq!(content_type(Path::new("assets/hero.m4v")), "video/mp4");
+        assert_eq!(content_type(Path::new("assets/hero.webm")), "video/webm");
+        assert_eq!(content_type(Path::new("assets/hero.ogv")), "video/ogg");
+        assert_eq!(
+            content_type(Path::new("assets/hero.mov")),
+            "video/quicktime"
+        );
+        assert_eq!(content_type(Path::new("assets/take.mp3")), "audio/mpeg");
+        assert_eq!(content_type(Path::new("assets/take.wav")), "audio/wav");
+        assert_eq!(content_type(Path::new("assets/take.ogg")), "audio/ogg");
+        assert_eq!(content_type(Path::new("assets/photo.avif")), "image/avif");
     }
 
     #[test]
@@ -5214,7 +5583,21 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
     #[derive(Debug)]
     struct TestHttpResponse {
         status: u16,
+        headers: String,
         body: String,
+    }
+
+    impl TestHttpResponse {
+        fn has_header(&self, name: &str, value: &str) -> bool {
+            let needle = format!("{name}: {value}").to_lowercase();
+            self.headers.to_lowercase().contains(&needle)
+        }
+
+        fn mentions_header(&self, name: &str) -> bool {
+            self.headers
+                .to_lowercase()
+                .contains(&format!("{}: ", name.to_lowercase()))
+        }
     }
 
     fn deck_write_server(writer: impl DeckWriter + 'static) -> PresentServer {
@@ -5248,15 +5631,29 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
         body: &str,
         content_type: Option<&str>,
     ) -> TestHttpResponse {
+        let extra: Vec<(&str, &str)> = content_type
+            .map(|content_type| vec![("Content-Type", content_type)])
+            .unwrap_or_default();
+        http_request_with_headers(server, method, path, body, &extra)
+    }
+
+    fn http_request_with_headers(
+        server: &PresentServer,
+        method: &str,
+        path: &str,
+        body: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> TestHttpResponse {
         let addr = server.addr();
         let server_for_request = server.clone();
         let handle = thread::spawn(move || server_for_request.handle_one());
         let mut stream = TcpStream::connect(addr).unwrap();
-        let content_type_header = content_type
-            .map(|content_type| format!("Content-Type: {content_type}\r\n"))
-            .unwrap_or_default();
+        let extra_headers_block: String = extra_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{content_type_header}Connection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{extra_headers_block}Connection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(request.as_bytes()).unwrap();
@@ -5306,6 +5703,7 @@ warning: rejected rehearsal snapshot: rehearsal timeline position 1001 exceeds e
             .unwrap();
         TestHttpResponse {
             status,
+            headers: head.to_owned(),
             body: body.to_owned(),
         }
     }
