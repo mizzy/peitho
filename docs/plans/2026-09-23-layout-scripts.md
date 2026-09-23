@@ -372,6 +372,24 @@ the backlog, dispatch the event with the section as `root`. No script
 rehydration here — these documents are parsed normally, so their scripts already
 ran.
 
+*As implemented (Issue #635):*
+- One implementation again: both documents embed the task-6 `viewer.js` bundle,
+  each copy inside its own IIFE (about 8 KB twice, in documents that never leave
+  the machine). The one in `<head>` creates the backlog before any slide is
+  parsed, because a slide's classic inline script runs as the parser reaches it.
+  The one after the last slide, before `pdf_flatten.js` / `lint_measure.js`,
+  announces.
+- Rust is the source of each slide's key and index, as the manifest is for the
+  dist viewer: it embeds a script-safe JSON list (`<` escaped as `<`), and
+  `announceParsedSlides` (TypeScript, so vitest executes it) finds each section
+  by `data-slide-key`, not by DOM position. A structural selector plus position
+  would silently skip a slide a layout script re-parents and shift every later
+  index.
+- It resolves every slide before announcing any. A key that matches zero or
+  several sections announces nothing, and the failure is recorded where PDF
+  export and lint already read the page, so the command fails with the message
+  instead of shipping slides whose scripts never got their root.
+
 **Verification.**
 ```sh
 cargo test -p peitho-core render_pdf_document
@@ -447,7 +465,16 @@ guide must also cover what tasks 1–4 established:
   parsed document;
 - external SVG scripts run in load order, not document order;
 - `window.__peithoShadowRoots` must stay an array; replacing it with a shim is an
-  error, not a supported pattern.
+  error, not a supported pattern;
+- in `export pdf` and `lint`, only drawing that finishes synchronously in the
+  event or backlog handler, or before the window `load` event, is guaranteed to
+  be in the output: PDF waits for fonts and `load` and then flattens and prints,
+  and lint measures after `load` under virtual time, so work after a `fetch` or
+  an `await` races the print or the measurement (task 7 review);
+- a layout script must not duplicate or remove its own slide section (moving it is
+  fine — slides are found by key):
+  PDF export and lint fail with the offending key when a slide cannot be found
+  exactly once.
 
 Remember: the guide is Zola, and a line starting with four backticks swallows
 everything after it (see `zola-guide-fence-hazard`).

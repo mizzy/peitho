@@ -1,6 +1,6 @@
 // jsdom never executes <script> because vitest does not opt into runScripts: "dangerously";
-// the tests are structural only; real execution and order are covered by the real-Chrome
-// checklist in docs/plans/2026-09-23-layout-scripts.md.
+// script rehydration is tested structurally, while plain DOM helpers execute directly in tests.
+// Real script execution and order are covered by the Chrome-backed integration tests.
 // The distribution viewer consumes these helpers through the IIFE bundle built from viewer.ts.
 
 const CLASSIC_JAVASCRIPT_TYPES = new Set(["text/javascript", "application/javascript"]);
@@ -57,6 +57,32 @@ export function announceShadowMounted(
       composed: true
     })
   );
+}
+
+export function announceParsedSlides(
+  doc: Document,
+  win: Window,
+  slides: ReadonlyArray<{ key: string; index: number }>
+): void {
+  const sections = Array.from(doc.querySelectorAll<HTMLElement>(".peitho-slide"));
+  const resolved = slides.map((slide) => ({
+    slide,
+    matches: sections.filter((section) => section.dataset.slideKey === slide.key)
+  }));
+  const failures = resolved.filter(({ matches }) => matches.length !== 1);
+
+  if (failures.length > 0) {
+    const summary = failures
+      .map(({ slide, matches }) => `${JSON.stringify(slide.key)} matched ${matches.length}`)
+      .join(", ");
+    throw new Error(`Unable to announce parsed slides: ${summary}`);
+  }
+
+  for (const { slide, matches } of resolved) {
+    const section = matches[0]!;
+    const detail = { root: section, key: slide.key, index: slide.index };
+    announceShadowMounted(section, detail, win);
+  }
 }
 
 function isHtmlScriptElement(

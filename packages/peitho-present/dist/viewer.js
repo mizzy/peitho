@@ -21,6 +21,7 @@ var PeithoViewer = (() => {
   // src/viewer.ts
   var viewer_exports = {};
   __export(viewer_exports, {
+    announceParsedSlides: () => announceParsedSlides,
     announceShadowMounted: () => announceShadowMounted,
     dropDisconnectedShadowMounted: () => dropDisconnectedShadowMounted,
     executeInlineScripts: () => executeInlineScripts,
@@ -65,6 +66,23 @@ var PeithoViewer = (() => {
         composed: true
       })
     );
+  }
+  function announceParsedSlides(doc, win, slides) {
+    const sections = Array.from(doc.querySelectorAll(".peitho-slide"));
+    const resolved = slides.map((slide) => ({
+      slide,
+      matches: sections.filter((section) => section.dataset.slideKey === slide.key)
+    }));
+    const failures = resolved.filter(({ matches }) => matches.length !== 1);
+    if (failures.length > 0) {
+      const summary = failures.map(({ slide, matches }) => `${JSON.stringify(slide.key)} matched ${matches.length}`).join(", ");
+      throw new Error(`Unable to announce parsed slides: ${summary}`);
+    }
+    for (const { slide, matches } of resolved) {
+      const section = matches[0];
+      const detail = { root: section, key: slide.key, index: slide.index };
+      announceShadowMounted(section, detail, win);
+    }
   }
   function isHtmlScriptElement(script) {
     return script.namespaceURI === HTML_NAMESPACE && script.localName === "script";

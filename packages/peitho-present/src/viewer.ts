@@ -1,4 +1,5 @@
 export {
+  announceParsedSlides,
   announceShadowMounted,
   dropDisconnectedShadowMounted,
   executeInlineScripts,

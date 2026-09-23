@@ -2188,11 +2188,65 @@ __PEITHO_DISTRIBUTION_VIEWER_JS__
         .replace("__PEITHO_DISTRIBUTION_VIEWER_JS__", DISTRIBUTION_VIEWER_JS)
 }
 
+fn embedded_distribution_viewer_script(body: &str) -> String {
+    format!(
+        r#"  <script>
+(() => {{
+{DISTRIBUTION_VIEWER_JS}{body}
+}})();
+  </script>
+"#
+    )
+}
+
+fn shadow_mounted_backlog_script() -> String {
+    embedded_distribution_viewer_script("    PeithoViewer.shadowMountedBacklog(window);\n")
+}
+
+#[derive(serde::Serialize)]
+struct ShadowMountedSlide<'a> {
+    key: &'a str,
+    index: usize,
+}
+
+fn shadow_mounted_announce_script(slides: &[RenderedSlide]) -> String {
+    shadow_mounted_announce_script_from_entries(
+        slides
+            .iter()
+            .map(|slide| (slide.key().as_str(), slide.index())),
+    )
+}
+
+fn shadow_mounted_announce_script_from_entries<'a>(
+    slides: impl IntoIterator<Item = (&'a str, usize)>,
+) -> String {
+    let slides = slides
+        .into_iter()
+        .map(|(key, index)| ShadowMountedSlide { key, index })
+        .collect::<Vec<_>>();
+    let slides_json = serde_json::to_string(&slides)
+        .expect("slide keys and indices serialize as JSON")
+        .replace('<', "\\u003c");
+    let body = format!(
+        r#"    try {{
+      PeithoViewer.announceParsedSlides(document, window, {slides_json});
+    }} catch (error) {{
+      const message = error instanceof Error ? error.message : String(error);
+      document.documentElement.setAttribute("data-peitho-shadow-mounted-error", message);
+      throw error;
+    }}
+"#
+    );
+    embedded_distribution_viewer_script(&body)
+}
+
 pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
     let settings = deck.settings();
     let aspect_ratio = settings.aspect_ratio();
     let resolution = settings.resolution();
     let scale = format_pdf_scale(resolution.width(), aspect_ratio.width());
+    let backlog_script = shadow_mounted_backlog_script();
+    let announce_script = shadow_mounted_announce_script(deck.slides());
     let mut slides = String::new();
     for slide in deck.slides() {
         slides.push_str(r#"  <div class="peitho-slide-wrap">"#);
@@ -2216,9 +2270,10 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
     .peitho-slide-wrap:last-child {{ page-break-after: auto; break-after: auto; }}
     .peitho-slide {{ transform: scale({scale}); transform-origin: top left; }}
   </style>
+{backlog_script}
 </head>
 <body>
-{slides}  <script>
+{slides}{announce_script}  <script>
 {pdf_flatten_js}
   </script>
 </body>
@@ -2236,6 +2291,8 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
 pub fn render_lint_document(deck: &Deck<Rendered>) -> String {
     let settings = deck.settings();
     let aspect_ratio = settings.aspect_ratio();
+    let backlog_script = shadow_mounted_backlog_script();
+    let announce_script = shadow_mounted_announce_script(deck.slides());
     let mut slides = String::new();
     for slide in deck.slides() {
         slides.push_str(slide.html());
@@ -2254,9 +2311,10 @@ pub fn render_lint_document(deck: &Deck<Rendered>) -> String {
     html, body {{ margin: 0; padding: 0; }}
     .peitho-slide {{ transform: scale(1); }}
   </style>
+{backlog_script}
 </head>
 <body>
-{slides}  <script>
+{slides}{announce_script}  <script>
 {lint_measure_js}
   </script>
 </body>
@@ -2931,6 +2989,70 @@ mod tests {
         let start = html.find("<pre").expect("rendered pre block");
         let end = html[start..].find("</pre>").expect("closed pre block") + start + "</pre>".len();
         &html[start..end]
+    }
+
+    fn embedded_script_body<'a>(html: &'a str, needle: &str) -> &'a str {
+        let needle_index = html.find(needle).expect("embedded script content");
+        let body_start = html[..needle_index]
+            .rfind("<script>\n")
+            .expect("opening script tag")
+            + "<script>\n".len();
+        let body_end = needle_index
+            + html[needle_index..]
+                .find("\n  </script>")
+                .expect("closing script tag");
+        &html[body_start..body_end]
+    }
+
+    fn assert_embedded_viewer_bundles_are_iife_scoped(html: &str) {
+        assert_eq!(html.matches(DISTRIBUTION_VIEWER_JS).count(), 2);
+
+        let mut rest = html;
+        for _ in 0..2 {
+            let bundle_index = rest
+                .find(DISTRIBUTION_VIEWER_JS)
+                .expect("embedded viewer bundle");
+            let body_start = rest[..bundle_index]
+                .rfind("<script>\n")
+                .expect("viewer bundle opening script tag")
+                + "<script>\n".len();
+            let body_end = bundle_index
+                + rest[bundle_index..]
+                    .find("\n  </script>")
+                    .expect("viewer bundle closing script tag");
+            let body = &rest[body_start..body_end];
+            let scoped_body = body
+                .strip_prefix("(() => {\n")
+                .and_then(|body| body.strip_suffix("\n})();"))
+                .expect("viewer bundle is scoped by one outer IIFE");
+
+            assert!(scoped_body.contains(DISTRIBUTION_VIEWER_JS));
+            assert_eq!(scoped_body.matches("var PeithoViewer =").count(), 1);
+
+            rest = &rest[bundle_index + DISTRIBUTION_VIEWER_JS.len()..];
+        }
+
+        assert!(!html.contains("<script>\n\"use strict\";\nvar PeithoViewer ="));
+    }
+
+    #[test]
+    fn shadow_mounted_announce_script_embeds_script_safe_round_trippable_json() {
+        let hostile_key = "quoted\"</script><!--";
+        let script = shadow_mounted_announce_script_from_entries([(hostile_key, 7)]);
+        let body = embedded_script_body(&script, "PeithoViewer.announceParsedSlides(");
+        let json_prefix = "PeithoViewer.announceParsedSlides(document, window, ";
+        let json_start = body.find(json_prefix).unwrap() + json_prefix.len();
+        let json_end = json_start + body[json_start..].find(");").unwrap();
+        let slides_json = &body[json_start..json_end];
+
+        assert!(!body.to_ascii_lowercase().contains("</script"));
+        assert!(!slides_json.contains('<'));
+        assert!(slides_json.contains(r#"\u003c/script>"#));
+        assert!(slides_json.contains(r#"\""#));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(slides_json).unwrap(),
+            serde_json::json!([{ "key": hostile_key, "index": 7 }])
+        );
     }
 
     fn opening_tag<'a>(html: &'a str, prefix: &str) -> &'a str {
@@ -6297,10 +6419,50 @@ Paragraph after heading.
         let html = render_pdf_document(&rendered);
 
         let slide_index = html.find(r#"data-slide-key="intro""#).unwrap();
-        let script_index = html.find("<script>").unwrap();
+        let script_index = html.find(PDF_FLATTEN_JS).unwrap();
         assert!(script_index > slide_index);
         assert!(html.contains("flattenGradients"));
         assert!(html.contains("flattenBoxShadows"));
+    }
+
+    #[test]
+    fn render_pdf_document_backlogs_before_slides_and_announces_before_flattening() {
+        let rendered = render_checked_deck("# Intro\n\n---\n# Details");
+
+        let html = render_pdf_document(&rendered);
+        let backlog_index = html
+            .find("PeithoViewer.shadowMountedBacklog(window);")
+            .unwrap();
+        let head_end_index = html.find("</head>").unwrap();
+        let first_slide_index = html.find(r#"data-slide-key="intro""#).unwrap();
+        let last_slide_index = html.rfind(r#"data-slide-key="details""#).unwrap();
+        let announce_index = html.find("PeithoViewer.announceParsedSlides(").unwrap();
+        let flatten_index = html.find(PDF_FLATTEN_JS).unwrap();
+        let announce_script = embedded_script_body(&html, "PeithoViewer.announceParsedSlides(");
+        let announce_body = announce_script
+            .split_once(DISTRIBUTION_VIEWER_JS)
+            .unwrap()
+            .1;
+
+        assert!(backlog_index < head_end_index);
+        assert!(head_end_index < first_slide_index);
+        assert!(last_slide_index < announce_index);
+        assert!(announce_index < flatten_index);
+        assert!(
+            announce_script.contains(r#"[{"key":"intro","index":0},{"key":"details","index":1}]"#)
+        );
+        assert!(announce_body.contains("PeithoViewer.announceParsedSlides(document, window,"));
+        assert!(announce_body.contains("data-peitho-shadow-mounted-error"));
+        assert!(announce_body.contains("throw error;"));
+        assert!(!announce_body.contains("PeithoViewer.announceShadowMounted("));
+        assert!(!announce_body.contains("for (const { key, index } of slides)"));
+        assert!(!announce_script.contains("> .peitho-slide"));
+        assert!(!html.contains("PeithoViewer.executeInlineScripts("));
+        assert_eq!(
+            embedded_script_body(&html, "function flattenGradients"),
+            PDF_FLATTEN_JS
+        );
+        assert_embedded_viewer_bundles_are_iife_scoped(&html);
     }
 
     #[test]
@@ -6425,7 +6587,7 @@ Paragraph after heading.
     }
 
     #[test]
-    fn lint_document_inlines_slides_in_order_and_embeds_measurement_script_only() {
+    fn lint_document_inlines_slides_in_order_and_embeds_measurement_script() {
         let rendered = render_checked_deck("# Intro\n\n---\n# Details");
 
         let html = render_lint_document(&rendered);
@@ -6444,6 +6606,42 @@ Paragraph after heading.
     }
 
     #[test]
+    fn render_lint_document_backlogs_before_slides_and_announces_before_measurement() {
+        let rendered = render_checked_deck("# Intro\n\n---\n# Details");
+
+        let html = render_lint_document(&rendered);
+        let backlog_index = html
+            .find("PeithoViewer.shadowMountedBacklog(window);")
+            .unwrap();
+        let head_end_index = html.find("</head>").unwrap();
+        let first_slide_index = html.find(r#"data-slide-key="intro""#).unwrap();
+        let last_slide_index = html.rfind(r#"data-slide-key="details""#).unwrap();
+        let announce_index = html.find("PeithoViewer.announceParsedSlides(").unwrap();
+        let measure_index = html.find(LINT_MEASURE_JS).unwrap();
+        let announce_script = embedded_script_body(&html, "PeithoViewer.announceParsedSlides(");
+        let announce_body = announce_script
+            .split_once(DISTRIBUTION_VIEWER_JS)
+            .unwrap()
+            .1;
+
+        assert!(backlog_index < head_end_index);
+        assert!(head_end_index < first_slide_index);
+        assert!(last_slide_index < announce_index);
+        assert!(announce_index < measure_index);
+        assert!(
+            announce_script.contains(r#"[{"key":"intro","index":0},{"key":"details","index":1}]"#)
+        );
+        assert!(announce_body.contains("PeithoViewer.announceParsedSlides(document, window,"));
+        assert!(announce_body.contains("data-peitho-shadow-mounted-error"));
+        assert!(announce_body.contains("throw error;"));
+        assert!(!announce_body.contains("PeithoViewer.announceShadowMounted("));
+        assert!(!announce_body.contains("for (const { key, index } of slides)"));
+        assert!(!announce_script.contains("> .peitho-slide"));
+        assert!(!html.contains("PeithoViewer.executeInlineScripts("));
+        assert_embedded_viewer_bundles_are_iife_scoped(&html);
+    }
+
+    #[test]
     fn lint_measure_script_cannot_close_script_tag_or_decode_images() {
         let script = LINT_MEASURE_JS.to_ascii_lowercase();
 
@@ -6457,6 +6655,8 @@ Paragraph after heading.
         assert!(LINT_MEASURE_JS.contains("CHUNK_SIZE"));
         assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "CHUNK""#));
         assert!(LINT_MEASURE_JS.contains(r#""PEITHO_LINT_" + "DONE""#));
+        assert!(LINT_MEASURE_JS.contains("shadowMountedError:"));
+        assert!(LINT_MEASURE_JS.contains("data-peitho-shadow-mounted-error"));
         assert!(!LINT_MEASURE_JS.contains("document.title"));
     }
 

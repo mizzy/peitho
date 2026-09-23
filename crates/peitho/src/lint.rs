@@ -54,6 +54,14 @@ struct SlideMeasurement {
     slot_overflows: Vec<SlotOverflowMeasurement>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LintMeasurementPayload {
+    #[serde(default)]
+    shadow_mounted_error: Option<String>,
+    slides: Vec<SlideMeasurement>,
+}
+
 /// Text whose computed `--peitho-lint-min-font-size` replaces the 24pt floor.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 struct FontSizeWaiverMeasurement {
@@ -269,12 +277,22 @@ fn parse_lint_measurements(
             "lint measurement payload is not valid base64\ncaused by: {err}"
         )
     })?;
-    let measurements: Vec<SlideMeasurement> = serde_json::from_slice(&json).map_err(|err| {
+    let payload: LintMeasurementPayload = serde_json::from_slice(&json).map_err(|err| {
         miette::miette!(
             help = LINT_PARSE_HELP,
             "lint measurement payload is not valid JSON\ncaused by: {err}"
         )
     })?;
+    let LintMeasurementPayload {
+        shadow_mounted_error,
+        slides: measurements,
+    } = payload;
+    if let Some(message) = shadow_mounted_error {
+        return Err(miette::miette!(
+            help = LINT_PARSE_HELP,
+            "lint slide initialization failed: {message}"
+        ));
+    }
     if measurements.len() != expected_slide_count {
         return Err(miette::miette!(
             help = format!("no lint result was accepted; {LINT_PARSE_HELP}"),
@@ -877,7 +895,7 @@ mod tests {
     #[test]
     fn lint_measurement_chunks_reassemble_base64_json_and_validate_slide_count() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.4,"contentHeight":762.49,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":18.0,"minFontSample":"Tiny text"}]"#,
+            r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280.4,"contentHeight":762.49,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":18.0,"minFontSample":"Tiny text"}]}"#,
         );
         let stderr = chunked_console_log(&payload, 24);
 
@@ -908,7 +926,7 @@ mod tests {
     #[test]
     fn lint_measurement_payload_defaults_missing_optional_fields_to_none() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0}]"#,
+            r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0}]}"#,
         );
 
         let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
@@ -919,9 +937,27 @@ mod tests {
     }
 
     #[test]
+    fn lint_measurement_payload_surfaces_the_recorded_shadow_mounted_error() {
+        let payload = encoded(
+            r#"{"shadowMountedError":"Unable to announce parsed slides: \"intro\" matched 2","slides":[]}"#,
+        );
+
+        let message = assert_parse_error_mentions(
+            &console_chunk(1, 1, &payload),
+            1,
+            r#"Unable to announce parsed slides: "intro" matched 2"#,
+        );
+
+        assert!(
+            message.contains("lint slide initialization failed"),
+            "actual error: {message}"
+        );
+    }
+
+    #[test]
     fn lint_measurement_payload_deserializes_slot_overflow_fields() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"slotOverflows":[{"slotOverflowAxis":"horizontal","slotOverflowPx":7,"slotOverflowValue":"scroll","slotName":"body"},{"slotOverflowAxis":"vertical","slotOverflowPx":14,"slotName":"code"},{"slotOverflowAxis":"horizontal","slotOverflowPx":42,"slotOverflowValue":"hidden","slotOverflowTruncated":true,"slotName":"title"}]}]"#,
+            r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"slotOverflows":[{"slotOverflowAxis":"horizontal","slotOverflowPx":7,"slotOverflowValue":"scroll","slotName":"body"},{"slotOverflowAxis":"vertical","slotOverflowPx":14,"slotName":"code"},{"slotOverflowAxis":"horizontal","slotOverflowPx":42,"slotOverflowValue":"hidden","slotOverflowTruncated":true,"slotName":"title"}]}]}"#,
         );
 
         let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
@@ -951,7 +987,7 @@ mod tests {
     #[test]
     fn lint_measurement_payload_accepts_utf8_min_font_sample() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":24.0,"minFontSample":"日本語の小さい文字🙂"}]"#,
+            r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"minFontSizePx":24.0,"minFontSample":"日本語の小さい文字🙂"}]}"#,
         );
 
         let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();
@@ -1035,7 +1071,7 @@ mod tests {
                 1,
                 1,
                 &encoded(
-                    r#"[{"slide":1,"contentWidth":1280,"contentHeight":762,"boxWidth":1280,"boxHeight":720,"minFontSizePx":null,"minFontSample":null}]"#,
+                    r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280,"contentHeight":762,"boxWidth":1280,"boxHeight":720,"minFontSizePx":null,"minFontSample":null}]}"#,
                 ),
             ),
             2,
@@ -1091,7 +1127,7 @@ mod tests {
     #[test]
     fn lint_measurement_payload_deserializes_font_size_waiver_fields() {
         let payload = encoded(
-            r#"[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"fontSizeWaiver":{"fontSizePx":18.0,"sample":"Source","thresholdPx":16.0},"fontSizeWaiverError":"none"}]"#,
+            r#"{"shadowMountedError":null,"slides":[{"slide":1,"contentWidth":1280.0,"contentHeight":720.0,"boxWidth":1280.0,"boxHeight":720.0,"fontSizeWaiver":{"fontSizePx":18.0,"sample":"Source","thresholdPx":16.0},"fontSizeWaiverError":"none"}]}"#,
         );
 
         let measurements = parse_lint_measurements(&console_chunk(1, 1, &payload), 1).unwrap();

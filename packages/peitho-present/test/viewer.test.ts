@@ -3,6 +3,7 @@ import * as viewer from "../src/viewer";
 
 it("exports exactly the distribution viewer runtime surface", () => {
   expect(Object.keys(viewer).sort()).toEqual([
+    "announceParsedSlides",
     "announceShadowMounted",
     "dropDisconnectedShadowMounted",
     "executeInlineScripts",
