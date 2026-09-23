@@ -24,8 +24,9 @@ moving part lives in the layout that owns it.
   hides it, and draws an SVG bar chart. An `IntersectionObserver` replays the
   grow-in each time the slide is shown, because peitho hides slides that are
   not current.
-- **Playground:** the `playground` layout copies its code block into a
-  `<textarea>` and runs it with a captured `console.log` when you press Run.
+- **Playground:** the `playground` layout makes its syntax-highlighted code
+  block editable in place and runs it with a captured `console.log` when you
+  press Run.
   Typing in the editor never advances the deck.
 
 ## What to look at

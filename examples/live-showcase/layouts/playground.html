@@ -1,8 +1,7 @@
 <section class="playground">
   <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
-  <div class="source"><slot name="code" accepts="code" arity="1"></slot></div>
   <div class="panes">
-    <textarea class="editor" spellcheck="false" wrap="off" aria-label="Code"></textarea>
+    <div class="editor" spellcheck="false" aria-label="Code"><slot name="code" accepts="code" arity="1"></slot></div>
     <div class="side">
       <button class="run" type="button">Run ▶</button>
       <pre class="output" aria-live="polite"></pre>
@@ -13,17 +12,15 @@
       window.showcasePlaygroundInstalled = true;
       const mount = ({ root }) => {
         const editor = root.querySelector(".playground .editor");
-        const source = root.querySelector(".playground .source");
-        if (!editor || !source || editor.dataset.mounted) return;
+        if (!editor || editor.dataset.mounted) return;
         editor.dataset.mounted = "true";
+        editor.contentEditable = "plaintext-only";
         const output = root.querySelector(".playground .output");
-        editor.value = source.textContent.trim();
-        source.hidden = true;
         root.querySelector(".playground .run").addEventListener("click", () => {
           const lines = [];
           const log = (...args) => lines.push(args.map(String).join(" "));
           try {
-            new Function("console", editor.value)({ log });
+            new Function("console", editor.textContent)({ log });
           } catch (error) {
             lines.push(`${error.name}: ${error.message}`);
           }
