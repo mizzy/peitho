@@ -2,11 +2,27 @@
 // these tests are structural only, with parser-blocking progress simulated by dispatching events.
 // The real-Chrome checklist is in docs/plans/2026-09-23-layout-scripts.md.
 import { expect, it } from "vitest";
-import { executeInlineScripts } from "../src/scripts";
+import { executeInlineScripts, shadowMountedBacklog } from "../src/scripts";
 
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
+
+it("rejects a pre-existing non-array shadow-root backlog without overwriting it", () => {
+  type WindowWithShadowMountedBacklog = Window & { __peithoShadowRoots?: unknown };
+  const backlogWindow = window as WindowWithShadowMountedBacklog;
+  const existingValue = { ownedBy: "layout" };
+  backlogWindow.__peithoShadowRoots = existingValue;
+
+  try {
+    expect(() => shadowMountedBacklog(window)).toThrowError(
+      new TypeError("window.__peithoShadowRoots must be an array")
+    );
+    expect(backlogWindow.__peithoShadowRoots).toBe(existingValue);
+  } finally {
+    delete backlogWindow.__peithoShadowRoots;
+  }
+});
 
 it("replaces a classic inline script in place with all attributes and a scoped body", () => {
   const root = document.createElement("div");

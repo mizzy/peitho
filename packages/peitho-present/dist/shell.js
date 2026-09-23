@@ -565,6 +565,30 @@ async function raceReadyWithTimeout(fonts, win, ms) {
 // src/scripts.ts
 var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["text/javascript", "application/javascript"]);
 var HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+var SHADOW_MOUNTED_EVENT = "peitho:shadow-mounted";
+function shadowMountedBacklog(win) {
+  const backlogWindow = win;
+  if (!("__peithoShadowRoots" in backlogWindow)) {
+    const backlog2 = [];
+    backlogWindow.__peithoShadowRoots = backlog2;
+    return backlog2;
+  }
+  const backlog = backlogWindow.__peithoShadowRoots;
+  if (!Array.isArray(backlog)) {
+    throw new TypeError("window.__peithoShadowRoots must be an array");
+  }
+  return backlog;
+}
+function announceShadowMounted(target, detail, win) {
+  shadowMountedBacklog(win).push(detail);
+  target.dispatchEvent(
+    new CustomEvent(SHADOW_MOUNTED_EVENT, {
+      detail,
+      bubbles: true,
+      composed: true
+    })
+  );
+}
 function isHtmlScriptElement(script) {
   return script.namespaceURI === HTML_NAMESPACE && script.localName === "script";
 }
@@ -1148,10 +1172,11 @@ var PresentShellController = class {
         log: this.log,
         text: deckText(sources.map((source) => source.html))
       });
-      const pending = sources.map(({ slide, html }) => ({
-        meta: slide,
-        host: this.createSlideHost(slide, html, css, dimensions)
-      }));
+      shadowMountedBacklog(this.win);
+      const pending = sources.map(({ slide, html }) => {
+        const { host, shadow } = this.createSlideHost(slide, html, css, dimensions);
+        return { meta: slide, host, shadow };
+      });
       this.manifest = manifest;
       for (const view of pending) {
         this.root.appendChild(view.host);
@@ -1159,6 +1184,17 @@ var PresentShellController = class {
       }
       this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
+      for (const view of pending) {
+        announceShadowMounted(
+          view.host,
+          {
+            root: view.shadow,
+            key: view.meta.key,
+            index: view.meta.index
+          },
+          this.win
+        );
+      }
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -1268,7 +1304,7 @@ var PresentShellController = class {
     const fragment = template.content.cloneNode(true);
     executeInlineScripts(fragment, this.doc);
     shadow.appendChild(fragment);
-    return host;
+    return { host, shadow };
   }
   mountPointerOverlay() {
     if (this.viewport != null) return;
@@ -3556,6 +3592,7 @@ async function mountPresenterView(options) {
 }
 export {
   PRESENTER_URL,
+  SHADOW_MOUNTED_EVENT,
   calculateCanvasFit,
   fallbackFeatures,
   formatMinuteSeconds,

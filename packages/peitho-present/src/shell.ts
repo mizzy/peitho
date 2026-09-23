@@ -3,7 +3,11 @@ import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
-import { executeInlineScripts } from "./scripts";
+import {
+  announceShadowMounted,
+  executeInlineScripts,
+  shadowMountedBacklog
+} from "./scripts";
 import { initialSlideIndex } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 
@@ -304,6 +308,7 @@ const CSS_NAMED_COLORS: Record<string, string> = {
 export type SlideView = {
   meta: ManifestSlide;
   host: HTMLElement;
+  shadow: ShadowRoot;
 };
 
 type ResolvedNavigateTarget = { index: number; step: number };
@@ -641,10 +646,11 @@ class PresentShellController implements PresentShell {
         log: this.log,
         text: deckText(sources.map((source) => source.html))
       });
-      const pending: SlideView[] = sources.map(({ slide, html }) => ({
-        meta: slide,
-        host: this.createSlideHost(slide, html, css, dimensions)
-      }));
+      shadowMountedBacklog(this.win);
+      const pending: SlideView[] = sources.map(({ slide, html }) => {
+        const { host, shadow } = this.createSlideHost(slide, html, css, dimensions);
+        return { meta: slide, host, shadow };
+      });
       this.manifest = manifest;
       for (const view of pending) {
         this.root.appendChild(view.host);
@@ -652,6 +658,17 @@ class PresentShellController implements PresentShell {
       }
       this.show(initialSlideIndex(pending.map((view) => view.meta)) ?? 0, 0);
       this.mountPointerOverlay();
+      for (const view of pending) {
+        announceShadowMounted(
+          view.host,
+          {
+            root: view.shadow,
+            key: view.meta.key,
+            index: view.meta.index
+          },
+          this.win
+        );
+      }
     } catch (error) {
       this.clearCanvasRootProperties();
       this.root.replaceChildren();
@@ -745,7 +762,7 @@ class PresentShellController implements PresentShell {
     html: string,
     css: string,
     dimensions: CanvasDimensions
-  ): HTMLElement {
+  ): { host: HTMLElement; shadow: ShadowRoot } {
     const host = this.doc.createElement("section");
     host.classList.add("peitho-slide");
     host.dataset.slideKey = slide.key;
@@ -778,7 +795,7 @@ class PresentShellController implements PresentShell {
     const fragment = template.content.cloneNode(true) as DocumentFragment;
     executeInlineScripts(fragment, this.doc);
     shadow.appendChild(fragment);
-    return host;
+    return { host, shadow };
   }
 
   private mountPointerOverlay(): void {

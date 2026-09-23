@@ -7,6 +7,48 @@
 const CLASSIC_JAVASCRIPT_TYPES = new Set(["text/javascript", "application/javascript"]);
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 
+export const SHADOW_MOUNTED_EVENT = "peitho:shadow-mounted";
+
+export type ShadowMountedDetail = {
+  root: ShadowRoot | Element;
+  key: string;
+  index: number;
+};
+
+interface WindowWithShadowMountedBacklog {
+  __peithoShadowRoots?: unknown;
+}
+
+export function shadowMountedBacklog(win: Window): ShadowMountedDetail[] {
+  const backlogWindow = win as Window & WindowWithShadowMountedBacklog;
+  if (!("__peithoShadowRoots" in backlogWindow)) {
+    const backlog: ShadowMountedDetail[] = [];
+    backlogWindow.__peithoShadowRoots = backlog;
+    return backlog;
+  }
+
+  const backlog = backlogWindow.__peithoShadowRoots;
+  if (!Array.isArray(backlog)) {
+    throw new TypeError("window.__peithoShadowRoots must be an array");
+  }
+  return backlog as ShadowMountedDetail[];
+}
+
+export function announceShadowMounted(
+  target: EventTarget,
+  detail: ShadowMountedDetail,
+  win: Window
+): void {
+  shadowMountedBacklog(win).push(detail);
+  target.dispatchEvent(
+    new CustomEvent<ShadowMountedDetail>(SHADOW_MOUNTED_EVENT, {
+      detail,
+      bubbles: true,
+      composed: true
+    })
+  );
+}
+
 function isHtmlScriptElement(
   script: HTMLScriptElement | SVGScriptElement
 ): script is HTMLScriptElement {
