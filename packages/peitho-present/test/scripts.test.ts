@@ -1,8 +1,12 @@
 // jsdom never executes <script> because vitest does not opt into runScripts: "dangerously";
-// these tests are structural only: real execution and execution order are not observable here.
+// these tests are structural only, with parser-blocking progress simulated by dispatching events.
 // The real-Chrome checklist is in docs/plans/2026-09-23-layout-scripts.md.
 import { expect, it } from "vitest";
 import { executeInlineScripts } from "../src/scripts";
+
+const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
 
 it("replaces a classic inline script in place with all attributes and a scoped body", () => {
   const root = document.createElement("div");
@@ -27,6 +31,26 @@ it("replaces a classic inline script in place with all attributes and a scoped b
   expect(newScript.hasAttribute("nonce")).toBe(false);
   expect(newScript.outerHTML).not.toContain("nonce");
   expect(newScript.textContent).toBe("(function () {\nlet answer = 42;\n})();");
+});
+
+it("preserves null-namespace colon attributes and continues replacing scripts", () => {
+  const root = document.createElement("div");
+  root.innerHTML =
+    '<script x-on:load="f()" xml:lang="en">let a = 1;</script><script>let b = 2;</script>';
+  const oldScripts = Array.from(root.querySelectorAll("script"));
+
+  executeInlineScripts(root, document);
+
+  const newScripts = Array.from(root.querySelectorAll("script"));
+  expect(newScripts).toHaveLength(2);
+  expect(newScripts[0]).not.toBe(oldScripts[0]);
+  expect(newScripts[1]).not.toBe(oldScripts[1]);
+  expect(newScripts[0].getAttribute("x-on:load")).toBe("f()");
+  expect(newScripts[0].getAttribute("xml:lang")).toBe("en");
+  expect(newScripts.map((script) => script.textContent)).toEqual([
+    "(function () {\nlet a = 1;\n})();",
+    "(function () {\nlet b = 2;\n})();"
+  ]);
 });
 
 it("copies a nonce from the IDL property when the content attribute is hidden", () => {
@@ -110,6 +134,8 @@ it("keeps module, source, and non-javascript script text byte-identical", () => 
   root.append(...oldScripts);
 
   executeInlineScripts(root, document);
+  root.querySelectorAll("script")[1].dispatchEvent(new Event("load"));
+  root.querySelectorAll("script")[2].dispatchEvent(new Event("load"));
 
   const newScripts = Array.from(root.querySelectorAll("script"));
   expect(newScripts).toHaveLength(oldScripts.length);
@@ -119,23 +145,58 @@ it("keeps module, source, and non-javascript script text byte-identical", () => 
   expect(newScripts.map((script) => script.textContent)).toEqual(originalTexts);
 });
 
-it("keeps external SVG script text byte-identical", () => {
+it("re-creates an href SVG script in the SVG namespace with byte-identical text", () => {
   const root = document.createElement("div");
-  root.innerHTML =
-    '<svg><script href="ext.js"></script><script xlink:href="legacy.js"></script></svg>';
-  const oldScripts = Array.from(root.querySelectorAll("svg script"));
+  root.innerHTML = '<svg><script href="ext.js"></script></svg>';
+  const oldScript = root.querySelector("svg script")!;
 
   executeInlineScripts(root, document);
 
-  const newScripts = Array.from(root.querySelectorAll("svg script"));
-  expect(newScripts[0]).not.toBe(oldScripts[0]);
-  expect(newScripts[1]).not.toBe(oldScripts[1]);
-  expect(newScripts.map((script) => script.textContent)).toEqual(["", ""]);
-  expect(newScripts[0].getAttribute("href")).toBe("ext.js");
-  expect(newScripts[1].getAttribute("xlink:href")).toBe("legacy.js");
+  const newScript = root.querySelector("svg script")!;
+  expect(newScript).not.toBe(oldScript);
+  expect(newScript.namespaceURI).toBe(SVG_NAMESPACE);
+  expect(newScript.getAttribute("href")).toBe("ext.js");
+  expect(newScript.textContent).toBe("");
 });
 
-it("clears the force-async flag that createElement sets", () => {
+it("preserves namespaced and null-namespace colon attributes on an SVG script", () => {
+  const root = document.createElement("div");
+  root.innerHTML = '<svg><script xlink:href="ext.js" data-a:b="c"></script></svg>';
+
+  executeInlineScripts(root, document);
+
+  const newScript = root.querySelector("svg script")!;
+  const xlinkHref = newScript.getAttributeNodeNS(XLINK_NAMESPACE, "href");
+  expect(newScript.namespaceURI).toBe(SVG_NAMESPACE);
+  expect(xlinkHref?.namespaceURI).toBe(XLINK_NAMESPACE);
+  expect(xlinkHref?.localName).toBe("href");
+  expect(newScript.getAttributeNS(XLINK_NAMESPACE, "href")).toBe("ext.js");
+  expect(newScript.getAttribute("data-a:b")).toBe("c");
+});
+
+it("re-creates an inline SVG script in the SVG namespace with a scoped body", () => {
+  const root = document.createElement("div");
+  root.innerHTML = "<svg><script>let svgValue = 1;</script></svg>";
+
+  executeInlineScripts(root, document);
+
+  const newScript = root.querySelector("svg script")!;
+  expect(newScript.namespaceURI).toBe(SVG_NAMESPACE);
+  expect(newScript.textContent).toBe("(function () {\nlet svgValue = 1;\n})();");
+});
+
+it("continues to re-create an HTML script as an HTMLScriptElement", () => {
+  const root = document.createElement("div");
+  root.innerHTML = "<script>let htmlValue = 1;</script>";
+
+  executeInlineScripts(root, document);
+
+  const newScript = root.querySelector("script")!;
+  expect(newScript).toBeInstanceOf(HTMLScriptElement);
+  expect(newScript.namespaceURI).toBe(HTML_NAMESPACE);
+});
+
+it("clears the force-async flag that dynamic HTML script creation sets", () => {
   const root = document.createElement("div");
   root.innerHTML =
     '<script src="chart-lib.js"></script><script src="chart-async.js" async></script><script src="chart-defer.js" defer></script>';
@@ -158,10 +219,11 @@ it("clears the force-async flag that createElement sets", () => {
   }
   let replacementIndex = 0;
   const forceAsyncDocument = {
-    createElement: () => replacements[replacementIndex++]
+    createElementNS: () => replacements[replacementIndex++]
   } as unknown as Document;
 
   executeInlineScripts(root, forceAsyncDocument);
+  replacements[0].dispatchEvent(new Event("load"));
 
   const [orderedScript, asyncScript, deferScript] = Array.from(root.querySelectorAll("script"));
   expect(orderedScript.async).toBe(false);
@@ -171,6 +233,109 @@ it("clears the force-async flag that createElement sets", () => {
   expect(deferScript.async).toBe(false);
   expect(deferScript.hasAttribute("async")).toBe(false);
   expect(deferScript.hasAttribute("defer")).toBe(true);
+});
+
+it("waits for a parser-blocking external script to load before re-creating the next script", () => {
+  const root = document.createElement("div");
+  root.innerHTML = '<script src="lib.js"></script><script>use()</script>';
+  const [oldExternal, oldInline] = Array.from(root.querySelectorAll("script"));
+
+  executeInlineScripts(root, document);
+
+  const [newExternal, pendingInline] = Array.from(root.querySelectorAll("script"));
+  expect(newExternal).not.toBe(oldExternal);
+  expect(pendingInline).toBe(oldInline);
+  expect(pendingInline.textContent).toBe("use()");
+
+  newExternal.dispatchEvent(new Event("load"));
+
+  const newInline = root.querySelectorAll("script")[1];
+  expect(newInline).not.toBe(oldInline);
+  expect(newInline.textContent).toBe("(function () {\nuse()\n})();");
+});
+
+it("continues after a parser-blocking external script fails to load", () => {
+  const root = document.createElement("div");
+  root.innerHTML = '<script src="lib.js"></script><script>use()</script>';
+  const [oldExternal, oldInline] = Array.from(root.querySelectorAll("script"));
+
+  executeInlineScripts(root, document);
+
+  const [newExternal, pendingInline] = Array.from(root.querySelectorAll("script"));
+  expect(newExternal).not.toBe(oldExternal);
+  expect(pendingInline).toBe(oldInline);
+
+  newExternal.dispatchEvent(new Event("error"));
+
+  const newInline = root.querySelectorAll("script")[1];
+  expect(newInline).not.toBe(oldInline);
+  expect(newInline.textContent).toBe("(function () {\nuse()\n})();");
+});
+
+it("waits for parser-blocking external scripts one at a time in document order", () => {
+  const root = document.createElement("div");
+  root.innerHTML =
+    '<script src="first.js"></script><script src="second.js"></script><script>use()</script>';
+  const [oldFirst, oldSecond, oldInline] = Array.from(root.querySelectorAll("script"));
+
+  executeInlineScripts(root, document);
+
+  let [newFirst, pendingSecond, pendingInline] = Array.from(root.querySelectorAll("script"));
+  expect(newFirst).not.toBe(oldFirst);
+  expect(pendingSecond).toBe(oldSecond);
+  expect(pendingInline).toBe(oldInline);
+
+  newFirst.dispatchEvent(new Event("load"));
+
+  const scriptsAfterFirstLoad = Array.from(root.querySelectorAll("script"));
+  const newSecond = scriptsAfterFirstLoad[1];
+  newFirst = scriptsAfterFirstLoad[0];
+  pendingInline = scriptsAfterFirstLoad[2];
+  expect(newFirst).not.toBe(oldFirst);
+  expect(newSecond).not.toBe(oldSecond);
+  expect(pendingInline).toBe(oldInline);
+
+  newSecond.dispatchEvent(new Event("load"));
+
+  const newInline = root.querySelectorAll("script")[2];
+  expect(newInline).not.toBe(oldInline);
+  expect(newInline.textContent).toBe("(function () {\nuse()\n})();");
+});
+
+it.each([
+  ["async", '<script src="a.js" async></script>'],
+  ["defer", '<script src="b.js" defer></script>'],
+  ["module", '<script type="module" src="c.js"></script>'],
+  ["non-JavaScript", '<script type="application/json" src="d.json"></script>'],
+  ["SVG", '<svg><script href="e.js"></script></svg>']
+])("does not wait for a non-blocking %s external script", (_kind, externalMarkup) => {
+  const root = document.createElement("div");
+  root.innerHTML = `${externalMarkup}<script>use()</script>`;
+  const [oldExternal, oldInline] = Array.from(root.querySelectorAll("script"));
+
+  executeInlineScripts(root, document);
+
+  const [newExternal, newInline] = Array.from(root.querySelectorAll("script"));
+  expect(newExternal).not.toBe(oldExternal);
+  expect(newInline).not.toBe(oldInline);
+  expect(newInline.textContent).toBe("(function () {\nuse()\n})();");
+});
+
+it("resumes a parser-blocked walk only once when both completion events are dispatched", () => {
+  const root = document.createElement("div");
+  root.innerHTML = '<script src="lib.js"></script><script>use()</script>';
+  const oldInline = root.querySelectorAll("script")[1];
+
+  executeInlineScripts(root, document);
+
+  const newExternal = root.querySelector("script")!;
+  newExternal.dispatchEvent(new Event("load"));
+  const newInline = root.querySelectorAll("script")[1];
+  expect(newInline).not.toBe(oldInline);
+
+  newExternal.dispatchEvent(new Event("error"));
+
+  expect(root.querySelectorAll("script")[1]).toBe(newInline);
 });
 
 it("replaces every script across nested descendants", () => {

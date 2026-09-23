@@ -3,6 +3,7 @@ import type { ManifestSlide } from "../../../bindings/ManifestSlide";
 import { installCanvasScaler, type CanvasViewport } from "./canvas";
 import { installDocumentFontScope } from "./fontscope";
 import { deckText, waitForFontsReady } from "./fontsReady";
+import { executeInlineScripts } from "./scripts";
 import { initialSlideIndex } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 
@@ -768,7 +769,9 @@ class PresentShellController implements PresentShell {
     shadow.appendChild(revealStyle);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
-    shadow.appendChild(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true) as DocumentFragment;
+    executeInlineScripts(fragment, this.doc);
+    shadow.appendChild(fragment);
     return host;
   }
 
