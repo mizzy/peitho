@@ -12,12 +12,66 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
 };
 
+/// The element/attribute pairs that load a subresource, in document order per
+/// element. `<a href>` is deliberately absent: it navigates rather than loading,
+/// and rewriting it would collide with `open_external_links_in_new_tab`.
+const ASSET_ATTRIBUTES: &[(&str, &[&str])] = &[
+    ("img", &["src"]),
+    ("video", &["src", "poster"]),
+    ("audio", &["src"]),
+    ("source", &["src"]),
+    ("track", &["src"]),
+    ("script", &["src"]),
+    ("link", &["href"]),
+    ("object", &["data"]),
+    ("embed", &["src"]),
+    ("iframe", &["src"]),
+];
+
+/// Attributes carrying a candidate list rather than a single URL. Refused with a
+/// named error instead of ignored, so a layout author never gets a silent 404
+/// (pillar ③). Parsing the descriptor grammar is deferred until there is demand;
+/// slides render at a resolution peitho decides, so one high-resolution image is
+/// the simpler answer today.
+const REFUSED_CANDIDATE_LIST_ATTRIBUTES: &[&str] = &["srcset", "imagesrcset"];
+
+/// One deck-relative asset reference written directly in a layout's HTML.
+///
+/// Values are produced only by [`parse_layout`], which is what keeps "what a
+/// layout references" a parser-owned answer rather than something each consumer
+/// re-derives from the HTML string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutAssetRef {
+    element: String,
+    attribute: String,
+    raw: String,
+}
+
+impl LayoutAssetRef {
+    /// Tag name the reference was found on, for error messages.
+    pub fn element(&self) -> &str {
+        &self.element
+    }
+
+    /// Attribute name the reference was found in, for error messages.
+    pub fn attribute(&self) -> &str {
+        &self.attribute
+    }
+
+    /// The attribute value exactly as the layout author wrote it. This is also
+    /// the lookup key used to rewrite the attribute at render time.
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Layout {
     name: String,
     html: String,
     slots: BTreeMap<SlotName, SlotContract>,
     root_classes: BTreeSet<String>,
+    asset_refs: Vec<LayoutAssetRef>,
 }
 
 impl Layout {
@@ -38,6 +92,16 @@ impl Layout {
     /// against these classes.
     pub fn root_classes(&self) -> &BTreeSet<String> {
         &self.root_classes
+    }
+
+    /// Deck-relative asset references written directly in this layout's HTML,
+    /// deduplicated by raw value, in first-occurrence order.
+    ///
+    /// External (`http:`, `https:`, `//`), `data:`, and fragment-only values are
+    /// already filtered out, so every entry is a path to resolve against the
+    /// deck directory.
+    pub fn asset_refs(&self) -> &[LayoutAssetRef] {
+        &self.asset_refs
     }
 
     pub fn slot(&self, name: &str) -> Option<&SlotContract> {
@@ -159,40 +223,87 @@ pub fn describe_layouts(layouts: &Layouts) -> Vec<LayoutSummary> {
 }
 
 pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
+    let name = name.into();
     let slots = Rc::new(RefCell::new(BTreeMap::new()));
     let sink = slots.clone();
     let section_count = Rc::new(RefCell::new(0usize));
     let section_sink = section_count.clone();
     let root_classes = Rc::new(RefCell::new(BTreeSet::new()));
     let root_classes_sink = root_classes.clone();
+    let asset_refs = Rc::new(RefCell::new(Vec::new()));
+    let mut handlers = vec![
+        element!("section", move |el| {
+            *section_sink.borrow_mut() += 1;
+            if let Some(classes) = el.get_attribute("class") {
+                root_classes_sink
+                    .borrow_mut()
+                    .extend(classes.split_whitespace().map(str::to_owned));
+            }
+            Ok(())
+        }),
+        element!("slot", move |el| {
+            let contract = SlotContract::from_element(el).map_err(box_build_error)?;
+            let key = contract.name.clone();
+            let mut slots = sink.borrow_mut();
+            if slots.contains_key(&key) {
+                return Err(box_build_error(BuildError::new(
+                    ErrorKind::Layout,
+                    None,
+                    format!("duplicate slot '{}'", key.as_str()),
+                    "rename one slot so every slot contract has a unique name",
+                )));
+            }
+            slots.insert(key, contract);
+            Ok(())
+        }),
+    ];
+
+    for (tag, attributes) in ASSET_ATTRIBUTES {
+        let sink = asset_refs.clone();
+        let layout_name = name.clone();
+        handlers.push(element!(*tag, move |el| {
+            for attribute in *attributes {
+                let Some(raw) = el.get_attribute(attribute) else {
+                    continue;
+                };
+                if !is_deck_relative_reference(&raw) {
+                    continue;
+                }
+                let mut sink = sink.borrow_mut();
+                if sink
+                    .iter()
+                    .any(|existing: &LayoutAssetRef| existing.raw == raw)
+                {
+                    continue;
+                }
+                sink.push(LayoutAssetRef {
+                    element: (*tag).to_owned(),
+                    attribute: (*attribute).to_owned(),
+                    raw,
+                });
+            }
+            for attribute in REFUSED_CANDIDATE_LIST_ATTRIBUTES {
+                if el.get_attribute(attribute).is_some() {
+                    return Err(box_build_error(BuildError::new(
+                        ErrorKind::Layout,
+                        None,
+                        format!(
+                            "layout '{layout_name}' uses unsupported '{attribute}' on <{tag}>"
+                        ),
+                        format!(
+                            "use a single {} with one high-resolution file; slides render at a fixed resolution, so candidate lists are not resolved",
+                            if *tag == "link" { "href" } else { "src" }
+                        ),
+                    )));
+                }
+            }
+            Ok(())
+        }));
+    }
+
     let mut rewriter = HtmlRewriter::new(
         Settings {
-            element_content_handlers: vec![
-                element!("section", move |el| {
-                    *section_sink.borrow_mut() += 1;
-                    if let Some(classes) = el.get_attribute("class") {
-                        root_classes_sink
-                            .borrow_mut()
-                            .extend(classes.split_whitespace().map(str::to_owned));
-                    }
-                    Ok(())
-                }),
-                element!("slot", move |el| {
-                    let contract = SlotContract::from_element(el).map_err(box_build_error)?;
-                    let key = contract.name.clone();
-                    let mut slots = sink.borrow_mut();
-                    if slots.contains_key(&key) {
-                        return Err(box_build_error(BuildError::new(
-                            ErrorKind::Layout,
-                            None,
-                            format!("duplicate slot '{}'", key.as_str()),
-                            "rename one slot so every slot contract has a unique name",
-                        )));
-                    }
-                    slots.insert(key, contract);
-                    Ok(())
-                }),
-            ],
+            element_content_handlers: handlers,
             ..Settings::default()
         },
         |_chunk: &[u8]| {},
@@ -213,10 +324,11 @@ pub fn parse_layout(name: impl Into<String>, html: &str) -> Result<Layout> {
     }
 
     Ok(Layout {
-        name: name.into(),
+        name,
         html: html.to_owned(),
         slots: Rc::try_unwrap(slots).unwrap().into_inner(),
         root_classes: Rc::try_unwrap(root_classes).unwrap().into_inner(),
+        asset_refs: Rc::try_unwrap(asset_refs).unwrap().into_inner(),
     })
 }
 
@@ -260,6 +372,38 @@ fn required_attr(el: &lol_html::html_content::Element<'_, '_>, name: &str) -> Re
     })
 }
 
+/// Is this attribute value a path to resolve against the deck directory?
+///
+/// Mirrors `open_external_links_in_new_tab`'s treatment of hrefs: anything with
+/// a scheme, a protocol-relative `//` prefix, or a bare fragment is left for the
+/// browser to fetch as written. A rooted path (`/x.png`) is also left alone —
+/// peitho serves slides from a subdirectory, so a rooted path is not
+/// deck-relative and rewriting it would silently change where it points.
+fn is_deck_relative_reference(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return false;
+    }
+    if trimmed.starts_with('/') {
+        return false;
+    }
+    // A scheme is `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"` (RFC 3986), so
+    // a Windows-style `C:` or a `mailto:` is excluded while `a.png` is not.
+    let scheme_end = trimmed.find(':');
+    if let Some(end) = scheme_end {
+        let scheme = &trimmed[..end];
+        let looks_like_scheme = !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if looks_like_scheme {
+            return false;
+        }
+    }
+    true
+}
+
 fn box_build_error(err: BuildError) -> Box<dyn Error + Send + Sync> {
     Box::new(err)
 }
@@ -288,6 +432,147 @@ fn layout_parse_error(err: RewritingError) -> BuildError {
 mod tests {
     use super::*;
     use crate::domain::{Accepts, Arity};
+
+    fn asset_refs(html: &str) -> Vec<(String, String, String)> {
+        parse_layout("test", html)
+            .unwrap()
+            .asset_refs()
+            .iter()
+            .map(|reference| {
+                (
+                    reference.element().to_owned(),
+                    reference.attribute().to_owned(),
+                    reference.raw().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collects_a_video_src_a_poster_and_a_source_src() {
+        let html = r#"<section class="slide">
+  <video src="hero.mp4" poster="hero-still.png" muted>
+    <source src="hero.webm">
+  </video>
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"#;
+
+        assert_eq!(
+            asset_refs(html),
+            vec![
+                ("video".to_owned(), "src".to_owned(), "hero.mp4".to_owned()),
+                (
+                    "video".to_owned(),
+                    "poster".to_owned(),
+                    "hero-still.png".to_owned()
+                ),
+                (
+                    "source".to_owned(),
+                    "src".to_owned(),
+                    "hero.webm".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_img_script_link_audio_track_object_embed_and_iframe_references() {
+        let html = r#"<section class="slide">
+  <img src="bg.png">
+  <script src="mount.js"></script>
+  <link rel="stylesheet" href="extra.css">
+  <audio src="chime.mp3"></audio>
+  <video><track src="captions.vtt"></video>
+  <object data="model.svg"></object>
+  <embed src="widget.svg">
+  <iframe src="frame.html"></iframe>
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"#;
+
+        let refs = asset_refs(html);
+        let raws: Vec<&str> = refs.iter().map(|(_, _, raw)| raw.as_str()).collect();
+        assert_eq!(
+            raws,
+            vec![
+                "bg.png",
+                "mount.js",
+                "extra.css",
+                "chime.mp3",
+                "captions.vtt",
+                "model.svg",
+                "widget.svg",
+                "frame.html",
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicates_repeated_references_keeping_first_occurrence_order() {
+        let html = r#"<section class="slide">
+  <img src="bg.png">
+  <video src="hero.mp4" poster="bg.png"></video>
+  <img src="bg.png">
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"#;
+
+        let refs = asset_refs(html);
+        let raws: Vec<&str> = refs.iter().map(|(_, _, raw)| raw.as_str()).collect();
+        assert_eq!(raws, vec!["bg.png", "hero.mp4"]);
+    }
+
+    #[test]
+    fn ignores_external_data_protocol_relative_and_fragment_references() {
+        let html = r##"<section class="slide">
+  <img src="https://example.com/a.png">
+  <img src="HTTP://example.com/b.png">
+  <img src="//cdn.example.com/c.png">
+  <img src="data:image/png;base64,AAAA">
+  <img src="#anchor-only">
+  <link rel="stylesheet" href="https://fonts.example.com/f.css">
+  <img src="">
+  <img src="   ">
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"##;
+
+        assert_eq!(asset_refs(html), Vec::new());
+    }
+
+    #[test]
+    fn ignores_anchor_hrefs_which_are_navigation_not_subresources() {
+        let html = r#"<section class="slide">
+  <a href="notes.html">speaker notes</a>
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"#;
+
+        assert_eq!(asset_refs(html), Vec::new());
+    }
+
+    #[test]
+    fn a_layout_without_asset_references_collects_nothing() {
+        let html = r#"<section class="slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+</section>"#;
+
+        assert_eq!(asset_refs(html), Vec::new());
+    }
+
+    #[test]
+    fn srcset_is_refused_rather_than_silently_ignored() {
+        let html = r#"<section class="slide">
+  <img src="bg.png" srcset="bg.png 1x, bg@2x.png 2x">
+  <slot name="body" accepts="blocks" arity="0..*"></slot>
+</section>"#;
+
+        let err = parse_layout("cover", html).unwrap_err();
+        assert!(
+            err.to_string().contains("srcset"),
+            "message should name the attribute: {err}"
+        );
+        assert!(
+            err.to_string().contains("cover"),
+            "message should name the layout: {err}"
+        );
+    }
 
     #[test]
     fn extracts_title_body_code_slot_contracts() {
