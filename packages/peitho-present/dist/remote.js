@@ -1,3 +1,17 @@
+// src/interactiveTarget.ts
+var TEXT_ENTRY_INPUT_TYPES = "text search email url tel password number date datetime-local month week time";
+var SPACE_ACTIVATABLE_INPUT_TYPES = "checkbox radio button submit reset image color file";
+var ENTER_ACTIVATABLE_INPUT_TYPES = "button submit reset image color file";
+var ARROW_ACTIVATABLE_INPUT_TYPES = "radio range";
+var ARROW_KEYS = "ArrowLeft ArrowRight ArrowUp ArrowDown";
+var RANGE_KEYS = "Home End PageUp PageDown";
+var textEntryInputTypes = new Set(TEXT_ENTRY_INPUT_TYPES.split(" "));
+var spaceActivatableInputTypes = new Set(SPACE_ACTIVATABLE_INPUT_TYPES.split(" "));
+var enterActivatableInputTypes = new Set(ENTER_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowKeys = new Set(ARROW_KEYS.split(" "));
+var rangeKeys = new Set(RANGE_KEYS.split(" "));
+
 // src/keyboard.ts
 var navigationKeyMap = /* @__PURE__ */ new Map([
   ["ArrowRight", "next"],
@@ -811,6 +825,7 @@ var PresentShellController = class {
   bus;
   now;
   viewport;
+  inertSlides;
   canvasCleanups = [];
   fontScopeCleanup = null;
   pointerCleanup = null;
@@ -846,6 +861,7 @@ var PresentShellController = class {
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
     this.viewport = options.viewport;
+    this.inertSlides = options.inertSlides ?? false;
     this.root.classList.add("peitho-shell-viewport");
     const rootPosition = this.win.getComputedStyle(this.root).position;
     if (rootPosition === "static" || rootPosition === "") {
@@ -969,6 +985,9 @@ var PresentShellController = class {
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
+    if (this.inertSlides) {
+      host.setAttribute("inert", "");
+    }
     host.style.position = "absolute";
     host.style.left = "0";
     host.style.top = "0";
@@ -2029,6 +2048,7 @@ var RemoteController = class {
           bus: this.previewBus,
           manifest,
           now: this.now,
+          inertSlides: true,
           viewport: paneViewport(previewRoot)
         });
         this.pointerCleanup = installRemotePointerBridge({

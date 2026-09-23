@@ -1,3 +1,4 @@
+import { keyBelongsToTarget } from "./interactiveTarget";
 import type { NavigateTarget } from "./shell";
 
 const navigationKeyMap = new Map<string, NavigateTarget>([
@@ -33,6 +34,7 @@ export function installKeyboardNavigation(
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     const to = keyMap.get(event.key);
     if (!to) return;
     event.preventDefault();
@@ -49,6 +51,7 @@ export function installPresenterKeyboard(
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     const to = navigationKeyMap.get(event.key);
     if (to) {
       event.preventDefault();
@@ -67,6 +70,7 @@ export function installPresenterKeyboard(
 export function installCloseOnEscape(win: Window = window, bus: EventTarget = win): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "Escape") return;
     event.preventDefault();
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));

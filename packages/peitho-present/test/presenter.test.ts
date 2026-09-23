@@ -214,6 +214,31 @@ it("renders the redesigned presenter shell and starts timer from the playpause b
   expect(root.querySelector('[data-peitho-presenter="state-label"]')?.className).toBe("");
 });
 
+it("makes current and next presenter slide hosts inert", async () => {
+  const root = document.createElement("main");
+  const { factory } = mockSyncChannelFactory();
+  const view = await mountPresenterView({
+    root,
+    notes,
+    rehearsalAudio: false,
+    fetcher: standardFetch(),
+    window,
+    now: () => 1000,
+    syncChannelFactory: factory
+  });
+  views.push(view);
+
+  const currentHosts = root.querySelectorAll<HTMLElement>(
+    '[data-peitho-presenter="current"] .peitho-slide'
+  );
+  const nextHosts = root.querySelectorAll<HTMLElement>(
+    '[data-peitho-presenter="preview"] .peitho-slide'
+  );
+  expect(currentHosts.length).toBeGreaterThan(0);
+  expect(nextHosts.length).toBeGreaterThan(0);
+  expect([...currentHosts, ...nextHosts].every((host) => host.hasAttribute("inert"))).toBe(true);
+});
+
 it("adds the rehearsal audio segment and overlaid detail only in audio mode", async () => {
   const mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(window.navigator, "mediaDevices");
   const getUserMedia = vi.fn(() => new Promise<MediaStream>(() => undefined));

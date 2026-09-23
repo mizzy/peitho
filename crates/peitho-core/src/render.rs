@@ -1983,8 +1983,75 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
   <script>
     const CANVAS_WIDTH = __PEITHO_CANVAS_WIDTH__;
     const CANVAS_HEIGHT = __PEITHO_CANVAS_HEIGHT__;
+    const CONTENTEDITABLE_SELECTOR = "[contenteditable]";
+    const INPUT_SELECTOR = "input";
+    const ENTER_ACTIVATABLE_SELECTOR = "a[href], button, summary";
+    const SPACE_ACTIVATABLE_SELECTOR = "button, summary";
+    const CLICK_INTERACTIVE_SELECTOR = "a, button, summary, input, textarea, select, label";
+    const TEXT_ENTRY_INPUT_TYPES = "text search email url tel password number date datetime-local month week time";
+    const SPACE_ACTIVATABLE_INPUT_TYPES = "checkbox radio button submit reset image color file";
+    const ENTER_ACTIVATABLE_INPUT_TYPES = "button submit reset image color file";
+    const ARROW_ACTIVATABLE_INPUT_TYPES = "radio range";
+    const ARROW_KEYS = "ArrowLeft ArrowRight ArrowUp ArrowDown";
+    const RANGE_KEYS = "Home End PageUp PageDown";
+    const textEntryInputTypes = new Set(TEXT_ENTRY_INPUT_TYPES.split(" "));
+    const spaceActivatableInputTypes = new Set(SPACE_ACTIVATABLE_INPUT_TYPES.split(" "));
+    const enterActivatableInputTypes = new Set(ENTER_ACTIVATABLE_INPUT_TYPES.split(" "));
+    const arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "));
+    const arrowKeys = new Set(ARROW_KEYS.split(" "));
+    const rangeKeys = new Set(RANGE_KEYS.split(" "));
     let slides = [];
     let currentIndex = 0;
+
+    function isInsideSlide(origin) {
+      return origin instanceof Element && origin.closest('.peitho-slide') !== null;
+    }
+
+    function isEditableTarget(event) {
+      const target = event.composedPath()[0];
+      if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+        return true;
+      }
+      if (target instanceof HTMLInputElement) return textEntryInputTypes.has(target.type);
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+      const editable = target.closest(CONTENTEDITABLE_SELECTOR);
+      return editable !== null && editable.getAttribute('contenteditable') !== 'false';
+    }
+
+    function keyBelongsToTarget(event) {
+      if (
+        isEditableTarget(event) &&
+        (event.shiftKey || (event.key !== 'PageUp' && event.key !== 'PageDown'))
+      ) {
+        return true;
+      }
+      const origin = event.composedPath()[0];
+      if (!(origin instanceof Element) || !isInsideSlide(origin)) return false;
+      if (
+        event.key === 'Enter' &&
+        origin.closest(ENTER_ACTIVATABLE_SELECTOR) !== null
+      ) {
+        return true;
+      }
+      if (event.key === ' ' && origin.closest(SPACE_ACTIVATABLE_SELECTOR) !== null) {
+        return true;
+      }
+      const input = origin.closest(INPUT_SELECTOR);
+      if (!(input instanceof HTMLInputElement)) return false;
+      if (event.key === ' ') return spaceActivatableInputTypes.has(input.type);
+      if (event.key === 'Enter') return enterActivatableInputTypes.has(input.type);
+      if (arrowKeys.has(event.key)) return arrowActivatableInputTypes.has(input.type);
+      return input.type === 'range' && rangeKeys.has(event.key);
+    }
+
+    function pointerBelongsToTarget(event) {
+      const origin = event.composedPath()[0];
+      if (origin instanceof Element && origin.closest(CLICK_INTERACTIVE_SELECTOR) !== null) {
+        return true;
+      }
+      return isEditableTarget(event);
+    }
 
     function showError(message) {
       const root = document.getElementById('peitho-slides');
@@ -2085,6 +2152,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     }
 
     document.addEventListener('keydown', (event) => {
+      if (keyBelongsToTarget(event)) return;
       if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
         event.preventDefault();
         navigate('next');
@@ -2101,7 +2169,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
       }
     });
     // Click-selection guard. Kept in sync with
-    // packages/peitho-present/src/clickNavigationGuard.ts.
+    // packages/peitho-present/src/interactiveTarget.ts and clickNavigationGuard.ts.
     let __clickStart = null;
     document.addEventListener('mousedown', (event) => {
       __clickStart = { x: event.clientX, y: event.clientY };
@@ -2113,8 +2181,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     function shouldIgnoreNavigationClick(event) {
       const start = __clickStart;
       __clickStart = null;
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest('a') !== null) return true;
+      if (pointerBelongsToTarget(event)) return true;
       if (hasNonCollapsedSelection()) {
         return true;
       }
@@ -2129,6 +2196,7 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
     document.addEventListener('touchstart', (event) => {
       if (__swipeState !== null) return;
       if (event.touches.length !== 1) return;
+      if (pointerBelongsToTarget(event)) return;
       const t = event.touches[0];
       __swipeState = { x: t.clientX, y: t.clientY, t: performance.now() };
     }, { passive: true });
@@ -2875,6 +2943,34 @@ mod tests {
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
         phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
     };
+
+    const INTERACTIVE_TARGET_TS: &str =
+        include_str!("../../../packages/peitho-present/src/interactiveTarget.ts");
+    const MIRRORED_INTERACTIVE_TARGET_STRINGS: &[(&str, &str)] = &[
+        ("CONTENTEDITABLE_SELECTOR", "[contenteditable]"),
+        ("INPUT_SELECTOR", "input"),
+        ("ENTER_ACTIVATABLE_SELECTOR", "a[href], button, summary"),
+        ("SPACE_ACTIVATABLE_SELECTOR", "button, summary"),
+        (
+            "CLICK_INTERACTIVE_SELECTOR",
+            "a, button, summary, input, textarea, select, label",
+        ),
+        (
+            "TEXT_ENTRY_INPUT_TYPES",
+            "text search email url tel password number date datetime-local month week time",
+        ),
+        (
+            "SPACE_ACTIVATABLE_INPUT_TYPES",
+            "checkbox radio button submit reset image color file",
+        ),
+        (
+            "ENTER_ACTIVATABLE_INPUT_TYPES",
+            "button submit reset image color file",
+        ),
+        ("ARROW_ACTIVATABLE_INPUT_TYPES", "radio range"),
+        ("ARROW_KEYS", "ArrowLeft ArrowRight ArrowUp ArrowDown"),
+        ("RANGE_KEYS", "Home End PageUp PageDown"),
+    ];
 
     fn parse_markdown(
         source: &str,
@@ -5337,11 +5433,54 @@ Paragraph after heading.
     }
 
     #[test]
-    fn distribution_index_click_navigation_ignores_anchor_clicks() {
+    fn distribution_index_click_navigation_ignores_interactive_targets() {
         let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
 
         assert!(html.contains("const origin = event.composedPath()[0]"));
-        assert!(html.contains("origin instanceof Element && origin.closest('a') !== null"));
+        assert!(html.contains("if (pointerBelongsToTarget(event)) return true;"));
+    }
+
+    #[test]
+    fn distribution_index_pins_mirrored_interactive_target_strings() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        for (name, value) in MIRRORED_INTERACTIVE_TARGET_STRINGS {
+            let declaration = format!(r#"const {name} = "{value}";"#);
+            assert!(html.contains(&declaration), "missing {declaration:?}");
+        }
+    }
+
+    #[test]
+    fn distribution_index_interactive_target_strings_match_typescript_source() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        for (name, value) in MIRRORED_INTERACTIVE_TARGET_STRINGS {
+            let marker = format!("const {name}");
+            let start = INTERACTIVE_TARGET_TS
+                .find(&marker)
+                .unwrap_or_else(|| panic!("missing TypeScript constant {name}"));
+            let declaration = INTERACTIVE_TARGET_TS[start..]
+                .split_once(';')
+                .map(|(declaration, _)| declaration)
+                .unwrap_or_else(|| panic!("unterminated TypeScript constant {name}"));
+            assert!(
+                declaration.contains(&format!(r#""{value}""#)),
+                "TypeScript constant {name} does not equal {value:?}: {declaration}"
+            );
+            assert!(
+                html.contains(value),
+                "distribution index is missing {name} value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distribution_index_navigation_defers_to_interactive_slide_content() {
+        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+
+        assert!(html.contains("origin.closest('.peitho-slide') !== null"));
+        assert!(html.contains("if (keyBelongsToTarget(event)) return;"));
+        assert!(html.contains("if (pointerBelongsToTarget(event)) return;"));
     }
 
     #[test]

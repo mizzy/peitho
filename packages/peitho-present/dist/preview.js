@@ -12,6 +12,70 @@ function calculateCanvasFit(viewport, canvasWidth, canvasHeight) {
   };
 }
 
+// src/interactiveTarget.ts
+var CONTENTEDITABLE_SELECTOR = "[contenteditable]";
+var INPUT_SELECTOR = "input";
+var ENTER_ACTIVATABLE_SELECTOR = "a[href], button, summary";
+var SPACE_ACTIVATABLE_SELECTOR = "button, summary";
+var CLICK_INTERACTIVE_SELECTOR = "a, button, summary, input, textarea, select, label";
+var TEXT_ENTRY_INPUT_TYPES = "text search email url tel password number date datetime-local month week time";
+var SPACE_ACTIVATABLE_INPUT_TYPES = "checkbox radio button submit reset image color file";
+var ENTER_ACTIVATABLE_INPUT_TYPES = "button submit reset image color file";
+var ARROW_ACTIVATABLE_INPUT_TYPES = "radio range";
+var ARROW_KEYS = "ArrowLeft ArrowRight ArrowUp ArrowDown";
+var RANGE_KEYS = "Home End PageUp PageDown";
+var textEntryInputTypes = new Set(TEXT_ENTRY_INPUT_TYPES.split(" "));
+var spaceActivatableInputTypes = new Set(SPACE_ACTIVATABLE_INPUT_TYPES.split(" "));
+var enterActivatableInputTypes = new Set(ENTER_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowKeys = new Set(ARROW_KEYS.split(" "));
+var rangeKeys = new Set(RANGE_KEYS.split(" "));
+function isInsideSlide(origin) {
+  let root = origin.getRootNode();
+  while (root instanceof ShadowRoot) {
+    if (root.host.hasAttribute("data-slide-key")) return true;
+    root = root.host.getRootNode();
+  }
+  return false;
+}
+function isEditableTarget(event) {
+  const target = event.composedPath()[0];
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) return textEntryInputTypes.has(target.type);
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const editable = target.closest(CONTENTEDITABLE_SELECTOR);
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
+}
+function keyBelongsToTarget(event) {
+  if (isEditableTarget(event) && (event.shiftKey || event.key !== "PageUp" && event.key !== "PageDown")) {
+    return true;
+  }
+  const origin = event.composedPath()[0];
+  if (!(origin instanceof Element) || !isInsideSlide(origin)) return false;
+  if (event.key === "Enter" && origin.closest(ENTER_ACTIVATABLE_SELECTOR) !== null) {
+    return true;
+  }
+  if (event.key === " " && origin.closest(SPACE_ACTIVATABLE_SELECTOR) !== null) {
+    return true;
+  }
+  const input = origin.closest(INPUT_SELECTOR);
+  if (input === null) return false;
+  if (event.key === " ") return spaceActivatableInputTypes.has(input.type);
+  if (event.key === "Enter") return enterActivatableInputTypes.has(input.type);
+  if (arrowKeys.has(event.key)) return arrowActivatableInputTypes.has(input.type);
+  return input.type === "range" && rangeKeys.has(event.key);
+}
+function pointerBelongsToTarget(event) {
+  const origin = event.composedPath()[0];
+  if (origin instanceof Element && origin.closest(CLICK_INTERACTIVE_SELECTOR) !== null) {
+    return true;
+  }
+  return isEditableTarget(event);
+}
+
 // src/clickNavigationGuard.ts
 var DEFAULT_MOVE_THRESHOLD_PX = 5;
 function createClickNavigationGuard(options) {
@@ -26,8 +90,7 @@ function createClickNavigationGuard(options) {
     shouldIgnoreClick(event) {
       const start = clickStart;
       clickStart = null;
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest("a") !== null) return true;
+      if (pointerBelongsToTarget(event)) return true;
       if (hasNonCollapsedSelection(win)) return true;
       if (start === null) return false;
       return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
@@ -333,6 +396,70 @@ async function readErrorResponse(response, fallbackLabel) {
   } catch {
   }
   return fallbackLabel === void 0 ? body : `${fallbackLabel} failed (HTTP ${response.status})`;
+}
+
+// src/scripts.ts
+var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["text/javascript", "application/javascript"]);
+var HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+function isHtmlScriptElement(script) {
+  return script.namespaceURI === HTML_NAMESPACE && script.localName === "script";
+}
+function isClassicType(script) {
+  const type = script.getAttribute("type");
+  if (type === null || type === "") return true;
+  return CLASSIC_JAVASCRIPT_TYPES.has(type.trim().toLowerCase());
+}
+function needsScopeWrap(script) {
+  if (script.hasAttribute("src") || script.hasAttribute("href") || script.hasAttribute("xlink:href")) {
+    return false;
+  }
+  return isClassicType(script);
+}
+function isParserBlocking(script) {
+  return isHtmlScriptElement(script) && script.hasAttribute("src") && isClassicType(script) && !script.hasAttribute("async") && !script.hasAttribute("defer");
+}
+function executeInlineScripts(root, doc) {
+  const scripts = Array.from(
+    root.querySelectorAll("script")
+  );
+  const replaceFrom = (startIndex) => {
+    for (let index = startIndex; index < scripts.length; index += 1) {
+      const oldScript = scripts[index];
+      const newScript = doc.createElementNS(
+        oldScript.namespaceURI,
+        oldScript.localName
+      );
+      for (const attr of Array.from(oldScript.attributes)) {
+        newScript.setAttributeNode(attr.cloneNode());
+      }
+      if (isHtmlScriptElement(newScript) && !oldScript.hasAttribute("async")) {
+        newScript.async = false;
+      }
+      if (oldScript.nonce) {
+        newScript.nonce = oldScript.nonce;
+      }
+      const text = oldScript.textContent ?? "";
+      newScript.textContent = needsScopeWrap(oldScript) ? `(function () {
+${text}
+})();` : text;
+      const parserBlocking = isParserBlocking(oldScript);
+      if (parserBlocking) {
+        let resumed = false;
+        const resume = () => {
+          if (resumed) return;
+          resumed = true;
+          newScript.removeEventListener("load", resume);
+          newScript.removeEventListener("error", resume);
+          replaceFrom(index + 1);
+        };
+        newScript.addEventListener("load", resume, { once: true });
+        newScript.addEventListener("error", resume, { once: true });
+      }
+      oldScript.replaceWith(newScript);
+      if (parserBlocking) return;
+    }
+  };
+  replaceFrom(0);
 }
 
 // src/previewSourceEdit.ts
@@ -950,16 +1077,6 @@ function insertSourceNewline(win, editor, rangeProvider) {
   selected.select(range);
   return addSentinel;
 }
-function isEditableTarget(event) {
-  const target = event.composedPath()[0];
-  if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement || target instanceof HTMLSelectElement) {
-    return true;
-  }
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  const editable = target.closest("[contenteditable]");
-  return editable !== null && editable.getAttribute("contenteditable") !== "false";
-}
 function previewGridColumnCount(rootWidth) {
   const columns = Math.floor(
     (rootWidth - GRID_PADDING * 2 + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP)
@@ -980,10 +1097,7 @@ var verticalPreviewNavigationTargets = /* @__PURE__ */ new Set(["up", "down"]);
 function installPreviewKeyboard(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event) || isComposingKey(event)) return;
-    const editable = isEditableTarget(event);
-    if (editable && (event.shiftKey || event.key !== "PageUp" && event.key !== "PageDown")) {
-      return;
-    }
+    if (keyBelongsToTarget(event)) return;
     if (event.key === "u") {
       const request2 = new CustomEvent("peitho:restorerequest", { cancelable: true });
       bus.dispatchEvent(request2);
@@ -1010,14 +1124,13 @@ function installPreviewKeyboard(win = window, bus = win) {
     }
     if (event.key === "Enter") {
       if (event.repeat) return;
-      const target = event.composedPath()[0];
-      if (target instanceof Element && target.closest("a") !== null) return;
       event.preventDefault();
       dispatchOverviewRequest(bus, "activate");
       return;
     }
     const to = previewNavigationKeyMap.get(event.key);
     if (!to) return;
+    const editable = isEditableTarget(event);
     const request = new CustomEvent("peitho:navigate", {
       cancelable: true,
       detail: { to }
@@ -1407,7 +1520,7 @@ var PreviewShellController = class {
     };
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
-    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide");
+    const host = this.createSlideHost(slide, html, css, "peitho-preview-slide", true);
     tile.appendChild(host);
     const tileNumber = this.createSlideNumber(slide);
     tile.appendChild(tileNumber);
@@ -1420,7 +1533,13 @@ var PreviewShellController = class {
     const onThumbClick = () => this.setIndex(slide.index);
     thumb.addEventListener("click", onThumbClick);
     this.tileListenerCleanups.push(() => thumb.removeEventListener("click", onThumbClick));
-    const thumbHost = this.createSlideHost(slide, html, css, "peitho-preview-thumb-slide");
+    const thumbHost = this.createSlideHost(
+      slide,
+      html,
+      css,
+      "peitho-preview-thumb-slide",
+      false
+    );
     thumbHost.style.pointerEvents = "none";
     thumb.appendChild(thumbHost);
     thumb.appendChild(this.createSlideNumber(slide));
@@ -1761,7 +1880,7 @@ var PreviewShellController = class {
     style.pointerEvents = "none";
     return badge;
   }
-  createSlideHost(slide, html, css, className) {
+  createSlideHost(slide, html, css, className, executeScripts) {
     const host = this.doc.createElement("section");
     host.classList.add(className);
     host.dataset.slideKey = slide.key;
@@ -1773,7 +1892,11 @@ var PreviewShellController = class {
     shadow.appendChild(style);
     const template = this.doc.createElement("template");
     template.innerHTML = html;
-    shadow.appendChild(template.content.cloneNode(true));
+    const fragment = template.content.cloneNode(true);
+    if (executeScripts) {
+      executeInlineScripts(fragment, this.doc);
+    }
+    shadow.appendChild(fragment);
     return host;
   }
   createStrip() {

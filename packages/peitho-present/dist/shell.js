@@ -1081,6 +1081,7 @@ var PresentShellController = class {
   bus;
   now;
   viewport;
+  inertSlides;
   canvasCleanups = [];
   fontScopeCleanup = null;
   pointerCleanup = null;
@@ -1116,6 +1117,7 @@ var PresentShellController = class {
     this.bus = options.bus ?? this.win;
     this.now = options.now ?? Date.now;
     this.viewport = options.viewport;
+    this.inertSlides = options.inertSlides ?? false;
     this.root.classList.add("peitho-shell-viewport");
     const rootPosition = this.win.getComputedStyle(this.root).position;
     if (rootPosition === "static" || rootPosition === "") {
@@ -1239,6 +1241,9 @@ var PresentShellController = class {
     host.dataset.slideKey = slide.key;
     host.dataset.slideIndex = String(slide.index);
     host.dataset.peithoCanvas = "slide";
+    if (this.inertSlides) {
+      host.setAttribute("inert", "");
+    }
     host.style.position = "absolute";
     host.style.left = "0";
     host.style.top = "0";
@@ -2307,6 +2312,70 @@ function timelinePosition(ms) {
   return Number.isSafeInteger(rounded) ? rounded : null;
 }
 
+// src/interactiveTarget.ts
+var CONTENTEDITABLE_SELECTOR = "[contenteditable]";
+var INPUT_SELECTOR = "input";
+var ENTER_ACTIVATABLE_SELECTOR = "a[href], button, summary";
+var SPACE_ACTIVATABLE_SELECTOR = "button, summary";
+var CLICK_INTERACTIVE_SELECTOR = "a, button, summary, input, textarea, select, label";
+var TEXT_ENTRY_INPUT_TYPES = "text search email url tel password number date datetime-local month week time";
+var SPACE_ACTIVATABLE_INPUT_TYPES = "checkbox radio button submit reset image color file";
+var ENTER_ACTIVATABLE_INPUT_TYPES = "button submit reset image color file";
+var ARROW_ACTIVATABLE_INPUT_TYPES = "radio range";
+var ARROW_KEYS = "ArrowLeft ArrowRight ArrowUp ArrowDown";
+var RANGE_KEYS = "Home End PageUp PageDown";
+var textEntryInputTypes = new Set(TEXT_ENTRY_INPUT_TYPES.split(" "));
+var spaceActivatableInputTypes = new Set(SPACE_ACTIVATABLE_INPUT_TYPES.split(" "));
+var enterActivatableInputTypes = new Set(ENTER_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowActivatableInputTypes = new Set(ARROW_ACTIVATABLE_INPUT_TYPES.split(" "));
+var arrowKeys = new Set(ARROW_KEYS.split(" "));
+var rangeKeys = new Set(RANGE_KEYS.split(" "));
+function isInsideSlide(origin) {
+  let root = origin.getRootNode();
+  while (root instanceof ShadowRoot) {
+    if (root.host.hasAttribute("data-slide-key")) return true;
+    root = root.host.getRootNode();
+  }
+  return false;
+}
+function isEditableTarget(event) {
+  const target = event.composedPath()[0];
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) return textEntryInputTypes.has(target.type);
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const editable = target.closest(CONTENTEDITABLE_SELECTOR);
+  return editable !== null && editable.getAttribute("contenteditable") !== "false";
+}
+function keyBelongsToTarget(event) {
+  if (isEditableTarget(event) && (event.shiftKey || event.key !== "PageUp" && event.key !== "PageDown")) {
+    return true;
+  }
+  const origin = event.composedPath()[0];
+  if (!(origin instanceof Element) || !isInsideSlide(origin)) return false;
+  if (event.key === "Enter" && origin.closest(ENTER_ACTIVATABLE_SELECTOR) !== null) {
+    return true;
+  }
+  if (event.key === " " && origin.closest(SPACE_ACTIVATABLE_SELECTOR) !== null) {
+    return true;
+  }
+  const input = origin.closest(INPUT_SELECTOR);
+  if (input === null) return false;
+  if (event.key === " ") return spaceActivatableInputTypes.has(input.type);
+  if (event.key === "Enter") return enterActivatableInputTypes.has(input.type);
+  if (arrowKeys.has(event.key)) return arrowActivatableInputTypes.has(input.type);
+  return input.type === "range" && rangeKeys.has(event.key);
+}
+function pointerBelongsToTarget(event) {
+  const origin = event.composedPath()[0];
+  if (origin instanceof Element && origin.closest(CLICK_INTERACTIVE_SELECTOR) !== null) {
+    return true;
+  }
+  return isEditableTarget(event);
+}
+
 // src/clickNavigationGuard.ts
 var DEFAULT_MOVE_THRESHOLD_PX = 5;
 function createClickNavigationGuard(options) {
@@ -2321,8 +2390,7 @@ function createClickNavigationGuard(options) {
     shouldIgnoreClick(event) {
       const start = clickStart;
       clickStart = null;
-      const origin = event.composedPath()[0];
-      if (origin instanceof Element && origin.closest("a") !== null) return true;
+      if (pointerBelongsToTarget(event)) return true;
       if (hasNonCollapsedSelection(win)) return true;
       if (start === null) return false;
       return Math.hypot(event.clientX - start.x, event.clientY - start.y) > moveThresholdPx;
@@ -2356,6 +2424,7 @@ function dispatchNavigate(bus, to) {
 function installKeyboardNavigation(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     const to = keyMap.get(event.key);
     if (!to) return;
     event.preventDefault();
@@ -2367,6 +2436,7 @@ function installKeyboardNavigation(win = window, bus = win) {
 function installPresenterKeyboard(win, bus, onPlaypause) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     const to = navigationKeyMap.get(event.key);
     if (to) {
       event.preventDefault();
@@ -2384,6 +2454,7 @@ function installPresenterKeyboard(win, bus, onPlaypause) {
 function installCloseOnEscape(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "Escape") return;
     event.preventDefault();
     bus.dispatchEvent(new CustomEvent("peitho:closerequest"));
@@ -2500,6 +2571,7 @@ function installSwipeNavigation(options) {
     if (active) return;
     if (event.touches.length !== 1) return;
     if (event.target.closest('[data-peitho-control-bar="true"]')) return;
+    if (pointerBelongsToTarget(event)) return;
     const touch = event.touches[0];
     x0 = touch.clientX;
     y0 = touch.clientY;
@@ -2541,6 +2613,7 @@ function installFullscreenShortcut(options = {}) {
   const doc = options.document ?? document;
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "f") return;
     event.preventDefault();
     toggleFullscreen(doc);
@@ -2571,6 +2644,7 @@ function swapRoute(pathname) {
 function installSwapShortcut(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "s" && event.key !== "S") return;
     if (event.repeat) return;
     event.preventDefault();
@@ -3219,6 +3293,7 @@ async function mountPresenterView(options) {
     document: doc,
     bus,
     now,
+    inertSlides: true,
     viewport: paneViewport(currentRoot)
   });
   const previewShell = await mountPresentShell({
@@ -3228,6 +3303,7 @@ async function mountPresenterView(options) {
     document: doc,
     bus: previewBus,
     now,
+    inertSlides: true,
     viewport: paneViewport(previewRoot)
   });
   const keyboardCleanup = installPresenterKeyboard(win, bus, dispatchPlaypause);

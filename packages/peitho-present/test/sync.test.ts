@@ -698,6 +698,30 @@ it("dispatches closerequest from Escape", () => {
   expect(requests).toEqual([null]);
 });
 
+it("leaves Escape in a shadow-root input for the input", () => {
+  const bus = new EventTarget();
+  const requests: unknown[] = [];
+  bus.addEventListener("peitho:closerequest", (event) => requests.push((event as CustomEvent).detail));
+  const cleanup = installCloseOnEscape(window, bus);
+  cleanups.push(cleanup);
+  const host = document.createElement("div");
+  const input = document.createElement("input");
+  host.attachShadow({ mode: "open" }).appendChild(input);
+  document.body.appendChild(host);
+  cleanups.push(() => host.remove());
+
+  const escape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  input.dispatchEvent(escape);
+
+  expect(escape.defaultPrevented).toBe(false);
+  expect(requests).toEqual([]);
+});
+
 it("posts close sync messages from closerequest", () => {
   const channel = mockChannel();
   const bus = new EventTarget();

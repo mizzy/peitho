@@ -21,7 +21,11 @@ function touchEvent(
   type: "touchstart" | "touchend" | "touchcancel",
   options: { touches?: Touch[]; changedTouches?: Touch[] } = {}
 ): Event {
-  const event = new Event(type, { bubbles: true, cancelable: type === "touchend" });
+  const event = new Event(type, {
+    bubbles: true,
+    composed: true,
+    cancelable: type === "touchend"
+  });
   Object.defineProperty(event, "touches", {
     value: options.touches ?? []
   });
@@ -234,6 +238,28 @@ it("ignores composed clicks on links inside a shadow root", () => {
   expect(requests).toEqual([]);
 });
 
+it("ignores a composed click on a button inside a shadow root", () => {
+  const root = document.createElement("main");
+  root.dataset.slideKey = "intro";
+  const shadow = root.attachShadow({ mode: "open" });
+  const button = document.createElement("button");
+  const nested = document.createElement("span");
+  button.appendChild(nested);
+  shadow.appendChild(button);
+  document.body.appendChild(root);
+  const requests: unknown[] = [];
+  mockSelection(true);
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installCanvasClickNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  nested.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+
+  expect(requests).toEqual([]);
+});
+
 it("does not navigate from a click that ends a drag gesture", () => {
   const root = document.createElement("main");
   const requests: unknown[] = [];
@@ -315,6 +341,53 @@ it("swipe right dispatches prev", () => {
   root.dispatchEvent(touchEvent("touchend", { changedTouches: [touch(200, 305)] }));
 
   expect(requests).toEqual([{ to: "prev" }]);
+});
+
+it("does not track a swipe that starts on a range input in a slide shadow root", () => {
+  const root = document.createElement("main");
+  const slideHost = document.createElement("section");
+  slideHost.dataset.slideKey = "intro";
+  const range = document.createElement("input");
+  range.type = "range";
+  slideHost.attachShadow({ mode: "open" }).appendChild(range);
+  root.appendChild(slideHost);
+  document.body.appendChild(root);
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  range.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  const end = touchEvent("touchend", { changedTouches: [touch(100, 305)] });
+  range.dispatchEvent(end);
+
+  expect(requests).toEqual([]);
+  expect(end.defaultPrevented).toBe(false);
+});
+
+it("still tracks a swipe that starts on plain content in a slide shadow root", () => {
+  const root = document.createElement("main");
+  const slideHost = document.createElement("section");
+  slideHost.dataset.slideKey = "intro";
+  const plain = document.createElement("div");
+  slideHost.attachShadow({ mode: "open" }).appendChild(plain);
+  root.appendChild(slideHost);
+  document.body.appendChild(root);
+  const requests: unknown[] = [];
+  listenWindow("peitho:navigate", (event) => {
+    requests.push((event as CustomEvent).detail);
+  });
+  const cleanup = installSwipeNavigation({ root, window, bus: window });
+  cleanups.push(cleanup);
+
+  plain.dispatchEvent(touchEvent("touchstart", { touches: [touch(200, 300)] }));
+  const end = touchEvent("touchend", { changedTouches: [touch(100, 305)] });
+  plain.dispatchEvent(end);
+
+  expect(requests).toEqual([{ to: "next" }]);
+  expect(end.defaultPrevented).toBe(true);
 });
 
 it("too-short horizontal swipe does not dispatch", () => {
@@ -507,6 +580,35 @@ it("fullscreen shortcut ignores chord-modified f", () => {
 
   const event = new KeyboardEvent("keydown", { key: "f", metaKey: true, cancelable: true });
   window.dispatchEvent(event);
+
+  expect(event.defaultPrevented).toBe(false);
+  expect(requestFullscreen).not.toHaveBeenCalled();
+});
+
+it("fullscreen shortcut leaves f in a shadow-root input", () => {
+  const requestFullscreen = vi.fn();
+  Object.defineProperty(document.documentElement, "requestFullscreen", {
+    value: requestFullscreen,
+    configurable: true
+  });
+  Object.defineProperty(document, "fullscreenElement", {
+    value: null,
+    configurable: true
+  });
+  const cleanup = installFullscreenShortcut({ window, document });
+  cleanups.push(cleanup);
+  const host = document.createElement("div");
+  const input = document.createElement("input");
+  host.attachShadow({ mode: "open" }).appendChild(input);
+  document.body.appendChild(host);
+
+  const event = new KeyboardEvent("keydown", {
+    key: "f",
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  input.dispatchEvent(event);
 
   expect(event.defaultPrevented).toBe(false);
   expect(requestFullscreen).not.toHaveBeenCalled();

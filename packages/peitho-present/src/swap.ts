@@ -1,4 +1,5 @@
 import { hasChordModifier } from "./keyboard";
+import { keyBelongsToTarget } from "./interactiveTarget";
 
 export type SwapRoute = Readonly<{ swapped: boolean; counterpart: string }>;
 
@@ -18,6 +19,7 @@ export function swapRoute(pathname: string): SwapRoute | null {
 export function installSwapShortcut(win: Window = window, bus: EventTarget = win): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "s" && event.key !== "S") return;
     if (event.repeat) return;
     event.preventDefault();

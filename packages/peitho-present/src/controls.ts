@@ -1,5 +1,6 @@
 import type { NavigateDetail, SlideChangeDetail } from "./shell";
 import { createClickNavigationGuard } from "./clickNavigationGuard";
+import { keyBelongsToTarget, pointerBelongsToTarget } from "./interactiveTarget";
 import { hasChordModifier } from "./keyboard";
 import { openPresenterPopup, type OpenPresenterPopupOptions } from "./presentDisplay";
 
@@ -137,6 +138,7 @@ export function installSwipeNavigation(options: SwipeNavigationOptions): () => v
     if (active) return;
     if (event.touches.length !== 1) return;
     if ((event.target as HTMLElement).closest('[data-peitho-control-bar="true"]')) return;
+    if (pointerBelongsToTarget(event)) return;
     const touch = event.touches[0];
     x0 = touch.clientX;
     y0 = touch.clientY;
@@ -181,6 +183,7 @@ export function installFullscreenShortcut(options: FullscreenShortcutOptions = {
   const doc = options.document ?? document;
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
+    if (keyBelongsToTarget(event)) return;
     if (event.key !== "f") return;
     event.preventDefault();
     toggleFullscreen(doc);
