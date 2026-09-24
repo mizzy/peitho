@@ -447,8 +447,8 @@ pub struct ResolvedImageAsset {
     pub dist_rel: ResolvedImagePath,
 }
 
-const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
-const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp";
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+const SUPPORTED_IMAGE_EXTENSIONS_TEXT: &str = "png, jpg, jpeg, gif, webp, svg";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmbedImageFormat {

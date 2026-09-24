@@ -17,7 +17,10 @@ struct FakeRunner;
 
 impl SvgRunner for FakeRunner {
     fn run(&self, _command: &CodeImageCommand, _stdin: &str) -> Result<Vec<u8>> {
-        Ok(br#"<svg viewBox="0 0 10 10">diagram</svg>"#.to_vec())
+        Ok(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">diagram</svg>"#
+                .to_vec(),
+        )
     }
 }
 

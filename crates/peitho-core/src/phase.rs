@@ -1,15 +1,17 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
+    code_images::{check_image_svg, SvgImageProblem},
     domain::{
         AspectRatio, CodeImagesConfig, EditableSpan, FragmentKind, RawImagePath, RenderedSlide,
         Resolution, ResolvedImageAsset, ResolvedImagePath, SlideKey, SlotContract, SlotName,
         SourceFragment, SourceSpan,
     },
-    error::{BuildError, Result},
+    error::{BuildError, ErrorKind, Result},
     layout::Layout,
     math::MathAssets,
 };
@@ -876,6 +878,14 @@ where
                             Some(&slide_key_for_error),
                         )
                     })?;
+                    validate_svg_image(&raw, &asset).map_err(|err| {
+                        attach_image_resolve_context(
+                            err,
+                            line,
+                            slide_number,
+                            Some(&slide_key_for_error),
+                        )
+                    })?;
                     let dist_rel = asset.dist_rel.clone();
                     if asset_paths.insert(dist_rel.as_str().to_owned()) {
                         assets.push(asset);
@@ -901,6 +911,61 @@ where
     }
 
     Ok((Deck::checked(settings, slides), assets))
+}
+
+fn validate_svg_image(raw: &RawImagePath, asset: &ResolvedImageAsset) -> Result<()> {
+    let is_svg = Path::new(raw.as_str())
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+    if !is_svg {
+        return Ok(());
+    }
+
+    let bytes = fs::read(&asset.source_abs).map_err(|err| {
+        BuildError::new(
+            ErrorKind::Asset,
+            None,
+            format!("failed to read image '{}': {err}", raw.as_str()),
+            "make sure the image exists and is readable",
+        )
+    })?;
+
+    check_image_svg(&bytes).map_err(|problem| match problem {
+        SvgImageProblem::NotSvg => BuildError::new(
+            ErrorKind::Asset,
+            None,
+            format!("image '{}' is not an SVG document", raw.as_str()),
+            "save the file as SVG or use a matching image extension",
+        ),
+        SvgImageProblem::RootNotFound => BuildError::new(
+            ErrorKind::Asset,
+            None,
+            format!(
+                "could not locate the root <svg> element in image '{}'",
+                raw.as_str()
+            ),
+            "make the file a standalone SVG document with <svg> as its root element",
+        ),
+        SvgImageProblem::MissingSvgNamespace => BuildError::new(
+            ErrorKind::Asset,
+            None,
+            format!(
+                "SVG image '{}' does not declare the SVG namespace on its root <svg>",
+                raw.as_str()
+            ),
+            "add xmlns=\"http://www.w3.org/2000/svg\" to the root <svg>; without it browsers show a broken image",
+        ),
+        SvgImageProblem::NoIntrinsicSize => BuildError::new(
+            ErrorKind::Asset,
+            None,
+            format!(
+                "SVG image '{}' has no usable intrinsic size (the root <svg> needs absolute width and height)",
+                raw.as_str()
+            ),
+            "add width and height attributes to the root <svg>; the viewBox's width and height are the right values",
+        ),
+    })
 }
 
 fn attach_image_resolve_context(
@@ -969,6 +1034,7 @@ mod tests {
             FragmentKind, RawImagePath, ResolvedImageAsset, ResolvedImagePath, SlideKey,
             SourceFragment,
         },
+        error::ErrorKind,
         layout::parse_layout,
     };
     use std::{
@@ -1270,6 +1336,142 @@ mod tests {
     }
 
     #[test]
+    fn resolve_image_paths_accepts_svg_with_absolute_width_and_height() {
+        resolve_test_image(
+            "img/diagram.svg",
+            11,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"></svg>"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_image_paths_accepts_svg_with_single_quoted_namespace() {
+        resolve_test_image(
+            "img/single-quoted-namespace.svg",
+            12,
+            br#"<svg xmlns='http://www.w3.org/2000/svg' width="400" height="300"></svg>"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_image_paths_rejects_svg_without_namespace_with_context() {
+        let err = resolve_test_image(
+            "img/no-namespace.svg",
+            13,
+            br#"<svg width="400" height="300"></svg>"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(13));
+        assert_eq!(
+            err.message,
+            "SVG image 'img/no-namespace.svg' does not declare the SVG namespace on its root <svg>"
+        );
+        assert_eq!(
+            err.help,
+            "add xmlns=\"http://www.w3.org/2000/svg\" to the root <svg>; without it browsers show a broken image"
+        );
+        assert!(
+            err.to_string().contains("slide 2 ('gallery'), line 13"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolve_image_paths_accepts_svg_after_long_xml_comment() {
+        let svg = format!(
+            "<!--{}--><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"300\"></svg>",
+            "x".repeat(1_101)
+        );
+
+        resolve_test_image("img/commented.svg", 12, svg.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn resolve_image_paths_rejects_view_box_only_svg_with_context() {
+        let err = resolve_test_image(
+            "img/viewbox.svg",
+            13,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"></svg>"#,
+        )
+        .unwrap_err();
+
+        assert_svg_no_intrinsic_size_error(&err, "img/viewbox.svg", 13);
+    }
+
+    #[test]
+    fn resolve_image_paths_rejects_percentage_width_even_with_view_box() {
+        let err = resolve_test_image(
+            "img/percentage.svg",
+            17,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="300" viewBox="0 0 400 300"></svg>"#,
+        )
+        .unwrap_err();
+
+        assert_svg_no_intrinsic_size_error(&err, "img/percentage.svg", 17);
+    }
+
+    #[test]
+    fn resolve_image_paths_rejects_non_svg_bytes_named_svg() {
+        let err = resolve_test_image("img/not-really.svg", 19, b"not an SVG document").unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(19));
+        assert_eq!(
+            err.message,
+            "image 'img/not-really.svg' is not an SVG document"
+        );
+        assert_eq!(
+            err.help,
+            "save the file as SVG or use a matching image extension"
+        );
+        assert!(
+            err.to_string().contains("slide 2 ('gallery'), line 19"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolve_image_paths_rejects_uppercase_svg_without_size() {
+        let err = resolve_test_image(
+            "img/diagram.SVG",
+            23,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"></svg>"#,
+        )
+        .unwrap_err();
+
+        assert_svg_no_intrinsic_size_error(&err, "img/diagram.SVG", 23);
+    }
+
+    #[test]
+    fn resolve_image_paths_reports_missing_root_svg_element() {
+        let err = resolve_test_image(
+            "img/nested.svg",
+            29,
+            br#"<wrapper><svg width="400" height="300"></svg></wrapper>"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(29));
+        assert_eq!(
+            err.message,
+            "could not locate the root <svg> element in image 'img/nested.svg'"
+        );
+        assert_eq!(
+            err.help,
+            "make the file a standalone SVG document with <svg> as its root element"
+        );
+        assert!(
+            err.to_string().contains("slide 2 ('gallery'), line 29"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn generic_thumbnail_resolves_to_hashed_asset_and_manifest_image() {
         let layout = parse_layout(
             "generic-card",
@@ -1432,5 +1634,77 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.checked_slides()[0].step_count(), 2);
+    }
+
+    fn resolve_test_image(raw_path: &str, line: usize, bytes: &[u8]) -> Result<()> {
+        let temp = tempfile::tempdir().unwrap();
+        let source_abs = temp.path().join("source.svg");
+        fs::write(&source_abs, bytes).unwrap();
+        let deck = checked_deck_with_image(raw_path, line);
+
+        resolve_image_paths(deck, |_request| {
+            Ok(ResolvedImageAsset {
+                source_abs: source_abs.clone(),
+                dist_rel: ResolvedImagePath::from_string("assets/source.svg".to_owned()),
+            })
+        })
+        .map(|_| ())
+    }
+
+    fn checked_deck_with_image(raw_path: &str, line: usize) -> Deck<Checked<RawImagePath>> {
+        let layout = parse_layout(
+            "images",
+            r#"<section><slot name="hero" accepts="image" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let hero = SlotName::new("hero").unwrap();
+        let contract = layout.slot("hero").unwrap().clone();
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            hero,
+            CheckedSlot::new(
+                contract,
+                vec![SourceFragment::image(
+                    line,
+                    "Diagram",
+                    RawImagePath::new_unchecked(raw_path.to_owned()),
+                )],
+            ),
+        );
+
+        Deck::checked(
+            DeckSettings::default(),
+            vec![CheckedSlide::new(
+                0,
+                1,
+                SlideKey::new("gallery").unwrap(),
+                layout,
+                slots,
+                false,
+                0,
+                false,
+                None,
+            )],
+        )
+    }
+
+    fn assert_svg_no_intrinsic_size_error(err: &BuildError, raw_path: &str, line: usize) {
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(line));
+        assert_eq!(
+            err.message,
+            format!(
+                "SVG image '{raw_path}' has no usable intrinsic size (the root <svg> needs absolute width and height)"
+            )
+        );
+        assert_eq!(
+            err.help,
+            "add width and height attributes to the root <svg>; the viewBox's width and height are the right values"
+        );
+        assert!(
+            err.to_string()
+                .contains(&format!("slide 2 ('gallery'), line {line}")),
+            "{err}"
+        );
     }
 }

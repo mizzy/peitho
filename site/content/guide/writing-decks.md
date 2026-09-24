@@ -45,8 +45,18 @@ Convention mapping turns Markdown into slots without extra notation:
 A table ends at a blank line, so separate any following prose from it with one.
 
 Markdown images are deck-relative local files. They must use supported local
-image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`) and must map to a layout
-with exactly one unambiguous `accepts="image"` slot.
+image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`) and must map to a
+layout with exactly one unambiguous `accepts="image"` slot.
+
+An SVG image is copied unchanged and shown through `<img>`, so scripts inside
+it never run. Its root `<svg>` must declare
+`xmlns="http://www.w3.org/2000/svg"` (without it browsers show a broken image)
+and carry absolute `width` and `height` attributes; an SVG with only a `viewBox` (or `width="100%"`) can collapse to
+nothing inside a slot, so the build rejects it with the line number. Copy the
+`viewBox` width and height into `width` and `height` to fix it. An SVG shown
+through `<img>` cannot load the deck's web fonts and draws its text with the
+viewer's system fonts; convert text to paths, or embed the font in the SVG,
+when the exact typeface matters.
 
 ## Code images
 

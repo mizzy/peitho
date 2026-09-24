@@ -666,7 +666,7 @@ fn valid_cached_svg(path: &Path) -> bool {
         return false;
     }
     fs::read(path)
-        .map(|bytes| is_valid_svg_bytes(&bytes) && svg_has_usable_intrinsic_size(&bytes))
+        .map(|bytes| check_image_svg(&bytes).is_ok())
         .unwrap_or(false)
 }
 
@@ -1320,7 +1320,46 @@ fn validate_svg_output(
     if !is_valid_svg_bytes(bytes) {
         return Err(svg_not_document_error(line, tag, context));
     }
+    let Some(root) = find_root_svg_tag(bytes) else {
+        return Err(svg_root_not_found_error(line, tag, context));
+    };
+    let attrs = parse_svg_root_attributes(bytes, root);
+    if !svg_root_declares_svg_namespace(bytes, attrs) {
+        return Err(svg_missing_namespace_error(line, tag, context));
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SvgImageProblem {
+    NotSvg,
+    RootNotFound,
+    MissingSvgNamespace,
+    NoIntrinsicSize,
+}
+
+pub(crate) fn check_image_svg(bytes: &[u8]) -> std::result::Result<(), SvgImageProblem> {
+    let Some(root) = find_root_svg_tag(bytes) else {
+        return if is_valid_svg_bytes(bytes) {
+            Err(SvgImageProblem::RootNotFound)
+        } else {
+            Err(SvgImageProblem::NotSvg)
+        };
+    };
+    let attrs = parse_svg_root_attributes(bytes, root);
+    if !svg_root_declares_svg_namespace(bytes, attrs) {
+        return Err(SvgImageProblem::MissingSvgNamespace);
+    }
+    if !svg_root_has_usable_dimensions(bytes, attrs) {
+        return Err(SvgImageProblem::NoIntrinsicSize);
+    }
+    Ok(())
+}
+
+fn svg_root_declares_svg_namespace(bytes: &[u8], attrs: SvgRootAttributes) -> bool {
+    attrs.xmlns.is_some_and(|attr| {
+        &bytes[attr.value_start..attr.value_end] == b"http://www.w3.org/2000/svg"
+    })
 }
 
 fn is_valid_svg_bytes(bytes: &[u8]) -> bool {
@@ -1354,14 +1393,6 @@ fn normalize_svg_intrinsic_size<'a>(
     )))
 }
 
-fn svg_has_usable_intrinsic_size(bytes: &[u8]) -> bool {
-    let Some(root) = find_root_svg_tag(bytes) else {
-        return false;
-    };
-    let attrs = parse_svg_root_attributes(bytes, root);
-    svg_root_has_usable_dimensions(bytes, attrs)
-}
-
 fn svg_root_has_usable_dimensions(bytes: &[u8], attrs: SvgRootAttributes) -> bool {
     attrs
         .width
@@ -1389,6 +1420,7 @@ struct SvgRootAttributes {
     width: Option<SvgAttribute>,
     height: Option<SvgAttribute>,
     view_box: Option<SvgAttribute>,
+    xmlns: Option<SvgAttribute>,
 }
 
 #[derive(Clone, Copy)]
@@ -1511,6 +1543,8 @@ fn parse_svg_root_attributes(bytes: &[u8], root: SvgRootTag) -> SvgRootAttribute
             attrs.height.get_or_insert(attr);
         } else if name == b"viewBox" {
             attrs.view_box.get_or_insert(attr);
+        } else if name == b"xmlns" {
+            attrs.xmlns.get_or_insert(attr);
         }
     }
 
@@ -1859,6 +1893,29 @@ fn svg_not_document_error(line: usize, tag: &str, context: CodeImageOutputContex
     }
 }
 
+fn svg_missing_namespace_error(
+    line: usize,
+    tag: &str,
+    context: CodeImageOutputContext,
+) -> BuildError {
+    match context {
+        CodeImageOutputContext::ExternalCommand => code_image_error(
+            line,
+            tag,
+            "command's SVG does not declare the SVG namespace on its root <svg>",
+            format!(
+                "make code_images.{tag} emit xmlns=\"http://www.w3.org/2000/svg\" on the root <svg>"
+            ),
+        ),
+        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+            line,
+            tag,
+            "built-in renderer's SVG does not declare the SVG namespace on its root <svg>",
+            builtin_mermaid_override_help(),
+        ),
+    }
+}
+
 fn svg_intrinsic_size_error(line: usize, tag: &str, context: CodeImageOutputContext) -> BuildError {
     match context {
         CodeImageOutputContext::ExternalCommand => code_image_error(
@@ -1938,10 +1995,10 @@ mod tests {
         builtin_embed_cache_key, builtin_math_override_help, builtin_mermaid_cache_key,
         builtin_mermaid_override_help, cache_or_fetch_generic_oembed,
         cache_or_fetch_generic_thumbnail, cache_or_fetch_oembed, cache_or_render_embed,
-        code_image_cache_key, dispatch_embed_target, hex_encode, is_svg_output,
+        check_image_svg, code_image_cache_key, dispatch_embed_target, hex_encode, is_svg_output,
         parse_deck_and_transform, parse_embed_block, render_builtin_math_with,
-        render_builtin_mermaid_with, svg_empty_output_error, svg_has_usable_intrinsic_size,
-        svg_intrinsic_size_error, svg_not_document_error, svg_root_not_found_error,
+        render_builtin_mermaid_with, svg_empty_output_error, svg_intrinsic_size_error,
+        svg_missing_namespace_error, svg_not_document_error, svg_root_not_found_error,
         transform_code_images, valid_cached_oembed_json, valid_cached_png, CodeImageOutputContext,
         EmbedDispatch, EmbedMode, EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme,
         GenericPageUrl, OEmbedFetcher, SvgRunner, TweetStatusUrl, BUILTIN_EMBED_PARAMS,
@@ -3885,7 +3942,7 @@ mod tests {
     impl SvgRunner for RecordingSvgRunner {
         fn run(&self, _command: &CodeImageCommand, stdin: &str) -> Result<Vec<u8>> {
             self.inputs.borrow_mut().push(stdin.to_owned());
-            Ok(br#"<svg viewBox="0 0 10 10">external embed</svg>"#.to_vec())
+            Ok(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">external embed</svg>"#.to_vec())
         }
     }
 
@@ -3928,7 +3985,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let code_images_cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let embeds_cache_dir = temp.path().join(crate::EMBEDS_CACHE_DIR);
-        let svg_runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">embed</svg>"#);
+        let svg_runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">embed</svg>"#,
+        );
         let embed_renderer = FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nunused".to_vec());
         let config = CodeImagesConfig {
             entries: BTreeMap::from([(
@@ -4194,7 +4253,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         transform_code_images(
             parsed,
-            &FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#),
+            &FakeRunner::svg(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">external</svg>"#,
+            ),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
@@ -4225,7 +4286,9 @@ mod tests {
     fn transforms_matching_code_block_to_cached_image() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">diagram</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">diagram</svg>"#,
+        );
 
         let deck = transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -4252,7 +4315,7 @@ mod tests {
         }
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg viewBox="0 0 10 10" width="10" height="10">diagram</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">diagram</svg>"#
         );
     }
 
@@ -4260,7 +4323,9 @@ mod tests {
     fn transformed_mermaid_code_preserves_reveal_span() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">diagram</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">diagram</svg>"#,
+        );
         let span = RevealSpan { start: 1, len: 1 };
 
         let deck = transform_code_images(
@@ -4345,10 +4410,12 @@ mod tests {
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(
             cache_dir.join(format!("{MERMAID_KEY}.svg")),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached</svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached</svg>"#,
         )
         .unwrap();
-        let runner = FakeRunner::svg(r#"<svg width="1" height="1">new</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">new</svg>"#,
+        );
 
         let deck = transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -4373,7 +4440,7 @@ mod tests {
         }
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached</svg>"#
         );
     }
 
@@ -4383,7 +4450,9 @@ mod tests {
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(cache_dir.join(format!("{MERMAID_KEY}.svg")), b"not svg").unwrap();
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">new</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">new</svg>"#,
+        );
 
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -4398,7 +4467,7 @@ mod tests {
         assert_eq!(runner.calls.get(), 1);
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg viewBox="0 0 10 10" width="10" height="10">new</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">new</svg>"#
         );
     }
 
@@ -4433,7 +4502,7 @@ mod tests {
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(
             &cache_path,
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#,
         )
         .unwrap();
         let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
@@ -4461,7 +4530,7 @@ mod tests {
         assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
         assert_eq!(
             fs::read(cache_path).unwrap(),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached builtin</svg>"#
         );
     }
 
@@ -4494,8 +4563,7 @@ mod tests {
         let cache_files = fs::read_dir(&cache_dir).unwrap().collect::<Vec<_>>();
         assert_eq!(cache_files.len(), 1);
         let bytes = fs::read(cache_files[0].as_ref().unwrap().path()).unwrap();
-        assert!(is_svg_output(&bytes));
-        assert!(svg_has_usable_intrinsic_size(&bytes));
+        assert!(check_image_svg(&bytes).is_ok());
     }
 
     #[test]
@@ -4535,7 +4603,9 @@ mod tests {
     fn explicit_mermaid_entry_overrides_builtin_renderer() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external override</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">external override</svg>"#,
+        );
 
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -4550,7 +4620,7 @@ mod tests {
         assert_eq!(runner.calls.get(), 1);
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg viewBox="0 0 10 10" width="10" height="10">external override</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">external override</svg>"#
         );
         assert_eq!(fs::read_dir(&cache_dir).unwrap().count(), 1);
     }
@@ -4561,7 +4631,9 @@ mod tests {
         let key = code_image_cache_key(math_config().entries.get("math").unwrap(), latex);
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">external math</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">external math</svg>"#,
+        );
 
         let deck = transform_code_images(
             deck_with_math(latex, math_config()),
@@ -4576,7 +4648,7 @@ mod tests {
         assert_eq!(runner.calls.get(), 1);
         assert_eq!(
             fs::read(cache_dir.join(format!("{key}.svg"))).unwrap(),
-            br#"<svg viewBox="0 0 10 10" width="10" height="10">external math</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10">external math</svg>"#
         );
         match deck.parsed_slides()[0].fragments[0].kind() {
             FragmentKind::Image { alt, src } => {
@@ -4745,6 +4817,14 @@ mod tests {
         );
         assert_eq!(no_root.help, builtin_mermaid_override_help());
 
+        let missing_namespace =
+            svg_missing_namespace_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        assert_eq!(
+            missing_namespace.message,
+            "code_images 'mermaid' failed: built-in renderer's SVG does not declare the SVG namespace on its root <svg>"
+        );
+        assert_eq!(missing_namespace.help, builtin_mermaid_override_help());
+
         let no_size =
             svg_intrinsic_size_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
         assert_eq!(
@@ -4787,6 +4867,17 @@ mod tests {
             "make code_images.mermaid write a standalone SVG document to stdout"
         );
 
+        let missing_namespace =
+            svg_missing_namespace_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
+        assert_eq!(
+            missing_namespace.message,
+            "code_images 'mermaid' failed: command's SVG does not declare the SVG namespace on its root <svg>"
+        );
+        assert_eq!(
+            missing_namespace.help,
+            "make code_images.mermaid emit xmlns=\"http://www.w3.org/2000/svg\" on the root <svg>"
+        );
+
         let no_size =
             svg_intrinsic_size_error(7, "mermaid", CodeImageOutputContext::ExternalCommand);
         assert_eq!(
@@ -4809,8 +4900,8 @@ mod tests {
 
     #[test]
     fn normalizes_bom_prefixed_svg_and_preserves_bom_bytes() {
-        let input = b"\xef\xbb\xbf<svg width=\"100%\" viewBox=\"0 0 10 10\"></svg>";
-        let expected = b"\xef\xbb\xbf<svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"></svg>";
+        let input = b"\xef\xbb\xbf<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" viewBox=\"0 0 10 10\"></svg>";
+        let expected = b"\xef\xbb\xbf<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"></svg>";
 
         assert_eq!(normalize_runner_output(input.to_vec()), expected);
     }
@@ -4872,20 +4963,20 @@ mod tests {
     fn normalizes_missing_or_unusable_dimensions_from_viewbox() {
         let cases: &[(&[u8], &[u8])] = &[
             (
-                br#"<svg height="12.5px" viewBox="0 0 20 30"></svg>"#,
-                br#"<svg height="30" width="20" viewBox="0 0 20 30"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" height="12.5px" viewBox="0 0 20 30"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" height="30" width="20" viewBox="0 0 20 30"></svg>"#,
             ),
             (
-                br#"<svg width="50pt" viewBox="0 0 40 60"></svg>"#,
-                br#"<svg width="40" height="60" viewBox="0 0 40 60"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="50pt" viewBox="0 0 40 60"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="60" viewBox="0 0 40 60"></svg>"#,
             ),
             (
-                br#"<svg width="10" height="0%" viewBox="0 0 10 15"></svg>"#,
-                br#"<svg width="10" height="15" viewBox="0 0 10 15"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="0%" viewBox="0 0 10 15"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="15" viewBox="0 0 10 15"></svg>"#,
             ),
             (
-                br#"<svg width="0" height="5" viewBox="0 0 7 5"></svg>"#,
-                br#"<svg width="7" height="5" viewBox="0 0 7 5"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="5" viewBox="0 0 7 5"></svg>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="7" height="5" viewBox="0 0 7 5"></svg>"#,
             ),
         ];
 
@@ -4899,9 +4990,9 @@ mod tests {
         // Keep intrinsic dimensions aligned with the viewBox aspect ratio.
         assert_eq!(
             normalize_runner_output(
-                br#"<svg width="200" height="100%" viewBox="0 0 50 25"></svg>"#.to_vec()
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100%" viewBox="0 0 50 25"></svg>"#.to_vec()
             ),
-            br#"<svg width="50" height="25" viewBox="0 0 50 25"></svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="25" viewBox="0 0 50 25"></svg>"#
         );
     }
 
@@ -4909,12 +5000,12 @@ mod tests {
     fn normalizes_self_closing_root_tags_before_closing_slash() {
         let cases: &[(&[u8], &[u8])] = &[
             (
-                br#"<svg viewBox="0 0 10 10"/>"#,
-                br#"<svg viewBox="0 0 10 10" width="10" height="10"/>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10"/>"#,
             ),
             (
-                br#"<svg viewBox="0 0 10 10" />"#,
-                br#"<svg viewBox="0 0 10 10" width="10" height="10" />"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" />"#,
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="10" height="10" />"#,
             ),
         ];
 
@@ -4926,14 +5017,16 @@ mod tests {
     #[test]
     fn parses_single_quoted_svg_attributes() {
         assert_eq!(
-            normalize_runner_output(br#"<svg width='100%' viewBox='0 0 42 24'></svg>"#.to_vec()),
-            br#"<svg width='42' height="24" viewBox='0 0 42 24'></svg>"#
+            normalize_runner_output(
+                br#"<svg xmlns='http://www.w3.org/2000/svg' width='100%' viewBox='0 0 42 24'></svg>"#.to_vec()
+            ),
+            br#"<svg xmlns='http://www.w3.org/2000/svg' width='42' height="24" viewBox='0 0 42 24'></svg>"#
         );
     }
 
     #[test]
     fn usable_unquoted_width_and_height_pass_through_byte_identical() {
-        let svg = br#"<svg width=100 height=50 viewBox="0 0 10 10"></svg>"#;
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width=100 height=50 viewBox="0 0 10 10"></svg>"#;
 
         assert_eq!(normalize_runner_output(svg.to_vec()), svg);
     }
@@ -4941,8 +5034,10 @@ mod tests {
     #[test]
     fn unusable_unquoted_width_is_replaced_without_duplicate_attribute() {
         assert_eq!(
-            normalize_runner_output(br#"<svg width=100% viewBox="0 0 10 10"></svg>"#.to_vec()),
-            br#"<svg width=10 height="10" viewBox="0 0 10 10"></svg>"#
+            normalize_runner_output(
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width=100% viewBox="0 0 10 10"></svg>"#.to_vec()
+            ),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width=10 height="10" viewBox="0 0 10 10"></svg>"#
         );
     }
 
@@ -4950,9 +5045,9 @@ mod tests {
     fn uppercase_width_and_height_do_not_satisfy_xml_svg_dimensions() {
         assert_eq!(
             normalize_runner_output(
-                br#"<svg WIDTH="100" HEIGHT="50" viewBox="0 0 10 10"></svg>"#.to_vec()
+                br#"<svg xmlns="http://www.w3.org/2000/svg" WIDTH="100" HEIGHT="50" viewBox="0 0 10 10"></svg>"#.to_vec()
             ),
-            br#"<svg WIDTH="100" HEIGHT="50" viewBox="0 0 10 10" width="10" height="10"></svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" WIDTH="100" HEIGHT="50" viewBox="0 0 10 10" width="10" height="10"></svg>"#
         );
     }
 
@@ -4960,7 +5055,9 @@ mod tests {
     fn lowercase_viewbox_does_not_supply_svg_dimensions() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg width="100%" viewbox="0 0 10 10"></svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewbox="0 0 10 10"></svg>"#,
+        );
 
         let err = match transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -4990,7 +5087,7 @@ mod tests {
 
     #[test]
     fn scientific_notation_lengths_pass_through_byte_identical() {
-        let svg = br#"<svg width="1e3px" height="0.5e2" viewBox="0 0 10 10"></svg>"#;
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1e3px" height="0.5e2" viewBox="0 0 10 10"></svg>"#;
 
         assert_eq!(normalize_runner_output(svg.to_vec()), svg);
     }
@@ -4999,7 +5096,9 @@ mod tests {
     fn scientific_notation_viewbox_dimensions_converge_as_cache_hit() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let first_runner = FakeRunner::svg(r#"<svg width="100%" viewBox="0 0 1e3 70"></svg>"#);
+        let first_runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1e3 70"></svg>"#,
+        );
 
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -5015,10 +5114,12 @@ mod tests {
         assert_eq!(first_runner.calls.get(), 1);
         assert_eq!(
             fs::read(&cache_path).unwrap(),
-            br#"<svg width="1e3" height="70" viewBox="0 0 1e3 70"></svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1e3" height="70" viewBox="0 0 1e3 70"></svg>"#
         );
 
-        let second_runner = FakeRunner::svg(r#"<svg width="1" height="1"></svg>"#);
+        let second_runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>"#,
+        );
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
             &second_runner,
@@ -5032,17 +5133,17 @@ mod tests {
         assert_eq!(second_runner.calls.get(), 0);
         assert_eq!(
             fs::read(cache_path).unwrap(),
-            br#"<svg width="1e3" height="70" viewBox="0 0 1e3 70"></svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1e3" height="70" viewBox="0 0 1e3 70"></svg>"#
         );
     }
 
     #[test]
     fn ignores_svg_text_inside_comment_before_root_tag() {
         let input = b"<!-- This comment contains <svg width=\"100\" height=\"100\"></svg>. -->\n\
-            <svg width=\"100%\" viewBox=\"0 0 10 10\"><g /></svg>";
+            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" viewBox=\"0 0 10 10\"><g /></svg>";
         let expected =
             b"<!-- This comment contains <svg width=\"100\" height=\"100\"></svg>. -->\n\
-            <svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"><g /></svg>";
+            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"><g /></svg>";
 
         assert_eq!(normalize_runner_output(input.to_vec()), expected);
     }
@@ -5051,7 +5152,8 @@ mod tests {
     fn rejects_svg_without_intrinsic_size_or_viewbox() {
         let temp = tempfile::tempdir().unwrap();
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
-        let runner = FakeRunner::svg(r#"<svg width="100%"></svg>"#);
+        let runner =
+            FakeRunner::svg(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%"></svg>"#);
 
         let err = match transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -5082,8 +5184,8 @@ mod tests {
     #[test]
     fn rejects_viewbox_with_non_positive_dimensions() {
         for svg in [
-            r#"<svg viewBox="0 0 0 10"></svg>"#,
-            r#"<svg viewBox="0 0 10 -1"></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 0 10"></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 -1"></svg>"#,
         ] {
             let temp = tempfile::tempdir().unwrap();
             let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
@@ -5123,10 +5225,12 @@ mod tests {
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(
             cache_dir.join(format!("{MERMAID_KEY}.svg")),
-            br#"<svg width="100%" viewBox="0 0 10 10">old</svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 10 10">old</svg>"#,
         )
         .unwrap();
-        let runner = FakeRunner::svg(r#"<svg width="100%" viewBox="0 0 10 10">new</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 10 10">new</svg>"#,
+        );
 
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -5141,7 +5245,38 @@ mod tests {
         assert_eq!(runner.calls.get(), 1);
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">new</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">new</svg>"#
+        );
+    }
+
+    #[test]
+    fn cached_svg_without_namespace_is_miss_and_gets_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(
+            cache_dir.join(format!("{MERMAID_KEY}.svg")),
+            br#"<svg width="10" height="10">old</svg>"#,
+        )
+        .unwrap();
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">new</svg>"#,
+        );
+
+        transform_code_images(
+            deck_with_mermaid("graph TD", config()),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap();
+
+        assert_eq!(runner.calls.get(), 1);
+        assert_eq!(
+            fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">new</svg>"#
         );
     }
 
@@ -5152,10 +5287,12 @@ mod tests {
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(
             cache_dir.join(format!("{MERMAID_KEY}.svg")),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached</svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached</svg>"#,
         )
         .unwrap();
-        let runner = FakeRunner::svg(r#"<svg width="1" height="1">new</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">new</svg>"#,
+        );
 
         transform_code_images(
             deck_with_mermaid("graph TD", config()),
@@ -5170,7 +5307,7 @@ mod tests {
         assert_eq!(runner.calls.get(), 0);
         assert_eq!(
             fs::read(cache_dir.join(format!("{MERMAID_KEY}.svg"))).unwrap(),
-            br#"<svg width="10" height="10" viewBox="0 0 10 10">cached</svg>"#
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">cached</svg>"#
         );
     }
 
@@ -5265,6 +5402,38 @@ mod tests {
     }
 
     #[test]
+    fn svg_stdout_without_namespace_reports_code_block_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg width="10" height="10"></svg>"#);
+
+        let err = match transform_code_images(
+            deck_with_mermaid("graph TD", config()),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        ) {
+            Ok(_) => panic!("expected missing SVG namespace failure"),
+            Err(err) => err,
+        };
+
+        assert_eq!(runner.calls.get(), 1);
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "code_images 'mermaid' failed: command's SVG does not declare the SVG namespace on its root <svg>"
+        );
+        assert_eq!(
+            err.help,
+            "make code_images.mermaid emit xmlns=\"http://www.w3.org/2000/svg\" on the root <svg>"
+        );
+        assert!(!cache_dir.join(format!("{MERMAID_KEY}.svg")).exists());
+    }
+
+    #[test]
     fn accepts_svg_with_graphviz_preamble() {
         let graphviz_svg = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n\
             <!-- Generated by graphviz version 12.0.0 -->\n\
@@ -5317,7 +5486,9 @@ mod tests {
         )
         .unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 10 10">json</svg>"#);
+        let runner = FakeRunner::svg(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">json</svg>"#,
+        );
 
         let deck = transform_code_images(
             parsed,
@@ -5352,7 +5523,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let transformed = transform_code_images(
             parsed,
-            &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">slot</svg>"#),
+            &FakeRunner::svg(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">slot</svg>"#,
+            ),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
             &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
@@ -5462,7 +5635,9 @@ mod tests {
         let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
         let transformed = transform_code_images(
             parsed,
-            &FakeRunner::svg(r#"<svg viewBox="0 0 10 10">same</svg>"#),
+            &FakeRunner::svg(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">same</svg>"#,
+            ),
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
             &cache_dir,
@@ -5482,10 +5657,10 @@ mod tests {
         let dist_rel = ResolvedImagePath::from_string("assets/same.svg".to_owned());
         let mut resolve_calls = 0;
 
-        let (_resolved, assets) = resolve_image_paths(checked, |_request| {
+        let (_resolved, assets) = resolve_image_paths(checked, |request| {
             resolve_calls += 1;
             Ok(ResolvedImageAsset {
-                source_abs: PathBuf::from("/tmp/code-image.svg"),
+                source_abs: temp.path().join(request.raw.as_str()),
                 dist_rel: dist_rel.clone(),
             })
         })

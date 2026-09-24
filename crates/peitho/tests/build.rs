@@ -911,6 +911,89 @@ fn build_copies_markdown_image_to_dist_assets() {
 }
 
 #[test]
+fn build_copies_sized_svg_markdown_image_byte_for_byte() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let source = dir.path().join("img/d.svg");
+    let out = dir.path().join("dist");
+    let svg = br#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="rebeccapurple"/>
+</svg>
+"#;
+    fs::write(
+        &deck,
+        deck_with_assets("./title-image.html", "# Visual\n\n![Diagram](img/d.svg)"),
+    )
+    .unwrap();
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, svg).unwrap();
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let assets = asset_files(&out);
+    assert_eq!(assets.len(), 1);
+    let asset = &assets[0];
+    let asset_name = asset.file_name().unwrap().to_string_lossy();
+    assert!(asset_name.ends_with("-d.svg"));
+    assert_eq!(fs::read(asset).unwrap(), svg);
+    let slide = fs::read_to_string(out.join("slides/000-visual.html")).unwrap();
+    assert!(slide.contains(&format!(r#"<img src="assets/{asset_name}" alt="Diagram">"#)));
+}
+
+#[test]
+fn build_rejects_unsized_svg_markdown_image_with_line() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let source = dir.path().join("img/d.svg");
+    let out = dir.path().join("dist");
+    fs::write(
+        &deck,
+        deck_with_assets("./title-image.html", "# Visual\n\n![Diagram](img/d.svg)"),
+    )
+    .unwrap();
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(
+        &source,
+        br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"></svg>"#,
+    )
+    .unwrap();
+    write_image_layout(dir.path(), "1");
+    write_base_css(dir.path());
+    write_overrides_css(dir.path(), "");
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("slide 1 ('visual'), line 7"))
+        .stderr(predicate::str::contains(
+            "SVG image 'img/d.svg' has no usable intrinsic size (the root <svg> needs absolute width and height)",
+        ))
+        .stderr(predicate::str::contains(
+            "help: add width and height attributes to the root <svg>; the viewBox's width and height are the right values",
+        ));
+}
+
+#[test]
 fn build_copies_nested_unicode_markdown_image_path() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");
