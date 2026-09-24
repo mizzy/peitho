@@ -1751,7 +1751,7 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("built 25 slide(s)"));
+        .stdout(predicate::str::contains("built 26 slide(s)"));
 
     let manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.path().join("manifest.json")).unwrap())
@@ -1761,10 +1761,10 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
     let expected = [
         ("Intro", 0, 3, 180_000),
         ("Install", 4, 4, 60_000),
-        ("Write", 5, 12, 480_000),
-        ("Design", 13, 16, 300_000),
-        ("Run", 17, 23, 420_000),
-        ("Close", 24, 24, 60_000),
+        ("Write", 5, 13, 480_000),
+        ("Design", 14, 17, 300_000),
+        ("Run", 18, 24, 420_000),
+        ("Close", 25, 25, 60_000),
     ];
     assert_eq!(sections.len(), expected.len());
     for (section, (name, start, end, planned)) in sections.iter().zip(expected) {
@@ -1792,7 +1792,7 @@ fn peitho_tour_example_exercises_dispatch_and_agenda_sections() {
     // The preview slide holds only text + a single image; type-driven dispatch
     // must land it on the `shot` layout (with the image slot) instead of
     // `topic`, without any explicit `layout` pin.
-    let preview = fs::read_to_string(out.path().join("slides/017-preview.html")).unwrap();
+    let preview = fs::read_to_string(out.path().join("slides/018-preview.html")).unwrap();
     assert!(preview.contains("guide-shot"));
 }
 

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="300" viewBox="0 0 1040 300">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#7dd3fc"/></marker>
+  </defs>
+  <rect width="1040" height="300" rx="18" fill="#0f1730"/>
+  <text x="520" y="62" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#f2f6fd">Every deck takes the same typed path</text>
+  <rect x="27" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="#38bdf8" stroke-width="2"/>
+  <text x="95" y="152" text-anchor="middle" font-family="Menlo, Consolas, monospace" font-size="22" fill="#dce4f2">deck.md</text>
+  <line x1="167" y1="144" x2="191" y2="144" stroke="#7dd3fc" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="197" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="url(#accent)" stroke-width="2"/>
+  <text x="265" y="152" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#dce4f2">Parsed</text>
+  <line x1="337" y1="144" x2="361" y2="144" stroke="#7dd3fc" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="367" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="url(#accent)" stroke-width="2"/>
+  <text x="435" y="152" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#dce4f2">Mapped</text>
+  <line x1="507" y1="144" x2="531" y2="144" stroke="#7dd3fc" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="537" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="url(#accent)" stroke-width="2"/>
+  <text x="605" y="152" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#dce4f2">Checked</text>
+  <line x1="677" y1="144" x2="701" y2="144" stroke="#7dd3fc" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="707" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="url(#accent)" stroke-width="2"/>
+  <text x="775" y="152" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#dce4f2">Rendered</text>
+  <line x1="847" y1="144" x2="871" y2="144" stroke="#7dd3fc" stroke-width="2" marker-end="url(#arrow)"/>
+  <rect x="877" y="108" width="136" height="72" rx="12" fill="#17233e" stroke="#38bdf8" stroke-width="2"/>
+  <text x="945" y="152" text-anchor="middle" font-family="Menlo, Consolas, monospace" font-size="22" fill="#dce4f2">dist/</text>
+  <text x="520" y="252" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="19" fill="#95a4be">Slot contracts are checked before anything renders: a broken deck never reaches dist/.</text>
+</svg>
