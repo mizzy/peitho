@@ -164,11 +164,22 @@ Any HTML comment that is not JSON becomes a speaker note on that slide. Multiple
 <!-- {"key":"images"} -->
 # Image-first slides
 
-Write a paragraph that contains only a single image and Peitho routes the slide to a layout with an `accepts="image"` slot. The image has to be a local path relative to the deck (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, and parent-directory escapes are build errors.
+Write a paragraph that contains only a single image and Peitho routes the slide to a layout with an `accepts="image"` slot. The image has to be a local path relative to the deck (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`). Remote URLs, absolute paths, and parent-directory escapes are build errors.
 
 ```markdown
 ![Architecture diagram](img/arch.png)
 ```
+
+---
+
+<!-- {"key":"svg-images"} -->
+# SVG diagrams stay sharp
+
+Keep a diagram as SVG and reference it directly: one source file, crisp at any screen size. The root `<svg>` needs `xmlns` and absolute `width`/`height`; its text uses system fonts.
+
+![The build pipeline: deck.md, Parsed, Mapped, Checked, Rendered, dist/](img/pipeline.svg)
+
+<!-- This diagram is img/pipeline.svg, copied into dist/ byte for byte. There is no PNG export step to forget. -->
 
 ---
 

@@ -147,7 +147,7 @@ Markdown images are local files written as an image-only paragraph:
 ![Architecture diagram](img/arch.png)
 ```
 
-Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`). Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
+Image paths are deck-relative and must use supported local image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`). An SVG image is copied unchanged, shown through `<img>` (its scripts never run, and its text uses system fonts rather than the deck's web fonts), and its root `<svg>` must declare `xmlns="http://www.w3.org/2000/svg"` and carry absolute `width` and `height`. Remote URLs, absolute paths, parent-directory escapes, query strings, fragments, and backslash separators are build errors. A slide with an image must map to a layout with exactly one unambiguous `accepts="image"` slot; style the rendered `<img>` through normal layout CSS, for example `.slot-hero img { max-width: 100%; }`.
 
 ### Explicit slots
 

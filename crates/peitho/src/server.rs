@@ -348,11 +348,13 @@ pub(crate) fn resolve_request_path(
 }
 
 pub(crate) fn content_type(path: &Path) -> &'static str {
-    match path
+    let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
-    {
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
@@ -2806,6 +2808,12 @@ mod tests {
         assert_eq!(content_type(Path::new("fonts/Custom.woff")), "font/woff");
         assert_eq!(content_type(Path::new("fonts/Custom.ttf")), "font/ttf");
         assert_eq!(content_type(Path::new("fonts/Custom.otf")), "font/otf");
+    }
+
+    #[test]
+    fn maps_uppercase_image_content_types() {
+        assert_eq!(content_type(Path::new("a.SVG")), "image/svg+xml");
+        assert_eq!(content_type(Path::new("a.PNG")), "image/png");
     }
 
     fn media_server(bytes: &[u8]) -> (tempfile::TempDir, PresentServer) {
