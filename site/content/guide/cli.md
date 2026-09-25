@@ -113,7 +113,7 @@ Edits go to the Markdown source only; notes never enter `dist/`.
 
 ### Editing slide text in preview
 
-Click a paragraph, heading, tight list item, or table cell in single view to
+Click a paragraph, heading, tight list item, table cell, or footnote in single view to
 replace its rendering with its inline Markdown source. Enter or blur saves,
 Shift+Enter inserts a newline, and Escape cancels. Markdown is the only source
 of truth; Peitho never converts rendered HTML back to Markdown.

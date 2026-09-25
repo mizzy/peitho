@@ -287,8 +287,15 @@ struct FootnoteReference {
 #[derive(Debug)]
 struct FootnoteDefinition {
     label: String,
-    markdown: String,
+    body: FootnoteBody,
     line: usize,
+}
+
+#[derive(Debug)]
+struct FootnoteBody {
+    markdown: String,
+    /// The body's source span and editable spans, when it is verbatim source.
+    provenance: Option<(SourceSpan, Vec<EditableSpan>)>,
 }
 
 #[derive(Debug)]
@@ -389,10 +396,10 @@ impl FootnoteAccumulator {
             let definition = definitions
                 .get(reference.label.as_str())
                 .expect("undefined references were checked above");
-            entries.push(FootnoteEntry::new(
+            let entry = FootnoteEntry::new(
                 index + 1,
                 reference.label.clone(),
-                definition.markdown.clone(),
+                definition.body.markdown.clone(),
                 definition.line,
                 reveal_step_for_reference_lines(
                     self.all_reference_lines
@@ -400,7 +407,13 @@ impl FootnoteAccumulator {
                         .expect("first references always have recorded lines"),
                     &step_for_line,
                 ),
-            ));
+            );
+            entries.push(match &definition.body.provenance {
+                Some((span, editable_spans)) => {
+                    entry.with_source_provenance(*span, editable_spans.clone())
+                }
+                None => entry,
+            });
         }
         let line = entries
             .first()
@@ -414,7 +427,7 @@ impl FootnoteAccumulator {
 struct FootnoteCapture {
     label: String,
     line: usize,
-    paragraph: Option<String>,
+    paragraph: Option<FootnoteBody>,
     current_paragraph_start: Option<usize>,
 }
 
@@ -442,15 +455,20 @@ impl FootnoteCapture {
                 source, end,
             )));
         };
-        let markdown = source_slice(source, start, end);
-        if !markdown.trim().is_empty() {
-            self.paragraph = Some(markdown);
+        let (markdown, span) = source_slice_with_span(source, start, end);
+        if !markdown.is_empty() {
+            let provenance = authorized_editable_spans(source, &markdown, span)
+                .map(|editable_spans| (span, editable_spans));
+            self.paragraph = Some(FootnoteBody {
+                markdown,
+                provenance,
+            });
         }
         Ok(())
     }
 
     fn finish(self) -> Result<FootnoteDefinition> {
-        let Some(markdown) = self.paragraph else {
+        let Some(body) = self.paragraph else {
             return Err(BuildError::new(
                 ErrorKind::Parse,
                 Some(self.line),
@@ -460,7 +478,7 @@ impl FootnoteCapture {
         };
         Ok(FootnoteDefinition {
             label: self.label,
-            markdown,
+            body,
             line: self.line,
         })
     }
@@ -3630,10 +3648,6 @@ pub fn line_for_offset(source: &str, offset: usize) -> usize {
         + 1
 }
 
-fn source_slice(source: &str, start: usize, end: usize) -> String {
-    source[start..end].trim().to_owned()
-}
-
 fn source_slice_with_span(source: &str, start: usize, end: usize) -> (String, SourceSpan) {
     let raw = &source[start..end];
     let markdown = raw.trim();
@@ -4070,11 +4084,24 @@ fn with_source_provenance(
     fragment: SourceFragment,
     fragment_span: SourceSpan,
 ) -> SourceFragment {
-    if combined.get(fragment_span.start..fragment_span.end) != Some(fragment.markdown()) {
-        return fragment;
+    match authorized_editable_spans(combined, fragment.markdown(), fragment_span) {
+        Some(editable_spans) => fragment.with_source_provenance(fragment_span, editable_spans),
+        None => fragment,
+    }
+}
+
+/// The editable spans inside `markdown`, or `None` when the renderer input is
+/// not byte-identical to `combined[span]` (then nothing in it is editable).
+fn authorized_editable_spans(
+    combined: &str,
+    markdown: &str,
+    fragment_span: SourceSpan,
+) -> Option<Vec<EditableSpan>> {
+    if combined.get(fragment_span.start..fragment_span.end) != Some(markdown) {
+        return None;
     }
 
-    let editable_spans = editable_spans_for_markdown(fragment.markdown())
+    let editable_spans = editable_spans_for_markdown(markdown)
         .into_iter()
         .map(|local| {
             let shift = |range: Range<usize>| SourceSpan {
@@ -4090,7 +4117,7 @@ fn with_source_provenance(
             }
         })
         .collect();
-    fragment.with_source_provenance(fragment_span, editable_spans)
+    Some(editable_spans)
 }
 
 fn unsupported_construct(line: usize, name: &str) -> BuildError {
@@ -4539,6 +4566,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ok"]
         );
+    }
+
+    #[test]
+    fn footnote_definition_bodies_are_editable_paragraphs() {
+        let source = "Body[^a][^b].\n\n[^a]: First *note* with [link](https://example.com).\n[^b]: Second line one\n    line two.";
+        let deck = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap();
+        let spans = deck.parsed_slides()[0].editable_spans();
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| {
+                    let span = span.source_span();
+                    &source[span.start..span.end]
+                })
+                .collect::<Vec<_>>(),
+            [
+                "Body[^a][^b].",
+                "First *note* with [link](https://example.com).",
+                "Second line one\n    line two.",
+            ]
+        );
+        assert!(spans
+            .iter()
+            .all(|span| span.kind() == EditableBlockKind::Paragraph));
     }
 
     #[test]
