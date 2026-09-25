@@ -23,7 +23,9 @@ second content model.
   turning a paragraph into a list, splitting slides. These are refused with a
   reason; the author uses their editor.
 - Editing code blocks, `code_images` output (Mermaid, math, embeds), images,
-  footnote definitions, raw HTML blocks, page settings, or layout HTML.
+  raw HTML blocks, page settings, or layout HTML. (Footnote definition bodies
+  were a non-goal until 2026-09-25; see
+  `docs/plans/2026-09-25-inline-edit-footnotes.md`.)
 - Editing in grid mode, in thumbnails, in `peitho present`, or in `dist/`.
 
 ## Author decisions (2026-09-20)

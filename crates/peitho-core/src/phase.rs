@@ -514,14 +514,30 @@ impl ParsedSlide {
             .map(|request| request.name.as_str())
     }
 
-    /// Return every parser-authorized editable span in source order, recursing
-    /// into `SlotGroup` children.
+    /// Return every parser-authorized editable span in fragment order, recursing
+    /// into `SlotGroup` children and footnote entries.
     pub fn editable_spans(&self) -> Vec<EditableSpan> {
         fn collect(fragments: &[SourceFragment], spans: &mut Vec<EditableSpan>) {
             for fragment in fragments {
                 spans.extend_from_slice(fragment.editable_spans());
-                if let FragmentKind::SlotGroup { children, .. } = fragment.kind() {
-                    collect(children, spans);
+                match fragment.kind() {
+                    FragmentKind::SlotGroup { children, .. } => collect(children, spans),
+                    FragmentKind::Footnotes { entries } => {
+                        for entry in entries {
+                            spans.extend_from_slice(entry.editable_spans());
+                        }
+                    }
+                    FragmentKind::Heading { .. }
+                    | FragmentKind::Paragraph
+                    | FragmentKind::Text
+                    | FragmentKind::Code
+                    | FragmentKind::Math { .. }
+                    | FragmentKind::EmbedCard { .. }
+                    | FragmentKind::GenericEmbedCard { .. }
+                    | FragmentKind::Image { .. }
+                    | FragmentKind::List
+                    | FragmentKind::Blockquote
+                    | FragmentKind::Table => {}
                 }
             }
         }

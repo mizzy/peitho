@@ -1026,7 +1026,11 @@ fn render_footnotes_block(
         }
         render_markdown_run(
             body,
-            &[BodyMarkdownFragment::plain(entry.markdown(), entry.line())],
+            &[BodyMarkdownFragment {
+                source_span: entry.source_span(),
+                editable_spans: entry.editable_spans(),
+                ..BodyMarkdownFragment::plain(entry.markdown(), entry.line())
+            }],
             context,
         )?;
         body.push_str("</li>");
@@ -7125,6 +7129,24 @@ Paragraph after heading.
         }
         assert!(html.contains("<blockquote>"), "{html}");
         assert!(!opening_tag(html, "<blockquote").contains("data-peitho-"));
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_footnote_bodies() {
+        let markdown = "# T\n\nBody[^a].\n\n[^a]: The *note* with [link](https://example.org).";
+        let (rendered, spans) = render_with_edit_annotations(
+            markdown,
+            title_body_code_footnotes_layout(),
+            EditAnnotations::On,
+        );
+        let html = rendered.slides()[0].html();
+        let source = "The *note* with [link](https://example.org).";
+        let span = span_for_slice(markdown, &spans, source);
+
+        assert!(
+            html.contains(&format!("<li>{}", annotated_tag("p", span, source))),
+            "{html}"
+        );
     }
 
     #[test]

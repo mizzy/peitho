@@ -638,6 +638,8 @@ pub struct FootnoteEntry {
     markdown: String,
     line: usize,
     reveal_step: Option<usize>,
+    source_span: Option<SourceSpan>,
+    editable_spans: Vec<EditableSpan>,
 }
 
 /// Parse-validated highlighting metadata for one code block nested inside a
@@ -667,7 +669,29 @@ impl FootnoteEntry {
             markdown: markdown.into(),
             line,
             reveal_step,
+            source_span: None,
+            editable_spans: Vec::new(),
         }
+    }
+
+    /// Attach the body's source span and parser-authorized editable spans.
+    /// `pub(crate)` so only the parser decides what is editable.
+    pub(crate) fn with_source_provenance(
+        mut self,
+        source_span: SourceSpan,
+        editable_spans: Vec<EditableSpan>,
+    ) -> Self {
+        self.source_span = Some(source_span);
+        self.editable_spans = editable_spans;
+        self
+    }
+
+    pub fn source_span(&self) -> Option<SourceSpan> {
+        self.source_span
+    }
+
+    pub fn editable_spans(&self) -> &[EditableSpan] {
+        &self.editable_spans
     }
 
     pub fn number(&self) -> usize {

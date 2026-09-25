@@ -527,6 +527,27 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_a_footnote_definition_body() {
+        let source = "# Title\n\nRead [^note].\n\n[^note]: Old [link](https://a.example).\n";
+
+        assert_eq!(
+            rewrite(source, 0, 2, "New [link](https://b.example).").unwrap(),
+            "# Title\n\nRead [^note].\n\n[^note]: New [link](https://b.example).\n"
+        );
+    }
+
+    #[test]
+    fn rejects_a_footnote_body_split_into_a_second_paragraph() {
+        assert_rewrite_refusal(
+            "# Title\n\nRead [^note].\n\n[^note]: Definition\n",
+            0,
+            2,
+            "one\n\ntwo",
+            "inline edit would change the edited slide's block structure",
+        );
+    }
+
+    #[test]
     fn accepts_internal_newlines_without_comparing_diagnostic_lines() {
         let source = concat!(
             "---\n",
