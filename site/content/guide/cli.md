@@ -132,7 +132,12 @@ runs, and the preview reloads on the same slide.
   stay inert. A click on a link still opens the link instead of starting an
   edit.
 - **Keys.** Enter saves and Shift+Enter inserts a newline (with
-  `breaks: true` that is a visible line break). Escape discards the inline
+  `breaks: true` that is a visible line break). A heading written as `# Title`
+  or `## Title` cannot hold a newline, so saving one rewrites the heading to
+  its multi-line (setext) form — the text, then a `====` (H1) or `----` (H2)
+  underline. A heading that is already in that form keeps it. H3 to H6 have
+  no multi-line form, so a newline there is refused. To show the newline on
+  the slide, give the heading's slot `white-space: pre-line` in layout CSS. Escape discards the inline
   edit immediately and puts the rendered block back; see
   [Restoring a discarded slide edit](#restoring-a-discarded-slide-edit). The
   notes panel is different: Escape only leaves its textarea and keeps the text.

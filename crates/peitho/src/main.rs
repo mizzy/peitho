@@ -2286,7 +2286,7 @@ fn write_preview_slide_edit(
         return Err(preview_deck_drift_conflict());
     }
 
-    let rewritten = loaded
+    let rewrite = loaded
         .translate(peitho_core::slide_edit::rewrite_block(
             combined_source,
             slide,
@@ -2298,9 +2298,9 @@ fn write_preview_slide_edit(
     write_preview_origin_rewrite(
         input,
         &loaded,
-        PreviewOriginRewriteScope::EditableBlock(span.source_span()),
+        PreviewOriginRewriteScope::EditableBlock(rewrite.replaced()),
         combined_source,
-        &rewritten,
+        rewrite.source(),
     )
 }
 
@@ -7362,6 +7362,39 @@ contexts:
             fs::read_to_string(&deck).unwrap(),
             current.replace("Edit *this*.", "Edit **this now**.")
         );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_writes_a_newline_in_an_atx_heading_as_setext() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        let key = SlideKey::new("current").unwrap();
+        fs::write(&deck, "<!-- {\"key\":\"current\"} -->\n# Title\n\nBody\n").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "Title", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "Title", "Title\nline two").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&deck).unwrap(),
+            "<!-- {\"key\":\"current\"} -->\nTitle\nline two\n====\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn write_preview_slide_edit_writes_an_included_atx_heading_as_setext() {
+        let (_dir, deck, included, top_source) =
+            include_deck_fixture(TOP_SOURCE, "## Included\n\nBody\n");
+        let key = SlideKey::new("included").unwrap();
+        let (start, end) = preview_edit_coordinates(&deck, &key, "Included", 0);
+
+        write_preview_slide_edit(&deck, &key, start, end, "Included", "Included\nline two")
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&included).unwrap(),
+            "Included\nline two\n----\n\nBody\n"
+        );
+        assert_eq!(fs::read_to_string(&deck).unwrap(), top_source);
     }
 
     #[test]

@@ -12,10 +12,10 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        AspectRatio, CodeImageCommand, CodeImageRenderer, CodeImagesConfig, ContainerCodeLanguage,
-        EditableBlockKind, EditableSpan, EmbedMode, EmbedOptions, ExplicitSlot, FootnoteEntry,
-        FragmentKind, RawImagePath, Resolution, RevealSpan, SlideKey, SlotName, SourceFragment,
-        SourceSpan,
+        AspectRatio, AtxHeading, CodeImageCommand, CodeImageRenderer, CodeImagesConfig,
+        ContainerCodeLanguage, EditableBlockKind, EditableSpan, EmbedMode, EmbedOptions,
+        ExplicitSlot, FootnoteEntry, FragmentKind, RawImagePath, Resolution, RevealSpan, SlideKey,
+        SlotName, SourceFragment, SourceSpan,
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
@@ -4024,6 +4024,8 @@ where
 struct LocalEditableSpan {
     source: Range<usize>,
     kind: EditableBlockKind,
+    /// `(level, line)` when the span is an ATX heading.
+    atx: Option<(u8, Range<usize>)>,
 }
 
 fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
@@ -4035,8 +4037,32 @@ fn editable_spans_for_markdown(markdown: &str) -> Vec<LocalEditableSpan> {
         |event_start| editable_inline_start(markdown, event_start),
     )
     .into_iter()
-    .map(|(_, kind, source)| LocalEditableSpan { source, kind })
+    .map(|(opening_event, kind, source)| LocalEditableSpan {
+        source,
+        kind,
+        atx: atx_heading_line(markdown, &events[opening_event]),
+    })
     .collect()
+}
+
+/// pulldown-cmark does not say whether a heading is ATX or setext; an ATX
+/// heading's own source starts with its `#` run (after at most three spaces of
+/// indentation), a setext heading's never does.
+fn atx_heading_line(
+    markdown: &str,
+    (event, range): &(Event<'_>, Range<usize>),
+) -> Option<(u8, Range<usize>)> {
+    let Event::Start(Tag::Heading { level, .. }) = event else {
+        return None;
+    };
+    let block = &markdown[range.clone()];
+    let indent = block.len() - block.trim_start_matches(' ').len();
+    if indent > 3 || !block[indent..].starts_with('#') {
+        return None;
+    }
+    let line = block.split('\n').next().unwrap_or(block);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    Some((*level as u8, range.start..range.start + line.len()))
 }
 
 fn with_source_provenance(
@@ -4051,13 +4077,17 @@ fn with_source_provenance(
     let editable_spans = editable_spans_for_markdown(fragment.markdown())
         .into_iter()
         .map(|local| {
-            EditableSpan::new(
-                SourceSpan {
-                    start: fragment_span.start + local.source.start,
-                    end: fragment_span.start + local.source.end,
-                },
-                local.kind,
-            )
+            let shift = |range: Range<usize>| SourceSpan {
+                start: fragment_span.start + range.start,
+                end: fragment_span.start + range.end,
+            };
+            match local.atx {
+                Some((level, line)) => EditableSpan::atx_heading(
+                    shift(local.source),
+                    AtxHeading::new(level, shift(line)),
+                ),
+                None => EditableSpan::new(shift(local.source), local.kind),
+            }
         })
         .collect();
     fragment.with_source_provenance(fragment_span, editable_spans)
@@ -4473,6 +4503,28 @@ mod tests {
                 Some("shared.md")
             );
         }
+    }
+
+    #[test]
+    fn only_atx_headings_carry_their_level_and_line() {
+        let markdown = "## ATX ##\n\nSetext\n------\n\n  ### Indented\r\n\nBody\n";
+        let spans = editable_spans_for_markdown(markdown);
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span
+                    .atx
+                    .clone()
+                    .map(|(level, line)| (level, &markdown[line])))
+                .collect::<Vec<_>>(),
+            [
+                Some((2, "## ATX ##")),
+                None,
+                Some((3, "### Indented")),
+                None
+            ]
+        );
     }
 
     #[test]

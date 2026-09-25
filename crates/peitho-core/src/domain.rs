@@ -759,11 +759,26 @@ pub(crate) enum EditableBlockKind {
 pub struct EditableSpan {
     source: SourceSpan,
     kind: EditableBlockKind,
+    atx_heading: Option<AtxHeading>,
 }
 
 impl EditableSpan {
     pub(crate) fn new(source: SourceSpan, kind: EditableBlockKind) -> Self {
-        Self { source, kind }
+        Self {
+            source,
+            kind,
+            atx_heading: None,
+        }
+    }
+
+    /// An ATX heading span; the only way to attach `AtxHeading`, so the
+    /// evidence can never ride a non-heading span.
+    pub(crate) fn atx_heading(source: SourceSpan, heading: AtxHeading) -> Self {
+        Self {
+            source,
+            kind: EditableBlockKind::Heading,
+            atx_heading: Some(heading),
+        }
     }
 
     pub fn source_span(self) -> SourceSpan {
@@ -772,6 +787,34 @@ impl EditableSpan {
 
     pub(crate) fn kind(self) -> EditableBlockKind {
         self.kind
+    }
+
+    /// Present only for a heading the parser saw written in ATX form.
+    pub(crate) fn atx(self) -> Option<AtxHeading> {
+        self.atx_heading
+    }
+}
+
+/// Parser evidence that an editable heading is written in ATX form (`# ...`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AtxHeading {
+    level: u8,
+    line: SourceSpan,
+}
+
+impl AtxHeading {
+    pub(crate) fn new(level: u8, line: SourceSpan) -> Self {
+        Self { level, line }
+    }
+
+    pub(crate) fn level(self) -> u8 {
+        self.level
+    }
+
+    /// The heading's own source line, from its first marker character through
+    /// any closing `#` sequence, line ending excluded.
+    pub(crate) fn line(self) -> SourceSpan {
+        self.line
     }
 }
 
