@@ -49,6 +49,12 @@ git diff --exit-code packages/peitho-present/dist/remote.js
 
 ### Step 6: Push the tag
 
+- **Before tagging, wait for the CI run that the merge pushed to `main`** and confirm
+  every job passed: `gh run list --workflow CI --branch main --limit 1`, then
+  `gh run watch <id> --exit-status`. The PR's own green checks do not cover this run.
+  If a job fails, report it to the user; only an external-flake failure (e.g. the X
+  tweet embed e2e timing out) may be rerun with `gh run rerun <id> --failed`, and the
+  tag waits until the rerun is green.
 - From the main worktree on `main` (after the merge and `git pull`), tag and push:
   `git tag v<version> && git push origin v<version>`.
 - **Do not run `gh release create`.** The tag push triggers `.github/workflows/release.yml`,
