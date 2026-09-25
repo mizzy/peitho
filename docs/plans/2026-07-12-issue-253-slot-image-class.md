@@ -12,7 +12,7 @@ Considered:
 - **Option 2** (document the bareness) — leaves the trap in place. Rejected by issue framing.
 - **Option 3** (`class="slot-image"` on each `<img>`) — one class per image, breaks the "1 slot = 1 class instance in the DOM" shape that block slots have. If a future slot rendering needs a caption or a grid of images, the markup shape has to change; Option 1 leaves room in the wrapper.
 
-Option 1 aligns with `Accepts::Blocks | Text | List` (single `<div class="slot-<name>">` wrapping all fragments of that slot). Inline (`<span>`) and code (`<pre>`) are also single-container per slot — Option 1 keeps image consistent with that invariant. The class rides the outermost rendered element for every slot kind.
+Option 1 aligns with `Accepts::Blocks | Text | List` (single `<div class="slot-<name>">` wrapping all fragments of that slot). Inline (`<span>`) is also a single container; code is the intentional exception, with one `<pre>` per fenced block. Option 1 keeps image consistent with the wrapper-based slot kinds while leaving room for captions or grids.
 
 ## Change
 
