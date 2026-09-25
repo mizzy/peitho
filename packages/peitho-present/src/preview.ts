@@ -132,6 +132,13 @@ type ActiveSlideEdit = {
   removeListeners(): void;
 };
 
+type EditableClickTarget = {
+  key: string;
+  target: HTMLElement;
+  /** An `<a>` sits between the click origin and the editable block. */
+  throughLink: boolean;
+};
+
 type ActiveEdit =
   | { kind: "inline"; edit: ActiveSlideEdit }
   | {
@@ -290,6 +297,10 @@ function parseEditableSourceRange(value: string): { start: number; end: number }
   const end = Number(match[2]);
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) return null;
   return { start, end };
+}
+
+function hasClickModifier(event: MouseEvent): boolean {
+  return hasChordModifier(event) || event.shiftKey;
 }
 
 function isNestedListItemBlock(node: Node): boolean {
@@ -902,8 +913,13 @@ class PreviewShellController implements PreviewShell {
     const clickGuard = createClickNavigationGuard({ target: tile, window: this.win });
     this.tileListenerCleanups.push(() => clickGuard.destroy());
     const onTileClick = (event: MouseEvent): void => {
-      if (clickGuard.shouldIgnoreClick(event)) return;
-      if (this.tryStartSlideEdit(slide, host, event)) return;
+      const editable = this.editableClickTarget(slide, host, event);
+      // A plain click on a link inside an editable block edits the block
+      // (the editor shows the link's Markdown); any modifier keeps the link.
+      const editsLink = editable?.throughLink === true && !hasClickModifier(event);
+      if (editsLink) event.preventDefault();
+      if (clickGuard.shouldIgnoreClick(event) && !editsLink) return;
+      if (this.tryStartSlideEdit(editable)) return;
       this.commitTransition(slide.index, "single");
     };
     tile.addEventListener("click", onTileClick);
@@ -1026,32 +1042,38 @@ class PreviewShellController implements PreviewShell {
     this.releaseDeferredReload();
   }
 
-  private tryStartSlideEdit(
+  private editableClickTarget(
     slide: ManifestSlide,
     host: HTMLElement,
     event: MouseEvent
-  ): boolean {
-    if (!this.canStartEdit()) return true;
-    if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
+  ): EditableClickTarget | null {
+    if (this.mode !== "single" || slide.index !== this.currentIndex) return null;
     const shadow = host.shadowRoot;
-    if (shadow === null) return false;
+    if (shadow === null) return null;
     const path = event.composedPath();
     const boundary = path.indexOf(shadow);
-    if (boundary <= 0) return false;
+    if (boundary <= 0) return null;
 
-    let target: HTMLElement | null = null;
+    let throughLink = false;
     for (let index = 0; index < boundary; index += 1) {
       const candidate = path[index];
+      if (!(candidate instanceof HTMLElement)) continue;
       if (
-        candidate instanceof HTMLElement &&
         candidate.hasAttribute("data-peitho-src") &&
         candidate.hasAttribute("data-peitho-md")
       ) {
-        target = candidate;
-        break;
+        if (candidate.getRootNode() !== shadow) return null;
+        return { key: slide.key, target: candidate, throughLink };
       }
+      if (candidate.tagName === "A") throughLink = true;
     }
-    if (target === null || target.getRootNode() !== shadow) return false;
+    return null;
+  }
+
+  private tryStartSlideEdit(editable: EditableClickTarget | null): boolean {
+    if (!this.canStartEdit()) return true;
+    if (editable === null) return false;
+    const { key, target } = editable;
 
     const encodedRange = target.getAttribute("data-peitho-src");
     const old = target.getAttribute("data-peitho-md");
@@ -1059,7 +1081,7 @@ class PreviewShellController implements PreviewShell {
     const sourceRange = parseEditableSourceRange(encodedRange);
     if (sourceRange === null) return false;
 
-    return this.startSlideEdit(slide.key, target, sourceRange.start, sourceRange.end, old, old);
+    return this.startSlideEdit(key, target, sourceRange.start, sourceRange.end, old, old);
   }
 
   private startSlideEdit(

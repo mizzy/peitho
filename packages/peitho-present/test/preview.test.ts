@@ -4774,7 +4774,7 @@ it("inline_edit_grid_tile_thumbnail_and_non_current_roots_do_not_start", async (
   expect(nonCurrent.hasAttribute("contenteditable")).toBe(false);
 });
 
-it("inline_edit_link_click_keeps_browser_behavior", async () => {
+it("inline_edit_plain_link_click_edits_the_block_instead_of_navigating", async () => {
   const { root, fixture } = await mountInlineEditForTest();
   const shadow = slideShadow(root, "intro");
   const link = shadow.querySelector<HTMLAnchorElement>("#external-link")!;
@@ -4782,10 +4782,33 @@ it("inline_edit_link_click_keeps_browser_behavior", async () => {
 
   const click = dispatchShadowClick(link);
 
-  expect(click.defaultPrevented).toBe(false);
-  expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+  expect(click.defaultPrevented).toBe(true);
+  expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(paragraph.textContent).toBe("[Open docs](https://example.com)");
   expect(fixture.slideEditPosts()).toHaveLength(0);
 });
+
+it.each(["metaKey", "ctrlKey", "altKey", "shiftKey"] as const)(
+  "inline_edit_modified_link_click_keeps_browser_behavior_%s",
+  async (modifier) => {
+    const { root, fixture } = await mountInlineEditForTest();
+    const shadow = slideShadow(root, "intro");
+    const link = shadow.querySelector<HTMLAnchorElement>("#external-link")!;
+    const paragraph = shadow.querySelector<HTMLElement>("#editable-link")!;
+
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      [modifier]: true
+    });
+    link.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(false);
+    expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+    expect(fixture.slideEditPosts()).toHaveLength(0);
+  }
+);
 
 it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () => {
   const { root } = await mountInlineEditForTest();

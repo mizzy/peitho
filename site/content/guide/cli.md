@@ -129,8 +129,8 @@ runs, and the preview reloads on the same slide.
 
 - **Where it works.** The single-slide view, on the current slide only. The
   overview grid keeps its click-to-open meaning and the filmstrip thumbnails
-  stay inert. A click on a link still opens the link instead of starting an
-  edit.
+  stay inert. A click on a link edits the block it sits in, so the link text
+  and URL can be changed too; Cmd+click (Ctrl+click) opens the link instead.
 - **Keys.** Enter saves and Shift+Enter inserts a newline (with
   `breaks: true` that is a visible line break). A heading written as `# Title`
   or `## Title` cannot hold a newline, so saving one rewrites the heading to
