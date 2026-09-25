@@ -488,23 +488,7 @@ fn render_code_slot(
     highlighter: &Highlighter,
     edit_annotations: EditAnnotations,
 ) -> Result<String> {
-    if fragments
-        .iter()
-        .all(|fragment| fragment.reveal_span().is_none())
-    {
-        let body = fragments
-            .iter()
-            .map(|fragment| render_code_fragment(fragment, highlighter))
-            .collect::<Result<Vec<_>>>()?
-            .join("\n");
-        let language = (fragments.len() == 1)
-            .then(|| fragments[0].language())
-            .flatten();
-        return Ok(render_code_block(class_name, &body, language, None));
-    }
-
     let mut body = String::new();
-    let mut code_run = Vec::new();
     let footnote_numbers = BTreeMap::new();
     let context = BodyRenderContext {
         breaks: false,
@@ -513,40 +497,20 @@ fn render_code_slot(
         edit_annotations,
     };
     for fragment in fragments {
-        ensure_fragment_matches_contract(Accepts::Code, fragment)?;
+        append_code_separator(&mut body);
         if let Some(span) = fragment.reveal_span() {
-            flush_code_run(&mut body, class_name, &code_run, highlighter)?;
-            code_run.clear();
-            append_code_separator(&mut body);
+            ensure_fragment_matches_contract(Accepts::Code, fragment)?;
             render_revealed_fragment(&mut body, class_name, fragment, span, context)?;
         } else {
-            code_run.push(fragment);
+            body.push_str(&render_code_block(
+                class_name,
+                &render_code_fragment(fragment, highlighter)?,
+                fragment.language(),
+                None,
+            ));
         }
     }
-    flush_code_run(&mut body, class_name, &code_run, highlighter)?;
     Ok(body)
-}
-
-fn flush_code_run(
-    body: &mut String,
-    class_name: &str,
-    code_run: &[&SourceFragment<ResolvedImagePath>],
-    highlighter: &Highlighter,
-) -> Result<()> {
-    if code_run.is_empty() {
-        return Ok(());
-    }
-    append_code_separator(body);
-    let code = code_run
-        .iter()
-        .map(|fragment| render_code_fragment(fragment, highlighter))
-        .collect::<Result<Vec<_>>>()?
-        .join("\n");
-    let language = (code_run.len() == 1)
-        .then(|| code_run[0].language())
-        .flatten();
-    body.push_str(&render_code_block(class_name, &code, language, None));
-    Ok(())
 }
 
 fn render_code_block(
@@ -3959,6 +3923,67 @@ mod tests {
         assert!(
             !plain_html.contains("data-reveal-steps") && !plain_html.contains("data-reveal-step"),
             "{plain_html}"
+        );
+    }
+
+    #[test]
+    fn render_code_slot_keeps_one_pre_per_fence_without_reveal() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n```rust\nfn first() {}\n```\n\n```\nplain second\n```\n",
+            parse_layout(
+                "title-code",
+                r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1..*"></slot></section>"#,
+            )
+            .unwrap(),
+        );
+        let html = rendered.slides()[0].html();
+
+        let first_prefix = r#"<pre class="slot-code"><code class="language-rust">"#;
+        let second_prefix = r#"<pre class="slot-code"><code>"#;
+        let first_start = html.find(first_prefix).unwrap();
+        let second_start = html.find(second_prefix).unwrap();
+        let first_close = first_start + html[first_start..].find("</code></pre>").unwrap();
+
+        assert!(first_start < second_start, "{html}");
+        assert_eq!(
+            html.matches(r#"<pre class="slot-code""#).count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(&html[first_close..second_start], "</code></pre>\n");
+        assert_eq!(html.matches(r#"class="language-rust""#).count(), 1);
+    }
+
+    #[test]
+    fn render_code_slot_keeps_one_pre_per_fence_with_reveal() {
+        let rendered = render_checked_deck_with_layout(
+            "# T\n\n```rust\nfn first() {}\n```\n\n```\nplain second\n```\n\n::: {reveal}\n\n```rust\nfn third() {}\n```\n\n:::\n",
+            parse_layout(
+                "title-code",
+                r#"<section><slot name="title" accepts="inline" arity="1"></slot><slot name="code" accepts="code" arity="1..*"></slot></section>"#,
+            )
+            .unwrap(),
+        );
+        let html = rendered.slides()[0].html();
+
+        assert_eq!(
+            html.matches(r#"<pre class="slot-code""#).count(),
+            3,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("</code></pre>\n<pre class=\"slot-code\"")
+                .count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches(
+                r#"<pre class="slot-code" data-reveal-step="1"><code class="language-rust">"#
+            )
+            .count(),
+            1,
+            "{html}"
         );
     }
 

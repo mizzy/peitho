@@ -25,7 +25,7 @@ Issue #364 (moving presentation vocabulary out of Markdown into layouts) is expl
 | Where the notation lives | Code fence info string, after the language token |
 | Static vs stepped | The `\|` separator is the sole discriminator: no `\|` → static (0 steps), `\|` present → one step per group |
 | Step number space | Shared with incremental reveal (#290) — same counter, same `data-reveal-step` attribute |
-| Line numbering basis | Per fragment, always starting at 1 (not per concatenated `<pre>`) |
+| Line numbering basis | Per fenced block, always starting at 1; each block renders as its own `<pre>` |
 | Distributed artifacts (PDF / preview / lint / `dist/`) | Stepped emphasis: absent. Static emphasis: present |
 | Untagged code blocks | Supported — emphasis works without a language tag |
 | Non-contiguous lines | Supported from v1 via `,` |
@@ -78,7 +78,7 @@ With `|` as an explicit marker the rule is uniform and local: count the separato
 
 ### Why line numbers restart per code block
 
-Multiple code fragments routed to the same slot are joined into a single `<pre>` at render time (an emitted-HTML detail). Authors see two code blocks and write `{2}` in the second one meaning *its* line 2. Numbering across the concatenation would also make emphasis in a later block shift whenever a line is added to an earlier one — a fragility with no upside. Emphasis spans are stamped inside per-fragment highlighting, before concatenation, so per-fragment numbering is what falls out naturally.
+Each fenced code block remains a distinct fragment and renders as its own `<pre>`, even when multiple fragments are routed to the same slot. Authors write `{2}` in the second block meaning *its* line 2. This keeps emphasis in a later block from shifting whenever a line is added to an earlier one, and per-fragment numbering matches the rendered block boundary.
 
 ## Architecture
 
