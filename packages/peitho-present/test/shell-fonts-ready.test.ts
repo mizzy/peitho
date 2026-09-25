@@ -81,6 +81,7 @@ it("waits for document fonts before appending slide hosts", async () => {
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText('@font-face { font-family: "Deck"; src: url("deck.woff2"); }');
+    if (url === "fontscope.css") return okText('@font-face { font-family: "Deck"; src: url("deck.woff2"); font-display:block; }');
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     throw new Error(`unexpected ${url}`);
   });

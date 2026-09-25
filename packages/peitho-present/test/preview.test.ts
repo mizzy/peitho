@@ -122,6 +122,7 @@ const keyTokens = (hint: HTMLSpanElement): string[] =>
   Array.from(hint.children)
     .filter((child) => (child as HTMLSpanElement).style.color === KEY_HINT_COLOR)
     .map((child) => child.textContent ?? "");
+// Opaque text installed verbatim by the shell; Rust owns the contents of fontscope.css.
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
 .peitho-preview-slide { color: red; }
@@ -174,7 +175,8 @@ function previewFetchFixture(
   deck: typeof manifest = manifest,
   css = cssText,
   sourceNotes: Notes = notes,
-  sourceSlideSources: SlideSources = slideSources
+  sourceSlideSources: SlideSources = slideSources,
+  fontCss = ""
 ): PreviewFetchFixture {
   // The shell receives these same objects, so map assertions observe their updates.
   const loadedNotes: Notes = { version: sourceNotes.version, notes: { ...sourceNotes.notes } };
@@ -203,6 +205,7 @@ function previewFetchFixture(
     if (url === "notes.json") return okJson(loadedNotes);
     if (url === "sources.json") return okJson(loadedSources);
     if (url === "peitho.css") return okText(css);
+    if (url === "fontscope.css") return okText(fontCss);
     if (url.startsWith("slides/")) return okText(`<section><h1>${url}</h1></section>`);
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   }) as unknown as typeof fetch;
@@ -326,8 +329,8 @@ function sourceEditFetchFixture(
   };
 }
 
-function fetchForManifest(deck: typeof manifest, css = cssText): typeof fetch {
-  return previewFetchFixture(deck, css).fetcher;
+function fetchForManifest(deck: typeof manifest, css = cssText, fontCss = ""): typeof fetch {
+  return previewFetchFixture(deck, css, notes, slideSources, fontCss).fetcher;
 }
 
 function standardFetch(): typeof fetch {
@@ -1134,14 +1137,14 @@ it("injects document scoped font css once for preview shells", async () => {
   const secondRoot = document.createElement("main");
   const first = await mountPreviewShell({
     root: firstRoot,
-    fetcher: fetchForManifest(manifest, fontCssText),
+    fetcher: fetchForManifest(manifest, cssText, fontCssText),
     window,
     storage: sessionStorage,
     viewport: () => ({ width: 1280, height: 720 })
   });
   const second = await mountPreviewShell({
     root: secondRoot,
-    fetcher: fetchForManifest(manifest, fontCssText),
+    fetcher: fetchForManifest(manifest, cssText, fontCssText),
     window,
     storage: sessionStorage,
     viewport: () => ({ width: 1280, height: 720 })
@@ -1152,12 +1155,7 @@ it("injects document scoped font css once for preview shells", async () => {
     "style[data-peitho-font-scope]"
   );
   expect(styles).toHaveLength(1);
-  expect(styles[0].textContent).toBe(
-    [
-      '@import url("fonts/noto-sans-jp/index.css");',
-      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); font-display:block;}'
-    ].join("\n")
-  );
+  expect(styles[0].textContent).toBe(fontCssText);
 });
 
 it("removes document scoped font css when the last preview shell is destroyed", async () => {
@@ -1165,14 +1163,14 @@ it("removes document scoped font css when the last preview shell is destroyed", 
   const secondRoot = document.createElement("main");
   const first = await mountPreviewShell({
     root: firstRoot,
-    fetcher: fetchForManifest(manifest, fontCssText),
+    fetcher: fetchForManifest(manifest, cssText, fontCssText),
     window,
     storage: sessionStorage,
     viewport: () => ({ width: 1280, height: 720 })
   });
   const second = await mountPreviewShell({
     root: secondRoot,
-    fetcher: fetchForManifest(manifest, fontCssText),
+    fetcher: fetchForManifest(manifest, cssText, fontCssText),
     window,
     storage: sessionStorage,
     viewport: () => ({ width: 1280, height: 720 })
@@ -1874,6 +1872,7 @@ it("ignores preview commands while content is still loading without clobbering s
     if (url === "notes.json") return Promise.resolve(okJson(notes));
     if (url === "sources.json") return Promise.resolve(okJson(slideSources));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
+    if (url === "fontscope.css") return Promise.resolve(okText(""));
     if (url === "slides/000-intro.html") return Promise.resolve(okText("<section><h1>Intro</h1></section>"));
     if (url === "slides/001-middle.html") return Promise.resolve(okText("<section><h1>Middle</h1></section>"));
     if (url === "slides/002-end.html") return Promise.resolve(okText("<section><h1>End</h1></section>"));
@@ -1973,6 +1972,7 @@ it("handshakes sync generation before fetching preview content", async () => {
     if (url === "notes.json") return okJson(notes);
     if (url === "sources.json") return okJson(slideSources);
     if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-middle.html") return okText("<section><h1>Middle</h1></section>");
     if (url === "slides/002-end.html") return okText("<section><h1>End</h1></section>");
@@ -1994,6 +1994,7 @@ it("handshakes sync generation before fetching preview content", async () => {
     "notes.json",
     "sources.json",
     "peitho.css",
+    "fontscope.css",
     "slides/000-intro.html",
     "slides/001-middle.html",
     "slides/002-end.html"
@@ -2055,6 +2056,39 @@ it("handshakes sync generation before fetching preview content", async () => {
   }
 });
 
+it("shows a visible error when fontscope css fetch fails", async () => {
+  const root = document.createElement("main");
+  const fetcher = vi.fn(async (url: string) => {
+    if (url === "/sync") {
+      return okJson({ seq: 7, message: null, generation: 4, buildError: null });
+    }
+    if (url === "manifest.json") return okJson(manifest);
+    if (url === "notes.json") return okJson(notes);
+    if (url === "sources.json") return okJson(slideSources);
+    if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") {
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }
+    if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
+    if (url === "slides/001-middle.html") return okText("<section>Middle</section>");
+    if (url === "slides/002-end.html") return okText("<section>End</section>");
+    throw new Error(`unexpected ${url}`);
+  }) as typeof fetch;
+
+  const shell = await mountPreviewShell({
+    root,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(shell.manifest).toBeNull();
+  expect(root.textContent).toContain("Failed to load fontscope.css: 404");
+  expect(root.querySelectorAll(".peitho-preview-slide")).toHaveLength(0);
+});
+
 it("fetches preview slide fragments in parallel", async () => {
   const root = document.createElement("main");
   const requestedSlides: string[] = [];
@@ -2069,6 +2103,7 @@ it("fetches preview slide fragments in parallel", async () => {
     if (url === "notes.json") return Promise.resolve(okJson(notes));
     if (url === "sources.json") return Promise.resolve(okJson(slideSources));
     if (url === "peitho.css") return Promise.resolve(okText(cssText));
+    if (url === "fontscope.css") return Promise.resolve(okText(""));
     if (url.startsWith("slides/")) {
       requestedSlides.push(url);
       return new Promise<Response>((resolve) => {

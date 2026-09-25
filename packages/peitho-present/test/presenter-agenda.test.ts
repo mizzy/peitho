@@ -46,6 +46,7 @@ function standardFetch(overrides: Partial<Manifest> = {}): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText("");
+    if (url === "fontscope.css") return okText("");
     if (url === "/rehearsal") return okJson({ recorded: false });
     const slide = responseManifest.slides.find((item) => item.src === url);
     if (slide) return okText(`<section><h1>${slide.key}</h1></section>`);

@@ -90,6 +90,7 @@ function fetcherForDeck(): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(deckCss);
+    if (url === "fontscope.css") return okText("");
     const html = slideHtml.get(url);
     if (html !== undefined) return okText(html);
     throw new Error(`unexpected ${url}`);

@@ -57,6 +57,7 @@ function fetcherFor(html: string): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(deckCss);
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText(html);
     throw new Error(`unexpected ${url}`);
   }) as unknown as typeof fetch;

@@ -154,6 +154,25 @@ fn publish_rejects_slide_sources_file() {
 }
 
 #[test]
+fn publish_rejects_font_scope_css() {
+    let dir = tempdir().unwrap();
+    let dist = dir.path().join("dist");
+    write_valid_dist(&dist);
+    fs::write(dist.join("fontscope.css"), "").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args(["publish", "--dist"])
+        .arg(&dist)
+        .args(["--", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "distribution contains presentation-only file: fontscope.css",
+        ));
+}
+
+#[test]
 fn publish_rejects_preview_edit_source_span_attribute() {
     assert_publish_rejects_preview_edit_annotation("data-peitho-src", "1-4");
 }

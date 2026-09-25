@@ -912,6 +912,7 @@ const PRESENTATION_ONLY_DIST_FILES: &[&str] = &[
     "remote.html",
     "notes.json",
     "sources.json",
+    "fontscope.css",
     "shell.js",
     "remote.js",
 ];
@@ -5195,6 +5196,7 @@ fn emit_present_cache(
         ensure_shell_bundle(shell)?;
     }
     write_shared_assets(cache, artifacts)?;
+    write_font_scope_css(cache, artifacts)?;
     write_slide_fragments(cache, &artifacts.rendered)?;
     fs::write(cache.join("manifest.json"), &artifacts.manifest_json).into_diagnostic()?;
     write_notes_json(cache, artifacts)?;
@@ -5248,6 +5250,14 @@ fn write_notes_json(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()
     .into_diagnostic()
 }
 
+fn write_font_scope_css(dir: &Path, artifacts: &BuildArtifacts) -> miette::Result<()> {
+    fs::write(
+        dir.join("fontscope.css"),
+        artifacts.rendered.font_scope_css(),
+    )
+    .into_diagnostic()
+}
+
 fn emit_preview_cache_generation(
     cache: &Path,
     generation: u64,
@@ -5260,6 +5270,7 @@ fn emit_preview_cache_generation(
     }
     fs::create_dir_all(&generation_dir).into_diagnostic()?;
     write_shared_assets(&generation_dir, artifacts)?;
+    write_font_scope_css(&generation_dir, artifacts)?;
     write_slide_fragments(&generation_dir, &artifacts.rendered)?;
     fs::write(
         generation_dir.join("manifest.json"),
@@ -10429,6 +10440,55 @@ contexts:
         emit_pdf_workspace(&workspace, &artifacts).unwrap();
 
         assert!(!workspace.join("sources.json").exists());
+    }
+
+    #[test]
+    fn font_scope_css_is_emitted_only_to_present_and_preview_caches() {
+        let fixture = WatchFixture::new("# Math\n\n```math\nx^2\n```\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let present_cache = fixture._dir.path().join("present-cache");
+        let preview_cache = fixture._dir.path().join("preview-cache");
+        let distribution = fixture._dir.path().join("dist");
+        let pdf_workspace = fixture._dir.path().join("pdf-workspace");
+
+        emit_present_cache(&present_cache, &artifacts, None, false, false).unwrap();
+        let preview_generation =
+            emit_preview_cache_generation(&preview_cache, 0, &artifacts).unwrap();
+        emit_distribution(&distribution, &artifacts).unwrap();
+        emit_pdf_workspace(&pdf_workspace, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(present_cache.join("fontscope.css")).unwrap(),
+            artifacts.rendered.font_scope_css()
+        );
+        assert_eq!(
+            fs::read_to_string(preview_generation.join("fontscope.css")).unwrap(),
+            artifacts.rendered.font_scope_css()
+        );
+        assert!(!distribution.join("fontscope.css").exists());
+        assert!(!pdf_workspace.join("fontscope.css").exists());
+    }
+
+    #[test]
+    fn empty_font_scope_css_is_still_written_to_each_cache() {
+        let fixture = WatchFixture::new("# Intro\n\nBody\n");
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        let present_cache = fixture._dir.path().join("present-cache");
+        let preview_cache = fixture._dir.path().join("preview-cache");
+
+        assert_eq!(artifacts.rendered.font_scope_css(), "");
+        emit_present_cache(&present_cache, &artifacts, None, false, false).unwrap();
+        let preview_generation =
+            emit_preview_cache_generation(&preview_cache, 0, &artifacts).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(present_cache.join("fontscope.css")).unwrap(),
+            ""
+        );
+        assert_eq!(
+            fs::read_to_string(preview_generation.join("fontscope.css")).unwrap(),
+            ""
+        );
     }
 
     #[test]

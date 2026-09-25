@@ -66,6 +66,7 @@ function standardFetch(): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><h1>Arch</h1></section>");
     return { ok: false, status: 404, text: async () => "not found" } as Response;

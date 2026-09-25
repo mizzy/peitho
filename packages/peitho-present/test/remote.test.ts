@@ -780,6 +780,7 @@ it("remote preview shell reuses the already loaded manifest", async () => {
     }
     if (url === "notes.json") return okJson({ version: 1, notes: {} });
     if (url === "peitho.css") return { ok: true, status: 200, text: async () => "" } as Response;
+    if (url === "fontscope.css") return { ok: true, status: 200, text: async () => "" } as Response;
     const slide = manifest.slides.find((item) => item.src === url);
     if (slide) return { ok: true, status: 200, text: async () => "<section></section>" } as Response;
     return fail(404);
