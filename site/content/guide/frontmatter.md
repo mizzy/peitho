@@ -88,8 +88,9 @@ during a talk.
 
 Fenced `math` blocks are rendered by Peitho's built-in KaTeX renderer into
 HTML+MathML body content. They need no frontmatter. When a deck uses math,
-Peitho prepends KaTeX CSS to `peitho.css` and writes fonts under
-`katex-fonts/`.
+Peitho places KaTeX CSS after the theme's leading `@charset`, `@import`, and
+statement-form `@layer` rules, but before the rest of the theme, and writes
+fonts under `katex-fonts/`.
 
 Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
 then treated as images. An `embed` block containing one X status URL defaults

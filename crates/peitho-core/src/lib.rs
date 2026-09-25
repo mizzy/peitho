@@ -71,7 +71,7 @@ pub use render::{
     render_preview_index, render_remote_index, EditAnnotations,
 };
 pub use slide_source::{slide_sources_json, SlideSources};
-pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
+pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeCss, ThemeFontAsset};
 
 /// ```compile_fail
 /// use peitho_core::*;
@@ -80,8 +80,9 @@ pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeFontAsset};
 ///     let _ = render_deck(
 ///         deck,
 ///         &highlight::Highlighter::defaults(),
-///         String::new(),
+///         ThemeCss::new(String::new()),
 ///         EditAnnotations::Off,
+///         &LayoutAssets::default(),
 ///     );
 /// }
 /// ```

@@ -6431,7 +6431,7 @@ contexts:
     }
 
     #[test]
-    fn build_artifacts_prepends_katex_css_only_for_math_decks() {
+    fn build_artifacts_places_katex_css_before_theme_rules_only_for_math_decks() {
         let math = WatchFixture::new("# Math\n\n```math\n\\frac{1}{2}\n```\n");
         let plain = WatchFixture::new("# Plain\n\nBody\n");
 
@@ -6447,7 +6447,7 @@ contexts:
         let theme_index = math_css.find(".slot-title { font-weight: 700; }").unwrap();
         assert!(
             katex_index < theme_index,
-            "KaTeX CSS must come before author/theme CSS so author rules win"
+            "KaTeX CSS must come before author theme rules so author rules win"
         );
         assert!(math_artifacts.rendered.slides()[0]
             .html()
@@ -6457,7 +6457,7 @@ contexts:
     }
 
     #[test]
-    fn build_artifacts_prepends_static_emphasis_css_before_theme() {
+    fn build_artifacts_places_static_emphasis_css_before_theme_rules() {
         let fixture =
             WatchFixture::new("# Code\n\n```rust {2}\nlet first = 1;\nlet second = 2;\n```\n");
         let artifacts = build_artifacts(&fixture.options.input).unwrap();
@@ -6476,7 +6476,7 @@ contexts:
         let theme_index = css.find(".slot-title { font-weight: 700; }").unwrap();
         assert!(
             emphasis_index < theme_index,
-            "static-emphasis CSS must come before author/theme CSS so author rules win"
+            "static-emphasis CSS must come before author theme rules so author rules win"
         );
     }
 

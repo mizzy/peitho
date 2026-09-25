@@ -62,6 +62,51 @@ fn build_writes_index_html_and_css() {
 }
 
 #[test]
+fn build_keeps_theme_import_before_static_emphasis_css() {
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let css_dir = dir.path().join("css");
+    let out = dir.path().join("dist");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(
+        &deck,
+        "# Code\n\n```rust {2}\nlet first = 1;\nlet second = 2;\n```\n",
+    )
+    .unwrap();
+    let import = r#"@import url("https://fonts.googleapis.com/css2?family=Inter");"#;
+    fs::write(css_dir.join("00-fonts.css"), import).unwrap();
+    fs::write(
+        css_dir.join("base.css"),
+        ".theme-base-rule { font-family: Inter, sans-serif; }",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .args([
+            "build",
+            deck.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let css = fs::read_to_string(out.join("peitho.css")).unwrap();
+    let emphasis = css.find(".code-line-emphasis {").unwrap();
+    let base_rule = css.find(".theme-base-rule {").unwrap();
+
+    assert!(
+        css.starts_with(import),
+        "theme import must stay first: {css}"
+    );
+    assert!(
+        emphasis < base_rule,
+        "static-emphasis CSS must precede the first theme rule: {css}"
+    );
+}
+
+#[test]
 fn build_distribution_omits_preview_edit_annotations() {
     let dir = tempdir().unwrap();
     let deck = dir.path().join("deck.md");

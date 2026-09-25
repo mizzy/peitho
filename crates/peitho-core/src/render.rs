@@ -22,6 +22,7 @@ use crate::{
     layout::{Layout, LayoutAssets},
     math::MathAssets,
     phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, Rendered},
+    theme::ThemeCss,
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
@@ -89,7 +90,7 @@ pub(crate) fn walk_body_markdown_list_items_with_ranges<'a>(
 pub fn render_deck(
     deck: Deck<Checked<ResolvedImagePath>>,
     highlighter: &Highlighter,
-    theme_css: String,
+    theme_css: ThemeCss,
     edit_annotations: EditAnnotations,
     layout_assets: &LayoutAssets,
 ) -> Result<Deck<Rendered>> {
@@ -154,8 +155,18 @@ pub fn render_deck(
     if uses_static_emphasis {
         css_parts.push(code_emphasis_css());
     }
-    css_parts.push(&theme_css);
-    let css = css_parts.join("\n");
+    let css = if css_parts.is_empty() {
+        theme_css.as_str().to_owned()
+    } else {
+        let (prelude, rest) = theme_css.split_at_prelude();
+        let mut parts = Vec::with_capacity(css_parts.len() + 2);
+        if !prelude.is_empty() {
+            parts.push(prelude);
+        }
+        parts.extend(css_parts);
+        parts.push(rest);
+        parts.join("\n")
+    };
     Ok(Deck::rendered(settings, slides, css, math_assets))
 }
 
@@ -3126,7 +3137,7 @@ mod tests {
         render_deck(
             checked,
             &crate::highlight::Highlighter::defaults(),
-            String::new(),
+            ThemeCss::new(String::new()),
             EditAnnotations::Off,
             &LayoutAssets::default(),
         )
@@ -4652,7 +4663,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_deck_prepends_katex_css_before_theme_css_only_for_math_decks() {
+    fn rendered_deck_places_katex_css_before_theme_rules_only_for_math_decks() {
         let theme_css = ".katex { font-size: 1.6em; }\n.peitho-slide { color: red; }\n";
         let with_math = render_checked_with_css(checked_deck_with_math_body(), theme_css);
         let without_math = render_checked_deck_with_layout_and_css(
@@ -4667,7 +4678,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_deck_prepends_card_css_before_theme_only_when_used() {
+    fn rendered_deck_places_card_css_before_theme_rules_only_when_used() {
         let theme_css = ".peitho-slide { color: red; }\n";
         let with_card = render_checked_with_css(
             checked_deck_with_card_body(false, TEST_CARD_HTML),
@@ -4698,7 +4709,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_deck_prepends_emphasis_css_before_theme_only_when_used() {
+    fn rendered_deck_places_emphasis_css_before_theme_rules_only_when_used() {
         let theme_css = ".peitho-slide { color: red; }\n";
         let with_static_emphasis = render_checked_deck_with_layout_and_css(
             "# Intro\n\n```rust {2}\nlet a = 1;\nlet b = 2;\n```\n",
@@ -4735,6 +4746,48 @@ mod tests {
         assert!(!emphasis_css.contains("[data-emphasis-active]"));
         assert!(!emphasis_css.contains(".slot-code"));
         assert_eq!(emphasis_css.matches("--peitho-emphasis-").count(), 3);
+    }
+
+    #[test]
+    fn every_builtin_stylesheet_follows_theme_prelude_and_precedes_theme_rules() {
+        let theme_css =
+            "@import url(https://example.com/theme.css);\n.theme-rule { color: rebeccapurple; }\n";
+        let rendered = render_checked_with_css(
+            checked_deck_with_generic_card_body(true, true, true),
+            theme_css,
+        );
+        let css = rendered.css();
+        let import = css.find("@import url(").unwrap();
+        let math = css.find(MathAssets::katex().css()).unwrap();
+        let card = css.find(EmbedCardAssets::builtin().css()).unwrap();
+        let generic = css
+            .find(crate::embed_card::generic_embed_card_css())
+            .unwrap();
+        let emphasis = css.find(code_emphasis_css()).unwrap();
+        let theme_rule = css.find(".theme-rule {").unwrap();
+
+        assert_eq!(import, 0, "theme import must remain first: {css}");
+        assert!(import < math, "KaTeX CSS must follow the prelude: {css}");
+        assert!(math < card, "embed-card CSS order changed: {css}");
+        assert!(card < generic, "generic-card CSS order changed: {css}");
+        assert!(generic < emphasis, "emphasis CSS order changed: {css}");
+        assert!(
+            emphasis < theme_rule,
+            "all built-ins must precede the first theme rule: {css}"
+        );
+    }
+
+    #[test]
+    fn deck_without_builtins_keeps_theme_prelude_bytes_unchanged() {
+        let theme_css =
+            "@import url(https://example.com/theme.css);\n.theme-rule { color: rebeccapurple; }\n";
+        let rendered = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            theme_css,
+        );
+
+        assert_eq!(rendered.css(), theme_css);
     }
 
     #[test]
@@ -6960,7 +7013,7 @@ Paragraph after heading.
         let rendered = render_deck(
             resolved,
             &highlighter,
-            String::new(),
+            ThemeCss::new(String::new()),
             edit_annotations,
             &LayoutAssets::default(),
         )
@@ -7638,7 +7691,7 @@ Paragraph after heading.
         render_deck(
             resolved,
             &crate::highlight::Highlighter::defaults(),
-            theme_css.to_owned(),
+            ThemeCss::new(theme_css.to_owned()),
             EditAnnotations::Off,
             &LayoutAssets::default(),
         )
@@ -7688,7 +7741,7 @@ Paragraph after heading.
         render_deck(
             resolved,
             &crate::highlight::Highlighter::defaults(),
-            String::new(),
+            ThemeCss::new(String::new()),
             EditAnnotations::Off,
             &layout_assets,
         )
@@ -7767,7 +7820,7 @@ Paragraph after heading.
         render_deck(
             resolved,
             &crate::highlight::Highlighter::defaults(),
-            theme_css.to_owned(),
+            ThemeCss::new(theme_css.to_owned()),
             EditAnnotations::Off,
             &LayoutAssets::default(),
         )
