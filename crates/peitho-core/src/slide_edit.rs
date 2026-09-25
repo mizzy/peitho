@@ -1,7 +1,7 @@
 //! Pure source rewriting for one parser-authorized slide block.
 
 use crate::{
-    domain::{EditableBlockKind, EditableSpan},
+    domain::{EditableBlockKind, EditableSpan, SourceSpan},
     error::{BuildError, ErrorKind, Result},
     highlight::Highlighter,
     notes_edit::{normalized_note_text, restore_bom, strip_bom},
@@ -16,6 +16,28 @@ use crate::{
 const STRUCTURAL_EDIT_HELP: &str =
     "make structural changes in the Markdown editor, then reload the preview and retry";
 
+/// One validated block rewrite: the full rewritten source and the range of the
+/// original source it replaced.
+///
+/// `replaced` is where the splice actually landed, which is wider than the
+/// edited span when an ATX heading becomes setext, so an origin writer scopes
+/// itself by this range rather than restating it from the span.
+#[derive(Debug)]
+pub struct BlockRewrite {
+    source: String,
+    replaced: SourceSpan,
+}
+
+impl BlockRewrite {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn replaced(&self) -> SourceSpan {
+        self.replaced
+    }
+}
+
 /// Returns the full source after one validated parser-authorized block rewrite.
 ///
 /// The supplied slide and span are treated only as capability tokens. The
@@ -28,7 +50,7 @@ pub fn rewrite_block(
     span: EditableSpan,
     new_markdown: &str,
     highlighter: &Highlighter,
-) -> Result<String> {
+) -> Result<BlockRewrite> {
     let (source, had_bom) = strip_bom(source);
     let before = parse_source(source, highlighter)?;
     let source_span = span.source_span();
@@ -75,11 +97,35 @@ pub fn rewrite_block(
     let normalized_replacement = normalized_note_text(new_markdown);
     let replacement = normalized_replacement.trim_matches(|ch| matches!(ch, '\r' | '\n'));
     if source[source_span.start..source_span.end] == *replacement {
-        return Ok(restore_bom(source.to_owned(), had_bom));
+        return Ok(BlockRewrite {
+            source: restore_bom(source.to_owned(), had_bom),
+            replaced: source_span,
+        });
     }
 
+    // An ATX heading is one line, so a newline rewrites the whole heading to
+    // setext form; the reparse below still proves nothing else changed.
+    let (splice, spliced) = match span.atx() {
+        Some(heading) if replacement.contains('\n') => {
+            let underline = match heading.level() {
+                1 => "====",
+                // Four, not three: a lone `---` line is the slide separator.
+                2 => "----",
+                level => {
+                    return Err(refusal(
+                        error_line,
+                        format!(
+                            "an H{level} heading cannot span lines; only H1 and H2 have a multi-line (setext) form"
+                        ),
+                    ))
+                }
+            };
+            (heading.line(), format!("{replacement}\n{underline}"))
+        }
+        _ => (source_span, replacement.to_owned()),
+    };
     let mut candidate = source.to_owned();
-    candidate.replace_range(source_span.start..source_span.end, replacement);
+    candidate.replace_range(splice.start..splice.end, &spliced);
     let after = parse_source(&candidate, highlighter)?;
     preserves_deck_for_block_edit(
         source,
@@ -95,7 +141,10 @@ pub fn rewrite_block(
         error
     })?;
 
-    Ok(restore_bom(candidate, had_bom))
+    Ok(BlockRewrite {
+        source: restore_bom(candidate, had_bom),
+        replaced: splice,
+    })
 }
 
 fn parse_source(source: &str, highlighter: &Highlighter) -> Result<Deck<Parsed>> {
@@ -319,6 +368,7 @@ mod tests {
         let slide = &deck.parsed_slides()[slide_index];
         let span = slide.editable_spans()[span_index];
         rewrite_block(source, slide, span, replacement, &highlighter)
+            .map(|rewrite| rewrite.source().to_owned())
     }
 
     fn assert_rewrite_refusal(
@@ -1030,5 +1080,128 @@ mod tests {
             "inline edit target does not match the current deck source"
         );
         assert_eq!(error.help, STRUCTURAL_EDIT_HELP);
+    }
+
+    #[test]
+    fn newline_in_atx_h1_becomes_a_setext_heading() {
+        assert_eq!(
+            rewrite_heading("# Title\n\nBody\n", "Title\nline two").unwrap(),
+            "Title\nline two\n====\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn newline_in_atx_h2_becomes_a_setext_heading_that_is_not_a_slide_separator() {
+        let source = "# First\n\n---\n\n## Title\n\nBody\n";
+        let rewritten = rewrite(source, 1, 0, "Title\nline two").unwrap();
+
+        assert_eq!(
+            rewritten,
+            "# First\n\n---\n\nTitle\nline two\n----\n\nBody\n"
+        );
+        assert_eq!(
+            parse(&rewritten, &Highlighter::defaults())
+                .parsed_slides()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn newline_in_atx_heading_drops_the_closing_sequence() {
+        assert_eq!(
+            rewrite_heading("# Title #\n", "Title\nline two").unwrap(),
+            "Title\nline two\n====\n"
+        );
+    }
+
+    #[test]
+    fn newline_in_atx_heading_keeps_a_crlf_line_ending_outside_the_heading() {
+        assert_eq!(
+            rewrite_heading("# Title\r\n\r\nBody\r\n", "Title\nline two").unwrap(),
+            "Title\nline two\n====\r\n\r\nBody\r\n"
+        );
+    }
+
+    #[test]
+    fn rejects_newline_in_atx_h3_to_h6() {
+        for level in 3..=6 {
+            let source = format!("{} Title\n", "#".repeat(level));
+            assert_rewrite_refusal(
+                &source,
+                0,
+                0,
+                "Title\nline two",
+                &format!(
+                    "an H{level} heading cannot span lines; only H1 and H2 have a multi-line (setext) form"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn atx_heading_without_newline_keeps_atx_form() {
+        assert_eq!(rewrite_heading("## Title\n", "New").unwrap(), "## New\n");
+    }
+
+    #[test]
+    fn setext_heading_stays_setext_with_or_without_newlines() {
+        assert_eq!(
+            rewrite_heading("Title\n=====\n", "Title\nline two").unwrap(),
+            "Title\nline two\n=====\n"
+        );
+        assert_eq!(
+            rewrite_heading("Title\nline two\n=====\n", "Title").unwrap(),
+            "Title\n=====\n"
+        );
+    }
+
+    #[test]
+    fn rejects_newline_in_a_heading_inside_a_container() {
+        for source in ["> # Title\n", "- # Title\n"] {
+            assert_rewrite_refusal(
+                source,
+                0,
+                0,
+                "Title\nline two",
+                "inline edit would change the edited slide's editable block kinds",
+            );
+        }
+    }
+
+    #[test]
+    fn newline_in_an_indented_atx_heading_keeps_the_indentation() {
+        assert_eq!(
+            rewrite_heading("   # Title\n\nBody\n", "Title\nline two").unwrap(),
+            "   Title\nline two\n====\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn converted_heading_keeps_an_explicit_key_and_moves_a_derived_one() {
+        let highlighter = Highlighter::defaults();
+        let explicit =
+            rewrite_heading("<!-- {\"key\":\"fixed\"} -->\n# Before\n", "Before\nAfter").unwrap();
+        assert_eq!(
+            parse(&explicit, &highlighter).parsed_slides()[0]
+                .key
+                .as_str(),
+            "fixed"
+        );
+        let derived = rewrite_heading("# Before\n", "Before\nAfter").unwrap();
+        assert_ne!(
+            parse(&derived, &highlighter).parsed_slides()[0]
+                .key
+                .as_str(),
+            "before"
+        );
+    }
+
+    #[test]
+    fn newline_in_atx_heading_keeps_a_leading_bom() {
+        assert_eq!(
+            rewrite_heading("\u{feff}# Title\n\nBody\n", "Title\nline two").unwrap(),
+            "\u{feff}Title\nline two\n====\n\nBody\n"
+        );
     }
 }
