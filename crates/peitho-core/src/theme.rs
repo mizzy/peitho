@@ -46,9 +46,40 @@ pub struct CssFile {
     pub content: String,
 }
 
+/// Theme CSS together with the end of its leading statement prelude.
+///
+/// The split is computed when the value is constructed, so renderers cannot
+/// accidentally place ordinary rules before a leading `@charset`, `@import`,
+/// or statement-form `@layer` rule.
+#[derive(Debug)]
+pub struct ThemeCss {
+    css: String,
+    prelude_end: usize,
+}
+
+impl ThemeCss {
+    pub fn new(css: String) -> Self {
+        let prelude_end = theme_prelude_end(&css);
+        Self { css, prelude_end }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.css
+    }
+
+    /// Split immediately after the last complete statement in the prelude.
+    pub(crate) fn split_at_prelude(&self) -> (&str, &str) {
+        self.css.split_at(self.prelude_end)
+    }
+}
+
 struct StrippedCssFile<'a> {
     name: &'a str,
     content: String,
+}
+
+fn strip_bom(css: &str) -> &str {
+    css.strip_prefix('\u{feff}').unwrap_or(css)
 }
 
 const PEITHO_SLIDE_CLASS: &str = "peitho-slide";
@@ -67,18 +98,21 @@ const PEITHO_SLIDE_CLASS: &str = "peitho-slide";
 ///   union of provided layouts
 /// - bare root layout classes must not set `width` or `height` differently
 ///   from `.peitho-slide`, which owns the slide root's canvas sizing
+/// - one leading UTF-8 BOM is stripped from each file before validation and
+///   concatenation, yielding a [`ThemeCss`] whose leading statement prelude is
+///   located for the renderer
 /// - everything else is unrestricted theme CSS
 pub fn build_theme_css(
     files: &[CssFile],
     slide_slots: &BTreeMap<String, BTreeSet<String>>,
     layout_slots: &BTreeSet<String>,
     root_classes: &BTreeSet<String>,
-) -> Result<String> {
+) -> Result<ThemeCss> {
     let stripped_files = files
         .iter()
         .map(|file| StrippedCssFile {
             name: file.name.as_str(),
-            content: strip_css_comments(&file.content),
+            content: strip_css_comments(strip_bom(&file.content)),
         })
         .collect::<Vec<_>>();
     let root_classes = root_classes
@@ -111,12 +145,172 @@ pub fn build_theme_css(
             })?;
         }
     }
-    Ok(files
-        .iter()
-        .map(|file| file.content.trim())
-        .filter(|content| !content.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+    Ok(ThemeCss::new(
+        files
+            .iter()
+            .map(|file| strip_bom(&file.content).trim())
+            .filter(|content| !content.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    ))
+}
+
+fn theme_prelude_end(css: &str) -> usize {
+    let mut offset = 0;
+    let mut prelude_end = 0;
+
+    loop {
+        let Some(statement_start) = skip_theme_prelude_trivia(css, offset) else {
+            return prelude_end;
+        };
+        let Some(statement_body_start) = prelude_statement_body_start(css, statement_start) else {
+            return prelude_end;
+        };
+        let Some(statement_end) = prelude_statement_end(css, statement_body_start) else {
+            return prelude_end;
+        };
+        prelude_end = statement_end;
+        offset = statement_end;
+    }
+}
+
+fn skip_theme_prelude_trivia(css: &str, mut offset: usize) -> Option<usize> {
+    while offset < css.len() {
+        let rest = &css[offset..];
+        if let Some(comment) = rest.strip_prefix("/*") {
+            let comment_end = comment.find("*/")?;
+            offset += 2 + comment_end + 2;
+            continue;
+        }
+
+        let ch = rest.chars().next().expect("offset is before string end");
+        if is_css_whitespace(ch) {
+            offset += ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    Some(offset)
+}
+
+fn prelude_statement_body_start(css: &str, offset: usize) -> Option<usize> {
+    let rest = css.get(offset..)?.strip_prefix('@')?;
+    for keyword in ["charset", "import", "layer"] {
+        let Some(candidate) = rest.get(..keyword.len()) else {
+            continue;
+        };
+        if !candidate.eq_ignore_ascii_case(keyword) {
+            continue;
+        }
+        let following = &rest[keyword.len()..];
+        if following
+            .chars()
+            .next()
+            .is_some_and(|ch| is_css_ident_char(ch) || ch == '\\')
+        {
+            continue;
+        }
+        return Some(offset + 1 + keyword.len());
+    }
+    None
+}
+
+fn prelude_statement_end(css: &str, offset: usize) -> Option<usize> {
+    let statement = &css[offset..];
+    let mut chars = statement.char_indices().peekable();
+    let mut string = CssStringState::default();
+    let mut in_comment = false;
+    let mut paren_depth = 0usize;
+
+    while let Some((relative_index, ch)) = chars.next() {
+        if in_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                in_comment = false;
+            }
+            continue;
+        }
+        if string.consume(ch) {
+            continue;
+        }
+        if matches!(ch, 'u' | 'U') {
+            match scan_unquoted_url_token(statement, relative_index) {
+                UnquotedUrlScan::NotToken => {}
+                UnquotedUrlScan::Unterminated => return None,
+                UnquotedUrlScan::End(url_end) => {
+                    while chars.peek().is_some_and(|(index, _)| *index < url_end) {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '*') {
+            chars.next();
+            in_comment = true;
+            continue;
+        }
+
+        match ch {
+            '{' => return None,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ';' if paren_depth == 0 => return Some(offset + relative_index + ch.len_utf8()),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+enum UnquotedUrlScan {
+    NotToken,
+    Unterminated,
+    End(usize),
+}
+
+fn scan_unquoted_url_token(css: &str, start: usize) -> UnquotedUrlScan {
+    if css[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| is_css_ident_char(ch) || ch == '\\')
+    {
+        return UnquotedUrlScan::NotToken;
+    }
+
+    let rest = &css[start..];
+    let Some(function) = rest.get(..4) else {
+        return UnquotedUrlScan::NotToken;
+    };
+    if !function.eq_ignore_ascii_case("url(") {
+        return UnquotedUrlScan::NotToken;
+    }
+
+    let body = &rest[4..];
+    if body
+        .chars()
+        .find(|ch| !is_css_whitespace(*ch))
+        .is_some_and(|ch| matches!(ch, '\'' | '"'))
+    {
+        return UnquotedUrlScan::NotToken;
+    }
+
+    let mut escaped = false;
+    for (index, ch) in body.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == ')' {
+            return UnquotedUrlScan::End(start + 4 + index + ch.len_utf8());
+        }
+    }
+
+    UnquotedUrlScan::Unterminated
+}
+
+fn is_css_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1056,6 +1250,208 @@ mod tests {
     use super::*;
     use crate::error::ErrorKind;
 
+    fn assert_prelude(css: &str, expected_prelude: &str, expected_rest: &str) {
+        let theme = ThemeCss::new(css.to_owned());
+
+        assert_eq!(theme.as_str(), css);
+        assert_eq!(theme.split_at_prelude(), (expected_prelude, expected_rest));
+    }
+
+    #[test]
+    fn theme_css_empty_theme_has_no_prelude() {
+        assert_prelude("", "", "");
+    }
+
+    #[test]
+    fn theme_css_rule_without_statement_prelude_has_no_prelude() {
+        assert_prelude(
+            "\n/* theme */\n.peitho-slide { color: red; }",
+            "",
+            "\n/* theme */\n.peitho-slide { color: red; }",
+        );
+    }
+
+    #[test]
+    fn theme_css_scans_quoted_google_fonts_url_semicolon() {
+        let prelude =
+            r#"@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;700");"#;
+        let css = format!("{prelude}\n.peitho-slide {{ color: red; }}");
+
+        assert_prelude(&css, prelude, "\n.peitho-slide { color: red; }");
+    }
+
+    #[test]
+    fn theme_css_does_not_end_statement_at_semicolon_inside_parentheses() {
+        let prelude = "@import url(https://fonts.googleapis.com/css2?family=Inter:wght@400;700);";
+        let css = format!("{prelude}\n.peitho-slide {{ color: red; }}");
+
+        assert_prelude(&css, prelude, "\n.peitho-slide { color: red; }");
+    }
+
+    #[test]
+    fn theme_css_scans_comment_openers_inside_unquoted_url_tokens() {
+        for prelude in [
+            "@import url(https://cdn.example/a/*/b.css);",
+            "@import URL(https://cdn.example/a/*/b.css);",
+            r"@import url(https://cdn.example/a\)/*/b.css);",
+        ] {
+            let css = format!("{prelude}\n.theme{{}}");
+
+            assert_prelude(&css, prelude, "\n.theme{}");
+        }
+    }
+
+    #[test]
+    fn theme_css_prelude_trivia_uses_only_css_whitespace() {
+        let css = "\u{a0}@import url(x);\n.theme{}";
+        assert_prelude(css, "", css);
+
+        let css = "\u{b}@import url(x);\n.theme{}";
+        assert_prelude(css, "", css);
+
+        let prelude = " \t\n\r\x0c@import url(x);";
+        let css = format!("{prelude}\n.theme{{}}");
+        assert_prelude(&css, prelude, "\n.theme{}");
+    }
+
+    #[test]
+    fn theme_css_scans_charset_import_layer_and_comments() {
+        let prelude = " \n/* before */\n@charset \"UTF-8\";\n/* between */\n@import url(theme.css);\n@layer reset, components;";
+        let css = format!("{prelude}\n.theme {{ color: red; }}");
+
+        assert_prelude(&css, prelude, "\n.theme { color: red; }");
+    }
+
+    #[test]
+    fn theme_css_scans_comment_between_imports_and_escaped_quote() {
+        let prelude = r#"@import url(first.css);
+/* between imports */
+@import /* a ; and { inside a statement comment */ url("second\";theme.css");"#;
+        let css = format!("{prelude}\n.theme {{ color: red; }}");
+
+        assert_prelude(&css, prelude, "\n.theme { color: red; }");
+    }
+
+    #[test]
+    fn theme_css_matches_at_keywords_ascii_case_insensitively() {
+        let prelude = "@IMPORT url(theme.css);";
+        let css = format!("{prelude}\n.theme {{ color: red; }}");
+
+        assert_prelude(&css, prelude, "\n.theme { color: red; }");
+    }
+
+    #[test]
+    fn theme_css_stops_before_layer_block() {
+        let prelude = "@layer reset;";
+        let rest = "\n@layer components {\n  .theme { color: red; }\n}";
+        let css = format!("{prelude}{rest}");
+
+        assert_prelude(&css, prelude, rest);
+    }
+
+    #[test]
+    fn theme_css_prelude_only_theme_ends_after_last_semicolon() {
+        let css = "@charset \"UTF-8\";\n@import url(theme.css);\n@layer reset;";
+
+        assert_prelude(css, css, "");
+    }
+
+    #[test]
+    fn theme_css_finds_prelude_across_concatenated_files() {
+        let prelude = "@import url(fonts.css);";
+        let rest = "\n\n.peitho-slide { font-family: Inter, sans-serif; }";
+        let theme = build_theme_css(
+            &[
+                CssFile {
+                    name: "00-fonts.css".to_owned(),
+                    content: prelude.to_owned(),
+                },
+                CssFile {
+                    name: "base.css".to_owned(),
+                    content: rest.trim().to_owned(),
+                },
+            ],
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(theme.as_str(), format!("{prelude}{rest}"));
+        assert_eq!(theme.split_at_prelude(), (prelude, rest));
+    }
+
+    #[test]
+    fn theme_css_strips_bom_before_scanning_first_files_import() {
+        let import = "@import url(fonts.css);";
+        let rest = "\n\n.peitho-slide { font-family: Inter, sans-serif; }";
+        let theme = build_theme_css(
+            &[
+                CssFile {
+                    name: "00-fonts.css".to_owned(),
+                    content: format!("\u{feff}{import}"),
+                },
+                CssFile {
+                    name: "base.css".to_owned(),
+                    content: rest.trim().to_owned(),
+                },
+            ],
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(theme.as_str(), format!("{import}{rest}"));
+        assert_eq!(theme.split_at_prelude(), (import, rest));
+    }
+
+    #[test]
+    fn theme_css_strips_bom_from_second_file_output() {
+        let theme = build_theme_css(
+            &[
+                CssFile {
+                    name: "base.css".to_owned(),
+                    content: ".first { color: red; }".to_owned(),
+                },
+                CssFile {
+                    name: "overrides.css".to_owned(),
+                    content: "\u{feff}.second { color: blue; }".to_owned(),
+                },
+            ],
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            theme.as_str(),
+            ".first { color: red; }\n\n.second { color: blue; }"
+        );
+    }
+
+    #[test]
+    fn theme_css_stops_before_unknown_or_extended_at_keyword() {
+        for css in [
+            "@font-face { font-family: Inter; }",
+            "@important url(theme.css);",
+            "@import-theme url(theme.css);",
+            r"@import\foo url(theme.css);",
+        ] {
+            assert_prelude(css, "", css);
+        }
+    }
+
+    #[test]
+    fn theme_css_does_not_consume_unterminated_statement() {
+        let first = "@import url(first.css);";
+        let rest = "\n@import url(second.css)";
+        let css = format!("{first}{rest}");
+
+        assert_prelude(&css, first, rest);
+    }
+
     fn slots(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
         entries
             .iter()
@@ -1074,7 +1470,7 @@ mod tests {
         base: &str,
         overrides: &str,
         slide_slots: &BTreeMap<String, BTreeSet<String>>,
-    ) -> crate::error::Result<String> {
+    ) -> crate::error::Result<ThemeCss> {
         build_with_root_classes(base, overrides, slide_slots, &[])
     }
 
@@ -1083,7 +1479,7 @@ mod tests {
         overrides: &str,
         slide_slots: &BTreeMap<String, BTreeSet<String>>,
         root_classes: &[&str],
-    ) -> crate::error::Result<String> {
+    ) -> crate::error::Result<ThemeCss> {
         let layout_slots: BTreeSet<String> = slide_slots.values().flatten().cloned().collect();
         let root_classes: BTreeSet<String> = root_classes
             .iter()
@@ -1115,10 +1511,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".slot-code { color: black; }"));
-        assert!(
-            css.ends_with(r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#)
-        );
+        assert!(css.as_str().contains(".slot-code { color: black; }"));
+        assert!(css
+            .as_str()
+            .ends_with(r#"[data-slide-key="arch-1"] .slot-code { outline: 3px solid #f40; }"#));
     }
 
     #[test]
@@ -1130,7 +1526,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(r#"[data-slide-key="arch-1"] .slot-title { color: red; }"#));
+        assert!(css
+            .as_str()
+            .contains(r#"[data-slide-key="arch-1"] .slot-title { color: red; }"#));
     }
 
     #[test]
@@ -1246,7 +1644,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(r#"[data-slide-key='arch-1'] .slot-title"#));
+        assert!(css
+            .as_str()
+            .contains(r#"[data-slide-key='arch-1'] .slot-title"#));
     }
 
     #[test]
@@ -1313,7 +1713,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(r#"[data-empty-slots~="quote"] .quote"#));
+        assert!(css
+            .as_str()
+            .contains(r#"[data-empty-slots~="quote"] .quote"#));
     }
 
     fn assert_rejects_data_empty_slots_operator(operator: &str, value: &str) {
@@ -1370,8 +1772,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(r#"[data-empty-slots~="Quote" i] .quote"#));
-        assert!(css.contains(r#"[data-empty-slots~='TITLE' I] .title"#));
+        assert!(css
+            .as_str()
+            .contains(r#"[data-empty-slots~="Quote" i] .quote"#));
+        assert!(css
+            .as_str()
+            .contains(r#"[data-empty-slots~='TITLE' I] .title"#));
     }
 
     #[test]
@@ -1383,7 +1789,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("[data-empty-slots ~= quote ] .quote"));
+        assert!(css.as_str().contains("[data-empty-slots ~= quote ] .quote"));
     }
 
     #[test]
@@ -1395,7 +1801,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("[data-empty-slots] .quote"));
+        assert!(css.as_str().contains("[data-empty-slots] .quote"));
     }
 
     #[test]
@@ -1450,7 +1856,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".slot-code { color: red; }"));
+        assert!(css.as_str().contains(".slot-code { color: red; }"));
     }
 
     #[test]
@@ -1472,7 +1878,7 @@ mod tests {
             .contains("unknown slot class '.slot-code' for slide 'cover'"));
 
         let css = build("", ".slot-code { color: red; }", &deck_slots).unwrap();
-        assert!(css.contains(".slot-code { color: red; }"));
+        assert!(css.as_str().contains(".slot-code { color: red; }"));
     }
 
     #[test]
@@ -1529,7 +1935,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -1542,7 +1950,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("height: var(--peitho-canvas-height, 720px);"));
+        assert!(css
+            .as_str()
+            .contains("height: var(--peitho-canvas-height, 720px);"));
     }
 
     #[test]
@@ -1555,7 +1965,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".not-root { width: 100%; }"));
+        assert!(css.as_str().contains(".not-root { width: 100%; }"));
     }
 
     #[test]
@@ -1568,7 +1978,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".peitho-slide { width: 100%; height: 100%; }"));
+        assert!(css
+            .as_str()
+            .contains(".peitho-slide { width: 100%; height: 100%; }"));
     }
 
     #[test]
@@ -1581,7 +1993,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".タイトル { color: red; }"));
+        assert!(css.as_str().contains(".タイトル { color: red; }"));
     }
 
     #[test]
@@ -1627,7 +2039,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -1745,7 +2159,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: 1280px; }"));
+        assert!(css.as_str().contains(".code-images { width: 1280px; }"));
     }
 
     #[test]
@@ -1790,7 +2204,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: 1280px; }"));
+        assert!(css.as_str().contains(".code-images { width: 1280px; }"));
     }
 
     #[test]
@@ -1819,7 +2233,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("&:hover { width: 100%; }"));
+        assert!(css.as_str().contains("&:hover { width: 100%; }"));
     }
 
     #[test]
@@ -1832,7 +2246,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("width:\n    var(--peitho-canvas-width, 1280px);"));
+        assert!(css
+            .as_str()
+            .contains("width:\n    var(--peitho-canvas-width, 1280px);"));
     }
 
     #[test]
@@ -1845,7 +2261,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -1858,7 +2276,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("[data-note=\",.code-images,\"] { width: 100%; }"));
+        assert!(css
+            .as_str()
+            .contains("[data-note=\",.code-images,\"] { width: 100%; }"));
     }
 
     #[test]
@@ -1887,7 +2307,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("@media print"));
+        assert!(css.as_str().contains("@media print"));
     }
 
     #[test]
@@ -1948,7 +2368,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: calc((100% - 10px)); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: calc((100% - 10px)); }"));
     }
 
     #[test]
@@ -1961,7 +2383,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".cover { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".cover { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -1974,7 +2398,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".cover { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".cover { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -2003,7 +2429,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: var(--peitho-canvas-width,1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: var(--peitho-canvas-width,1280px); }"));
     }
 
     #[test]
@@ -2016,8 +2444,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("--width: 100%"));
-        assert!(css.contains("border-width: 4px"));
+        assert!(css.as_str().contains("--width: 100%"));
+        assert!(css.as_str().contains("border-width: 4px"));
     }
 
     #[test]
@@ -2030,7 +2458,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: 222px; }"));
+        assert!(css.as_str().contains(".code-images { width: 222px; }"));
     }
 
     #[test]
@@ -2128,7 +2556,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
+        assert!(css
+            .as_str()
+            .contains(".code-images { width: var(--peitho-canvas-width, 1280px); }"));
     }
 
     #[test]
@@ -2141,7 +2571,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(css.contains("@media print"));
-        assert!(css.contains("min-width: 100%"));
+        assert!(css.as_str().contains("@media print"));
+        assert!(css.as_str().contains("min-width: 100%"));
     }
 }

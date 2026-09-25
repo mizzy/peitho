@@ -17,8 +17,9 @@ Math shows fenced `math` blocks rendered at build time into KaTeX HTML+MathML.
 The output is body content, not an image, and the deck does not need
 client-side math JavaScript.
 
-When a deck contains math, Peitho prepends the embedded KaTeX CSS to
-`peitho.css` and writes the matching fonts under `katex-fonts/`.
+When a deck contains math, Peitho places the embedded KaTeX CSS after the
+theme's leading statement prelude and before its ordinary rules, then writes
+the matching fonts under `katex-fonts/`.
 
 ## What to look at
 
