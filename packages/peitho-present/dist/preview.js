@@ -1021,6 +1021,9 @@ function parseEditableSourceRange(value) {
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) return null;
   return { start, end };
 }
+function hasClickModifier(event) {
+  return hasChordModifier(event) || event.shiftKey;
+}
 function isNestedListItemBlock(node) {
   return node instanceof Element && NESTED_LIST_ITEM_BLOCKS.has(node.tagName);
 }
@@ -1564,8 +1567,11 @@ var PreviewShellController = class {
     const clickGuard = createClickNavigationGuard({ target: tile, window: this.win });
     this.tileListenerCleanups.push(() => clickGuard.destroy());
     const onTileClick = (event) => {
-      if (clickGuard.shouldIgnoreClick(event)) return;
-      if (this.tryStartSlideEdit(slide, host, event)) return;
+      const editable = this.editableClickTarget(slide, host, event);
+      const editsLink = editable?.throughLink === true && !hasClickModifier(event);
+      if (editsLink) event.preventDefault();
+      if (clickGuard.shouldIgnoreClick(event) && !editsLink) return;
+      if (this.tryStartSlideEdit(editable)) return;
       this.commitTransition(slide.index, "single");
     };
     tile.addEventListener("click", onTileClick);
@@ -1668,29 +1674,35 @@ var PreviewShellController = class {
     this.applyLayout();
     this.releaseDeferredReload();
   }
-  tryStartSlideEdit(slide, host, event) {
-    if (!this.canStartEdit()) return true;
-    if (this.mode !== "single" || slide.index !== this.currentIndex) return false;
+  editableClickTarget(slide, host, event) {
+    if (this.mode !== "single" || slide.index !== this.currentIndex) return null;
     const shadow = host.shadowRoot;
-    if (shadow === null) return false;
+    if (shadow === null) return null;
     const path = event.composedPath();
     const boundary = path.indexOf(shadow);
-    if (boundary <= 0) return false;
-    let target = null;
+    if (boundary <= 0) return null;
+    let throughLink = false;
     for (let index = 0; index < boundary; index += 1) {
       const candidate = path[index];
-      if (candidate instanceof HTMLElement && candidate.hasAttribute("data-peitho-src") && candidate.hasAttribute("data-peitho-md")) {
-        target = candidate;
-        break;
+      if (!(candidate instanceof HTMLElement)) continue;
+      if (candidate.hasAttribute("data-peitho-src") && candidate.hasAttribute("data-peitho-md")) {
+        if (candidate.getRootNode() !== shadow) return null;
+        return { key: slide.key, target: candidate, throughLink };
       }
+      if (candidate.tagName === "A") throughLink = true;
     }
-    if (target === null || target.getRootNode() !== shadow) return false;
+    return null;
+  }
+  tryStartSlideEdit(editable) {
+    if (!this.canStartEdit()) return true;
+    if (editable === null) return false;
+    const { key, target } = editable;
     const encodedRange = target.getAttribute("data-peitho-src");
     const old = target.getAttribute("data-peitho-md");
     if (encodedRange === null || old === null) return false;
     const sourceRange = parseEditableSourceRange(encodedRange);
     if (sourceRange === null) return false;
-    return this.startSlideEdit(slide.key, target, sourceRange.start, sourceRange.end, old, old);
+    return this.startSlideEdit(key, target, sourceRange.start, sourceRange.end, old, old);
   }
   startSlideEdit(key, target, start, end, old, text) {
     let editor = target;
