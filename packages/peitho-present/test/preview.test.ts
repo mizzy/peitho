@@ -4855,6 +4855,7 @@ it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () =
   expect(heading.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(heading.textContent).toBe('A "quote" & **mark**');
   expect(heading.style.outline).not.toBe("");
+  expect(heading.style.display).toBe("inline-block");
   expect(heading.parentElement?.classList.contains("slot-title")).toBe(true);
 });
 
@@ -4876,6 +4877,64 @@ it("inline_edit_tight_list_wraps_only_leading_inline_nodes", async () => {
   expect(editor.nextSibling).toBe(nested);
   expect(item.lastChild).toBe(nested);
   expect(nested.firstElementChild).toBe(nestedChild);
+});
+
+it("inline_edit_inline_editor_uses_rectangular_outline_styles_and_restores_them", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const item = shadow.querySelector<HTMLLIElement>("#editable-tight-item")!;
+
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#tight-emphasis")!);
+
+  const editor = item.firstElementChild as HTMLElement;
+  expect(editor.style.display).toBe("inline-block");
+  expect(editor.style.verticalAlign).toBe("top");
+
+  editor.textContent = "parent *two*";
+  editor.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      composed: true,
+      cancelable: true
+    })
+  );
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(editor.hasAttribute("contenteditable")).toBe(false));
+
+  expect(item.firstElementChild).toBe(editor);
+  expect(editor.getAttribute("style")).toBeNull();
+});
+
+it("inline_edit_failed_save_restores_inline_editor_styles", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const item = shadow.querySelector<HTMLLIElement>("#editable-tight-item")!;
+
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#tight-emphasis")!);
+  const editor = item.firstElementChild as HTMLElement;
+  editor.textContent = "parent *two*";
+  editor.dispatchEvent(new FocusEvent("blur"));
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  fixture.resolveSlideEditPost(errorJson(422, "slide edit refused"));
+  await vi.waitFor(() => expect(editor.getAttribute("contenteditable")).toBe("plaintext-only"));
+
+  expect(editor.style.display).toBe("inline-block");
+  expect(editor.style.verticalAlign).toBe("top");
+});
+
+it("inline_edit_block_editor_does_not_override_display", async () => {
+  const { root } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+
+  expect(window.getComputedStyle(paragraph).display).toBe("block");
+  expect(paragraph.style.display).toBe("");
+  expect(paragraph.style.verticalAlign).toBe("");
 });
 
 it("inline_edit_escape_restores_rendered_nodes_without_posting", async () => {
@@ -5091,6 +5150,8 @@ it("inline_edit_enter_and_blur_post_the_exact_request_once", async () => {
   expect(paragraph.getAttribute("contenteditable")).toBe("false");
   expect(Number(paragraph.style.opacity)).toBeLessThan(1);
   expect(paragraph.style.outline).not.toBe("");
+  expect(paragraph.style.outlineOffset).toBe("-2px");
+  expect(paragraph.style.paddingInline).toBe("6px");
   expect(fixture.slideEditPosts()[0][0]).toBe("/slide-edit");
   expect(fixture.slideEditPosts()[0][1]).toMatchObject({
     method: "POST",

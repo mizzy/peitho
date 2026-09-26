@@ -1116,7 +1116,12 @@ class PreviewShellController implements PreviewShell {
     editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
     editor.style.outline = INLINE_EDIT_OUTLINE;
-    editor.style.outlineOffset = "2px";
+    editor.style.outlineOffset = "-2px";
+    editor.style.paddingInline = "6px";
+    if (this.win.getComputedStyle(editor).display === "inline") {
+      editor.style.display = "inline-block";
+      editor.style.verticalAlign = "top";
+    }
     const editableStyle = editor.getAttribute("style");
 
     let edit!: ActiveSlideEdit;
