@@ -126,10 +126,11 @@ type ActiveSlideEdit = {
   originalNodes: Node[];
   originalContenteditable: string | null;
   originalStyle: string | null;
-  editableStyle: string | null;
+  tile: HTMLElement;
+  frame: HTMLElement;
   trailingNewlineSentinel: boolean;
   commitPromise: Promise<boolean> | null;
-  removeListeners(): void;
+  dispose(): void;
 };
 
 type EditableClickTarget = {
@@ -238,7 +239,8 @@ const EDIT_AFFORDANCE_WITHOUT_SOURCE_HINT: HintTokens = [
   hintKey("Enter"),
   hintText(" for notes")
 ];
-const INLINE_EDIT_OUTLINE = "2px solid #38bdf8";
+const INLINE_EDIT_FRAME_BORDER = "2px solid #38bdf8";
+const INLINE_EDIT_FRAME_GAP = 6;
 const NESTED_LIST_ITEM_BLOCKS = new Set([
   "BLOCKQUOTE",
   "DIV",
@@ -863,7 +865,7 @@ class PreviewShellController implements PreviewShell {
     const active = this.activeEdit;
     if (active !== null) {
       if (active.kind === "inline") {
-        active.edit.removeListeners();
+        active.edit.dispose();
         this.restoreSlideEdit(active.edit);
       } else {
         active.edit.destroy();
@@ -1095,6 +1097,8 @@ class PreviewShellController implements PreviewShell {
     old: string,
     text: string
   ): boolean {
+    const tile = this.slides[this.currentIndex]?.tile;
+    if (tile === undefined) return false;
     let editor = target;
     let originalNodes: Node[];
     if (target.tagName === "LI") {
@@ -1115,16 +1119,22 @@ class PreviewShellController implements PreviewShell {
     const originalStyle = editor.getAttribute("style");
     editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
-    editor.style.outline = INLINE_EDIT_OUTLINE;
-    editor.style.outlineOffset = "-2px";
-    editor.style.paddingInline = "6px";
-    if (this.win.getComputedStyle(editor).display === "inline") {
-      editor.style.display = "inline-block";
-      editor.style.verticalAlign = "top";
-    }
-    const editableStyle = editor.getAttribute("style");
+    editor.style.outline = "none";
+
+    const frame = this.doc.createElement("div");
+    frame.dataset.peithoPreview = "edit-frame";
+    frame.style.position = "absolute";
+    frame.style.pointerEvents = "none";
+    frame.style.boxSizing = "border-box";
+    frame.style.border = INLINE_EDIT_FRAME_BORDER;
+    tile.appendChild(frame);
 
     let edit!: ActiveSlideEdit;
+    let animationFrame: number;
+    const positionOnAnimationFrame = (): void => {
+      this.positionEditFrame(edit);
+      animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
+    };
     const onKeyDown = (keyboardEvent: KeyboardEvent): void => {
       this.handleSlideEditKeyDown(edit, keyboardEvent);
     };
@@ -1141,21 +1151,44 @@ class PreviewShellController implements PreviewShell {
       originalNodes,
       originalContenteditable,
       originalStyle,
-      editableStyle,
+      tile,
+      frame,
       trailingNewlineSentinel: false,
       commitPromise: null,
-      removeListeners: () => {
+      dispose: () => {
         editor.removeEventListener("keydown", onKeyDown);
         editor.removeEventListener("blur", onBlur);
+        this.win.cancelAnimationFrame(animationFrame);
+        frame.remove();
       }
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
+    this.positionEditFrame(edit);
+    animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
     this.replaceActiveEdit({ kind: "inline", edit });
     this.setSlideEditStatus("");
     editor.focus({ preventScroll: true });
     placeCaretAtEnd(this.win, editor);
     return true;
+  }
+
+  private positionEditFrame(edit: ActiveSlideEdit): void {
+    const editorRect = edit.editor.getBoundingClientRect();
+    const tileRect = edit.tile.getBoundingClientRect();
+    const gap = INLINE_EDIT_FRAME_GAP;
+    const left = `${Math.round(
+      editorRect.left - tileRect.left + edit.tile.scrollLeft - gap
+    )}px`;
+    const top = `${Math.round(
+      editorRect.top - tileRect.top + edit.tile.scrollTop - gap
+    )}px`;
+    const width = `${Math.round(editorRect.width + gap * 2)}px`;
+    const height = `${Math.round(editorRect.height + gap * 2)}px`;
+    if (edit.frame.style.left !== left) edit.frame.style.left = left;
+    if (edit.frame.style.top !== top) edit.frame.style.top = top;
+    if (edit.frame.style.width !== width) edit.frame.style.width = width;
+    if (edit.frame.style.height !== height) edit.frame.style.height = height;
   }
 
   private handleSlideEditKeyDown(edit: ActiveSlideEdit, event: KeyboardEvent): void {
@@ -1209,7 +1242,7 @@ class PreviewShellController implements PreviewShell {
     discarded?: DiscardedDraftData
   ): boolean {
     if (this.activeEdit?.kind !== "inline" || this.activeEdit.edit !== edit) return false;
-    edit.removeListeners();
+    edit.dispose();
     this.replaceActiveEdit(null, discarded);
     this.restoreSlideEdit(edit);
     this.setSlideEditStatus("");
@@ -1281,7 +1314,7 @@ class PreviewShellController implements PreviewShell {
   }
 
   private finishSlideEdit(edit: ActiveSlideEdit, newText: string): void {
-    edit.removeListeners();
+    edit.dispose();
     this.replaceActiveEdit(null);
     edit.editor.textContent = newText;
     this.restoreSlideEditorAttributes(edit);
@@ -1345,8 +1378,9 @@ class PreviewShellController implements PreviewShell {
 
   private unlockSlideEdit(edit: ActiveSlideEdit): void {
     edit.editor.setAttribute("contenteditable", "plaintext-only");
-    if (edit.editableStyle === null) edit.editor.removeAttribute("style");
-    else edit.editor.setAttribute("style", edit.editableStyle);
+    if (edit.originalStyle === null) edit.editor.removeAttribute("style");
+    else edit.editor.setAttribute("style", edit.originalStyle);
+    edit.editor.style.outline = "none";
     edit.editor.focus({ preventScroll: true });
   }
 

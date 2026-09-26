@@ -187,8 +187,10 @@ page is unchanged.
   in single mode does nothing today, so no behavior is displaced.
 - The block's editable nodes are replaced by the `data-peitho-md` text and the
   element (for `<li>`, a wrapper around the leading inline run) becomes
-  `contenteditable="plaintext-only"` with an outline. Typography stays the
-  slide's own, so the text stays roughly in place.
+  `contenteditable="plaintext-only"`, framed by a shell overlay drawn outside
+  the slide (Issue #675), so the editor's own box is never restyled.
+  Typography stays the slide's own, so plain-text blocks stay exactly in
+  place; blocks with inline markup reflow because the source is shown.
 - Enter commits; Shift+Enter inserts a newline; blur commits; Escape cancels.
   IME composition keys (`isComposing` / `keyCode 229`) are ignored, so the
   Enter that confirms a Japanese conversion never commits.
