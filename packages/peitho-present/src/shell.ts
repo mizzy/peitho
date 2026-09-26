@@ -638,8 +638,11 @@ class PresentShellController implements PresentShell {
       };
       const cssAspect = manifest.aspectRatio.replace(":", " / ");
       this.setCanvasRootProperties(dimensions, cssAspect);
-      const css = await this.fetchText("peitho.css");
-      this.fontScopeCleanup = installDocumentFontScope(this.doc, css);
+      const [css, fontCss] = await Promise.all([
+        this.fetchText("peitho.css"),
+        this.fetchText("fontscope.css")
+      ]);
+      this.fontScopeCleanup = installDocumentFontScope(this.doc, fontCss);
       // Fetch the slide HTML before waiting on fonts: the deck's own text is what selects
       // which `unicode-range` subsets are worth fetching (see waitForFontsReady).
       const sources: { slide: (typeof manifest.slides)[number]; html: string }[] = [];

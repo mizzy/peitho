@@ -48,6 +48,7 @@ function standardFetch(): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
       return okText("<section><h1>Details</h1></section>");
@@ -224,6 +225,7 @@ it("uses an injected manifest without fetching manifest.json", async () => {
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return { ok: false, status: 500, text: async () => "" } as Response;
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
       return okText("<section><h1>Details</h1></section>");

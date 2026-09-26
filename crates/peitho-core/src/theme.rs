@@ -1,4 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    iter::Peekable,
+    ops::Range,
+    str::CharIndices,
+};
 
 use crate::error::{BuildError, ErrorKind, Result};
 
@@ -46,7 +52,7 @@ pub struct CssFile {
     pub content: String,
 }
 
-/// Theme CSS together with the end of its leading statement prelude.
+/// Theme CSS together with its leading statement prelude.
 ///
 /// The split is computed when the value is constructed, so renderers cannot
 /// accidentally place ordinary rules before a leading `@charset`, `@import`,
@@ -54,13 +60,16 @@ pub struct CssFile {
 #[derive(Debug)]
 pub struct ThemeCss {
     css: String,
-    prelude_end: usize,
+    prelude_statements: Vec<ThemePreludeStatement>,
 }
 
 impl ThemeCss {
     pub fn new(css: String) -> Self {
-        let prelude_end = theme_prelude_end(&css);
-        Self { css, prelude_end }
+        let prelude_statements = theme_prelude_statements(&css);
+        Self {
+            css,
+            prelude_statements,
+        }
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -69,8 +78,25 @@ impl ThemeCss {
 
     /// Split immediately after the last complete statement in the prelude.
     pub(crate) fn split_at_prelude(&self) -> (&str, &str) {
-        self.css.split_at(self.prelude_end)
+        let prelude_end = self
+            .prelude_statements
+            .last()
+            .map_or(0, |statement| statement.range.end);
+        self.css.split_at(prelude_end)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemePreludeKeyword {
+    Charset,
+    Import,
+    Layer,
+}
+
+#[derive(Debug)]
+struct ThemePreludeStatement {
+    keyword: ThemePreludeKeyword,
+    range: Range<usize>,
 }
 
 struct StrippedCssFile<'a> {
@@ -155,21 +181,25 @@ pub fn build_theme_css(
     ))
 }
 
-fn theme_prelude_end(css: &str) -> usize {
+fn theme_prelude_statements(css: &str) -> Vec<ThemePreludeStatement> {
     let mut offset = 0;
-    let mut prelude_end = 0;
+    let mut statements = Vec::new();
 
     loop {
         let Some(statement_start) = skip_theme_prelude_trivia(css, offset) else {
-            return prelude_end;
+            return statements;
         };
-        let Some(statement_body_start) = prelude_statement_body_start(css, statement_start) else {
-            return prelude_end;
+        let Some((keyword, statement_body_start)) = prelude_statement_keyword(css, statement_start)
+        else {
+            return statements;
         };
         let Some(statement_end) = prelude_statement_end(css, statement_body_start) else {
-            return prelude_end;
+            return statements;
         };
-        prelude_end = statement_end;
+        statements.push(ThemePreludeStatement {
+            keyword,
+            range: statement_start..statement_end,
+        });
         offset = statement_end;
     }
 }
@@ -193,69 +223,46 @@ fn skip_theme_prelude_trivia(css: &str, mut offset: usize) -> Option<usize> {
     Some(offset)
 }
 
-fn prelude_statement_body_start(css: &str, offset: usize) -> Option<usize> {
-    let rest = css.get(offset..)?.strip_prefix('@')?;
-    for keyword in ["charset", "import", "layer"] {
-        let Some(candidate) = rest.get(..keyword.len()) else {
-            continue;
-        };
-        if !candidate.eq_ignore_ascii_case(keyword) {
-            continue;
+fn prelude_statement_keyword(css: &str, offset: usize) -> Option<(ThemePreludeKeyword, usize)> {
+    for (keyword, text) in [
+        (ThemePreludeKeyword::Charset, "charset"),
+        (ThemePreludeKeyword::Import, "import"),
+        (ThemePreludeKeyword::Layer, "layer"),
+    ] {
+        if let Some(end) = at_rule_keyword_end(css, offset, text) {
+            return Some((keyword, end));
         }
-        let following = &rest[keyword.len()..];
-        if following
-            .chars()
-            .next()
-            .is_some_and(|ch| is_css_ident_char(ch) || ch == '\\')
-        {
-            continue;
-        }
-        return Some(offset + 1 + keyword.len());
     }
     None
 }
 
+fn at_rule_keyword_end(css: &str, offset: usize, keyword: &str) -> Option<usize> {
+    let rest = css.get(offset..)?.strip_prefix('@')?;
+    let candidate = rest.get(..keyword.len())?;
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let following = &rest[keyword.len()..];
+    if following
+        .chars()
+        .next()
+        .is_some_and(|ch| is_css_ident_char(ch) || ch == '\\')
+    {
+        return None;
+    }
+    Some(offset + 1 + keyword.len())
+}
+
 fn prelude_statement_end(css: &str, offset: usize) -> Option<usize> {
-    let statement = &css[offset..];
-    let mut chars = statement.char_indices().peekable();
-    let mut string = CssStringState::default();
-    let mut in_comment = false;
     let mut paren_depth = 0usize;
 
-    while let Some((relative_index, ch)) = chars.next() {
-        if in_comment {
-            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
-                chars.next();
-                in_comment = false;
-            }
-            continue;
-        }
-        if string.consume(ch) {
-            continue;
-        }
-        if matches!(ch, 'u' | 'U') {
-            match scan_unquoted_url_token(statement, relative_index) {
-                UnquotedUrlScan::NotToken => {}
-                UnquotedUrlScan::Unterminated => return None,
-                UnquotedUrlScan::End(url_end) => {
-                    while chars.peek().is_some_and(|(index, _)| *index < url_end) {
-                        chars.next();
-                    }
-                    continue;
-                }
-            }
-        }
-        if ch == '/' && chars.peek().is_some_and(|(_, next)| *next == '*') {
-            chars.next();
-            in_comment = true;
-            continue;
-        }
-
+    for code_char in css_code_chars(css, offset) {
+        let (index, ch) = code_char.ok()?;
         match ch {
             '{' => return None,
             '(' => paren_depth += 1,
             ')' => paren_depth = paren_depth.saturating_sub(1),
-            ';' if paren_depth == 0 => return Some(offset + relative_index + ch.len_utf8()),
+            ';' if paren_depth == 0 => return Some(index + ch.len_utf8()),
             _ => {}
         }
     }
@@ -309,8 +316,294 @@ fn scan_unquoted_url_token(css: &str, start: usize) -> UnquotedUrlScan {
     UnquotedUrlScan::Unterminated
 }
 
+struct UnterminatedCssUrl;
+
+struct CssCodeChars<'a> {
+    css: &'a str,
+    chars: Peekable<CharIndices<'a>>,
+    base: usize,
+    string: CssStringState,
+    in_comment: bool,
+    last_non_trivia: Option<char>,
+    finished: bool,
+}
+
+fn css_code_chars(css: &str, start: usize) -> CssCodeChars<'_> {
+    CssCodeChars {
+        css,
+        chars: css[start..].char_indices().peekable(),
+        base: start,
+        string: CssStringState::default(),
+        in_comment: false,
+        last_non_trivia: None,
+        finished: false,
+    }
+}
+
+impl Iterator for CssCodeChars<'_> {
+    type Item = std::result::Result<(usize, char), UnterminatedCssUrl>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        while let Some((relative, ch)) = self.chars.next() {
+            let index = self.base + relative;
+            if self.in_comment {
+                if ch == '*' && self.chars.peek().is_some_and(|(_, next)| *next == '/') {
+                    self.chars.next();
+                    self.in_comment = false;
+                }
+                continue;
+            }
+            if self.string.consume(ch) {
+                self.last_non_trivia = Some(ch);
+                continue;
+            }
+            if matches!(ch, 'u' | 'U') {
+                match scan_unquoted_url_token(self.css, index) {
+                    UnquotedUrlScan::NotToken => {}
+                    UnquotedUrlScan::Unterminated => {
+                        self.last_non_trivia = Some(ch);
+                        self.finished = true;
+                        return Some(Err(UnterminatedCssUrl));
+                    }
+                    UnquotedUrlScan::End(url_end) => {
+                        while self
+                            .chars
+                            .peek()
+                            .is_some_and(|(next, _)| self.base + *next < url_end)
+                        {
+                            self.chars.next();
+                        }
+                        self.last_non_trivia = Some(')');
+                        continue;
+                    }
+                }
+            }
+            if ch == '/' && self.chars.peek().is_some_and(|(_, next)| *next == '*') {
+                self.chars.next();
+                self.in_comment = true;
+                continue;
+            }
+
+            if !is_css_whitespace(ch) {
+                self.last_non_trivia = Some(ch);
+            }
+
+            return Some(Ok((index, ch)));
+        }
+
+        self.finished = true;
+        None
+    }
+}
+
+/// Build the CSS promoted to document scope by present and preview.
+///
+/// Imports come only from the theme's shared leading-prelude scan. Font faces
+/// come from the complete rendered stylesheet so embedded renderer CSS is
+/// included too.
+pub(crate) fn build_font_scope_css(theme_css: &ThemeCss, rendered_css: &str) -> String {
+    let mut parts = theme_css
+        .prelude_statements
+        .iter()
+        .filter(|statement| statement.keyword == ThemePreludeKeyword::Import)
+        .map(|statement| Cow::Borrowed(&theme_css.css[statement.range.clone()]))
+        .collect::<Vec<Cow<'_, str>>>();
+    parts.extend(
+        top_level_font_face_blocks(rendered_css)
+            .iter()
+            .map(|block| Cow::Owned(force_font_display_block(rendered_css, block))),
+    );
+    parts.join("\n")
+}
+
+struct CssBlockRange {
+    range: Range<usize>,
+    opening_brace: usize,
+    closing_brace: usize,
+}
+
+enum AtRuleBlockScan {
+    Found(CssBlockRange),
+    ResumeAt(usize),
+    Stop,
+}
+
+fn top_level_font_face_blocks(css: &str) -> Vec<CssBlockRange> {
+    let mut blocks = Vec::new();
+    let mut chars = css_code_chars(css, 0);
+    let mut depth = 0usize;
+
+    while let Some(code_char) = chars.next() {
+        let Ok((index, ch)) = code_char else {
+            break;
+        };
+
+        if depth == 0 && ch == '@' {
+            if let Some(keyword_end) = at_rule_keyword_end(css, index, "font-face") {
+                match at_rule_block(css, index, keyword_end) {
+                    AtRuleBlockScan::Found(block) => {
+                        chars = css_code_chars(css, block.range.end);
+                        blocks.push(block);
+                        continue;
+                    }
+                    AtRuleBlockScan::ResumeAt(offset) => {
+                        chars = css_code_chars(css, offset);
+                        continue;
+                    }
+                    AtRuleBlockScan::Stop => break,
+                }
+            }
+        }
+
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    blocks
+}
+
+fn at_rule_block(css: &str, start: usize, offset: usize) -> AtRuleBlockScan {
+    let mut chars = css_code_chars(css, offset);
+    let opening_brace = loop {
+        let Some(code_char) = chars.next() else {
+            return AtRuleBlockScan::Stop;
+        };
+        let Ok((index, ch)) = code_char else {
+            return AtRuleBlockScan::Stop;
+        };
+        match ch {
+            '{' => break index,
+            ';' => return AtRuleBlockScan::ResumeAt(index + ch.len_utf8()),
+            _ => {}
+        }
+    };
+
+    let mut depth = 1usize;
+    for code_char in chars {
+        let Ok((index, ch)) = code_char else {
+            return AtRuleBlockScan::Stop;
+        };
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return AtRuleBlockScan::Found(CssBlockRange {
+                        range: start..index + ch.len_utf8(),
+                        opening_brace,
+                        closing_brace: index,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    AtRuleBlockScan::Stop
+}
+
+/// Force `font-display: block` on every hoisted face.
+///
+/// Present and preview mount slides only after waiting for fonts, so `block`
+/// does not delay first paint. It prevents a cached watch reload from first
+/// painting the fallback face and then visibly reflowing under an authored
+/// `swap`. Only the document-scope copy is rewritten; `dist/` keeps the
+/// author's original value.
+fn force_font_display_block(css: &str, block: &CssBlockRange) -> String {
+    let text = &css[block.range.clone()];
+    let opening_brace = block.opening_brace - block.range.start;
+    let closing_brace = block.closing_brace - block.range.start;
+    let removals = font_display_declaration_ranges(text, opening_brace, closing_brace);
+    let mut forced = String::with_capacity(text.len() + "font-display:block;".len());
+    let mut cursor = 0;
+    for removal in removals {
+        forced.push_str(&text[cursor..removal.start]);
+        cursor = removal.end;
+    }
+    forced.push_str(&text[cursor..closing_brace]);
+    if font_face_body_needs_separator(&forced, opening_brace + 1) {
+        forced.push(';');
+    }
+    forced.push_str("font-display:block;");
+    forced.push_str(&text[closing_brace..]);
+    forced
+}
+
+fn font_face_body_needs_separator(css: &str, body_start: usize) -> bool {
+    let mut chars = css_code_chars(css, body_start);
+    while chars.next().is_some() {}
+    !matches!(chars.last_non_trivia.unwrap_or('{'), ';' | '{')
+}
+
+fn font_display_declaration_ranges(
+    block: &str,
+    opening_brace: usize,
+    closing_brace: usize,
+) -> Vec<Range<usize>> {
+    let mut removals = Vec::new();
+    let body_start = opening_brace + 1;
+    let mut brace_depth = 1usize;
+    let mut paren_depth = 0usize;
+    let mut declaration_start = body_start;
+    let mut font_display_start = None;
+    let mut saw_colon = false;
+
+    for code_char in css_code_chars(&block[..closing_brace], body_start) {
+        let Ok((index, ch)) = code_char else {
+            break;
+        };
+        match ch {
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '(' if brace_depth == 1 => paren_depth += 1,
+            ')' if brace_depth == 1 => paren_depth = paren_depth.saturating_sub(1),
+            ':' if brace_depth == 1 && paren_depth == 0 && !saw_colon => {
+                let declaration = &block[declaration_start..index];
+                if let Some(property_start) = font_display_property_start(declaration) {
+                    font_display_start = Some(declaration_start + property_start);
+                }
+                saw_colon = true;
+            }
+            ';' if brace_depth == 1 && paren_depth == 0 => {
+                if let Some(start) = font_display_start.take() {
+                    removals.push(start..index + ch.len_utf8());
+                }
+                declaration_start = index + ch.len_utf8();
+                saw_colon = false;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(start) = font_display_start {
+        removals.push(start..closing_brace);
+    }
+    removals
+}
+
+fn font_display_property_start(declaration: &str) -> Option<usize> {
+    let start = skip_theme_prelude_trivia(declaration, 0)?;
+    let name = declaration.get(start..start + "font-display".len())?;
+    if !name.eq_ignore_ascii_case("font-display") {
+        return None;
+    }
+    let end = start + name.len();
+    (skip_theme_prelude_trivia(declaration, end)? == declaration.len()).then_some(start)
+}
+
 fn is_css_whitespace(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')
+}
+
+fn is_css_newline(ch: char) -> bool {
+    matches!(ch, '\n' | '\r' | '\x0c')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -456,18 +749,42 @@ enum CssScanMode<T> {
 struct CssStringState {
     quote: Option<char>,
     escaped: bool,
+    hex_escape_digits: u8,
+    continued_cr: bool,
 }
 
 impl CssStringState {
     fn consume(&mut self, ch: char) -> bool {
-        if ch == '\n' {
-            self.quote = None;
-            self.escaped = false;
-            return false;
+        if self.continued_cr {
+            self.continued_cr = false;
+            if ch == '\n' {
+                return self.quote.is_some();
+            }
         }
+
         if let Some(quote) = self.quote {
+            if self.hex_escape_digits > 0 {
+                if self.hex_escape_digits < 6 && ch.is_ascii_hexdigit() {
+                    self.hex_escape_digits += 1;
+                    return true;
+                }
+                self.hex_escape_digits = 0;
+                if is_css_whitespace(ch) {
+                    self.continued_cr = ch == '\r';
+                    return true;
+                }
+            }
+
             if self.escaped {
                 self.escaped = false;
+                if ch.is_ascii_hexdigit() {
+                    self.hex_escape_digits = 1;
+                } else {
+                    self.continued_cr = ch == '\r';
+                }
+            } else if is_css_newline(ch) {
+                self.quote = None;
+                return false;
             } else if ch == '\\' {
                 self.escaped = true;
             } else if ch == quote {
@@ -1450,6 +1767,267 @@ mod tests {
         let css = format!("{first}{rest}");
 
         assert_prelude(&css, first, rest);
+    }
+
+    #[test]
+    fn css_string_state_continues_only_across_escaped_css_newlines() {
+        for newline in ["\n", "\r", "\x0c", "\r\n"] {
+            let mut string = CssStringState::default();
+            assert!(string.consume('"'));
+            assert!(string.consume('x'));
+            assert!(string.consume('\\'));
+            for ch in newline.chars() {
+                assert!(string.consume(ch), "escaped newline {newline:?}");
+            }
+            assert!(string.consume('{'), "escaped newline {newline:?}");
+            assert!(string.consume('"'));
+            assert!(!string.consume(';'));
+        }
+
+        for newline in ['\n', '\r', '\x0c'] {
+            let mut string = CssStringState::default();
+            assert!(string.consume('"'));
+            assert!(!string.consume(newline), "unescaped newline {newline:?}");
+            assert!(!string.consume('{'), "unescaped newline {newline:?}");
+        }
+    }
+
+    #[test]
+    fn css_string_state_consumes_hex_escape_digits_and_one_trailing_whitespace() {
+        for escape in ["\\41\n", "\\000041\n", "\\41\r", "\\41\x0c", "\\41\r\n"] {
+            let mut string = CssStringState::default();
+            assert!(string.consume('"'));
+            for ch in escape.chars() {
+                assert!(string.consume(ch), "hex escape {escape:?}");
+            }
+            assert!(string.consume('{'), "hex escape {escape:?}");
+            assert!(string.consume('"'));
+            assert!(!string.consume(';'));
+        }
+
+        for escape in ["\\41 ", "\\000041A"] {
+            let mut string = CssStringState::default();
+            assert!(string.consume('"'));
+            for ch in escape.chars() {
+                assert!(string.consume(ch), "hex escape {escape:?}");
+            }
+            assert!(!string.consume('\n'), "hex escape {escape:?}");
+            assert!(!string.consume('{'), "hex escape {escape:?}");
+        }
+    }
+
+    fn assert_font_scope(theme_css: &str, rendered_css: &str, expected: &str) {
+        let theme = ThemeCss::new(theme_css.to_owned());
+
+        assert_eq!(build_font_scope_css(&theme, rendered_css), expected);
+    }
+
+    #[test]
+    fn font_scope_hoists_only_imports_from_the_leading_theme_prelude() {
+        let css = r#"
+/* deck fonts */
+@charset "UTF-8";
+
+@import url("fonts/noto-sans-jp/index.css");
+@import url("fonts/inter/index.css") screen;
+.peitho-slide { color: red; }
+@import url("fonts/late.css");
+"#;
+
+        assert_font_scope(
+            css,
+            css,
+            concat!(
+                "@import url(\"fonts/noto-sans-jp/index.css\");\n",
+                "@import url(\"fonts/inter/index.css\") screen;"
+            ),
+        );
+    }
+
+    #[test]
+    fn font_scope_hoists_complete_unquoted_url_import_with_semicolon() {
+        let import = "@import url(https://fonts.googleapis.com/css2?family=Inter:wght@400;700);";
+        let css = format!("{import}\n.peitho-slide {{ color: red; }}");
+
+        assert_font_scope(&css, &css, import);
+    }
+
+    #[test]
+    fn font_scope_layer_statement_does_not_stop_later_import() {
+        let css = "@layer base;\n@import url(\"fonts.css\");\n.theme {}";
+
+        assert_font_scope(css, css, "@import url(\"fonts.css\");");
+    }
+
+    #[test]
+    fn font_scope_skips_charset_and_preserves_comment_marker_in_unquoted_url() {
+        let import = "@import url(https://cdn.example/a/*/font.css);";
+        let css = format!("@charset \"UTF-8\";\n{import}\n.theme {{}}");
+
+        assert_font_scope(&css, &css, import);
+    }
+
+    #[test]
+    fn font_scope_hoists_top_level_font_faces_from_full_rendered_css() {
+        let theme = ".slot-title { color: red; }";
+        let rendered = r#"
+.slot-title { color: red; }
+@font-face { font-family: "Heading"; src: url("fonts/heading.woff2"); }
+.slot-body { color: blue; }
+@font-face {
+  font-family: "Body";
+  src: url("fonts/body.woff2");
+}
+"#;
+
+        assert_font_scope(
+            theme,
+            rendered,
+            concat!(
+                "@font-face { font-family: \"Heading\"; src: url(\"fonts/heading.woff2\"); font-display:block;}\n",
+                "@font-face {\n",
+                "  font-family: \"Body\";\n",
+                "  src: url(\"fonts/body.woff2\");\n",
+                "font-display:block;}"
+            ),
+        );
+    }
+
+    #[test]
+    fn font_scope_ignores_braces_after_escaped_newlines_inside_strings() {
+        let css = concat!(
+            ".a { content: \"x\\\n",
+            "{\"; }\n",
+            "@font-face { font-family: P; src: url(p.woff2); }"
+        );
+
+        assert_font_scope(
+            css,
+            css,
+            "@font-face { font-family: P; src: url(p.woff2); font-display:block;}",
+        );
+    }
+
+    #[test]
+    fn font_scope_ignores_braces_after_hex_escape_whitespace_inside_strings() {
+        let css = concat!(
+            ".a{content:\"\\41\n",
+            "{\"}\n",
+            "@font-face{font-family:A;src:url(a.woff2)}"
+        );
+
+        assert_font_scope(
+            css,
+            css,
+            "@font-face{font-family:A;src:url(a.woff2);font-display:block;}",
+        );
+    }
+
+    #[test]
+    fn font_scope_skips_semicolon_font_face_and_keeps_brace_in_prelude() {
+        let face = "@font-face { font-family: A; src: url(a.woff2); }";
+        let expected = "@font-face { font-family: A; src: url(a.woff2); font-display:block;}";
+
+        let semicolon = format!("@font-face;\n{face}");
+        assert_font_scope(&semicolon, &semicolon, expected);
+
+        let closing_brace = format!("@font-face}}\n{face}\n.x{{color:red}}");
+        let blocks = top_level_font_face_blocks(&closing_brace);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].range.start, 0);
+        assert!(
+            closing_brace[blocks[0].range.clone()].contains("@font-face}\n@font-face"),
+            "{}",
+            &closing_brace[blocks[0].range.clone()]
+        );
+
+        let scoped = build_font_scope_css(&ThemeCss::new(closing_brace.clone()), &closing_brace);
+        assert!(scoped.starts_with("@font-face}\n@font-face"), "{scoped}");
+        assert_eq!(scoped.matches("font-display:block;").count(), 1);
+        assert!(!scoped.contains(".x{color:red}"), "{scoped}");
+    }
+
+    #[test]
+    fn font_scope_ignores_font_face_text_in_comments_strings_and_nested_rules() {
+        let css = r#"
+.fake::before { content: "@font-face { nope }"; }
+/* @font-face { font-family: "Comment"; } */
+@media screen {
+  @font-face { font-family: "Nested"; src: url("fonts/nested.woff2"); }
+}
+@font-face {
+  font-family: "Brace } Face";
+  src: url(fonts/a/*/brace}.woff2);
+  unicode-range: U+0-5FF; /* } */
+}
+"#;
+
+        assert_font_scope(
+            css,
+            css,
+            concat!(
+                "@font-face {\n",
+                "  font-family: \"Brace } Face\";\n",
+                "  src: url(fonts/a/*/brace}.woff2);\n",
+                "  unicode-range: U+0-5FF; /* } */\n",
+                "font-display:block;}"
+            ),
+        );
+    }
+
+    #[test]
+    fn font_scope_replaces_each_authored_font_display_declaration() {
+        let css = concat!(
+            "@font-face { font-family: \"A\"; src: url(a.woff2); font-display: swap; }\n",
+            "@font-face { font-family: \"B\"; src: url(b.woff2); FONT-DISPLAY: optional }"
+        );
+
+        let scoped = build_font_scope_css(&ThemeCss::new(css.to_owned()), css);
+
+        assert_eq!(scoped.matches("font-display:block;").count(), 2);
+        assert_eq!(
+            scoped.to_ascii_lowercase().matches("font-display").count(),
+            2
+        );
+        assert!(!scoped.contains("swap"));
+        assert!(!scoped.contains("optional"));
+    }
+
+    #[test]
+    fn font_scope_terminates_the_last_declaration_before_forced_font_display() {
+        let css = "@font-face { font-family: A; src: url(a.woff2) /* trailing */ }";
+
+        assert_font_scope(
+            css,
+            css,
+            "@font-face { font-family: A; src: url(a.woff2) /* trailing */ ;font-display:block;}",
+        );
+    }
+
+    #[test]
+    fn font_scope_replaces_commented_font_display_without_touching_values() {
+        let css = r#"@font-face {
+  font-family: "font-display: optional;";
+  src: url(data:font/woff2;base64,a;b/*not-a-comment*/);
+  /* descriptor */ FONT-DISPLAY /* before colon */ : swap;
+}"#;
+
+        let scoped = build_font_scope_css(&ThemeCss::new(css.to_owned()), css);
+
+        assert!(scoped.contains("font-display: optional;"), "{scoped}");
+        assert!(
+            scoped.contains("url(data:font/woff2;base64,a;b/*not-a-comment*/);"),
+            "{scoped}"
+        );
+        assert!(!scoped.contains(": swap"), "{scoped}");
+        assert!(scoped.contains("font-display:block;"), "{scoped}");
+    }
+
+    #[test]
+    fn font_scope_is_empty_without_imports_or_top_level_font_faces() {
+        let css = "@media screen { @font-face { font-family: Nested; } }\n.theme {}";
+
+        assert_font_scope(css, css, "");
     }
 
     fn slots(entries: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {

@@ -42,6 +42,7 @@ const manifest = {
   ]
 };
 const cssText = ".slot-title { color: rebeccapurple; }";
+// Opaque text installed verbatim by the shell; Rust owns the contents of fontscope.css.
 const fontCssText = `
 @import url("fonts/noto-sans-jp/index.css");
 .peitho-slide { color: red; }
@@ -82,10 +83,11 @@ function listenWindow(type: string, listener: EventListener): void {
   windowListenerCleanups.push(() => window.removeEventListener(type, listener));
 }
 
-function standardFetch(responseManifest = manifest, css = cssText): typeof fetch {
+function standardFetch(responseManifest = manifest, css = cssText, fontCss = ""): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText(css);
+    if (url === "fontscope.css") return okText(fontCss);
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
     return {
@@ -119,6 +121,7 @@ function fetchForManifest(responseManifest: typeof manifest): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") return okText("");
     if (url.startsWith("slides/")) return okText(`<section>${url}</section>`);
     return {
       ok: false,
@@ -134,6 +137,7 @@ it("loads manifest and fragments into shadow roots", async () => {
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-arch-1.html") return okText("<section><pre>code</pre></section>");
     throw new Error(`unexpected ${url}`);
@@ -222,19 +226,22 @@ it("injects document scoped font css once for present shells", async () => {
   const firstRoot = document.createElement("main");
   const secondRoot = document.createElement("main");
 
-  await mountForTest({ root: firstRoot, fetcher: standardFetch(manifest, fontCssText), window });
-  await mountForTest({ root: secondRoot, fetcher: standardFetch(manifest, fontCssText), window });
+  await mountForTest({
+    root: firstRoot,
+    fetcher: standardFetch(manifest, cssText, fontCssText),
+    window
+  });
+  await mountForTest({
+    root: secondRoot,
+    fetcher: standardFetch(manifest, cssText, fontCssText),
+    window
+  });
 
   const styles = document.head.querySelectorAll<HTMLStyleElement>(
     "style[data-peitho-font-scope]"
   );
   expect(styles).toHaveLength(1);
-  expect(styles[0].textContent).toBe(
-    [
-      '@import url("fonts/noto-sans-jp/index.css");',
-      '@font-face { font-family: "Noto Sans JP"; src: url("fonts/noto.woff2"); font-display:block;}'
-    ].join("\n")
-  );
+  expect(styles[0].textContent).toBe(fontCssText);
 });
 
 it("removes document scoped font css when the last present shell is destroyed", async () => {
@@ -242,12 +249,12 @@ it("removes document scoped font css when the last present shell is destroyed", 
   const secondRoot = document.createElement("main");
   const first = await mountForTest({
     root: firstRoot,
-    fetcher: standardFetch(manifest, fontCssText),
+    fetcher: standardFetch(manifest, cssText, fontCssText),
     window
   });
   const second = await mountForTest({
     root: secondRoot,
-    fetcher: standardFetch(manifest, fontCssText),
+    fetcher: standardFetch(manifest, cssText, fontCssText),
     window
   });
 
@@ -401,6 +408,7 @@ it("walks reveal steps before changing slides and hides future step elements", a
     fetcher: vi.fn(async (url: string) => {
       if (url === "manifest.json") return okJson(responseManifest);
       if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
       if (url.includes("intro")) {
         return okText(
           '<section><p data-reveal-step="1">A</p><p data-reveal-step="2">B</p></section>'
@@ -449,6 +457,7 @@ it("moves code line emphasis to the group owning the current step", async () => 
     fetcher: vi.fn(async (url: string) => {
       if (url === "manifest.json") return okJson(responseManifest);
       if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
       if (url.includes("intro")) {
         return okText(
           '<section><pre class="slot-code"><code>' +
@@ -494,6 +503,7 @@ it("injects only stepped emphasis styling from the present shell", async () => {
     fetcher: vi.fn(async (url: string) => {
       if (url === "manifest.json") return okJson(responseManifest);
       if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
       if (url.includes("intro")) {
         return okText(
           '<section><pre><code><span class="code-line" data-emphasis-step="1">a</span></code></pre></section>'
@@ -526,6 +536,7 @@ it("never hides an emphasis-only code block", async () => {
     fetcher: vi.fn(async (url: string) => {
       if (url === "manifest.json") return okJson(responseManifest);
       if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
       if (url.includes("intro")) {
         return okText(
           '<section><pre class="slot-code"><code>' +
@@ -1012,6 +1023,7 @@ it("shows a visible error when a fragment fetch fails", async () => {
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
     return { ok: false, status: 404, text: async () => "not found" } as Response;
   });
@@ -1028,6 +1040,7 @@ it("shows a visible error when peitho css fetch fails", async () => {
   const fetcher = vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(manifest);
     if (url === "peitho.css") return { ok: false, status: 503, text: async () => "" } as Response;
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
     if (url === "slides/001-arch-1.html") return okText("<section>Code</section>");
     throw new Error(`unexpected ${url}`);
@@ -1037,6 +1050,26 @@ it("shows a visible error when peitho css fetch fails", async () => {
 
   expect(shell.manifest).toBeNull();
   expect(root.textContent).toContain("Failed to load peitho.css: 503");
+  expect(root.querySelectorAll(".peitho-slide")).toHaveLength(0);
+});
+
+it("shows a visible error when fontscope css fetch fails", async () => {
+  const root = document.createElement("main");
+  const fetcher = vi.fn(async (url: string) => {
+    if (url === "manifest.json") return okJson(manifest);
+    if (url === "peitho.css") return okText(cssText);
+    if (url === "fontscope.css") {
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }
+    if (url === "slides/000-intro.html") return okText("<section>Intro</section>");
+    if (url === "slides/001-arch-1.html") return okText("<section>Code</section>");
+    throw new Error(`unexpected ${url}`);
+  });
+
+  const shell = await mountForTest({ root, fetcher: fetcher as unknown as typeof fetch });
+
+  expect(shell.manifest).toBeNull();
+  expect(root.textContent).toContain("Failed to load fontscope.css: 404");
   expect(root.querySelectorAll(".peitho-slide")).toHaveLength(0);
 });
 

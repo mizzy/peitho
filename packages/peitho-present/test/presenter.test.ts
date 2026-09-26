@@ -52,6 +52,7 @@ function standardFetch(overrides: Partial<typeof manifest> = {}): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(responseManifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
       return okText("<section><h1>Details</h1></section>");
@@ -113,6 +114,7 @@ function legacyManifestFetch(): typeof fetch {
   return vi.fn(async (url: string) => {
     if (url === "manifest.json") return okJson(legacyManifest);
     if (url === "peitho.css") return okText(".slot-title { color: red; }");
+    if (url === "fontscope.css") return okText("");
     if (url === "slides/000-intro.html") return okText("<section><h1>Intro</h1></section>");
     if (url === "slides/001-details.html")
       return okText("<section><h1>Details</h1></section>");
@@ -606,6 +608,7 @@ it("presenter current pane follows sync step while next pane stays final state",
     fetcher: vi.fn(async (url: string) => {
       if (url === "manifest.json") return okJson(responseManifest);
       if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
       if (url === "slides/000-intro.html") {
         return okText(
           '<section><p data-reveal-step="1">A</p><p data-reveal-step="2">B</p></section>'

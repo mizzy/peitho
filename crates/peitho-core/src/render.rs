@@ -22,7 +22,7 @@ use crate::{
     layout::{Layout, LayoutAssets},
     math::MathAssets,
     phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, Rendered},
-    theme::ThemeCss,
+    theme::{build_font_scope_css, ThemeCss},
 };
 
 const PDF_FLATTEN_JS: &str = include_str!("pdf_flatten.js");
@@ -167,7 +167,14 @@ pub fn render_deck(
         parts.push(rest);
         parts.join("\n")
     };
-    Ok(Deck::rendered(settings, slides, css, math_assets))
+    let font_scope_css = build_font_scope_css(&theme_css, &css);
+    Ok(Deck::rendered(
+        settings,
+        slides,
+        css,
+        font_scope_css,
+        math_assets,
+    ))
 }
 
 fn slide_uses_math(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
@@ -4675,6 +4682,49 @@ mod tests {
         assert!(with_math.css().starts_with(MathAssets::katex().css()));
         assert!(with_math.css().ends_with(theme_css));
         assert_eq!(without_math.css(), theme_css);
+    }
+
+    #[test]
+    fn rendered_deck_exposes_font_scope_from_theme_and_full_rendered_css() {
+        let theme_css = concat!(
+            "@import url(https://example.com/fonts.css);\n",
+            "@font-face { font-family: Theme; src: url(theme.woff2); font-display: swap; }\n",
+            ".peitho-slide { color: red; }"
+        );
+        let rendered = render_checked_with_css(checked_deck_with_math_body(), theme_css);
+        let font_scope = rendered.font_scope_css();
+
+        assert!(
+            font_scope.starts_with("@import url(https://example.com/fonts.css);\n@font-face"),
+            "{font_scope}"
+        );
+        assert!(
+            font_scope.contains("font-family:KaTeX_Main"),
+            "{font_scope}"
+        );
+        assert!(font_scope.contains("font-family: Theme"), "{font_scope}");
+        assert!(!font_scope.contains("font-display: swap"), "{font_scope}");
+        assert!(!font_scope.contains(".peitho-slide"), "{font_scope}");
+        for (index, _) in font_scope.match_indices("font-display:block;") {
+            assert!(
+                matches!(
+                    font_scope[..index].trim_end().chars().next_back(),
+                    Some(';' | '{')
+                ),
+                "forced font-display must follow a declaration terminator: {font_scope}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_deck_exposes_empty_font_scope_when_nothing_is_hoisted() {
+        let rendered = render_checked_deck_with_layout_and_css(
+            "# Intro\n\nBody",
+            title_body_layout(),
+            ".peitho-slide { color: red; }",
+        );
+
+        assert_eq!(rendered.font_scope_css(), "");
     }
 
     #[test]

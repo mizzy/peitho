@@ -664,6 +664,7 @@ pub struct ImageRequest<'a> {
 pub struct Rendered {
     slides: Vec<RenderedSlide>,
     css: String,
+    font_scope_css: String,
     math_assets: Option<MathAssets>,
 }
 
@@ -1004,6 +1005,7 @@ impl Deck<Rendered> {
         settings: DeckSettings,
         slides: Vec<RenderedSlide>,
         css: String,
+        font_scope_css: String,
         math_assets: Option<MathAssets>,
     ) -> Self {
         Self {
@@ -1011,6 +1013,7 @@ impl Deck<Rendered> {
             phase: Rendered {
                 slides,
                 css,
+                font_scope_css,
                 math_assets,
             },
         }
@@ -1026,6 +1029,11 @@ impl Deck<Rendered> {
 
     pub fn css(&self) -> &str {
         &self.phase.css
+    }
+
+    /// CSS that present and preview promote from shadow roots to document scope.
+    pub fn font_scope_css(&self) -> &str {
+        &self.phase.font_scope_css
     }
 
     pub fn math_assets(&self) -> Option<MathAssets> {
