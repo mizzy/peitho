@@ -420,6 +420,65 @@ function slideShadow(root: HTMLElement, key: string, thumbnail = false): ShadowR
   return host.shadowRoot;
 }
 
+function stageTile(root: HTMLElement, key = "intro"): HTMLElement {
+  const tile = root.querySelector<HTMLElement>(
+    `.peitho-preview-tile[data-slide-key="${key}"]`
+  );
+  if (tile === null) throw new Error(`Missing stage tile for ${key}`);
+  return tile;
+}
+
+function editFrame(root: HTMLElement): HTMLElement | null {
+  return root.querySelector<HTMLElement>('[data-peitho-preview="edit-frame"]');
+}
+
+function boundingRect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function animationFrameDriver(win: Window): {
+  request: ReturnType<typeof vi.fn>;
+  cancel: ReturnType<typeof vi.fn>;
+  pending(): number;
+  flush(): void;
+} {
+  let nextHandle = 1;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  const request = vi
+    .spyOn(win, "requestAnimationFrame")
+    .mockImplementation((callback: FrameRequestCallback): number => {
+      const handle = nextHandle;
+      nextHandle += 1;
+      callbacks.set(handle, callback);
+      return handle;
+    });
+  const cancel = vi
+    .spyOn(win, "cancelAnimationFrame")
+    .mockImplementation((handle: number): void => {
+      callbacks.delete(handle);
+    });
+  return {
+    request,
+    cancel,
+    pending: () => callbacks.size,
+    flush(): void {
+      const pending = Array.from(callbacks.values());
+      callbacks.clear();
+      for (const callback of pending) callback(0);
+    }
+  };
+}
+
 function dispatchShadowClick(target: Element): MouseEvent {
   const event = new MouseEvent("click", {
     bubbles: true,
@@ -4797,6 +4856,7 @@ it("inline_edit_grid_tile_thumbnail_and_non_current_roots_do_not_start", async (
   dispatchShadowClick(gridParagraph);
   expect(shell.mode).toBe("single");
   expect(gridParagraph.hasAttribute("contenteditable")).toBe(false);
+  expect(editFrame(root)).toBeNull();
 
   const thumbnailParagraph = slideShadow(root, "intro", true).querySelector<HTMLElement>(
     "#editable-paragraph"
@@ -4849,13 +4909,13 @@ it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () =
   const { root } = await mountInlineEditForTest();
   const shadow = slideShadow(root, "intro");
   const heading = shadow.querySelector<HTMLElement>("#editable-heading")!;
+  heading.setAttribute("style", "color: rebeccapurple");
 
   dispatchShadowClick(heading.querySelector("strong")!);
 
   expect(heading.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(heading.textContent).toBe('A "quote" & **mark**');
-  expect(heading.style.outline).not.toBe("");
-  expect(heading.style.display).toBe("inline-block");
+  expect(heading.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
   expect(heading.parentElement?.classList.contains("slot-title")).toBe(true);
 });
 
@@ -4879,16 +4939,21 @@ it("inline_edit_tight_list_wraps_only_leading_inline_nodes", async () => {
   expect(nested.firstElementChild).toBe(nestedChild);
 });
 
-it("inline_edit_inline_editor_uses_rectangular_outline_styles_and_restores_them", async () => {
+it("inline_edit_uses_one_tile_overlay_without_layout_styling_the_list_item_editor", async () => {
   const { root, fixture } = await mountInlineEditForTest();
   const shadow = slideShadow(root, "intro");
   const item = shadow.querySelector<HTMLLIElement>("#editable-tight-item")!;
+  const tile = stageTile(root);
 
   dispatchShadowClick(shadow.querySelector<HTMLElement>("#tight-emphasis")!);
 
   const editor = item.firstElementChild as HTMLElement;
-  expect(editor.style.display).toBe("inline-block");
-  expect(editor.style.verticalAlign).toBe("top");
+  const frame = editFrame(root);
+  expect(editor.getAttribute("style")).toBe("outline: none;");
+  expect(frame?.parentElement).toBe(tile);
+  expect(tile.querySelectorAll('[data-peitho-preview="edit-frame"]')).toHaveLength(1);
+  expect(frame?.style.pointerEvents).toBe("none");
+  expect(shadow.querySelector('[data-peitho-preview="edit-frame"]')).toBeNull();
 
   editor.textContent = "parent *two*";
   editor.dispatchEvent(
@@ -4905,36 +4970,79 @@ it("inline_edit_inline_editor_uses_rectangular_outline_styles_and_restores_them"
 
   expect(item.firstElementChild).toBe(editor);
   expect(editor.getAttribute("style")).toBeNull();
+  expect(editFrame(root)).toBeNull();
 });
 
-it("inline_edit_failed_save_restores_inline_editor_styles", async () => {
+it("inline_edit_failed_save_keeps_the_overlay_and_outline_suppression", async () => {
   const { root, fixture } = await mountInlineEditForTest();
   const shadow = slideShadow(root, "intro");
-  const item = shadow.querySelector<HTMLLIElement>("#editable-tight-item")!;
+  const editor = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  editor.setAttribute("style", "color: rebeccapurple");
 
-  dispatchShadowClick(shadow.querySelector<HTMLElement>("#tight-emphasis")!);
-  const editor = item.firstElementChild as HTMLElement;
-  editor.textContent = "parent *two*";
+  dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
+  editor.textContent = "Peitho is a **very fast** tool";
   editor.dispatchEvent(new FocusEvent("blur"));
 
   await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  const frame = editFrame(root);
   fixture.resolveSlideEditPost(errorJson(422, "slide edit refused"));
   await vi.waitFor(() => expect(editor.getAttribute("contenteditable")).toBe("plaintext-only"));
 
-  expect(editor.style.display).toBe("inline-block");
-  expect(editor.style.verticalAlign).toBe("top");
+  expect(editor.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
+  expect(editFrame(root)).toBe(frame);
+  expect(frame?.isConnected).toBe(true);
+
+  press(editor, "Escape");
+
+  expect(editor.getAttribute("style")).toBe("color: rebeccapurple");
+  expect(editFrame(root)).toBeNull();
 });
 
-it("inline_edit_block_editor_does_not_override_display", async () => {
+it("inline_edit_overlay_rounds_scrolled_screen_rects_and_follows_animation_frames_until_close", async () => {
+  const animationFrames = animationFrameDriver(window);
   const { root } = await mountInlineEditForTest();
   const shadow = slideShadow(root, "intro");
   const paragraph = shadow.querySelector<HTMLElement>("#editable-paragraph")!;
+  const tile = stageTile(root);
+  paragraph.setAttribute("style", "color: rebeccapurple");
+  let paragraphRect = boundingRect(150.75, 90.25, 240.4, 48.6);
+  vi.spyOn(paragraph, "getBoundingClientRect").mockImplementation(() => paragraphRect);
+  vi.spyOn(tile, "getBoundingClientRect").mockReturnValue(
+    boundingRect(100.25, 40.75, 900, 600)
+  );
+  tile.scrollLeft = 13;
+  tile.scrollTop = 17;
 
   dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
 
-  expect(window.getComputedStyle(paragraph).display).toBe("block");
-  expect(paragraph.style.display).toBe("");
-  expect(paragraph.style.verticalAlign).toBe("");
+  const frame = editFrame(root)!;
+  expect(paragraph.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
+  expect(frame.style.position).toBe("absolute");
+  expect(frame.style.pointerEvents).toBe("none");
+  expect(frame.style.boxSizing).toBe("border-box");
+  expect(frame.style.borderWidth).toBe("2px");
+  expect(frame.style.borderStyle).toBe("solid");
+  expect(frame.style.borderColor).toBe("rgb(56, 189, 248)");
+  expect(frame.style.zIndex).toBe("");
+  expect(frame.style.left).toBe("58px");
+  expect(frame.style.top).toBe("61px");
+  expect(frame.style.width).toBe("252px");
+  expect(frame.style.height).toBe("61px");
+  expect(animationFrames.pending()).toBe(1);
+
+  paragraphRect = boundingRect(170.1, 120.4, 280.6, 72.3);
+  animationFrames.flush();
+  expect(frame.style.left).toBe("77px");
+  expect(frame.style.top).toBe("91px");
+  expect(frame.style.width).toBe("293px");
+  expect(frame.style.height).toBe("84px");
+  expect(animationFrames.pending()).toBe(1);
+
+  press(paragraph, "Escape");
+
+  expect(animationFrames.cancel).toHaveBeenCalledTimes(1);
+  expect(animationFrames.pending()).toBe(0);
+  expect(editFrame(root)).toBeNull();
 });
 
 it("inline_edit_escape_restores_rendered_nodes_without_posting", async () => {
@@ -4982,6 +5090,7 @@ it("inline_edit_escape_restores_rendered_nodes_without_posting", async () => {
     expect(escape.defaultPrevented).toBe(true);
     expect(testCase.target.hasAttribute("contenteditable")).toBe(false);
     expectSameNodes(testCase.target.childNodes, originalNodes);
+    expect(editFrame(root)).toBeNull();
   }
 
   expect(overviewRequests).toEqual([]);
@@ -5149,9 +5258,10 @@ it("inline_edit_enter_and_blur_post_the_exact_request_once", async () => {
   await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
   expect(paragraph.getAttribute("contenteditable")).toBe("false");
   expect(Number(paragraph.style.opacity)).toBeLessThan(1);
-  expect(paragraph.style.outline).not.toBe("");
-  expect(paragraph.style.outlineOffset).toBe("-2px");
-  expect(paragraph.style.paddingInline).toBe("6px");
+  expect(paragraph.style.outline).toBe("none");
+  expect(paragraph.style.outlineOffset).toBe("");
+  expect(paragraph.style.paddingInline).toBe("");
+  expect(editFrame(root)?.style.pointerEvents).toBe("none");
   expect(fixture.slideEditPosts()[0][0]).toBe("/slide-edit");
   expect(fixture.slideEditPosts()[0][1]).toMatchObject({
     method: "POST",
@@ -5168,6 +5278,7 @@ it("inline_edit_enter_and_blur_post_the_exact_request_once", async () => {
   fixture.resolveSlideEditPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
   expect(paragraph.textContent).toBe("Peitho is a **very fast** tool");
+  expect(editFrame(root)).toBeNull();
   dispatchShadowClick(paragraph);
   expect(paragraph.hasAttribute("contenteditable")).toBe(false);
 });
@@ -5304,7 +5415,12 @@ it("inline_edit_failed_save_stays_open_and_reports_json_error", async () => {
   await vi.waitFor(() => expect(status.textContent).toBe("slide edit refused"));
   expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(paragraph.style.opacity).toBe("");
-  expect(paragraph.style.outline).not.toBe("");
+  expect(paragraph.style.outline).toBe("none");
+  expect(paragraph.style.display).toBe("");
+  expect(paragraph.style.padding).toBe("");
+  expect(paragraph.style.paddingInline).toBe("");
+  expect(paragraph.style.verticalAlign).toBe("");
+  expect(editFrame(root)).not.toBeNull();
   expect(shadow.activeElement).toBe(paragraph);
 
   note.value = "saved note";
@@ -5361,6 +5477,7 @@ it("inline_edit_failed_save_stays_open_and_reports_json_error", async () => {
   await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(4));
   fixture.resolveSlideEditPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
+  expect(editFrame(root)).toBeNull();
   expect(status.textContent).toBe("note save refused");
 });
 
@@ -5375,6 +5492,7 @@ it("inline_edit_unchanged_close_restores_without_posting", async () => {
 
   await vi.waitFor(() => expect(paragraph.hasAttribute("contenteditable")).toBe(false));
   expect(Array.from(paragraph.childNodes)).toEqual(originalNodes);
+  expect(editFrame(root)).toBeNull();
   expect(fixture.slideEditPosts()).toHaveLength(0);
 });
 
@@ -5399,6 +5517,7 @@ it("commit_transition_saves_slide_edit_before_notes_and_navigation", async () =>
   fixture.resolveSlideEditPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
   expect(shell.currentIndex).toBe(0);
+  expect(editFrame(root)).toBeNull();
 
   fixture.resolveNotesPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
@@ -5471,6 +5590,7 @@ it("failed_slide_edit_blocks_slide_change_and_grid_entry", async () => {
   await vi.waitFor(() =>
     expect(paragraph.getAttribute("contenteditable")).toBe("plaintext-only")
   );
+  expect(editFrame(root)).not.toBeNull();
   expect(shell.currentIndex).toBe(0);
   expect(shell.mode).toBe("single");
   expect(panel.hidden).toBe(false);
@@ -5583,6 +5703,7 @@ it("successful_commit_releases_deferred_reload", async () => {
 
   fixture.resolveSlideEditPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  expect(editFrame(root)).toBeNull();
   expect(statesAtReload).toEqual([{ mode: "single", index: 0 }]);
 });
 
@@ -5707,6 +5828,7 @@ it("escape_cancel_releases_deferred_reload", async () => {
   expect(fixture.slideEditPosts()).toHaveLength(0);
   expect(reload).toHaveBeenCalledTimes(1);
   expect(paragraph.hasAttribute("contenteditable")).toBe(false);
+  expect(editFrame(root)).toBeNull();
 });
 
 it("drift_409_keeps_editor_open_until_escape_releases_reload", async () => {
@@ -5751,8 +5873,9 @@ it("drift_409_keeps_editor_open_until_escape_releases_reload", async () => {
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
-it("pagehide_posts_dirty_slide_edit_with_keepalive", async () => {
-  const { root, fixture } = await mountInlineEditForTest();
+it("pagehide_posts_dirty_slide_edit_and_disposal_removes_the_frame", async () => {
+  const animationFrames = animationFrameDriver(window);
+  const { root, shell, fixture } = await mountInlineEditForTest();
   const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
     "#editable-paragraph"
   )!;
@@ -5774,6 +5897,10 @@ it("pagehide_posts_dirty_slide_edit_with_keepalive", async () => {
     old: "Peitho is a *fast* tool",
     new: "page exit edit"
   });
+  shell.destroy();
+  shells.pop();
+  expect(animationFrames.pending()).toBe(0);
+  expect(editFrame(root)).toBeNull();
   fixture.resolveSlideEditPost(okJson({ saved: true }));
 });
 
