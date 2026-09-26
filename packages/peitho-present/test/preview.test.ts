@@ -5150,6 +5150,8 @@ it("inline_edit_enter_and_blur_post_the_exact_request_once", async () => {
   expect(paragraph.getAttribute("contenteditable")).toBe("false");
   expect(Number(paragraph.style.opacity)).toBeLessThan(1);
   expect(paragraph.style.outline).not.toBe("");
+  expect(paragraph.style.outlineOffset).toBe("-2px");
+  expect(paragraph.style.paddingInline).toBe("6px");
   expect(fixture.slideEditPosts()[0][0]).toBe("/slide-edit");
   expect(fixture.slideEditPosts()[0][1]).toMatchObject({
     method: "POST",
