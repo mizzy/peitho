@@ -4915,7 +4915,7 @@ it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () =
 
   expect(heading.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(heading.textContent).toBe('A "quote" & **mark**');
-  expect(heading.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
+  expect(heading.getAttribute("style")).toBe("color: rebeccapurple; outline: none; white-space: pre-wrap; overflow-wrap: anywhere;");
   expect(heading.classList.contains("slot-title")).toBe(true);
 });
 
@@ -4989,7 +4989,7 @@ it("inline_edit_uses_one_tile_overlay_without_layout_styling_the_list_item_edito
 
   const editor = item.firstElementChild as HTMLElement;
   const frame = editFrame(root);
-  expect(editor.getAttribute("style")).toBe("outline: none;");
+  expect(editor.getAttribute("style")).toBe("outline: none; white-space: pre-wrap; overflow-wrap: anywhere;");
   expect(frame?.parentElement).toBe(tile);
   expect(tile.querySelectorAll('[data-peitho-preview="edit-frame"]')).toHaveLength(1);
   expect(frame?.style.pointerEvents).toBe("none");
@@ -5028,7 +5028,7 @@ it("inline_edit_failed_save_keeps_the_overlay_and_outline_suppression", async ()
   fixture.resolveSlideEditPost(errorJson(422, "slide edit refused"));
   await vi.waitFor(() => expect(editor.getAttribute("contenteditable")).toBe("plaintext-only"));
 
-  expect(editor.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
+  expect(editor.getAttribute("style")).toBe("color: rebeccapurple; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; z-index: 1; margin-bottom: 0px;");
   expect(editFrame(root)).toBe(frame);
   expect(frame?.isConnected).toBe(true);
 
@@ -5056,7 +5056,7 @@ it("inline_edit_overlay_rounds_scrolled_screen_rects_and_follows_animation_frame
   dispatchShadowClick(shadow.querySelector<HTMLElement>("#paragraph-emphasis")!);
 
   const frame = editFrame(root)!;
-  expect(paragraph.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
+  expect(paragraph.getAttribute("style")).toBe("color: rebeccapurple; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; z-index: 1; margin-bottom: 0px;");
   expect(frame.style.position).toBe("absolute");
   expect(frame.style.pointerEvents).toBe("none");
   expect(frame.style.boxSizing).toBe("border-box");
@@ -5083,6 +5083,23 @@ it("inline_edit_overlay_rounds_scrolled_screen_rects_and_follows_animation_frame
   expect(animationFrames.cancel).toHaveBeenCalledTimes(1);
   expect(animationFrames.pending()).toBe(0);
   expect(editFrame(root)).toBeNull();
+  expect(paragraph.getAttribute("style")).toBe("color: rebeccapurple");
+});
+
+it("inline_edit_holds_the_list_item_layout_and_restores_its_style", async () => {
+  const { root } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const item = shadow.querySelector<HTMLElement>("#editable-tight-item")!;
+
+  dispatchShadowClick(item);
+
+  expect(item.style.position).toBe("relative");
+  expect(item.style.zIndex).toBe("1");
+  expect(item.style.marginBottom).toBe("0px");
+
+  press(item.querySelector<HTMLElement>("[contenteditable]")!, "Escape");
+
+  expect(item.hasAttribute("style")).toBe(false);
 });
 
 it("inline_edit_escape_restores_rendered_nodes_without_posting", async () => {

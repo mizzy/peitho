@@ -130,8 +130,8 @@ it("opens a light-DOM source textarea and applies the fitted stage frame", () =>
   expect(textarea.dataset.peithoPreview).toBe("source");
   expect(textarea.style.fontFamily).toContain("monospace");
   expect(textarea.style.tabSize).toBe("2");
-  expect(textarea.style.whiteSpace).toBe("pre");
-  expect(textarea.wrap).toBe("off");
+  expect(textarea.style.whiteSpace).toBe("pre-wrap");
+  expect(textarea.style.overflowWrap).toBe("anywhere");
   expect(textarea.spellcheck).toBe(false);
   expect(textarea.getAttribute("aria-label")).toBe("Slide Markdown source");
   expect(textarea.value).toBe("# Supplied body");

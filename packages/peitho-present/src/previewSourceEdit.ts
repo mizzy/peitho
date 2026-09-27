@@ -46,7 +46,6 @@ export function openPreviewSourceEdit(options: {
   textarea.dataset.peithoPreview = "source";
   textarea.setAttribute("aria-label", "Slide Markdown source");
   textarea.spellcheck = false;
-  textarea.wrap = "off";
   textarea.value = options.body;
   textarea.style.position = "absolute";
   textarea.style.boxSizing = "border-box";
@@ -55,7 +54,8 @@ export function openPreviewSourceEdit(options: {
   textarea.style.fontFamily =
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
   textarea.style.tabSize = "2";
-  textarea.style.whiteSpace = "pre";
+  textarea.style.whiteSpace = "pre-wrap";
+  textarea.style.overflowWrap = "anywhere";
   textarea.style.overflow = "auto";
   // The browser default is small black-on-white, which is unreadable against the
   // shell's dark ground. Deck CSS cannot reach this element, so it is styled here.

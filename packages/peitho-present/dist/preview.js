@@ -370,7 +370,6 @@ function openPreviewSourceEdit(options) {
   textarea.dataset.peithoPreview = "source";
   textarea.setAttribute("aria-label", "Slide Markdown source");
   textarea.spellcheck = false;
-  textarea.wrap = "off";
   textarea.value = options.body;
   textarea.style.position = "absolute";
   textarea.style.boxSizing = "border-box";
@@ -378,7 +377,8 @@ function openPreviewSourceEdit(options) {
   textarea.style.resize = "none";
   textarea.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
   textarea.style.tabSize = "2";
-  textarea.style.whiteSpace = "pre";
+  textarea.style.whiteSpace = "pre-wrap";
+  textarea.style.overflowWrap = "anywhere";
   textarea.style.overflow = "auto";
   textarea.style.background = SOURCE_EDITOR_BACKGROUND;
   textarea.style.color = SOURCE_EDITOR_COLOR;
@@ -884,6 +884,83 @@ function hasClickModifier(event) {
 }
 function isNestedListItemBlock(node) {
   return node instanceof Element && NESTED_LIST_ITEM_BLOCKS.has(node.tagName);
+}
+function applyEditorStyle(editor) {
+  editor.style.outline = "none";
+  editor.style.whiteSpace = "pre-wrap";
+  editor.style.overflowWrap = "anywhere";
+}
+function holdEditLayout(win, target) {
+  let box = target;
+  while (/^(contents|inline)$/.test(win.getComputedStyle(box).display) && box.parentElement) {
+    box = box.parentElement;
+  }
+  const slide = box.closest("[data-slide-key]") ?? box;
+  const isGridOrFlex = (el) => el !== null && /flex|grid/.test(win.getComputedStyle(el).display);
+  const computed = win.getComputedStyle(box);
+  const originalStyle = box.getAttribute("style");
+  const staticPosition = computed.position === "static";
+  const height0 = box.offsetHeight;
+  const marginBottom0 = Number.parseFloat(computed.marginBottom) || 0;
+  const reference = (() => {
+    if (isGridOrFlex(box.parentElement)) return null;
+    let item = null;
+    for (let a = box.parentElement; a !== null && a !== slide; a = a.parentElement) {
+      if (isGridOrFlex(a.parentElement)) {
+        item = a;
+        break;
+      }
+    }
+    const scope = item ?? slide;
+    for (let n = box; n !== null && n !== scope; n = n.parentElement) {
+      const following = n.nextElementSibling;
+      if (following !== null) return () => following.getBoundingClientRect().top;
+    }
+    return item === null ? null : () => item.getBoundingClientRect().height;
+  })();
+  const reference0 = reference?.() ?? 0;
+  const background = opaqueBackground(win, box);
+  return {
+    apply() {
+      if (staticPosition) box.style.position = "relative";
+      box.style.zIndex = "1";
+      if (background !== null) box.style.backgroundColor = background;
+      box.style.transform = "";
+      const rect = box.getBoundingClientRect();
+      const scale = box.offsetHeight > 0 ? rect.height / box.offsetHeight : 1;
+      let marginBottom = marginBottom0 - (box.offsetHeight - height0);
+      box.style.marginBottom = `${marginBottom}px`;
+      for (let i = 0; reference !== null && i < 3; i++) {
+        const drift = (reference() - reference0) / scale;
+        if (Math.abs(drift) < 0.5) break;
+        box.style.marginBottom = `${marginBottom - drift}px`;
+        if (Math.abs((reference() - reference0) / scale - drift) < 0.5) {
+          box.style.marginBottom = `${marginBottom}px`;
+          break;
+        }
+        marginBottom -= drift;
+      }
+      const placed = box.getBoundingClientRect();
+      const bounds = slide.getBoundingClientRect();
+      const overflow = (placed.bottom - bounds.bottom) / scale;
+      const room = (placed.top - bounds.top) / scale;
+      const shift = Math.max(0, Math.min(overflow, room));
+      if (shift > 0) box.style.transform = `translateY(${-shift}px)`;
+    },
+    release() {
+      if (originalStyle === null) box.removeAttribute("style");
+      else box.setAttribute("style", originalStyle);
+    }
+  };
+}
+function opaqueBackground(win, from) {
+  for (let el = from; el !== null; el = el.parentElement) {
+    const color = win.getComputedStyle(el).backgroundColor;
+    if (color !== "" && color !== "transparent" && !/,\s*0\)$/.test(color)) {
+      return el === from ? null : color;
+    }
+  }
+  return null;
 }
 function placeCaretAtEnd(win, editor) {
   const selection = win.getSelection();
@@ -1568,6 +1645,7 @@ var PreviewShellController = class {
   startSlideEdit(key, target, start, end, old, text) {
     const tile = this.slides[this.currentIndex]?.tile;
     if (tile === void 0) return false;
+    const layoutHold = holdEditLayout(this.win, target);
     let editor = target;
     let originalNodes;
     const children = Array.from(target.childNodes);
@@ -1588,7 +1666,7 @@ var PreviewShellController = class {
     const originalStyle = editor.getAttribute("style");
     editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
-    editor.style.outline = "none";
+    applyEditorStyle(editor);
     const frame = this.doc.createElement("div");
     frame.dataset.peithoPreview = "edit-frame";
     frame.style.position = "absolute";
@@ -1599,6 +1677,7 @@ var PreviewShellController = class {
     let edit;
     let animationFrame;
     const positionOnAnimationFrame = () => {
+      layoutHold.apply();
       this.positionEditFrame(edit);
       animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
     };
@@ -1627,10 +1706,12 @@ var PreviewShellController = class {
         editor.removeEventListener("blur", onBlur);
         this.win.cancelAnimationFrame(animationFrame);
         frame.remove();
+        layoutHold.release();
       }
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
+    layoutHold.apply();
     this.positionEditFrame(edit);
     animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
     this.replaceActiveEdit({ kind: "inline", edit });
@@ -1815,7 +1896,7 @@ var PreviewShellController = class {
     edit.editor.setAttribute("contenteditable", "plaintext-only");
     if (edit.originalStyle === null) edit.editor.removeAttribute("style");
     else edit.editor.setAttribute("style", edit.originalStyle);
-    edit.editor.style.outline = "none";
+    applyEditorStyle(edit.editor);
     edit.editor.focus({ preventScroll: true });
   }
   restoreSlideEditorAttributes(edit) {
