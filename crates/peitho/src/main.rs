@@ -6378,9 +6378,6 @@ contexts:
                     );
                     element.remove_attribute("data-peitho-src");
                     element.remove_attribute("data-peitho-md");
-                    if element.tag_name().eq_ignore_ascii_case("span") {
-                        element.remove_and_keep_content();
-                    }
                     Ok(())
                 })],
                 ..RewriteStrSettings::new()

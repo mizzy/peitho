@@ -388,26 +388,33 @@ fn render_slot(
     let class_name = slot.class_name();
     let html = match accepts {
         Accepts::Inline => {
-            let body = fragments
+            let rendered_fragments = fragments
                 .iter()
                 .map(|fragment| {
                     render_heading_inline_fragment(fragment, footnote_numbers, edit_annotations)
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>>>()?;
+            let body = rendered_fragments
+                .iter()
+                .map(|(html, _)| html.as_str())
+                .collect::<Vec<_>>()
                 .join(" ");
+            let mut html = format!(r#"<span class="{class_name}""#);
             if let Some(span) = fragments.iter().find_map(SourceFragment::reveal_span) {
                 // check.rs rejects revealed fragments that share an inline
                 // slot with other content, so render can rely on this shape.
                 if fragments.len() > 1 {
                     unreachable!("revealed inline slots carry exactly one fragment");
                 }
-                format!(
-                    r#"<span class="{class_name}" data-reveal-step="{}">{body}</span>"#,
-                    span.start
-                )
-            } else {
-                format!(r#"<span class="{class_name}">{body}</span>"#)
+                write!(html, r#" data-reveal-step="{}""#, span.start).unwrap();
             }
+            if let [(_, Some(annotation))] = rendered_fragments.as_slice() {
+                push_edit_annotation_attributes(&mut html, annotation);
+            }
+            html.push('>');
+            html.push_str(&body);
+            html.push_str("</span>");
+            html
         }
         Accepts::Code => render_code_slot(&class_name, fragments, highlighter, edit_annotations)?,
         Accepts::Image => {
@@ -1652,11 +1659,11 @@ fn render_heading_inline_fragment(
     fragment: &SourceFragment<ResolvedImagePath>,
     footnote_numbers: &BTreeMap<String, usize>,
     edit_annotations: EditAnnotations,
-) -> Result<String> {
+) -> Result<(String, Option<EditAnnotation>)> {
     ensure_fragment_matches_contract(Accepts::Inline, fragment)?;
     let rendered = render_heading_inline(fragment.markdown(), footnote_numbers)?;
     if edit_annotations == EditAnnotations::Off {
-        return Ok(rendered);
+        return Ok((rendered, None));
     }
 
     let sources = [BodyMarkdownSource {
@@ -1675,16 +1682,7 @@ fn render_heading_inline_fragment(
         .into_iter()
         .flatten()
         .next();
-    let Some(annotation) = annotation else {
-        return Ok(rendered);
-    };
-
-    let mut wrapped = String::from("<span");
-    push_edit_annotation_attributes(&mut wrapped, &annotation);
-    wrapped.push('>');
-    wrapped.push_str(&rendered);
-    wrapped.push_str("</span>");
-    Ok(wrapped)
+    Ok((rendered, annotation))
 }
 
 /// A tagged code block is highlighted at build time into `hl-*` classed
@@ -7014,6 +7012,14 @@ Paragraph after heading.
         .unwrap()
     }
 
+    fn multi_title_layout() -> Layout {
+        parse_layout(
+            "multi-title",
+            r#"<section><slot name="title" accepts="inline" arity="1..*"></slot></section>"#,
+        )
+        .unwrap()
+    }
+
     fn body_only_layout() -> Layout {
         parse_layout(
             "body-only",
@@ -7103,9 +7109,6 @@ Paragraph after heading.
                     );
                     element.remove_attribute("data-peitho-src");
                     element.remove_attribute("data-peitho-md");
-                    if element.tag_name().eq_ignore_ascii_case("span") {
-                        element.remove_and_keep_content();
-                    }
                     Ok(())
                 })],
                 ..RewriteStrSettings::new()
@@ -7206,6 +7209,17 @@ Paragraph after heading.
                 "revealed heading",
                 "::: {reveal}\n\n## revealed heading\n\n:::",
                 title_body_layout,
+            ),
+            ("inline slot single fragment", "# Title", title_body_layout),
+            (
+                "inline slot leading emphasis",
+                "# *YAPC::Asia 2006 Tokyo* rest",
+                title_body_layout,
+            ),
+            (
+                "inline slot multiple fragments",
+                "::: {slot=title}\n\n# First\n\n## Second\n\n:::",
+                multi_title_layout,
             ),
             (
                 "revealed paragraph",
@@ -7342,28 +7356,53 @@ Paragraph after heading.
     }
 
     #[test]
-    fn edit_annotations_on_wraps_each_accepts_inline_heading_fragment() {
+    fn edit_annotations_on_marks_single_inline_slot_element_directly() {
+        let markdown = "# *YAPC::Asia 2006 Tokyo* rest";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, title_body_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+        let source = "*YAPC::Asia 2006 Tokyo* rest";
+        let span = span_for_slice(markdown, &spans, source);
+
+        assert!(
+            html.contains(&format!(
+                r#"<span class="slot-title" data-peitho-src="{}-{}" data-peitho-md="{source}"><em>YAPC::Asia 2006 Tokyo</em> rest</span>"#,
+                span.start, span.end
+            )),
+            "{html}"
+        );
+        assert_eq!(html.matches("<span").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn edit_annotations_on_marks_revealed_inline_slot_element_directly() {
+        let markdown = "::: {reveal}\n\n## revealed *heading*\n\n:::";
+        let (rendered, spans) =
+            render_with_edit_annotations(markdown, title_body_layout(), EditAnnotations::On);
+        let html = rendered.slides()[0].html();
+        let source = "revealed *heading*";
+        let span = span_for_slice(markdown, &spans, source);
+
+        assert!(
+            html.contains(&format!(
+                r#"<span class="slot-title" data-reveal-step="1" data-peitho-src="{}-{}" data-peitho-md="{source}">revealed <em>heading</em></span>"#,
+                span.start, span.end
+            )),
+            "{html}"
+        );
+        assert_eq!(html.matches("<span").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn edit_annotations_on_omits_annotation_for_multiple_inline_fragments() {
         let markdown = "::: {slot=title}\n\n# First *heading*\n\n## Second **heading**\n\n:::";
-        let layout = parse_layout(
-            "multi-title",
-            r#"<section><slot name="title" accepts="inline" arity="1..*"></slot></section>"#,
-        )
-        .unwrap();
-        let (rendered, spans) = render_with_edit_annotations(markdown, layout, EditAnnotations::On);
+        let (rendered, _) =
+            render_with_edit_annotations(markdown, multi_title_layout(), EditAnnotations::On);
         let html = rendered.slides()[0].html();
 
         assert!(html.contains(r#"<span class="slot-title">"#), "{html}");
-        for source in ["First *heading*", "Second **heading**"] {
-            let span = span_for_slice(markdown, &spans, source);
-            assert!(
-                html.contains(&format!(
-                    r#"<span data-peitho-src="{}-{}" data-peitho-md="{source}">"#,
-                    span.start, span.end
-                )),
-                "{html}"
-            );
-        }
-        assert_eq!(html.matches("<span data-peitho-src=").count(), 2, "{html}");
+        assert!(!html.contains("data-peitho-src"), "{html}");
+        assert!(!html.contains("data-peitho-md"), "{html}");
     }
 
     #[test]

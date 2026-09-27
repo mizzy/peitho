@@ -1570,9 +1570,10 @@ var PreviewShellController = class {
     if (tile === void 0) return false;
     let editor = target;
     let originalNodes;
-    if (target.tagName === "LI") {
-      const children = Array.from(target.childNodes);
-      const nestedBlockIndex = children.findIndex(isNestedListItemBlock);
+    const children = Array.from(target.childNodes);
+    const useInnerEditor = target.tagName === "LI" || this.win.getComputedStyle(target).display === "contents";
+    if (useInnerEditor) {
+      const nestedBlockIndex = target.tagName === "LI" ? children.findIndex(isNestedListItemBlock) : -1;
       const inlineEnd = nestedBlockIndex < 0 ? children.length : nestedBlockIndex;
       originalNodes = children.slice(0, inlineEnd);
       const insertionPoint = children[inlineEnd] ?? null;
@@ -1580,7 +1581,7 @@ var PreviewShellController = class {
       for (const node of originalNodes) target.removeChild(node);
       target.insertBefore(editor, insertionPoint);
     } else {
-      originalNodes = Array.from(target.childNodes);
+      originalNodes = children;
       target.replaceChildren();
     }
     const originalContenteditable = editor.getAttribute("contenteditable");

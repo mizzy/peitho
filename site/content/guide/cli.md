@@ -177,7 +177,9 @@ runs, and the preview reloads on the same slide.
 Not editable, by design: code blocks, generated `code_images` output
 (diagrams, math, embeds), images, footnote definitions, raw HTML, page
 settings and frontmatter, any block that contains a speaker-note comment
-(edit the note in the notes panel) or other inline HTML, and anything that comes from the layout HTML
+(edit the note in the notes panel) or other inline HTML, headings that share
+an inline slot with other headings (an `arity="1..*"` title slot holding two
+or more; press `e` instead), and anything that comes from the layout HTML
 rather than the Markdown. Inline editing exists only in `peitho preview`;
 `peitho present`, `peitho build`, and `dist/` never see it.
 

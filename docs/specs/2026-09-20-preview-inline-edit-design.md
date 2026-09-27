@@ -88,7 +88,10 @@ With `On`, each editable block element carries two attributes:
 them and they describe the `<li>`'s leading inline child nodes (everything
 before its first nested block element). Title-slot headings
 (`Accepts::Inline`) get a per-fragment `<span>` wrapper carrying the
-attributes, in `On` mode only.
+attributes, in `On` mode only. *(Superseded 2026-09-27, Issue #678: the wrapper changed the DOM that
+theme CSS sees, so the attributes now sit on the slot's own `<span>` and an
+inline slot holding more than one fragment carries none. See
+`docs/plans/2026-09-27-inline-slot-edit-annotation.md`.)*
 
 The renderer already iterates body Markdown with `into_offset_iter()` and
 tracks each fragment's range inside the joined run
