@@ -175,7 +175,8 @@ runs, and the preview reloads on the same slide.
   to the included file, not to the deck that includes it.
 
 Not editable, by design: code blocks, generated `code_images` output
-(diagrams, math, embeds), images, footnote definitions, raw HTML, page
+(diagrams, math, embeds), images, a footnote definition's `[^label]:` marker
+(its text is editable), raw HTML, page
 settings and frontmatter, any block that contains a speaker-note comment
 (edit the note in the notes panel) or other inline HTML, headings that share
 an inline slot with other headings (an `arity="1..*"` title slot holding two
