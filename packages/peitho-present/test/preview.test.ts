@@ -230,7 +230,7 @@ function previewFetchFixture(
 const inlineEditSlideHtml: Record<string, string> = {
   "slides/000-intro.html": `
     <section>
-      <h1><span class="slot-title"><span id="editable-heading" data-peitho-src="40-67" data-peitho-md="A &quot;quote&quot; &amp; **mark**">A &quot;quote&quot; &amp; <strong>mark</strong></span></span></h1>
+      <h1><span id="editable-heading" class="slot-title" data-peitho-src="40-67" data-peitho-md="A &quot;quote&quot; &amp; **mark**">A &quot;quote&quot; &amp; <strong>mark</strong></span></h1>
       <p id="editable-paragraph" data-peitho-src="120-143" data-peitho-md="Peitho is a *fast* tool">Peitho is a <em id="paragraph-emphasis">fast</em> tool</p>
       <ul><li id="editable-tight-item" data-peitho-src="200-212" data-peitho-md="parent *one*">parent <em id="tight-emphasis">one</em><ul id="nested-list"><li>child</li></ul></li></ul>
       <p id="editable-link" data-peitho-src="240-279" data-peitho-md="[Open docs](https://example.com)"><a id="external-link" href="https://example.com" target="_blank">Open docs</a></p>
@@ -4916,7 +4916,47 @@ it("inline_edit_editor_uses_plaintext_only_and_shows_data_peitho_md", async () =
   expect(heading.getAttribute("contenteditable")).toBe("plaintext-only");
   expect(heading.textContent).toBe('A "quote" & **mark**');
   expect(heading.getAttribute("style")).toBe("color: rebeccapurple; outline: none;");
-  expect(heading.parentElement?.classList.contains("slot-title")).toBe(true);
+  expect(heading.classList.contains("slot-title")).toBe(true);
+});
+
+it("inline_edit_display_contents_uses_an_inner_editor_and_restores_on_cancel_or_commit", async () => {
+  const { root, fixture } = await mountInlineEditForTest();
+  const shadow = slideShadow(root, "intro");
+  const heading = shadow.querySelector<HTMLElement>("#editable-heading")!;
+  const originalNodes = Array.from(heading.childNodes);
+  const originalStrong = heading.querySelector<HTMLElement>("strong")!;
+  heading.style.display = "contents";
+
+  dispatchShadowClick(originalStrong);
+
+  const cancelledEditor = heading.firstElementChild as HTMLElement;
+  expect(heading.hasAttribute("contenteditable")).toBe(false);
+  expect(cancelledEditor).toBeInstanceOf(HTMLSpanElement);
+  expect(cancelledEditor).not.toBe(originalStrong);
+  expect(cancelledEditor.getAttribute("contenteditable")).toBe("plaintext-only");
+  expect(cancelledEditor.textContent).toBe('A "quote" & **mark**');
+
+  cancelledEditor.textContent = "cancelled";
+  press(cancelledEditor, "Escape");
+
+  expectSameNodes(heading.childNodes, originalNodes);
+  expect(heading.querySelector("strong")).toBe(originalStrong);
+
+  dispatchShadowClick(originalStrong);
+  const committedEditor = heading.firstElementChild as HTMLElement;
+  committedEditor.textContent = "Committed *heading*";
+  press(committedEditor, "Enter");
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.slideEditPosts()[0][1].body as string).new).toBe(
+    "Committed *heading*"
+  );
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(committedEditor.hasAttribute("contenteditable")).toBe(false));
+
+  expect(heading.firstElementChild).toBe(committedEditor);
+  expect(heading.childNodes).toHaveLength(1);
+  expect(committedEditor.textContent).toBe("Committed *heading*");
+  expect(heading.style.display).toBe("contents");
 });
 
 it("inline_edit_tight_list_wraps_only_leading_inline_nodes", async () => {
