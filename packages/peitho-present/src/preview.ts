@@ -309,6 +309,110 @@ function isNestedListItemBlock(node: Node): boolean {
   return node instanceof Element && NESTED_LIST_ITEM_BLOCKS.has(node.tagName);
 }
 
+// The editor shows Markdown source, which the layout's CSS was not written
+// for: an author `white-space: nowrap` (a one-line caption) beats the
+// contenteditable UA default and would also collapse typed spaces and
+// newlines, and a flex/grid item's min-content ignores `break-word`, so an
+// unbroken token such as a link URL would widen the slot past the slide.
+function applyEditorStyle(editor: HTMLElement): void {
+  editor.style.outline = "none";
+  editor.style.whiteSpace = "pre-wrap";
+  editor.style.overflowWrap = "anywhere";
+}
+
+type EditLayoutHold = { apply(): void; release(): void };
+
+// The source text is longer (or shorter) than the rendered text, so letting the
+// edited block reflow would resize or move its neighbours — in a flex column
+// the screenshot above a caption shrank. Instead the block keeps its original
+// footprint (a margin absorbs the height change), paints over its neighbours
+// on an opaque background, and shifts up when it would run off the slide.
+// Measured once from the rendered block, before its content is swapped.
+function holdEditLayout(win: Window, target: HTMLElement): EditLayoutHold {
+  let box = target;
+  while (/^(contents|inline)$/.test(win.getComputedStyle(box).display) && box.parentElement) {
+    box = box.parentElement;
+  }
+  const slide = box.closest<HTMLElement>("[data-slide-key]") ?? box;
+  const isGridOrFlex = (el: Element | null): boolean =>
+    el !== null && /flex|grid/.test(win.getComputedStyle(el).display);
+  const computed = win.getComputedStyle(box);
+  const originalStyle = box.getAttribute("style");
+  const staticPosition = computed.position === "static";
+  const height0 = box.offsetHeight;
+  const marginBottom0 = Number.parseFloat(computed.marginBottom) || 0;
+  // Flex and grid margins never collapse, so the margin arithmetic is exact
+  // for a flex/grid item. In block flow the margin may collapse with a
+  // neighbour or pass through its parents, so it is corrected against what it
+  // must not move: the next element inside the nearest flex/grid item (or the
+  // slide), and otherwise that item's own height.
+  const reference = ((): (() => number) | null => {
+    if (isGridOrFlex(box.parentElement)) return null;
+    let item: HTMLElement | null = null;
+    for (let a = box.parentElement; a !== null && a !== slide; a = a.parentElement) {
+      if (isGridOrFlex(a.parentElement)) {
+        item = a;
+        break;
+      }
+    }
+    const scope = item ?? slide;
+    for (let n: Element | null = box; n !== null && n !== scope; n = n.parentElement) {
+      const following = n.nextElementSibling;
+      if (following !== null) return () => following.getBoundingClientRect().top;
+    }
+    return item === null ? null : () => item.getBoundingClientRect().height;
+  })();
+  const reference0 = reference?.() ?? 0;
+  const background = opaqueBackground(win, box);
+
+  return {
+    apply() {
+      if (staticPosition) box.style.position = "relative";
+      box.style.zIndex = "1";
+      if (background !== null) box.style.backgroundColor = background;
+      box.style.transform = "";
+      const rect = box.getBoundingClientRect();
+      const scale = box.offsetHeight > 0 ? rect.height / box.offsetHeight : 1;
+      let marginBottom = marginBottom0 - (box.offsetHeight - height0);
+      box.style.marginBottom = `${marginBottom}px`;
+      for (let i = 0; reference !== null && i < 3; i++) {
+        const drift = (reference() - reference0) / scale;
+        if (Math.abs(drift) < 0.5) break;
+        box.style.marginBottom = `${marginBottom - drift}px`;
+        // A reference the margin cannot move would otherwise push it further
+        // every pass; keep the last margin that had an effect.
+        if (Math.abs((reference() - reference0) / scale - drift) < 0.5) {
+          box.style.marginBottom = `${marginBottom}px`;
+          break;
+        }
+        marginBottom -= drift;
+      }
+      const placed = box.getBoundingClientRect();
+      const bounds = slide.getBoundingClientRect();
+      const overflow = (placed.bottom - bounds.bottom) / scale;
+      const room = (placed.top - bounds.top) / scale;
+      const shift = Math.max(0, Math.min(overflow, room));
+      if (shift > 0) box.style.transform = `translateY(${-shift}px)`;
+    },
+    release() {
+      if (originalStyle === null) box.removeAttribute("style");
+      else box.setAttribute("style", originalStyle);
+    }
+  };
+}
+
+// ponytail: a background image or gradient is not copied; the editor then sits
+// on the nearest solid colour, or stays transparent when there is none.
+function opaqueBackground(win: Window, from: HTMLElement): string | null {
+  for (let el: HTMLElement | null = from; el !== null; el = el.parentElement) {
+    const color = win.getComputedStyle(el).backgroundColor;
+    if (color !== "" && color !== "transparent" && !/,\s*0\)$/.test(color)) {
+      return el === from ? null : color;
+    }
+  }
+  return null;
+}
+
 function placeCaretAtEnd(win: Window, editor: HTMLElement): void {
   const selection = win.getSelection();
   if (selection === null) return;
@@ -1099,6 +1203,7 @@ class PreviewShellController implements PreviewShell {
   ): boolean {
     const tile = this.slides[this.currentIndex]?.tile;
     if (tile === undefined) return false;
+    const layoutHold = holdEditLayout(this.win, target);
     let editor = target;
     let originalNodes: Node[];
     const children = Array.from(target.childNodes);
@@ -1122,7 +1227,7 @@ class PreviewShellController implements PreviewShell {
     const originalStyle = editor.getAttribute("style");
     editor.textContent = text;
     editor.setAttribute("contenteditable", "plaintext-only");
-    editor.style.outline = "none";
+    applyEditorStyle(editor);
 
     const frame = this.doc.createElement("div");
     frame.dataset.peithoPreview = "edit-frame";
@@ -1135,6 +1240,7 @@ class PreviewShellController implements PreviewShell {
     let edit!: ActiveSlideEdit;
     let animationFrame: number;
     const positionOnAnimationFrame = (): void => {
+      layoutHold.apply();
       this.positionEditFrame(edit);
       animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
     };
@@ -1163,10 +1269,12 @@ class PreviewShellController implements PreviewShell {
         editor.removeEventListener("blur", onBlur);
         this.win.cancelAnimationFrame(animationFrame);
         frame.remove();
+        layoutHold.release();
       }
     };
     editor.addEventListener("keydown", onKeyDown);
     editor.addEventListener("blur", onBlur);
+    layoutHold.apply();
     this.positionEditFrame(edit);
     animationFrame = this.win.requestAnimationFrame(positionOnAnimationFrame);
     this.replaceActiveEdit({ kind: "inline", edit });
@@ -1383,7 +1491,7 @@ class PreviewShellController implements PreviewShell {
     edit.editor.setAttribute("contenteditable", "plaintext-only");
     if (edit.originalStyle === null) edit.editor.removeAttribute("style");
     else edit.editor.setAttribute("style", edit.originalStyle);
-    edit.editor.style.outline = "none";
+    applyEditorStyle(edit.editor);
     edit.editor.focus({ preventScroll: true });
   }
 
