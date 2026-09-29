@@ -12,9 +12,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tungstenite::{protocol::WebSocketConfig, Message, WebSocket};
 
-const DEVTOOLS_PORT_FILE: &str = "DevToolsActivePort";
+pub const DEVTOOLS_PORT_FILE: &str = "DevToolsActivePort";
 const HTTP_RESPONSE_LIMIT: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FULLSCREEN_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const FULLSCREEN_STABLE: Duration = Duration::from_secs(1);
 // Total expression: it must never throw. The poll can land in a freshly
 // created document before `<html>` is inserted, where `documentElement` is
 // null (measured on CI, issue #418) — that window is "not ready", not an
@@ -25,7 +27,7 @@ const PDF_FLATTENED_EXPRESSION: &str =
 const SHADOW_MOUNTED_ERROR_EXPRESSION: &str =
     "document.documentElement?.getAttribute('data-peitho-shadow-mounted-error') ?? null";
 
-pub(crate) fn wait_for_devtools_port(
+pub fn wait_for_devtools_port(
     profile: &Path,
     deadline: Instant,
     mut ensure_chrome_running: impl FnMut() -> miette::Result<()>,
@@ -66,7 +68,7 @@ fn parse_devtools_active_port(contents: &str) -> miette::Result<u16> {
     Ok(port)
 }
 
-pub(crate) fn fetch_page_websocket_url(port: u16, deadline: Instant) -> miette::Result<String> {
+pub fn fetch_page_websocket_url(port: u16, deadline: Instant) -> miette::Result<String> {
     wait_for_page_websocket_url_with(deadline, |attempt_deadline| {
         fetch_page_websocket_url_once(port, attempt_deadline)
     })
@@ -249,17 +251,13 @@ fn connect_cdp_websocket(url: &str, stream: TcpStream) -> miette::Result<WebSock
     Ok(socket)
 }
 
-pub(crate) struct CdpClient {
+pub struct CdpClient {
     socket: WebSocket<TcpStream>,
     next_id: u64,
 }
 
 impl CdpClient {
-    pub(crate) fn connect(
-        port: u16,
-        discovered_url: &str,
-        deadline: Instant,
-    ) -> miette::Result<Self> {
+    pub fn connect(port: u16, discovered_url: &str, deadline: Instant) -> miette::Result<Self> {
         let url = loopback_websocket_url(port, discovered_url)?;
         let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
         let connect_timeout = remaining(deadline, "connecting to Chrome's CDP WebSocket")?;
@@ -274,11 +272,11 @@ impl CdpClient {
         Ok(Self { socket, next_id: 1 })
     }
 
-    pub(crate) fn page_enable(&mut self, deadline: Instant) -> miette::Result<()> {
+    pub fn page_enable(&mut self, deadline: Instant) -> miette::Result<()> {
         self.call("Page.enable", json!({}), deadline).map(|_| ())
     }
 
-    pub(crate) fn page_navigate(&mut self, url: &str, deadline: Instant) -> miette::Result<()> {
+    pub fn page_navigate(&mut self, url: &str, deadline: Instant) -> miette::Result<()> {
         let result = self.call("Page.navigate", json!({ "url": url }), deadline)?;
         if let Some(error_text) = result.get("errorText").and_then(Value::as_str) {
             if !error_text.is_empty() {
@@ -290,7 +288,7 @@ impl CdpClient {
         Ok(())
     }
 
-    pub(crate) fn pdf_flattening_ready(&mut self, deadline: Instant) -> miette::Result<bool> {
+    pub fn pdf_flattening_ready(&mut self, deadline: Instant) -> miette::Result<bool> {
         let result = self.call(
             "Runtime.evaluate",
             json!({
@@ -322,10 +320,7 @@ impl CdpClient {
         }
     }
 
-    pub(crate) fn ensure_shadow_mounted_succeeded(
-        &mut self,
-        deadline: Instant,
-    ) -> miette::Result<()> {
+    pub fn ensure_shadow_mounted_succeeded(&mut self, deadline: Instant) -> miette::Result<()> {
         let result = self.call(
             "Runtime.evaluate",
             json!({
@@ -337,7 +332,7 @@ impl CdpClient {
         validate_shadow_mounted_error_evaluation(&result)
     }
 
-    pub(crate) fn page_print_to_pdf(&mut self, deadline: Instant) -> miette::Result<Vec<u8>> {
+    pub fn page_print_to_pdf(&mut self, deadline: Instant) -> miette::Result<Vec<u8>> {
         let result = self.call(
             "Page.printToPDF",
             json!({
@@ -355,7 +350,76 @@ impl CdpClient {
             .map_err(|err| miette::miette!("Chrome returned invalid base64 PDF data: {err}"))
     }
 
-    pub(crate) fn browser_close(&mut self, deadline: Instant) -> miette::Result<()> {
+    /// Fullscreen the window holding this page target, first moving it to
+    /// `position` (Chrome's top-left screen coordinates) so the fullscreen
+    /// lands on the display containing that point. Chrome 155 ignores
+    /// `--start-fullscreen` and off-primary `--window-position` (Issue #683).
+    pub fn fullscreen_window(
+        &mut self,
+        position: Option<(i32, i32)>,
+        deadline: Instant,
+    ) -> miette::Result<()> {
+        let window = self.call("Browser.getWindowForTarget", json!({}), deadline)?;
+        let window_id = window
+            .get("windowId")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                miette::miette!("Chrome Browser.getWindowForTarget response omitted windowId")
+            })?;
+        // A successful response is no evidence: right after launch, and while
+        // another window is mid-transition, Chrome reports `fullscreen` and
+        // then falls back to `normal` 100-200 ms later (measured on Chrome
+        // 155, Issue #683). Only a state that holds counts; a fallback is
+        // re-requested.
+        let mut last_request: Option<Instant> = None;
+        let mut fullscreen_since: Option<Instant> = None;
+        loop {
+            let bounds = self.call(
+                "Browser.getWindowBounds",
+                json!({ "windowId": window_id }),
+                deadline,
+            )?;
+            let state = bounds
+                .pointer("/bounds/windowState")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    miette::miette!("Chrome Browser.getWindowBounds response omitted windowState")
+                })?;
+            if state == "fullscreen" {
+                let since = *fullscreen_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= FULLSCREEN_STABLE {
+                    return Ok(());
+                }
+            } else {
+                fullscreen_since = None;
+            }
+            let due = last_request.is_none_or(|at| at.elapsed() >= FULLSCREEN_RETRY_INTERVAL);
+            if state == "normal" && due {
+                if let Some((left, top)) = position {
+                    self.call(
+                        "Browser.setWindowBounds",
+                        json!({
+                            "windowId": window_id,
+                            "bounds": { "left": left, "top": top, "windowState": "normal" }
+                        }),
+                        deadline,
+                    )?;
+                }
+                self.call(
+                    "Browser.setWindowBounds",
+                    json!({ "windowId": window_id, "bounds": { "windowState": "fullscreen" } }),
+                    deadline,
+                )?;
+                last_request = Some(Instant::now());
+            }
+            sleep_for_poll(
+                deadline,
+                "waiting for the Chrome window to enter fullscreen",
+            )?;
+        }
+    }
+
+    pub fn browser_close(&mut self, deadline: Instant) -> miette::Result<()> {
         self.call("Browser.close", json!({}), deadline).map(|_| ())
     }
 
@@ -432,10 +496,7 @@ fn validate_shadow_mounted_error_evaluation(result: &Value) -> miette::Result<()
     }
 }
 
-pub(crate) fn wait_for_pdf_flattening(
-    client: &mut CdpClient,
-    deadline: Instant,
-) -> miette::Result<()> {
+pub fn wait_for_pdf_flattening(client: &mut CdpClient, deadline: Instant) -> miette::Result<()> {
     wait_for_pdf_flattening_with(deadline, |attempt_deadline| {
         client.pdf_flattening_ready(attempt_deadline)
     })
