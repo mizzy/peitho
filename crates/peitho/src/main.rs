@@ -25,7 +25,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 mod asset_resolution;
-mod cdp;
 mod diagnostics;
 mod docs;
 mod doctor;
@@ -34,7 +33,7 @@ mod new_cmd;
 
 use asset_resolution::{resolve_assets, Provenance, ResolvedAssets};
 use diagnostics::{plain_diagnostic_text, render_diagnostic, DeckDiagnostic, LabelStyle};
-use peitho::{browser, server};
+use peitho::{browser, cdp, server};
 use peitho_core::domain::SlideKey;
 
 struct BuildArtifacts {

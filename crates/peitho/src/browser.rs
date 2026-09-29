@@ -1,9 +1,11 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
+use crate::cdp;
 use crate::displays::{self, PresentationLayout, SavedWindowBounds, WindowPlacement};
 use crate::labels::LabelStyle;
 
@@ -34,12 +36,22 @@ pub struct BrowserCommand {
     pub role: WindowRole,
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub fullscreen: Option<CdpFullscreen>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     Slides,
     Presenter,
+}
+
+impl WindowRole {
+    fn label(self) -> &'static str {
+        match self {
+            WindowRole::Slides => "slides",
+            WindowRole::Presenter => "presenter",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,59 +96,84 @@ fn chrome_base_args(profile_dir: &Path, url: &str) -> Vec<OsString> {
     ]
 }
 
-fn push_placement_args(args: &mut Vec<OsString>, placement: WindowPlacement) {
-    match placement {
-        WindowPlacement::Fullscreen { x, y } => {
-            args.push(OsString::from(format!("--window-position={x},{y}")));
-            args.push(OsString::from("--start-fullscreen"));
-        }
-        WindowPlacement::Windowed {
+/// A window peitho fullscreens over CDP once Chrome is up. Chrome 155 ignores
+/// `--start-fullscreen` and off-primary `--window-position` (Issue #683), so no
+/// launch flag asks for fullscreen; only `chrome_launch` builds this, together
+/// with the `--remote-debugging-port=0` flag it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdpFullscreen {
+    profile: PathBuf,
+    position: Option<(i32, i32)>,
+}
+
+struct ChromeLaunch {
+    args: Vec<OsString>,
+    fullscreen: Option<CdpFullscreen>,
+}
+
+/// `None` placement is the single-window case: fullscreen wherever Chrome
+/// opens the window.
+fn chrome_launch(
+    profile_dir: &Path,
+    url: &str,
+    placement: Option<WindowPlacement>,
+) -> ChromeLaunch {
+    let mut args = chrome_base_args(profile_dir, url);
+    let fullscreen_at = match placement {
+        None => Some(None),
+        Some(WindowPlacement::Fullscreen { x, y }) => Some(Some((x, y))),
+        Some(WindowPlacement::Windowed {
             x,
             y,
             width,
             height,
-        } => {
+        }) => {
             args.push(OsString::from(format!("--window-position={x},{y}")));
             args.push(OsString::from(format!("--window-size={width},{height}")));
+            None
         }
-        WindowPlacement::Restored => {}
-    }
+        Some(WindowPlacement::Restored) => None,
+    };
+    let fullscreen = fullscreen_at.map(|position| {
+        args.push(OsString::from("--remote-debugging-port=0"));
+        CdpFullscreen {
+            profile: profile_dir.to_path_buf(),
+            position,
+        }
+    });
+    ChromeLaunch { args, fullscreen }
 }
 
-fn chrome_slides_args(
-    profile_dir: &Path,
-    url: &str,
-    placement: Option<WindowPlacement>,
-) -> Vec<OsString> {
-    let mut args = chrome_base_args(profile_dir, url);
-    match placement {
-        Some(placement) => push_placement_args(&mut args, placement),
-        None => args.push(OsString::from("--start-fullscreen")),
-    }
-    args
-}
-
-fn chrome_presenter_args(
-    profile_dir: &Path,
-    url: &str,
-    placement: WindowPlacement,
-) -> Vec<OsString> {
-    let mut args = chrome_base_args(profile_dir, url);
-    push_placement_args(&mut args, placement);
-    args
-}
-
-fn macos_chrome_command(role: WindowRole, args: Vec<OsString>) -> BrowserCommand {
+fn macos_chrome_command(role: WindowRole, launch: ChromeLaunch) -> BrowserCommand {
     let mut full_args = vec![
         OsString::from("-na"),
         OsString::from("Google Chrome"),
         OsString::from("--args"),
     ];
-    full_args.extend(args);
+    full_args.extend(launch.args);
     BrowserCommand {
         role,
         program: OsString::from("open"),
         args: full_args,
+        fullscreen: launch.fullscreen,
+    }
+}
+
+fn linux_chrome_command(role: WindowRole, program: &OsStr, launch: ChromeLaunch) -> BrowserCommand {
+    BrowserCommand {
+        role,
+        program: program.to_owned(),
+        args: launch.args,
+        fullscreen: launch.fullscreen,
+    }
+}
+
+fn open_command(program: &str, url: &str) -> BrowserCommand {
+    BrowserCommand {
+        role: WindowRole::Slides,
+        program: OsString::from(program),
+        args: vec![OsString::from(url)],
+        fullscreen: None,
     }
 }
 
@@ -147,42 +184,30 @@ pub fn plan_browser_commands(
     match env.platform {
         BrowserPlatform::Macos if env.mac_google_chrome_available => {
             let Some(profiles) = env.chrome_profiles.as_ref() else {
-                return vec![BrowserCommand {
-                    role: WindowRole::Slides,
-                    program: OsString::from("open"),
-                    args: vec![OsString::from(request.slides_url)],
-                }];
+                return vec![open_command("open", request.slides_url)];
             };
             if let Some(layout) = env.layout.filter(|_| !request.no_presenter) {
                 return vec![
                     macos_chrome_command(
                         WindowRole::Slides,
-                        chrome_slides_args(
-                            &profiles.slides,
-                            request.slides_url,
-                            Some(layout.slides),
-                        ),
+                        chrome_launch(&profiles.slides, request.slides_url, Some(layout.slides)),
                     ),
                     macos_chrome_command(
                         WindowRole::Presenter,
-                        chrome_presenter_args(
+                        chrome_launch(
                             &profiles.presenter,
                             request.presenter_url,
-                            layout.presenter,
+                            Some(layout.presenter),
                         ),
                     ),
                 ];
             }
             vec![macos_chrome_command(
                 WindowRole::Slides,
-                chrome_slides_args(&profiles.slides, request.slides_url, None),
+                chrome_launch(&profiles.slides, request.slides_url, None),
             )]
         }
-        BrowserPlatform::Macos => vec![BrowserCommand {
-            role: WindowRole::Slides,
-            program: OsString::from("open"),
-            args: vec![OsString::from(request.slides_url)],
-        }],
+        BrowserPlatform::Macos => vec![open_command("open", request.slides_url)],
         BrowserPlatform::Linux => linux_browser_commands(request, env),
         BrowserPlatform::Other => Vec::new(),
     }
@@ -192,45 +217,36 @@ fn linux_browser_commands(
     request: &BrowserOpenRequest<'_>,
     env: &BrowserEnvironment,
 ) -> Vec<BrowserCommand> {
-    let Some(program) = env.linux_browser.as_deref() else {
-        return vec![BrowserCommand {
-            role: WindowRole::Slides,
-            program: OsString::from("xdg-open"),
-            args: vec![OsString::from(request.slides_url)],
-        }];
-    };
-    let Some(profiles) = env.chrome_profiles.as_ref() else {
-        return vec![BrowserCommand {
-            role: WindowRole::Slides,
-            program: OsString::from("xdg-open"),
-            args: vec![OsString::from(request.slides_url)],
-        }];
+    let (Some(program), Some(profiles)) =
+        (env.linux_browser.as_deref(), env.chrome_profiles.as_ref())
+    else {
+        return vec![open_command("xdg-open", request.slides_url)];
     };
 
     if let Some(layout) = env.layout.filter(|_| !request.no_presenter) {
         return vec![
-            BrowserCommand {
-                role: WindowRole::Slides,
-                program: program.to_owned(),
-                args: chrome_slides_args(&profiles.slides, request.slides_url, Some(layout.slides)),
-            },
-            BrowserCommand {
-                role: WindowRole::Presenter,
-                program: program.to_owned(),
-                args: chrome_presenter_args(
+            linux_chrome_command(
+                WindowRole::Slides,
+                program,
+                chrome_launch(&profiles.slides, request.slides_url, Some(layout.slides)),
+            ),
+            linux_chrome_command(
+                WindowRole::Presenter,
+                program,
+                chrome_launch(
                     &profiles.presenter,
                     request.presenter_url,
-                    layout.presenter,
+                    Some(layout.presenter),
                 ),
-            },
+            ),
         ];
     }
 
-    vec![BrowserCommand {
-        role: WindowRole::Slides,
-        program: program.to_owned(),
-        args: chrome_slides_args(&profiles.slides, request.slides_url, None),
-    }]
+    vec![linux_chrome_command(
+        WindowRole::Slides,
+        program,
+        chrome_launch(&profiles.slides, request.slides_url, None),
+    )]
 }
 
 pub fn plan_browser(request: &BrowserOpenRequest<'_>, env: &BrowserEnvironment) -> BrowserPlan {
@@ -473,15 +489,52 @@ pub fn open_browser_plan(plan: BrowserPlan) {
         );
         return;
     }
+    let mut fullscreens = Vec::new();
     for command in plan.commands {
+        if let Some(fullscreen) = &command.fullscreen {
+            // A previous session's file would point at a dead port. Ignoring a
+            // failed removal is safe: a stale port fails loudly below.
+            let _ = std::fs::remove_file(fullscreen.profile.join(cdp::DEVTOOLS_PORT_FILE));
+        }
         if let Err(err) = Command::new(&command.program).args(&command.args).spawn() {
             eprintln!(
                 "{}failed to open browser with {}: {err}",
                 LabelStyle::for_stderr().warning(),
                 command.program.to_string_lossy()
             );
+            continue;
+        }
+        if let Some(fullscreen) = command.fullscreen {
+            fullscreens.push((command.role, fullscreen));
         }
     }
+    if fullscreens.is_empty() {
+        return;
+    }
+    // One window at a time: a fullscreen transition started while another
+    // is running falls back to a normal window (measured, Issue #683). Off
+    // the main thread so the server starts serving meanwhile.
+    std::thread::spawn(move || {
+        for (role, fullscreen) in fullscreens {
+            if let Err(err) = apply_fullscreen(&fullscreen) {
+                eprintln!(
+                    "{}failed to fullscreen the {} window: {err}",
+                    LabelStyle::for_stderr().warning(),
+                    role.label()
+                );
+            }
+        }
+    });
+}
+
+const FULLSCREEN_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn apply_fullscreen(target: &CdpFullscreen) -> miette::Result<()> {
+    let deadline = Instant::now() + FULLSCREEN_TIMEOUT;
+    let port = cdp::wait_for_devtools_port(&target.profile, deadline, || Ok(()))?;
+    let url = cdp::fetch_page_websocket_url(port, deadline)?;
+    let mut client = cdp::CdpClient::connect(port, &url, deadline)?;
+    client.fullscreen_window(target.position, deadline)
 }
 
 #[cfg(test)]
@@ -550,8 +603,15 @@ mod tests {
                 OsString::from("--no-first-run"),
                 OsString::from("--no-default-browser-check"),
                 OsString::from("--app=http://127.0.0.1:8000/present.html"),
-                OsString::from("--start-fullscreen"),
+                OsString::from("--remote-debugging-port=0"),
             ]
+        );
+        assert_eq!(
+            commands[0].fullscreen,
+            Some(CdpFullscreen {
+                profile: test_profiles().slides,
+                position: None,
+            })
         );
     }
 
@@ -580,9 +640,15 @@ mod tests {
                 OsString::from("--no-first-run"),
                 OsString::from("--no-default-browser-check"),
                 OsString::from("--app=http://127.0.0.1:8000/present.html"),
-                OsString::from("--window-position=-1055,0"),
-                OsString::from("--start-fullscreen"),
+                OsString::from("--remote-debugging-port=0"),
             ]
+        );
+        assert_eq!(
+            commands[0].fullscreen,
+            Some(CdpFullscreen {
+                profile: test_profiles().slides,
+                position: Some((-1055, 0)),
+            })
         );
         assert_eq!(
             commands[1].args,
@@ -594,9 +660,15 @@ mod tests {
                 OsString::from("--no-first-run"),
                 OsString::from("--no-default-browser-check"),
                 OsString::from("--app=http://127.0.0.1:8000/presenter.html"),
-                OsString::from("--window-position=156,91"),
-                OsString::from("--start-fullscreen"),
+                OsString::from("--remote-debugging-port=0"),
             ]
+        );
+        assert_eq!(
+            commands[1].fullscreen,
+            Some(CdpFullscreen {
+                profile: test_profiles().presenter,
+                position: Some((156, 91)),
+            })
         );
     }
 
@@ -627,7 +699,8 @@ mod tests {
             .contains(&OsString::from("--window-size=1200,800")));
         assert!(!commands[1]
             .args
-            .contains(&OsString::from("--start-fullscreen")));
+            .contains(&OsString::from("--remote-debugging-port=0")));
+        assert_eq!(commands[1].fullscreen, None);
     }
 
     #[test]
@@ -688,9 +761,7 @@ mod tests {
         let commands = plan_browser_commands(&test_request(false), &env);
 
         assert_eq!(commands.len(), 2);
-        assert!(commands[0]
-            .args
-            .contains(&OsString::from("--start-fullscreen")));
+        assert!(commands[0].fullscreen.is_some());
         assert_eq!(
             commands[1].args,
             vec![
@@ -703,6 +774,7 @@ mod tests {
                 OsString::from("--app=http://127.0.0.1:8000/presenter.html"),
             ]
         );
+        assert_eq!(commands[1].fullscreen, None);
     }
 
     #[test]
@@ -719,9 +791,13 @@ mod tests {
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].role, WindowRole::Slides);
-        assert!(commands[0]
-            .args
-            .contains(&OsString::from("--start-fullscreen")));
+        assert_eq!(
+            commands[0].fullscreen,
+            Some(CdpFullscreen {
+                profile: test_profiles().slides,
+                position: None,
+            })
+        );
         assert!(!commands[0]
             .args
             .iter()
@@ -796,6 +872,33 @@ mod tests {
             commands[0].args,
             vec![OsString::from("http://127.0.0.1:8000/present.html")]
         );
+    }
+
+    #[test]
+    fn no_launch_flag_asks_chrome_for_fullscreen_or_off_primary_position() {
+        let request = test_request(false);
+        let mut commands = Vec::new();
+        for (platform, layout) in [
+            (BrowserPlatform::Macos, Some(test_layout())),
+            (BrowserPlatform::Macos, None),
+            (BrowserPlatform::Linux, Some(test_layout())),
+            (BrowserPlatform::Linux, None),
+        ] {
+            let env = BrowserEnvironment {
+                platform,
+                mac_google_chrome_available: true,
+                linux_browser: Some(OsString::from("google-chrome")),
+                chrome_profiles: Some(test_profiles()),
+                layout,
+            };
+            commands.extend(plan_browser_commands(&request, &env));
+        }
+
+        for command in commands {
+            assert!(command.fullscreen.is_some());
+            assert!(command.args.iter().all(|arg| arg != "--start-fullscreen"
+                && !arg.to_string_lossy().starts_with("--window-position")));
+        }
     }
 
     #[test]
@@ -879,13 +982,11 @@ mod tests {
 
         println!("{}", rendered.join("\n"));
         assert!(rendered[0].contains("--user-data-dir=/Users/alice/.peitho/chrome-profile-slides"));
-        assert!(rendered[0].contains("--window-position=-1055,0"));
-        assert!(rendered[0].contains("--start-fullscreen"));
+        assert!(rendered[0].contains("--remote-debugging-port=0"));
         assert!(
             rendered[1].contains("--user-data-dir=/Users/alice/.peitho/chrome-profile-presenter")
         );
-        assert!(rendered[1].contains("--window-position=156,91"));
-        assert!(rendered[1].contains("--start-fullscreen"));
+        assert!(rendered[1].contains("--remote-debugging-port=0"));
         assert!(!rendered[1].contains("--window-size=1200,800"));
     }
 
