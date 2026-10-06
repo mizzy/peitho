@@ -2745,7 +2745,7 @@ fn parse_slide(
                         unreachable!();
                     };
                     let code_line = line_for_offset(source, start);
-                    let mut slide_err =
+                    let slide_err =
                         |err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments);
 
                     // Order is load-bearing. Language validation runs first so
@@ -2757,13 +2757,13 @@ fn parse_slide(
                     let info = language.as_deref().unwrap_or_default();
                     let (split, renderer) =
                         validate_code_fence_info(info, code_line, highlighter, code_images)
-                            .map_err(&mut slide_err)?;
+                            .map_err(slide_err)?;
                     let language = split.language.map(str::to_owned);
 
                     let embed_options = match (renderer.as_ref(), split.tail) {
-                        (Some(CodeImageRenderer::BuiltinEmbed), tail) => Some(
-                            parse_embed_fence_options(tail, code_line).map_err(&mut slide_err)?,
-                        ),
+                        (Some(CodeImageRenderer::BuiltinEmbed), tail) => {
+                            Some(parse_embed_fence_options(tail, code_line).map_err(slide_err)?)
+                        }
                         (Some(CodeImageRenderer::ExternalEmbed(_)), Some(_)) => {
                             return Err(slide_err(BuildError::new(
                                 ErrorKind::Parse,
@@ -2801,7 +2801,7 @@ fn parse_slide(
                                 )));
                             }
                             let emphasis = emphasis::parse_emphasis_spec(spec, code_line)
-                                .map_err(&mut slide_err)?;
+                                .map_err(slide_err)?;
                             let line_count = text.lines().count();
                             if emphasis.max_line() > line_count {
                                 let max = emphasis.max_line();
