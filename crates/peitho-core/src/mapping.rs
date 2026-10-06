@@ -234,7 +234,7 @@ fn try_dispatch(slide: &ParsedSlide, layouts: &Layouts) -> DispatchAttempt {
                     ErrorKind::Layout,
                     line,
                     format!("no layout matches this slide\n{}", rejections.join("\n")),
-                    r#"adjust the slide content or pick a layout explicitly with <!-- {"layout":"…"} -->"#,
+                    "adjust the slide content, or add a layout that accepts it",
                 ),
             )
         }
@@ -869,7 +869,10 @@ mod tests {
         assert!(message.contains("no layout matches this slide"));
         assert!(message.contains("cover:"));
         assert!(message.contains("statement:"));
-        assert!(err.help.contains(r#"{"layout":"…"}"#));
+        assert_eq!(
+            err.help,
+            "adjust the slide content, or add a layout that accepts it"
+        );
     }
 
     #[test]
