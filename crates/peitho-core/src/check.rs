@@ -82,7 +82,41 @@ pub(crate) fn check_slide(slide: &MappedSlide) -> Result<()> {
     check_accepts(&slide.slots)?;
     check_revealed_inline_slots(&slide.slots)?;
     check_arity(&slide.slots, &slide.layout)?;
-    check_no_unassigned(&slide.unassigned)
+    check_no_unassigned(&slide.unassigned, &slide.layout)
+}
+
+pub(crate) fn unassigned_fragment_error(
+    layout: &Layout,
+    unassigned: &UnassignedFragment,
+) -> BuildError {
+    let fragment = unassigned.fragment();
+    let removal_noun = fragment.kind().removal_noun();
+    let help = format!(
+        "add a '{}' slot to the layout or remove the {removal_noun}",
+        unassigned.expected_slot().as_str()
+    );
+    no_slot_accepts(layout, fragment, help)
+}
+
+pub(crate) fn no_image_slot_error<S>(layout: &Layout, fragment: &SourceFragment<S>) -> BuildError {
+    no_slot_accepts(
+        layout,
+        fragment,
+        "add exactly one slot with accepts=\"image\" or remove the image".to_owned(),
+    )
+}
+
+fn no_slot_accepts<S>(layout: &Layout, fragment: &SourceFragment<S>, help: String) -> BuildError {
+    let removal_noun = fragment.kind().removal_noun();
+    BuildError::new(
+        ErrorKind::ResidualContent,
+        Some(fragment.line()),
+        format!(
+            "no slot in layout '{}' accepts this {removal_noun}",
+            layout.name()
+        ),
+        help,
+    )
 }
 
 fn check_accepts(slots: &BTreeMap<SlotName, MappedSlot>) -> Result<()> {
@@ -193,19 +227,9 @@ fn check_arity(slots: &BTreeMap<SlotName, MappedSlot>, layout: &Layout) -> Resul
     Ok(())
 }
 
-fn check_no_unassigned(unassigned: &[UnassignedFragment]) -> Result<()> {
+fn check_no_unassigned(unassigned: &[UnassignedFragment], layout: &Layout) -> Result<()> {
     if let Some(unassigned) = unassigned.first() {
-        let fragment = unassigned.fragment();
-        let target = unassigned.expected_slot().as_str();
-        return Err(BuildError::new(
-            ErrorKind::ResidualContent,
-            Some(fragment.line()),
-            format!("unassigned content remains for missing '{target}' slot"),
-            format!(
-                "add a '{target}' slot to the layout or remove the {}",
-                fragment.kind().removal_noun()
-            ),
-        ));
+        return Err(unassigned_fragment_error(layout, unassigned));
     }
     Ok(())
 }
@@ -676,9 +700,10 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
-        assert!(err
-            .to_string()
-            .contains("unassigned content remains for missing 'body' slot"));
+        assert_eq!(
+            err.message,
+            "no slot in layout 'title-only' accepts this footnote block"
+        );
         assert_eq!(
             err.help,
             "add a 'body' slot to the layout or remove the footnote block"
@@ -761,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unassigned_code_when_layout_has_no_code_slot() {
+    fn no_slot_error_for_unassigned_code_names_layout() {
         let layout = parse_layout(
             "title-body",
             r#"<section>
@@ -781,7 +806,10 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
-        assert!(err.to_string().contains("unassigned content remains"));
+        assert_eq!(
+            err.message,
+            "no slot in layout 'title-body' accepts this code block"
+        );
         assert_eq!(
             err.help,
             "add a 'code' slot to the layout or remove the code block"
@@ -806,6 +834,10 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "no slot in layout 'title-only' accepts this heading"
+        );
         assert_eq!(
             err.help,
             "add a 'body' slot to the layout or remove the heading"

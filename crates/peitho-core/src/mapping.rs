@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    check::check_slide,
+    check::{check_slide, no_image_slot_error},
     domain::{Accepts, FragmentKind, SlotName, SourceFragment},
     error::{BuildError, ErrorKind, Result},
     layout::{Layout, Layouts},
@@ -300,7 +300,7 @@ fn map_slide(slide: &ParsedSlide, layout: &Layout) -> Result<MappedSlide> {
             FragmentKind::Image { .. } => {
                 // Images must be claimed by an explicit image slot; never fall
                 // through to body/block mapping.
-                image_slot_name(layout, fragment.line())?
+                image_slot_name(layout, &fragment)?
             }
             FragmentKind::Footnotes { .. } => {
                 if layout.slot("footnotes").is_some() {
@@ -365,19 +365,15 @@ fn unknown_explicit_slot_error(target: &SlotName, line: usize, layout: &Layout) 
     )
 }
 
-fn image_slot_name(layout: &Layout, line: usize) -> Result<SlotName> {
+fn image_slot_name(layout: &Layout, fragment: &SourceFragment) -> Result<SlotName> {
+    let line = fragment.line();
     let image_slots = layout
         .slots()
         .values()
         .filter(|contract| contract.accepts == Accepts::Image)
         .collect::<Vec<_>>();
     match image_slots.as_slice() {
-        [] => Err(BuildError::new(
-            ErrorKind::Layout,
-            Some(line),
-            format!("no slot accepts image in layout '{}'", layout.name()),
-            "add exactly one slot with accepts=\"image\" or remove the image",
-        )),
+        [] => Err(no_image_slot_error(layout, fragment)),
         [slot] => Ok(slot.name.clone()),
         many => {
             let names = many
@@ -652,7 +648,7 @@ mod tests {
             } => {
                 assert_eq!(layout, "cover");
                 assert_eq!(line, 1);
-                assert!(reason.contains("no slot accepts image in layout 'cover'"));
+                assert_eq!(reason, "no slot in layout 'cover' accepts this image");
             }
             other => panic!("expected explicit no-match trace, got {other:?}"),
         }
@@ -710,7 +706,7 @@ mod tests {
                     },
             } => {
                 assert_eq!(layout, "cover");
-                assert!(reason.contains("no slot accepts image in layout 'cover'"));
+                assert_eq!(reason, "no slot in layout 'cover' accepts this image");
             }
             other => panic!("expected sole-layout no-match trace, got {other:?}"),
         }
@@ -734,7 +730,7 @@ mod tests {
                     Candidate {
                         layout: "cover".to_owned(),
                         outcome: CandidateOutcome::Rejected {
-                            reason: "unassigned content remains for missing 'body' slot".to_owned()
+                            reason: "no slot in layout 'cover' accepts this paragraph".to_owned()
                         }
                     },
                     Candidate {
@@ -765,7 +761,7 @@ mod tests {
                     Candidate {
                         layout: "cover".to_owned(),
                         outcome: CandidateOutcome::Rejected {
-                            reason: "unassigned content remains for missing 'code' slot".to_owned()
+                            reason: "no slot in layout 'cover' accepts this code block".to_owned()
                         }
                     },
                     Candidate {
@@ -1170,9 +1166,10 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
-        assert!(err
-            .to_string()
-            .contains("unassigned content remains for missing 'body' slot"));
+        assert_eq!(
+            err.message,
+            "no slot in layout 'title-only' accepts this footnote block"
+        );
         assert_eq!(
             err.help,
             "add a 'body' slot to the layout or remove the footnote block"
@@ -1254,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_image_when_layout_has_no_image_slot() {
+    fn no_slot_error_for_image_without_image_slot() {
         let layout = parse_layout(
             "title-body",
             r#"<section>
@@ -1274,9 +1271,16 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(3));
-        assert!(err.to_string().contains("no slot accepts image"));
+        assert_eq!(
+            err.message,
+            "no slot in layout 'title-body' accepts this image"
+        );
+        assert_eq!(
+            err.help,
+            "add exactly one slot with accepts=\"image\" or remove the image"
+        );
     }
 
     #[test]
@@ -1402,11 +1406,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, ErrorKind::Layout);
+        assert_eq!(err.kind, ErrorKind::ResidualContent);
         assert_eq!(err.line, Some(4));
-        assert!(err
-            .to_string()
-            .contains("no slot accepts image in layout 'cover'"));
+        assert_eq!(err.message, "no slot in layout 'cover' accepts this image");
     }
 
     #[test]

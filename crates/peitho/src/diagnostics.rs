@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn preserves_embedded_newlines_aligned_under_the_message() {
         insta::assert_snapshot!(render_diagnostic_parts(
-            "slide 2 ('whoami'), line 16: no layout matches this slide\nbooks: unassigned content remains for missing 'body' slot\ncode: no slot accepts image in layout 'code'\nprofile: slot 'photo' got 2 item(s), but layout 'profile' allows 1",
+            "slide 2 ('whoami'), line 16: no layout matches this slide\nbooks: no slot in layout 'books' accepts this paragraph\ncode: no slot in layout 'code' accepts this image\nprofile: slot 'photo' got 2 item(s), but layout 'profile' allows 1",
             Some("adjust the slide content or pick a layout explicitly with <!-- {\"layout\":\"…\"} -->"),
             TerminalStyle::plain(80),
         ));
