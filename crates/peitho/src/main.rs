@@ -13713,7 +13713,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             "actual stdout: {stdout}"
         );
         assert!(
-            stdout.contains("reason: no slot accepts image in layout 'cover'"),
+            stdout.contains("reason: no slot in layout 'cover' accepts this image"),
             "actual stdout: {stdout}"
         );
     }

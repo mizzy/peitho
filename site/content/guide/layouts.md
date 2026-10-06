@@ -86,8 +86,8 @@ The trace shows the resolved layout source, the addressed slide, each structural
 candidate, and the final dispatch result. A missing slide key exits with status
 2 and prints the known keys; a dispatch failure trace exits with status 1.
 Explicit and sole-layout no-match failures include a `reason:` line, such as
-`reason: no slot accepts image in layout 'cover'`, with the underlying mapping
-error.
+`reason: no slot in layout 'cover' accepts this image`, with the underlying
+mapping error.
 
 ## Keyed CSS overrides
 
