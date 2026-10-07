@@ -9749,6 +9749,31 @@ After list
     }
 
     #[test]
+    fn single_group_stepped_emphasis_advances_across_code_blocks() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {|1}\nlet a = 1;\n```\n\n```rust {|1}\nlet b = 2;\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 2);
+        let code_spans = slide
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .map(|fragment| fragment.reveal_span())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            code_spans,
+            vec![
+                Some(RevealSpan { start: 1, len: 1 }),
+                Some(RevealSpan { start: 2, len: 1 }),
+            ]
+        );
+    }
+
+    #[test]
     fn static_emphasis_contributes_no_steps() {
         // Static emphasis is always visible, so it must not consume a step:
         // otherwise the slide would open unemphasized and need a keypress to
@@ -9812,6 +9837,24 @@ After list
             "stepped line emphasis cannot be inside a reveal group"
         );
         // The help must name both supported alternatives.
+        assert!(err.help.contains("static"), "help: {}", err.help);
+        assert!(err.help.contains("outside"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn single_group_stepped_emphasis_inside_reveal_is_rejected() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\n```rust {|1}\nlet a = 1;\n```\n\n:::",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert_eq!(
+            err.message,
+            "stepped line emphasis cannot be inside a reveal group"
+        );
         assert!(err.help.contains("static"), "help: {}", err.help);
         assert!(err.help.contains("outside"), "help: {}", err.help);
     }

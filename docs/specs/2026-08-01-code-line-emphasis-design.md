@@ -48,13 +48,14 @@ fn main() {
 Grammar:
 
 ```
-spec      := "{" group ("|" group)* "}"
+spec      := "{" "|"? group ("|" group)* "}"
 group     := item ("," item)*
 item      := N | N "-" M          (1-based, inclusive, N <= M)
 ```
 
 - **`|` absent** — static emphasis. The listed lines are emphasized whenever the slide is shown. Consumes **no** reveal steps.
 - **`|` present** — stepped emphasis. Group *k* is emphasized at reveal step *k*; each group replaces the previous one. Consumes exactly *n* steps for *n* groups.
+- A leading `|` makes a single group stepped: `{|3}` (Issue #693).
 - The language token is optional: ` ```{2-4} ` (no language) emphasizes lines of an unhighlighted block. Detection is positional — an info string whose first token starts with `{` has no language.
 
 ### Collision with Pandoc attribute syntax
@@ -74,7 +75,7 @@ reads: step 1 emphasizes lines 2 and 5–7; step 2 emphasizes line 9.
 
 The alternative — treating static emphasis as "stepped emphasis with one group" — was rejected. If `{2-4}` consumed a step, the slide would first appear with no emphasis and require one keypress to reach the state the author wrote, which contradicts "these lines are always the important ones". Making the rule implicit instead ("one group means zero steps") creates a discontinuity: deleting one group from `{2-4|6-8}` would silently change the remaining group from stepped to static.
 
-With `|` as an explicit marker the rule is uniform and local: count the separators.
+With `|` as an explicit marker the rule is uniform and local: a spec is stepped iff it contains a `|`. An author who removes a group and wants the rest to stay stepped writes `{|2-4}` (Issue #693).
 
 ### Why line numbers restart per code block
 

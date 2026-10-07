@@ -3746,6 +3746,27 @@ mod tests {
     }
 
     #[test]
+    fn single_group_stepped_emphasis_emits_step_attributes_and_no_classes() {
+        let html = render_code_html("# T\n\n```{|1}\na\nb\nc\n```");
+
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="1">a</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line">b</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line">c</span>"#),
+            "{html}"
+        );
+        assert!(!html.contains("code-line-emphasis"), "{html}");
+        assert!(!html.contains(r#"data-reveal-step=""#), "{html}");
+        assert!(html.contains(r#"data-reveal-steps="1""#), "{html}");
+    }
+
+    #[test]
     fn emphasis_escapes_html_in_the_line_text() {
         let html = render_code_html("# T\n\n```{1}\n<script>\n```");
 
