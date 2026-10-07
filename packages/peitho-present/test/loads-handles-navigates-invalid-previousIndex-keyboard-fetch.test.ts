@@ -494,6 +494,53 @@ it("moves code line emphasis to the group owning the current step", async () => 
   expect(active()).toEqual(["1"]);
 });
 
+it("keeps an overlapping emphasis marker active at each listed step", async () => {
+  const responseManifest = manifestWithSlides([
+    { key: "intro", revealSteps: 3 },
+    { key: "end" }
+  ]);
+  const root = document.createElement("main");
+
+  const shell = await mountForTest({
+    root,
+    fetcher: vi.fn(async (url: string) => {
+      if (url === "manifest.json") return okJson(responseManifest);
+      if (url === "peitho.css") return okText("");
+      if (url === "fontscope.css") return okText("");
+      if (url.includes("intro")) {
+        return okText(
+          '<section><pre class="slot-code"><code>' +
+            '<span id="overlap" class="code-line" data-emphasis-step="1 2">a</span>\n' +
+            '<span id="single" class="code-line" data-emphasis-step="1">b</span>\n' +
+            '<span id="empty" class="code-line" data-emphasis-step="">c</span>\n' +
+            '<span id="whitespace" class="code-line" data-emphasis-step="   ">d</span>' +
+            "</code></pre></section>"
+        );
+      }
+      if (url.includes("end")) return okText("<section>End</section>");
+      return { ok: false, status: 404, text: async () => "" } as Response;
+    }) as unknown as typeof fetch,
+    window
+  });
+  const intro = root.querySelector<HTMLElement>('[data-slide-index="0"]')!;
+  const active = () =>
+    [...intro.shadowRoot!.querySelectorAll<HTMLElement>("[data-emphasis-step]")]
+      .filter((el) => el.hasAttribute("data-emphasis-active"))
+      .map((el) => el.id);
+
+  expect(shell.currentStep).toBe(0);
+  expect(active()).toEqual([]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(active()).toEqual(["overlap", "single"]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(active()).toEqual(["overlap"]);
+
+  window.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
+  expect(active()).toEqual([]);
+});
+
 it("injects only stepped emphasis styling from the present shell", async () => {
   const responseManifest = manifestWithSlides([{ key: "intro", revealSteps: 1 }]);
   const root = document.createElement("main");

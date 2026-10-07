@@ -56,6 +56,7 @@ item      := N | N "-" M          (1-based, inclusive, N <= M)
 - **`|` absent** — static emphasis. The listed lines are emphasized whenever the slide is shown. Consumes **no** reveal steps.
 - **`|` present** — stepped emphasis. Group *k* is emphasized at reveal step *k*; each group replaces the previous one. Consumes exactly *n* steps for *n* groups.
 - A leading `|` makes a single group stepped: `{|3}` (Issue #693).
+- Groups may overlap: a line listed in several groups is emphasized at each of their steps, so `{1-5|3}` emphasizes lines 1–5, then only line 3 (Issue #696).
 - The language token is optional: ` ```{2-4} ` (no language) emphasizes lines of an unhighlighted block. Detection is positional — an info string whose first token starts with `{` has no language.
 
 ### Collision with Pandoc attribute syntax
@@ -84,6 +85,13 @@ Each fenced code block remains a distinct fragment and renders as its own `<pre>
 ## Architecture
 
 ### 1. The spec is parsed at parse time and rides as a fragment annotation
+
+Issue #696 gives parse validation and rendering one shared definition of an
+emphasizable code block: trim every trailing `\n`, then take the lines of the
+remaining text. `LineEmphasis` construction validates its highest referenced
+line against that count, and the renderer splits the same trimmed slice. This
+keeps trailing blank lines from passing validation only to disappear during
+rendering.
 
 `SourceFragment` gains `emphasis: Option<LineEmphasis>`, handled exactly like the existing `reveal_span`:
 
@@ -125,7 +133,11 @@ Every line of every emphasis-carrying code block is wrapped:
 ```
 
 - **Static emphasis** → `class="code-line code-line-emphasis"`, no step attribute. Present in all outputs including `dist/`.
-- **Stepped emphasis** → `data-emphasis-step="N"`, no emphasis class. The shell adds the emphasis styling for the matching step.
+- **Stepped emphasis** → `data-emphasis-step="N"`, no emphasis class. A line
+  in overlapping groups carries every step as a space-separated token list,
+  for example `data-emphasis-step="1 2"`; a line in one group keeps the
+  single-token form byte-for-byte. This is the overlap behavior adopted in
+  [Issue #696](https://github.com/mizzy/peitho/issues/696).
 - Blocks with no emphasis spec are **not** line-wrapped at all, so existing decks render byte-identical.
 
 The implementation seam is `Highlighter::highlight_html`, which already iterates line by line but appends into one `ClassedHTMLGenerator` buffer, losing line boundaries; syntect's outer scope span (`<span class="hl-source hl-yaml">`) also wraps the whole block. Emitting per-line spans requires driving `ParseState`/`ScopeStack` directly and closing/reopening the open scope stack at each line boundary (`line_tokens_to_classed_spans`). This is the only substantial new code in the feature. The untagged path (plain escaped text) needs the same wrapping and is trivial by comparison — worth implementing first as a test scaffold.
@@ -134,7 +146,7 @@ The implementation seam is `Highlighter::highlight_html`, which already iterates
 
 Reveal hides with `visibility: hidden`; emphasis must not hide anything — the surrounding code stays readable, it is merely de-emphasized. Reusing `data-reveal-step`/`data-reveal-hidden` would make un-emphasized lines *disappear*.
 
-So the shell gains a parallel, equally small mechanism alongside `applyRevealState`: toggle `data-emphasis-active` on `[data-emphasis-step]` elements whose step equals the current step (note: **equals**, not "less than or equal" — emphasis moves, it does not accumulate), with `[data-emphasis-active]` styling injected next to the existing `REVEAL_HIDDEN_CSS`.
+So the shell gains a parallel, equally small mechanism alongside `applyRevealState`: split each `[data-emphasis-step]` value on whitespace and toggle `data-emphasis-active` when any whitespace-separated step token equals the current step (note: **equals per token**, not "less than or equal" — emphasis moves, it does not accumulate), with `[data-emphasis-active]` styling injected next to the existing `REVEAL_HIDDEN_CSS`.
 
 `stepnav.ts`, `sync.ts`, the `{index, step}` wire format, `ManifestSlide.revealSteps`, presenter, and remote are all **unchanged**: emphasis steps are reveal steps, counted by the same parse-time authority and surfaced through the same manifest field.
 
@@ -214,8 +226,8 @@ already gives reveal its PDF/preview behavior.
 
 - **Parser**: valid specs (static / stepped / multi-item / untagged / with-language); every error row above, asserting line number and help text; unknown-language regression; `{.rust}` produces the Pandoc-specific help rather than a generic parse failure; an emphasis spec on a `mermaid`/`math`/external-renderer block is rejected at parse time (asserted before any transform runs, pinning the ordering the architecture depends on).
 - **Step counting**: stepped emphasis contributes `groups.len()`; static contributes `0`; a code block inside `::: {reveal}` with static emphasis still contributes `1`; `manifest.json` `revealSteps` reflects the total.
-- **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped step values match the counted span.
-- **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; the injected shell CSS retains stepped rules and line layout but no static selector; listeners torn down per test.
+- **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped step values match the counted span; a line in overlapping groups carries every step token (`data-emphasis-step="1 2"`).
+- **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; a multi-token marker is active at each listed step only; the injected shell CSS retains stepped rules and line layout but no static selector; listeners torn down per test.
 - **E2E (browser, required)**: emphasis is visible and moves with arrow keys in `peitho present`; PDF export of a stepped deck contains no emphasis while a static deck does. Per CLAUDE.md, jsdom cannot confirm the visual result.
 - **Example deck**: extend `examples/` with a walked-through code block so the feature is covered by the demo site build.
 
