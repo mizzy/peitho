@@ -292,9 +292,20 @@ A `|` turns emphasis into a walkthrough: each group becomes one step in
 ```
 ````
 
+A leading `|` makes a single group stepped, so `{|3}` consumes one step:
+
+````markdown
+```rust {|3}
+```
+````
+
 The code is fully visible from the start either way — only the emphasis moves.
 Emphasis steps share the same step space as [incremental reveal](#incremental-reveal),
 so `next` walks through both in source order.
+
+That is how to point at one line in each of two code blocks in turn: give
+each block a single stepped group (`{|1}`), and source order gives each block
+its own step.
 
 Line numbers are 1-based and count every line of the block, including blank
 ones. Within a group, `,` separates entries and `-` makes a range:
@@ -307,6 +318,7 @@ The language tag is optional — ` ```{2-4} ` works on an untagged block.
 | Notation | Steps used | Where it appears |
 | --- | --- | --- |
 | `{2-4}` (no `\|`) | none | everywhere, including PDF and published output |
+| `{\|3}` | one | `peitho present` only |
 | `{2-4\|6-8}` | one per group | `peitho present` only |
 
 Static emphasis says "these lines are the important ones" — a property of the

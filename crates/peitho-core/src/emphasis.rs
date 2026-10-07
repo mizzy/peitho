@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! ```rust {2-4}        static: always emphasized, consumes no reveal steps
+//! ```rust {|3}         stepped: one group consuming one reveal step
 //! ```rust {2,5-7|9}    stepped: one reveal step per `|`-separated group
 //! ```
 //!
@@ -85,7 +86,7 @@ impl LineGroup {
 /// Grammar:
 ///
 /// ```text
-/// spec  := group ("|" group)*
+/// spec  := "|"? group ("|" group)*
 /// group := item ("," item)*
 /// item  := N | N "-" M          (1-based, inclusive, N <= M)
 /// ```
@@ -104,8 +105,9 @@ pub(crate) fn parse_emphasis_spec(spec: &str, line: usize) -> Result<LineEmphasi
     }
 
     let stepped = trimmed.contains('|');
+    let groups_spec = trimmed.strip_prefix('|').unwrap_or(trimmed);
     let mut groups = Vec::new();
-    for raw_group in trimmed.split('|') {
+    for raw_group in groups_spec.split('|') {
         groups.push(parse_group(raw_group, line)?);
     }
 
@@ -118,7 +120,7 @@ fn parse_group(raw: &str, line: usize) -> Result<LineGroup> {
         return Err(error(
             line,
             "empty emphasis group",
-            "every `|`-separated group needs at least one line, e.g. `{1|3}`",
+            "every `|`-separated group needs at least one line, e.g. `{1|3}`; write `{|1}` for a single stepped group",
         ));
     }
 
@@ -335,6 +337,28 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_separator_makes_a_single_group_stepped() {
+        let e = parse_emphasis_spec("|1", 3).unwrap();
+        assert!(e.stepped());
+        assert_eq!(e.groups().len(), 1);
+        assert_eq!(group_lines(&e, 0), vec![1]);
+
+        let e = parse_emphasis_spec(" | 2 ", 3).unwrap();
+        assert!(e.stepped());
+        assert_eq!(e.groups().len(), 1);
+        assert_eq!(group_lines(&e, 0), vec![2]);
+    }
+
+    #[test]
+    fn a_leading_separator_can_prefix_multiple_groups() {
+        let e = parse_emphasis_spec("|1|3", 3).unwrap();
+        assert!(e.stepped());
+        assert_eq!(e.groups().len(), 2);
+        assert_eq!(group_lines(&e, 0), vec![1]);
+        assert_eq!(group_lines(&e, 1), vec![3]);
+    }
+
+    #[test]
     fn tolerates_whitespace_around_items() {
         let e = parse_emphasis_spec(" 2 , 5 - 7 | 9 ", 3).unwrap();
         assert!(e.stepped());
@@ -343,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_group_with_a_trailing_separator_is_still_stepped() {
+    fn a_trailing_separator_is_an_empty_group_error() {
         // `{2|}` is stepped notation with an empty second group: an error,
         // not a silent downgrade to static emphasis.
         let err = parse_emphasis_spec("2|", 3).unwrap_err();
@@ -364,7 +388,8 @@ mod tests {
             ("   ", "empty emphasis spec"),
             ("2||4", "empty emphasis group"),
             ("2,,4", "empty emphasis group"),
-            ("|2", "empty emphasis group"),
+            ("|", "empty emphasis group"),
+            ("||1", "empty emphasis group"),
         ] {
             let err = parse_emphasis_spec(spec, 7).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Parse, "spec {spec:?}");
