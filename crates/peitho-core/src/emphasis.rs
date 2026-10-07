@@ -42,10 +42,9 @@ impl LineEmphasis {
 
     /// The highest line number referenced by any group.
     ///
-    /// Used to validate the spec against the block's actual line count: an
-    /// emphasis pointing past the end of the block is a build error, never a
-    /// silently ignored no-op.
-    pub(crate) fn max_line(&self) -> usize {
+    /// Validation at construction compares this with the block's emphasizable
+    /// line count, so an out-of-range emphasis can never reach the renderer.
+    fn max_line(&self) -> usize {
         self.groups
             .iter()
             .flat_map(|group| group.ranges.iter())
@@ -54,14 +53,27 @@ impl LineEmphasis {
             .expect("LineEmphasis always has at least one group with one range")
     }
 
-    /// The 0-based index of the group emphasizing `line`, if any.
+    /// The 0-based indices of every group emphasizing `line`, in ascending order.
     ///
     /// Groups are authored as an ordered sequence, and for stepped emphasis
-    /// the index is the step offset. A line listed in more than one group
-    /// resolves to the first — overlap is legal and means "emphasized again".
-    pub(crate) fn group_of(&self, line: usize) -> Option<usize> {
-        self.groups.iter().position(|group| group.contains(line))
+    /// each index is a step offset. Overlap is legal: a line is emphasized at
+    /// every step whose group contains it.
+    pub(crate) fn groups_of(&self, line: usize) -> impl Iterator<Item = usize> + '_ {
+        self.groups
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, group)| group.contains(line).then_some(index))
     }
+}
+
+/// The code text whose lines can carry emphasis.
+///
+/// Fenced code retains its closing newline and any trailing blank lines, but
+/// rendering omits those trailing newlines. Parse-time bounds validation and
+/// rendering must both use this slice so they cannot disagree about which
+/// line numbers exist.
+pub(crate) fn emphasis_code(text: &str) -> &str {
+    text.trim_end_matches('\n')
 }
 
 /// One emphasis group: the set of lines emphasized together.
@@ -81,7 +93,8 @@ impl LineGroup {
     }
 }
 
-/// Parse the text between the braces of an emphasis spec.
+/// Parse the text between the braces of an emphasis spec and validate it
+/// against the code block whose lines it will emphasize.
 ///
 /// Grammar:
 ///
@@ -94,7 +107,11 @@ impl LineGroup {
 /// Every malformed shape is a line-numbered error: silently accepting a spec
 /// that does not mean what the author wrote would send them on stage with the
 /// wrong line emphasized.
-pub(crate) fn parse_emphasis_spec(spec: &str, line: usize) -> Result<LineEmphasis> {
+pub(crate) fn parse_emphasis_spec(
+    spec: &str,
+    code_text: &str,
+    line: usize,
+) -> Result<LineEmphasis> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
         return Err(error(
@@ -111,7 +128,18 @@ pub(crate) fn parse_emphasis_spec(spec: &str, line: usize) -> Result<LineEmphasi
         groups.push(parse_group(raw_group, line)?);
     }
 
-    Ok(LineEmphasis { groups, stepped })
+    let emphasis = LineEmphasis { groups, stepped };
+    let line_count = emphasis_code(code_text).lines().count();
+    if emphasis.max_line() > line_count {
+        let max = emphasis.max_line();
+        return Err(error(
+            line,
+            format!("emphasis line {max} is past the end of a {line_count}-line code block"),
+            format!("this block has {line_count} line(s); emphasize a line in 1-{line_count}"),
+        ));
+    }
+
+    Ok(emphasis)
 }
 
 fn parse_group(raw: &str, line: usize) -> Result<LineGroup> {
@@ -311,18 +339,24 @@ fn extract_braced_spec(rest: &str, line: usize) -> Result<&str> {
 mod tests {
     use super::*;
 
+    const CODE: &str = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14";
+
+    fn parse(spec: &str, line: usize) -> Result<LineEmphasis> {
+        parse_emphasis_spec(spec, CODE, line)
+    }
+
     fn group_lines(emphasis: &LineEmphasis, index: usize) -> Vec<usize> {
         emphasis.groups()[index].lines().collect()
     }
 
     #[test]
     fn parses_static_and_stepped_specs() {
-        let e = parse_emphasis_spec("2-4", 3).unwrap();
+        let e = parse("2-4", 3).unwrap();
         assert!(!e.stepped());
         assert_eq!(e.groups().len(), 1);
         assert_eq!(group_lines(&e, 0), vec![2, 3, 4]);
 
-        let e = parse_emphasis_spec("2,5-7|9", 3).unwrap();
+        let e = parse("2,5-7|9", 3).unwrap();
         assert!(e.stepped());
         assert_eq!(e.groups().len(), 2);
         assert_eq!(group_lines(&e, 0), vec![2, 5, 6, 7]);
@@ -331,19 +365,19 @@ mod tests {
 
     #[test]
     fn parses_a_single_line_as_a_range() {
-        let e = parse_emphasis_spec("3", 3).unwrap();
+        let e = parse("3", 3).unwrap();
         assert!(!e.stepped());
         assert_eq!(group_lines(&e, 0), vec![3]);
     }
 
     #[test]
     fn a_leading_separator_makes_a_single_group_stepped() {
-        let e = parse_emphasis_spec("|1", 3).unwrap();
+        let e = parse("|1", 3).unwrap();
         assert!(e.stepped());
         assert_eq!(e.groups().len(), 1);
         assert_eq!(group_lines(&e, 0), vec![1]);
 
-        let e = parse_emphasis_spec(" | 2 ", 3).unwrap();
+        let e = parse(" | 2 ", 3).unwrap();
         assert!(e.stepped());
         assert_eq!(e.groups().len(), 1);
         assert_eq!(group_lines(&e, 0), vec![2]);
@@ -351,7 +385,7 @@ mod tests {
 
     #[test]
     fn a_leading_separator_can_prefix_multiple_groups() {
-        let e = parse_emphasis_spec("|1|3", 3).unwrap();
+        let e = parse("|1|3", 3).unwrap();
         assert!(e.stepped());
         assert_eq!(e.groups().len(), 2);
         assert_eq!(group_lines(&e, 0), vec![1]);
@@ -360,7 +394,7 @@ mod tests {
 
     #[test]
     fn tolerates_whitespace_around_items() {
-        let e = parse_emphasis_spec(" 2 , 5 - 7 | 9 ", 3).unwrap();
+        let e = parse(" 2 , 5 - 7 | 9 ", 3).unwrap();
         assert!(e.stepped());
         assert_eq!(group_lines(&e, 0), vec![2, 5, 6, 7]);
         assert_eq!(group_lines(&e, 1), vec![9]);
@@ -370,7 +404,7 @@ mod tests {
     fn a_trailing_separator_is_an_empty_group_error() {
         // `{2|}` is stepped notation with an empty second group: an error,
         // not a silent downgrade to static emphasis.
-        let err = parse_emphasis_spec("2|", 3).unwrap_err();
+        let err = parse("2|", 3).unwrap_err();
         assert_eq!(err.message, "empty emphasis group");
     }
 
@@ -391,7 +425,7 @@ mod tests {
             ("|", "empty emphasis group"),
             ("||1", "empty emphasis group"),
         ] {
-            let err = parse_emphasis_spec(spec, 7).unwrap_err();
+            let err = parse(spec, 7).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Parse, "spec {spec:?}");
             assert_eq!(err.line, Some(7), "spec {spec:?}");
             assert_eq!(err.message, message, "spec {spec:?}");
@@ -402,17 +436,34 @@ mod tests {
     #[test]
     fn an_absurd_line_number_errors_instead_of_panicking() {
         // Overflow must surface as a parse error, never a panic.
-        let err = parse_emphasis_spec("99999999999999999999999999", 3).unwrap_err();
+        let err = parse("99999999999999999999999999", 3).unwrap_err();
         assert_eq!(err.message, "emphasis spec expects line numbers");
     }
 
     #[test]
     fn max_line_reports_the_highest_referenced_line() {
-        let e = parse_emphasis_spec("2,5-7|9", 3).unwrap();
+        let e = parse("2,5-7|9", 3).unwrap();
         assert_eq!(e.max_line(), 9);
 
-        let e = parse_emphasis_spec("12-14|3", 3).unwrap();
+        let e = parse("12-14|3", 3).unwrap();
         assert_eq!(e.max_line(), 14);
+    }
+
+    #[test]
+    fn validation_and_rendering_share_the_same_emphasizable_code() {
+        assert_eq!(emphasis_code("a\n\n\n"), "a");
+
+        let err = parse_emphasis_spec("1|3", "a\n\n\n", 7).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(
+            err.message,
+            "emphasis line 3 is past the end of a 1-line code block"
+        );
+        assert_eq!(
+            err.help,
+            "this block has 1 line(s); emphasize a line in 1-1"
+        );
     }
 
     #[test]
@@ -507,16 +558,14 @@ mod tests {
     }
 
     #[test]
-    fn group_of_finds_the_first_group_containing_a_line() {
-        let e = parse_emphasis_spec("1-3|5", 3).unwrap();
-        assert_eq!(e.group_of(1), Some(0));
-        assert_eq!(e.group_of(3), Some(0));
-        assert_eq!(e.group_of(4), None);
-        assert_eq!(e.group_of(5), Some(1));
+    fn groups_of_finds_every_group_containing_a_line() {
+        let e = parse("1-5|3", 3).unwrap();
+        assert_eq!(e.groups_of(3).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(e.groups_of(1).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(e.groups_of(6).collect::<Vec<_>>(), Vec::<usize>::new());
 
-        // Overlapping groups resolve to the first: "emphasized again" is
-        // legal, and the first occurrence is what stepping starts from.
-        let e = parse_emphasis_spec("1-5|3", 3).unwrap();
-        assert_eq!(e.group_of(3), Some(0));
+        let e = parse("1-3|5", 3).unwrap();
+        assert_eq!(e.groups_of(4).collect::<Vec<_>>(), Vec::<usize>::new());
+        assert_eq!(e.groups_of(5).collect::<Vec<_>>(), vec![1]);
     }
 }

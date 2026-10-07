@@ -2810,22 +2810,8 @@ fn parse_slide(
                                     ),
                                 )));
                             }
-                            let emphasis = emphasis::parse_emphasis_spec(spec, code_line)
+                            let emphasis = emphasis::parse_emphasis_spec(spec, &text, code_line)
                                 .map_err(slide_err)?;
-                            let line_count = text.lines().count();
-                            if emphasis.max_line() > line_count {
-                                let max = emphasis.max_line();
-                                return Err(slide_err(BuildError::new(
-                                    ErrorKind::Parse,
-                                    Some(code_line),
-                                    format!(
-                                        "emphasis line {max} is past the end of a {line_count}-line code block",
-                                    ),
-                                    format!(
-                                        "this block has {line_count} line(s); emphasize a line in 1-{line_count}",
-                                    ),
-                                )));
-                            }
                             Some(emphasis)
                         }
                         None => None,
@@ -7907,6 +7893,46 @@ After list
             "emphasis line 4 is past the end of a 1-line code block"
         );
         assert!(err.help.contains("1-1"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn stepped_emphasis_cannot_reference_trailing_blank_lines() {
+        let err = parse_markdown(
+            "# Title\n\n```{1|3}\na\n\n\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "emphasis line 3 is past the end of a 1-line code block"
+        );
+        assert_eq!(
+            err.help,
+            "this block has 1 line(s); emphasize a line in 1-1"
+        );
+    }
+
+    #[test]
+    fn static_emphasis_cannot_reference_trailing_blank_lines() {
+        let err = parse_markdown(
+            "# Title\n\n```{3}\na\n\n\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "emphasis line 3 is past the end of a 1-line code block"
+        );
+        assert_eq!(
+            err.help,
+            "this block has 1 line(s); emphasize a line in 1-1"
+        );
     }
 
     #[test]

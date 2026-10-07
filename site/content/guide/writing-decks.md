@@ -292,6 +292,9 @@ A `|` turns emphasis into a walkthrough: each group becomes one step in
 ```
 ````
 
+Groups may overlap: `{1-5|3}` emphasizes lines 1–5, then narrows to line 3 on
+the next step.
+
 A leading `|` makes a single group stepped, so `{|3}` consumes one step:
 
 ````markdown
@@ -308,7 +311,8 @@ each block a single stepped group (`{|1}`), and source order gives each block
 its own step.
 
 Line numbers are 1-based and count every line of the block, including blank
-ones. Within a group, `,` separates entries and `-` makes a range:
+ones. Trailing empty lines at the end of the block are not counted. Within a
+group, `,` separates entries and `-` makes a range:
 `{2,5-7|9}` emphasizes lines 2 and 5–7 on the first step, then line 9.
 
 The language tag is optional — ` ```{2-4} ` works on an untagged block.

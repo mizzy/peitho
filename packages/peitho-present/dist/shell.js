@@ -1287,23 +1287,20 @@ var PresentShellController = class {
     this.applyEmphasisState(host, step);
   }
   /**
-   * Move code line emphasis to the group owning the current step.
+   * Move code line emphasis to every marker listing the current step.
    *
    * Unlike reveal, emphasis is not cumulative: it points at one group at a
-   * time and moves, so the comparison is equality rather than "step or
-   * earlier". Stepping past the last group leaves the block unemphasized,
-   * which is the correct final state — the pointer is gone once the speaker
-   * has moved on.
+   * time and moves, so each whitespace-separated step token is compared for
+   * equality rather than "step or earlier". Stepping past the last group
+   * leaves the block unemphasized, which is the correct final state — the
+   * pointer is gone once the speaker has moved on.
    */
   applyEmphasisState(host, step) {
     const markers = host.shadowRoot?.querySelectorAll("[data-emphasis-step]");
     if (markers == null) return;
     for (const marker of markers) {
-      const emphasisStep = Number(marker.dataset.emphasisStep);
-      marker.toggleAttribute(
-        "data-emphasis-active",
-        Number.isFinite(emphasisStep) && emphasisStep === step
-      );
+      const steps = (marker.dataset.emphasisStep ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+      marker.toggleAttribute("data-emphasis-active", steps.includes(step));
     }
   }
   startPresentation() {
