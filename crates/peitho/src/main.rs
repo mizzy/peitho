@@ -1901,7 +1901,7 @@ where
     let slide_count = checked.slide_count();
     let theme_css = core(peitho_core::build_theme_css(
         &css_files,
-        &checked.slide_slot_classes(),
+        &checked.override_keys(),
         &layouts.slot_classes(),
         &layouts.root_classes(),
     ))?;

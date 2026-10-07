@@ -71,7 +71,7 @@ pub use render::{
     render_preview_index, render_remote_index, EditAnnotations,
 };
 pub use slide_source::{slide_sources_json, SlideSources};
-pub use theme::{build_theme_css, theme_fonts, CssFile, ThemeCss, ThemeFontAsset};
+pub use theme::{build_theme_css, theme_fonts, CssFile, OverrideKeys, ThemeCss, ThemeFontAsset};
 
 /// ```compile_fail
 /// use peitho_core::*;

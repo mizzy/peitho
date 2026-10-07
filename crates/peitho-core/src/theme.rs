@@ -6,7 +6,10 @@ use std::{
     str::CharIndices,
 };
 
-use crate::error::{BuildError, ErrorKind, Result};
+use crate::{
+    domain::SlideKey,
+    error::{BuildError, ErrorKind, Result},
+};
 
 macro_rules! theme_font {
     ($name:literal) => {
@@ -50,6 +53,40 @@ pub fn theme_fonts() -> &'static [ThemeFontAsset] {
 pub struct CssFile {
     pub name: String,
     pub content: String,
+}
+
+/// Slide-key information used to validate keyed CSS override selectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideKeys {
+    slide_slots: BTreeMap<String, BTreeSet<String>>,
+    explicit_keys: BTreeSet<SlideKey>,
+    drafted_keys: BTreeSet<SlideKey>,
+}
+
+impl OverrideKeys {
+    /// Creates override-key information without a parsed deck.
+    ///
+    /// This carries no draft or explicit-key hints, so callers should use it
+    /// only when validating CSS without deck metadata.
+    pub fn without_deck(slide_slots: BTreeMap<String, BTreeSet<String>>) -> Self {
+        Self {
+            slide_slots,
+            explicit_keys: BTreeSet::new(),
+            drafted_keys: BTreeSet::new(),
+        }
+    }
+
+    pub(crate) fn from_deck(
+        slide_slots: BTreeMap<String, BTreeSet<String>>,
+        explicit_keys: BTreeSet<SlideKey>,
+        drafted_keys: BTreeSet<SlideKey>,
+    ) -> Self {
+        Self {
+            slide_slots,
+            explicit_keys,
+            drafted_keys,
+        }
+    }
 }
 
 /// Theme CSS together with its leading statement prelude.
@@ -115,7 +152,7 @@ const PEITHO_SLIDE_CLASS: &str = "peitho-slide";
 ///
 /// - a selector containing `[data-slide-key=...]` must reference an existing
 ///   slide key, and any `.slot-*` class in it must exist in that slide's own
-///   layout (`slide_slots`, see `Deck::<Checked>::slide_slot_classes`)
+///   layout (`override_keys`, see `Deck::<Checked>::override_keys`)
 /// - a bare `.slot-*` class must exist in some provided layout
 ///   (`layout_slots`), which catches typos without breaking themes shared
 ///   across decks that use only a subset of the layouts
@@ -130,7 +167,7 @@ const PEITHO_SLIDE_CLASS: &str = "peitho-slide";
 /// - everything else is unrestricted theme CSS
 pub fn build_theme_css(
     files: &[CssFile],
-    slide_slots: &BTreeMap<String, BTreeSet<String>>,
+    override_keys: &OverrideKeys,
     layout_slots: &BTreeSet<String>,
     root_classes: &BTreeSet<String>,
 ) -> Result<ThemeCss> {
@@ -153,12 +190,11 @@ pub fn build_theme_css(
     };
 
     for file in &stripped_files {
-        validate_override_selectors(&file.content, slide_slots, layout_slots).map_err(
-            |mut err| {
+        validate_override_selectors(&file.content, file.name, override_keys, layout_slots)
+            .map_err(|mut err| {
                 err.message = format!("{}: {}", file.name, err.message);
                 err
-            },
-        )?;
+            })?;
         if !root_classes.is_empty() {
             validate_root_class_size_declarations(
                 &file.content,
@@ -1218,7 +1254,8 @@ fn root_class_size_error(
 
 fn validate_override_selectors(
     css: &str,
-    slide_slots: &BTreeMap<String, BTreeSet<String>>,
+    file_name: &str,
+    override_keys: &OverrideKeys,
     layout_slots: &BTreeSet<String>,
 ) -> Result<()> {
     for (line_index, line) in css.lines().enumerate() {
@@ -1226,15 +1263,12 @@ fn validate_override_selectors(
         let selector = line.split('{').next().unwrap_or(line);
         let keys = extract_slide_key_values(selector, line_no)?;
         for key in &keys {
-            if !slide_slots.contains_key(key) {
+            if !override_keys.slide_slots.contains_key(key) {
                 return Err(BuildError::new(
                     ErrorKind::Theme,
                     Some(line_no),
                     format!("unknown slide key '{key}' in override selector"),
-                    format!(
-                        "use one of: {}; if this key belongs to a slide marked {{\"draft\":true}}, remove the override or the draft flag",
-                        slide_slots.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ),
+                    unknown_slide_key_help(key, file_name, override_keys),
                 ));
             }
         }
@@ -1242,7 +1276,7 @@ fn validate_override_selectors(
             layout_slots.clone()
         } else {
             keys.iter()
-                .filter_map(|key| slide_slots.get(key))
+                .filter_map(|key| override_keys.slide_slots.get(key))
                 .flatten()
                 .cloned()
                 .collect()
@@ -1307,6 +1341,42 @@ fn validate_override_selectors(
     }
 
     Ok(())
+}
+
+fn unknown_slide_key_help(key: &str, file_name: &str, override_keys: &OverrideKeys) -> String {
+    let key = match SlideKey::new(key) {
+        Ok(key) => key,
+        Err(reason) => {
+            return format!(
+                "'{key}' is not a valid slide key ({reason}), so no slide can match it; fix the selector or delete this rule from {file_name}"
+            );
+        }
+    };
+
+    if override_keys.drafted_keys.contains(&key) {
+        let key = key.as_str();
+        return format!(
+            "slide '{key}' is marked {{\"draft\":true}}; remove the draft flag, or delete this rule from {file_name}"
+        );
+    }
+
+    let key = key.as_str();
+    let explicit_keys = if override_keys.explicit_keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; explicit keys in this deck: {}",
+            override_keys
+                .explicit_keys
+                .iter()
+                .map(SlideKey::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "add \"key\":\"{key}\" to the page settings comment of the slide it styles (<!-- {{\"key\":\"{key}\"}} --> if it has none), or delete this rule from {file_name}{explicit_keys}"
+    )
 }
 
 fn extract_slot_classes(selector: &str) -> Vec<String> {
@@ -1688,7 +1758,7 @@ mod tests {
                     content: rest.trim().to_owned(),
                 },
             ],
-            &BTreeMap::new(),
+            &OverrideKeys::without_deck(BTreeMap::new()),
             &BTreeSet::new(),
             &BTreeSet::new(),
         )
@@ -1713,7 +1783,7 @@ mod tests {
                     content: rest.trim().to_owned(),
                 },
             ],
-            &BTreeMap::new(),
+            &OverrideKeys::without_deck(BTreeMap::new()),
             &BTreeSet::new(),
             &BTreeSet::new(),
         )
@@ -1736,7 +1806,7 @@ mod tests {
                     content: "\u{feff}.second { color: blue; }".to_owned(),
                 },
             ],
-            &BTreeMap::new(),
+            &OverrideKeys::without_deck(BTreeMap::new()),
             &BTreeSet::new(),
             &BTreeSet::new(),
         )
@@ -2042,8 +2112,27 @@ mod tests {
             .collect()
     }
 
-    /// base.css + overrides.css の2ファイル構成で、提供レイアウトの
-    /// スロット和集合はスライドのものと同一という旧来相当のセットアップ。
+    fn checked_override_keys(markdown: &str) -> OverrideKeys {
+        let frontmatter = crate::parser::parse_frontmatter(markdown).unwrap();
+        let parsed = crate::parser::parse_markdown(
+            markdown,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let layout = crate::layout::parse_layout(
+            "title-only",
+            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
+        )
+        .unwrap();
+        let mapped = crate::mapping::map_by_convention(parsed, &layout).unwrap();
+        let checked = crate::check::check_deck(mapped).unwrap();
+
+        checked.override_keys()
+    }
+
+    /// A base.css + overrides.css setup where the provided layout slots are
+    /// the union of the slide layout slots.
     fn build(
         base: &str,
         overrides: &str,
@@ -2074,7 +2163,7 @@ mod tests {
                     content: overrides.to_owned(),
                 },
             ],
-            slide_slots,
+            &OverrideKeys::without_deck(slide_slots.clone()),
             &layout_slots,
             &root_classes,
         )
@@ -2135,7 +2224,7 @@ mod tests {
         assert!(err.to_string().contains("unknown slide key 'missing'"));
         assert_eq!(
             err.help,
-            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css"#
         );
     }
 
@@ -2143,29 +2232,15 @@ mod tests {
     fn unknown_slide_key_help_mentions_drafted_slides() {
         let markdown = "# Live\n\n---\n\
                         <!-- {\"key\":\"drafted\",\"draft\":true} -->\n# Drafted";
-        let frontmatter = crate::parser::parse_frontmatter(markdown).unwrap();
-        let parsed = crate::parser::parse_markdown(
-            markdown,
-            frontmatter,
-            &crate::highlight::Highlighter::defaults(),
-        )
-        .unwrap();
-        let layout = crate::layout::parse_layout(
-            "title-only",
-            r#"<section><slot name="title" accepts="inline" arity="1"></slot></section>"#,
-        )
-        .unwrap();
-        let mapped = crate::mapping::map_by_convention(parsed, &layout).unwrap();
-        let checked = crate::check::check_deck(mapped).unwrap();
-        let slide_slots = checked.slide_slot_classes();
-        let layout_slots: BTreeSet<String> = slide_slots.values().flatten().cloned().collect();
+        let override_keys = checked_override_keys(markdown);
+        let layout_slots = BTreeSet::from(["slot-title".to_owned()]);
 
         let err = build_theme_css(
             &[CssFile {
                 name: "overrides.css".to_owned(),
                 content: r#"[data-slide-key="drafted"] .slot-title { color: red; }"#.to_owned(),
             }],
-            &slide_slots,
+            &override_keys,
             &layout_slots,
             &BTreeSet::new(),
         )
@@ -2173,8 +2248,111 @@ mod tests {
 
         assert_eq!(err.kind, ErrorKind::Theme);
         assert!(err.to_string().contains("unknown slide key 'drafted'"));
-        assert!(err.help.contains("draft"));
-        assert!(err.help.contains("remove the override or the draft flag"));
+        assert_eq!(
+            err.help,
+            r#"slide 'drafted' is marked {"draft":true}; remove the draft flag, or delete this rule from overrides.css"#
+        );
+    }
+
+    #[test]
+    fn unknown_slide_key_help_omits_draft_for_non_drafted_key() {
+        let markdown = "# Live\n\n---\n\
+                        <!-- {\"key\":\"drafted\",\"draft\":true} -->\n# Drafted";
+        let override_keys = checked_override_keys(markdown);
+
+        let err = build_theme_css(
+            &[CssFile {
+                name: "overrides.css".to_owned(),
+                content: r#"[data-slide-key="missing"] .slot-title { color: red; }"#.to_owned(),
+            }],
+            &override_keys,
+            &BTreeSet::from(["slot-title".to_owned()]),
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.help,
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css"#
+        );
+        assert!(!err.help.contains("draft"));
+    }
+
+    #[test]
+    fn unknown_slide_key_help_lists_only_sorted_explicit_keys() {
+        let override_keys = checked_override_keys(
+            "# Derived\n\n---\n\
+             <!-- {\"key\":\"zebra\"} -->\n# Explicit Z\n\n---\n\
+             <!-- {\"key\":\"alpha\"} -->\n# Explicit A",
+        );
+
+        let err = build_theme_css(
+            &[CssFile {
+                name: "overrides.css".to_owned(),
+                content: r#"[data-slide-key="missing"] .slot-title { color: red; }"#.to_owned(),
+            }],
+            &override_keys,
+            &BTreeSet::from(["slot-title".to_owned()]),
+            &BTreeSet::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.help,
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css; explicit keys in this deck: alpha, zebra"#
+        );
+        assert!(!err.help.contains("derived"));
+    }
+
+    #[test]
+    fn unknown_slide_key_help_explains_invalid_keys_cannot_match() {
+        let err = build(
+            "",
+            r#"[data-slide-key="Bad_Key"] .slot-title { color: red; }"#,
+            &slots(&[("live", &["slot-title"])]),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.message,
+            "overrides.css: unknown slide key 'Bad_Key' in override selector"
+        );
+        assert_eq!(
+            err.help,
+            "'Bad_Key' is not a valid slide key (slide key must use lowercase ascii, digits, or '-'), so no slide can match it; fix the selector or delete this rule from overrides.css"
+        );
+    }
+
+    #[test]
+    fn unknown_slide_key_help_names_the_originating_stylesheet() {
+        let slide_slots = slots(&[("live", &["slot-title"])]);
+        let base_err = build(
+            r#"[data-slide-key="missing"] .slot-title { color: red; }"#,
+            "",
+            &slide_slots,
+        )
+        .unwrap_err();
+        let overrides_err = build(
+            "",
+            r#"[data-slide-key="missing"] .slot-title { color: red; }"#,
+            &slide_slots,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            base_err.help,
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from base.css"#
+        );
+        assert_eq!(
+            overrides_err.help,
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css"#
+        );
+        assert!(base_err
+            .to_string()
+            .contains("base.css: unknown slide key 'missing'"));
+        assert!(overrides_err
+            .to_string()
+            .contains("overrides.css: unknown slide key 'missing'"));
     }
 
     #[test]
@@ -2191,7 +2369,7 @@ mod tests {
         assert!(err.to_string().contains("unknown slide key 'missing'"));
         assert_eq!(
             err.help,
-            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css"#
         );
     }
 
@@ -2209,7 +2387,7 @@ mod tests {
         assert!(err.to_string().contains("unknown slide key 'missing'"));
         assert_eq!(
             err.help,
-            r#"use one of: arch-1; if this key belongs to a slide marked {"draft":true}, remove the override or the draft flag"#
+            r#"add "key":"missing" to the page settings comment of the slide it styles (<!-- {"key":"missing"} --> if it has none), or delete this rule from overrides.css"#
         );
     }
 
@@ -2285,7 +2463,7 @@ mod tests {
                 name: "base.css".to_owned(),
                 content: r#"[data-empty-slots~="quote"] .quote { display: none; }"#.to_owned(),
             }],
-            &slide_slots,
+            &OverrideKeys::without_deck(slide_slots),
             &layout_slots,
             &BTreeSet::new(),
         )
@@ -2428,7 +2606,7 @@ mod tests {
                 name: "base.css".to_owned(),
                 content: ".slot-code { color: red; }".to_owned(),
             }],
-            &slide_slots,
+            &OverrideKeys::without_deck(slide_slots),
             &layout_slots,
             &BTreeSet::new(),
         )

@@ -659,21 +659,28 @@ pub(crate) fn parse_markdown(
     }
     reject_page_number_hidden_without_deck_setting(settings.page_numbers(), &pending)?;
     validate_unique_keys(pending.iter().map(|pending_slide| &pending_slide.slide))?;
-    let first_draft_line = pending
-        .iter()
-        .filter_map(|pending_slide| pending_slide.draft.as_ref().filter(|flag| flag.enabled))
-        .map(|flag| flag.line)
-        .next();
-    let mut survivors = pending
-        .into_iter()
-        .filter(|pending_slide| {
-            !pending_slide
+    let (drafted, mut survivors): (Vec<_>, Vec<_>) =
+        pending.into_iter().partition(|pending_slide| {
+            pending_slide
                 .draft
                 .as_ref()
-                .map(|flag| flag.enabled)
-                .unwrap_or(false)
+                .is_some_and(|flag| flag.enabled)
+        });
+    let drafted_keys = drafted
+        .iter()
+        .map(|pending_slide| pending_slide.slide.key.clone())
+        .collect();
+    let explicit_keys = survivors
+        .iter()
+        .filter(|pending_slide| {
+            matches!(&pending_slide.slide.key_source, KeySource::Explicit { .. })
         })
-        .collect::<Vec<_>>();
+        .map(|pending_slide| pending_slide.slide.key.clone())
+        .collect();
+    let first_draft_line = drafted
+        .first()
+        .and_then(|pending_slide| pending_slide.draft.as_ref())
+        .map(|flag| flag.line);
     if survivors.is_empty() {
         return Err(BuildError::new(
             ErrorKind::Parse,
@@ -689,7 +696,10 @@ pub(crate) fn parse_markdown(
     }
 
     let resolved_sections = resolve_deck_sections(&survivors)?;
-    let settings = finalize_section_settings(settings, resolved_sections)?;
+    let settings = finalize_section_settings(
+        settings.with_override_key_hints(explicit_keys, drafted_keys),
+        resolved_sections,
+    )?;
     let slides = survivors
         .into_iter()
         .map(|pending_slide| pending_slide.slide)
@@ -7651,6 +7661,36 @@ After list
         assert_eq!(slides[0].key.as_str(), "intro");
         assert_eq!(slides[1].index, 1);
         assert_eq!(slides[1].key.as_str(), "live");
+    }
+
+    #[test]
+    fn records_override_key_hints_on_deck_settings() {
+        let deck = parse_markdown(
+            "<!-- {\"key\":\"zebra\"} -->\n# Explicit Z\n\n---\n\
+             # Derived\n\n---\n\
+             <!-- {\"key\":\"alpha\"} -->\n# Explicit A\n\n---\n\
+             <!-- {\"key\":\"drafted-explicit\",\"draft\":true} -->\n# Drafted Explicit\n\n---\n\
+             <!-- {\"draft\":true} -->\n# Drafted Derived",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            deck.settings()
+                .explicit_keys()
+                .iter()
+                .map(SlideKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zebra"]
+        );
+        assert_eq!(
+            deck.settings()
+                .drafted_keys()
+                .iter()
+                .map(SlideKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["drafted-derived", "drafted-explicit"]
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{
     error::{BuildError, ErrorKind, Result},
     layout::Layout,
     math::MathAssets,
+    theme::OverrideKeys,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +342,8 @@ pub struct DeckSettings {
     syntaxes: Option<AssetPath>,
     fonts: Option<AssetPath>,
     code_images: CodeImagesConfig,
+    explicit_keys: BTreeSet<SlideKey>,
+    drafted_keys: BTreeSet<SlideKey>,
 }
 
 impl DeckSettings {
@@ -384,6 +387,8 @@ impl DeckSettings {
             syntaxes,
             fonts,
             code_images,
+            explicit_keys: BTreeSet::new(),
+            drafted_keys: BTreeSet::new(),
         })
     }
 
@@ -439,6 +444,14 @@ impl DeckSettings {
         &self.code_images
     }
 
+    pub(crate) fn drafted_keys(&self) -> &BTreeSet<SlideKey> {
+        &self.drafted_keys
+    }
+
+    pub(crate) fn explicit_keys(&self) -> &BTreeSet<SlideKey> {
+        &self.explicit_keys
+    }
+
     pub(crate) fn with_sections(mut self, sections: Vec<DeckSection>) -> Self {
         self.sections = sections;
         self
@@ -446,6 +459,16 @@ impl DeckSettings {
 
     pub(crate) fn with_planned_time(mut self, planned_time: Option<PlannedTime>) -> Self {
         self.planned_time = planned_time;
+        self
+    }
+
+    pub(crate) fn with_override_key_hints(
+        mut self,
+        explicit_keys: BTreeSet<SlideKey>,
+        drafted_keys: BTreeSet<SlideKey>,
+    ) -> Self {
+        self.explicit_keys = explicit_keys;
+        self.drafted_keys = drafted_keys;
         self
     }
 }
@@ -809,10 +832,10 @@ impl<S> Deck<Checked<S>> {
         self.phase.slides.iter().map(|slide| &slide.key)
     }
 
-    /// Slide key → slot class names of that slide's layout, plus the union
-    /// used to validate override selectors that name no slide key.
-    pub fn slide_slot_classes(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.phase
+    /// Returns the slide-key metadata used to validate CSS override selectors.
+    pub fn override_keys(&self) -> OverrideKeys {
+        let slide_slots = self
+            .phase
             .slides
             .iter()
             .map(|slide| {
@@ -826,7 +849,12 @@ impl<S> Deck<Checked<S>> {
                         .collect(),
                 )
             })
-            .collect()
+            .collect();
+        OverrideKeys::from_deck(
+            slide_slots,
+            self.settings.explicit_keys().clone(),
+            self.settings.drafted_keys().clone(),
+        )
     }
 
     pub(crate) fn checked_slides(&self) -> &[CheckedSlide<S>] {
