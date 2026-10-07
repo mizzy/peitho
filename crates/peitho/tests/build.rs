@@ -1672,11 +1672,13 @@ fn repository_example_css_is_root_size_lint_clean() {
         linted_examples += 1;
         let css_files = read_example_css_files(&example_dir.join("css"));
         let layout_slots = layouts.slot_classes();
-        let slide_slots = broad_slide_slots_for_css_keys(&css_files, &layout_slots);
+        let override_keys = peitho_core::OverrideKeys::without_deck(
+            broad_slide_slots_for_css_keys(&css_files, &layout_slots),
+        );
 
         peitho_core::build_theme_css(
             &css_files,
-            &slide_slots,
+            &override_keys,
             &layout_slots,
             &layouts.root_classes(),
         )
