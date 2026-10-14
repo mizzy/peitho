@@ -1,9 +1,8 @@
 # Draft, skip, and present-only example
 
-A deck mixing normal, skipped, draft, and present-only slides. This example is
-not part of the demo-site gallery on purpose: draft and present-only slides are
-dropped at build and skip only shows up in presenter navigation, so the behavior
-has to be observed locally.
+A deck mixing normal, skipped, draft, and present-only slides. Its gallery page
+shows the five-slide source beside the three-slide published deck; the skip and
+present-only behavior is observed locally with `peitho present`.
 
 ## Build: the draft and present-only slides disappear
 

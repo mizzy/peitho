@@ -437,7 +437,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 
 ## Examples
 
-`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture and `draft-skip` (whose behavior is only observable locally) are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
+`examples/` holds samples that differ entirely in content, layout structure, and theme. Each directory is self-contained: `deck.md`, plus `layouts/` and `css/` when the deck brings its own design. All of them except the `pdf-export` fixture are built and browsable on the [examples gallery](https://peitho.gosu.ke/examples/).
 
 | Sample | Content | Design | Contract highlight |
 |---|---|---|---|
