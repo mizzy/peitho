@@ -19,6 +19,18 @@ flowchart LR
 ```
 
 ---
+<!-- {"key":"qrcode-link"} -->
+# QR codes are built in
+
+A `qrcode` fence whose trimmed text is one non-empty line becomes a fixed
+black-on-white SVG with a standard quiet zone. It follows the same cache and
+image-slot path as Mermaid.
+
+```qrcode
+https://peitho.gosu.ke/
+```
+
+---
 <!-- {"key":"graphviz-flow"} -->
 # Graphviz uses the same contract
 
@@ -83,9 +95,11 @@ flowchart LR
 <!-- {"key":"config-source"} -->
 # The deck owns the commands
 
-Mermaid is built in. The deck declares commands for non-built-in language tags,
-and each command receives the fenced source on stdin. An explicit
-`code_images.mermaid` entry would override the built-in renderer.
+Mermaid and QR codes are built in. The deck declares commands for non-built-in
+language tags, and each command receives the fenced source verbatim on stdin,
+including its trailing newline. Explicit `code_images.mermaid` or
+`code_images.qrcode` entries would override the corresponding built-in
+renderer.
 
 ```yaml
 ---

@@ -2835,6 +2835,7 @@ fn parse_slide(
                         }
                         (Some(CodeImageRenderer::External(_)), Some(tail))
                         | (Some(CodeImageRenderer::BuiltinMermaid), Some(tail))
+                        | (Some(CodeImageRenderer::BuiltinQrCode), Some(tail))
                         | (Some(CodeImageRenderer::BuiltinMath), Some(tail))
                         | (None, Some(tail)) => {
                             return Err(slide_err(emphasis::unexpected_info_tail_error(
@@ -2844,6 +2845,7 @@ fn parse_slide(
                         (Some(CodeImageRenderer::ExternalEmbed(_)), None)
                         | (Some(CodeImageRenderer::External(_)), None)
                         | (Some(CodeImageRenderer::BuiltinMermaid), None)
+                        | (Some(CodeImageRenderer::BuiltinQrCode), None)
                         | (Some(CodeImageRenderer::BuiltinMath), None)
                         | (None, None) => None,
                     };
@@ -8197,6 +8199,23 @@ After list
         assert!(err.help.contains("dot"), "help: {}", err.help);
     }
 
+    #[test]
+    fn emphasis_on_a_builtin_qrcode_block_is_rejected_at_the_fence_line() {
+        let err = parse_markdown(
+            "# Intro\n\n```qrcode {1}\nhttps://x\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "line emphasis is not supported on rendered code images"
+        );
+        assert!(err.help.contains("qrcode"), "help: {}", err.help);
+    }
+
     fn code_fragment(deck: &Deck<Parsed>) -> &SourceFragment<RawImagePath> {
         deck.parsed_slides()[0]
             .fragments
@@ -8227,6 +8246,19 @@ After list
 
         assert_eq!(fragment.kind(), &FragmentKind::Code);
         assert_eq!(fragment.language(), Some("mermaid"));
+    }
+
+    #[test]
+    fn accepts_bare_qrcode_language_as_builtin_code_image() {
+        let deck = parse_markdown(
+            "# Intro\n\n```qrcode\nhttps://example.com/slides\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let fragment = &deck.parsed_slides()[0].fragments[1];
+
+        assert_eq!(fragment.kind(), &FragmentKind::Code);
+        assert_eq!(fragment.language(), Some("qrcode"));
     }
 
     #[test]
@@ -8351,7 +8383,12 @@ After list
 
     #[test]
     fn non_embed_info_tails_keep_the_existing_error_and_language_priority() {
-        for info in ["rust mode=card", "rust 2-4", "mermaid mode=card"] {
+        for info in [
+            "rust mode=card",
+            "rust 2-4",
+            "mermaid mode=card",
+            "qrcode mode=card",
+        ] {
             let err = parse_markdown(
                 &format!("# T\n\n```{info}\nx\n```"),
                 &crate::highlight::Highlighter::defaults(),

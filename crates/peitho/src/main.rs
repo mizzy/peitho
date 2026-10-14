@@ -5782,7 +5782,7 @@ contexts:
     }
 
     fn deterministic_example_slide_bytes(html: &str) -> Vec<u8> {
-        let html = &version_independent_mermaid_asset_names(html);
+        let html = &version_independent_code_image_asset_names(html);
         if !html.contains(r#"class="peitho-math""#) {
             return html.as_bytes().to_vec();
         }
@@ -5834,30 +5834,82 @@ contexts:
         .into_bytes()
     }
 
-    // The built-in Mermaid cache key hashes CARGO_PKG_VERSION and becomes the
-    // asset file stem, so it changes on every release. Blank only that stem;
-    // the content-hash prefix still pins the SVG bytes.
-    fn version_independent_mermaid_asset_names(html: &str) -> String {
-        if !html.contains(r#"alt="diagram (mermaid)""#) {
+    // Built-in SVG code-image cache keys hash CARGO_PKG_VERSION and become the
+    // asset file stem, so they change on every release. Normalize only images
+    // with a built-in renderer's typed alt contract and cache-asset filename;
+    // external and authored SVG names remain covered by the snapshot. The
+    // content-hash prefix still pins the generated SVG bytes.
+    fn version_independent_code_image_asset_names(html: &str) -> String {
+        if !html.contains(r#"alt="diagram (mermaid)""#) && !html.contains(r#"alt="QR code: "#) {
             return html.to_owned();
         }
         rewrite_str(
             html,
             RewriteStrSettings {
-                element_content_handlers: vec![element!(
-                    r#"img[alt="diagram (mermaid)"]"#,
-                    |element| {
-                        let src = element.get_attribute("src").expect("mermaid img has src");
-                        let (content_hash, _) =
-                            src.split_once('-').expect("asset name is <hash>-<stem>");
-                        element.set_attribute("src", &format!("{content_hash}-mermaid.svg"))?;
+                element_content_handlers: vec![
+                    element!(r#"img[alt="diagram (mermaid)"]"#, |element| {
+                        let Some(src) = element.get_attribute("src") else {
+                            return Ok(());
+                        };
+                        let Some(content_hash) = builtin_code_image_content_hash(&src) else {
+                            return Ok(());
+                        };
+                        element
+                            .set_attribute("src", &format!("assets/{content_hash}-mermaid.svg"))?;
                         Ok(())
-                    }
-                )],
+                    }),
+                    element!(r#"img[alt^="QR code: "]"#, |element| {
+                        let Some(src) = element.get_attribute("src") else {
+                            return Ok(());
+                        };
+                        let Some(content_hash) = builtin_code_image_content_hash(&src) else {
+                            return Ok(());
+                        };
+                        element
+                            .set_attribute("src", &format!("assets/{content_hash}-qrcode.svg"))?;
+                        Ok(())
+                    }),
+                ],
                 ..RewriteStrSettings::new()
             },
         )
         .expect("example slide HTML is valid")
+    }
+
+    fn builtin_code_image_content_hash(src: &str) -> Option<&str> {
+        let stem = src.strip_prefix("assets/")?.strip_suffix(".svg")?;
+        let (content_hash, cache_key) = stem.split_once('-')?;
+        let is_lowercase_hex = |value: &str, len| {
+            value.len() == len
+                && value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        };
+
+        (is_lowercase_hex(content_hash, 16) && is_lowercase_hex(cache_key, 64))
+            .then_some(content_hash)
+    }
+
+    #[test]
+    fn version_independent_asset_names_only_normalize_builtin_renderers() {
+        let mermaid_stem = "a".repeat(64);
+        let qrcode_stem = "b".repeat(64);
+        let dot_stem = "c".repeat(64);
+        let author_stem = "d".repeat(64);
+        let authored_qrcode_src = "assets/5555555555555555-foo.svg";
+        let html = format!(
+            r#"<img src="assets/1111111111111111-{mermaid_stem}.svg" alt="diagram (mermaid)"><img src="assets/2222222222222222-{qrcode_stem}.svg" alt="QR code: https://x"><img src="assets/3333333333333333-{dot_stem}.svg" alt="diagram (dot)"><img src="assets/4444444444444444-{author_stem}.svg" alt="Logo"><img src="{authored_qrcode_src}" alt="QR code: x">"#
+        );
+
+        let normalized = version_independent_code_image_asset_names(&html);
+
+        assert!(!normalized.contains(&mermaid_stem));
+        assert!(!normalized.contains(&qrcode_stem));
+        assert!(normalized.contains("assets/1111111111111111-mermaid.svg"));
+        assert!(normalized.contains("assets/2222222222222222-qrcode.svg"));
+        assert!(normalized.contains(&format!("assets/3333333333333333-{dot_stem}.svg")));
+        assert!(normalized.contains(&format!("assets/4444444444444444-{author_stem}.svg")));
+        assert!(normalized.contains(authored_qrcode_src));
     }
 
     fn has_arg(args: &[OsString], expected: &str) -> bool {

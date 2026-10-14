@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     borrow::Cow,
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::{self, Write},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -11,6 +12,7 @@ use std::{
     },
 };
 
+use qrcodegen::{DataTooLong, QrCode, QrCodeEcc};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -282,6 +284,7 @@ fn dispatch_embed_target<'a>(
 enum SvgCodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
     BuiltinMermaid,
+    BuiltinQrCode(&'a str),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -374,6 +377,13 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                             SvgCodeImageRenderer::External(command)
                         }
                         CodeImageRenderer::BuiltinMermaid => SvgCodeImageRenderer::BuiltinMermaid,
+                        CodeImageRenderer::BuiltinQrCode => {
+                            SvgCodeImageRenderer::BuiltinQrCode(validate_builtin_qrcode_body(
+                                fragment.line(),
+                                tag,
+                                fragment.code_text(),
+                            )?)
+                        }
                         CodeImageRenderer::BuiltinMath => {
                             return transform_builtin_math_fragment(
                                 fragment.line(),
@@ -466,6 +476,7 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                         SvgCodeImageRenderer::BuiltinMermaid => {
                             builtin_mermaid_cache_key(fragment.code_text())
                         }
+                        SvgCodeImageRenderer::BuiltinQrCode(text) => builtin_qrcode_cache_key(text),
                     };
                     let cache_path = code_images_cache_dir.join(format!("{key}.svg"));
                     fs::create_dir_all(code_images_cache_dir).map_err(|err| {
@@ -503,7 +514,24 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                                         )
                                     },
                                 )?;
-                                (bytes, CodeImageOutputContext::BuiltinMermaid)
+                                (
+                                    bytes,
+                                    CodeImageOutputContext::Builtin(BuiltinSvgRenderer::Mermaid),
+                                )
+                            }
+                            SvgCodeImageRenderer::BuiltinQrCode(text) => {
+                                let bytes = render_builtin_qrcode(text).map_err(|err| {
+                                    code_image_error(
+                                        fragment.line(),
+                                        tag,
+                                        format!("QR code data is too long: {err}"),
+                                        builtin_qrcode_capacity_help(),
+                                    )
+                                })?;
+                                (
+                                    bytes,
+                                    CodeImageOutputContext::Builtin(BuiltinSvgRenderer::QrCode),
+                                )
                             }
                         };
                         validate_svg_output(fragment.line(), tag, &bytes, output_context)?;
@@ -523,11 +551,12 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
                         })?;
                     }
                     let raw = RawImagePath::from_code_images_cache(&key);
-                    return Ok(SourceFragment::image(
-                        fragment.line(),
-                        format!("diagram ({tag})"),
-                        raw,
-                    ));
+                    let alt = match renderer {
+                        SvgCodeImageRenderer::BuiltinQrCode(text) => format!("QR code: {text}"),
+                        SvgCodeImageRenderer::External(_)
+                        | SvgCodeImageRenderer::BuiltinMermaid => format!("diagram ({tag})"),
+                    };
+                    return Ok(SourceFragment::image(fragment.line(), alt, raw));
                 }
             }
         }
@@ -655,6 +684,14 @@ fn builtin_mermaid_override_help() -> &'static str {
     "fix the mermaid source, or set code_images.mermaid to an external command like mmdc -i - -o - -e svg"
 }
 
+fn builtin_qrcode_override_help() -> &'static str {
+    "fix the qrcode block, or set code_images.qrcode to an external command"
+}
+
+fn builtin_qrcode_capacity_help() -> &'static str {
+    "shorten the text, for example by using a shorter URL"
+}
+
 fn builtin_math_override_help() -> &'static str {
     "fix the LaTeX source, or set code_images.math to an external command"
 }
@@ -681,13 +718,81 @@ fn code_image_cache_key(command: &CodeImageCommand, code_text: &str) -> String {
     hex_encode(&hasher.finalize())
 }
 
-fn builtin_mermaid_cache_key(code_text: &str) -> String {
+fn builtin_svg_cache_key(domain: &[u8], body: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"\0peitho-builtin-mermaid\0");
+    hasher.update(domain);
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
     hasher.update(b"\0");
-    hasher.update(code_text.as_bytes());
+    hasher.update(body.as_bytes());
     hex_encode(&hasher.finalize())
+}
+
+fn builtin_mermaid_cache_key(code_text: &str) -> String {
+    builtin_svg_cache_key(b"\0peitho-builtin-mermaid\0", code_text)
+}
+
+fn builtin_qrcode_cache_key(body: &str) -> String {
+    builtin_svg_cache_key(b"\0peitho-builtin-qrcode\0", body)
+}
+
+fn validate_builtin_qrcode_body<'a>(line: usize, tag: &str, body: &'a str) -> Result<&'a str> {
+    let text = body.trim();
+    if text.is_empty() {
+        return Err(code_image_error(
+            line,
+            tag,
+            "qrcode block is empty",
+            builtin_qrcode_override_help(),
+        ));
+    }
+    if text.contains(['\n', '\r']) {
+        return Err(code_image_error(
+            line,
+            tag,
+            "a qrcode block must contain exactly one line",
+            builtin_qrcode_override_help(),
+        ));
+    }
+    Ok(text)
+}
+
+const QRCODE_QUIET_ZONE_MODULES: i32 = 4;
+const QRCODE_MODULE_SCALE: i32 = 8;
+
+fn render_builtin_qrcode(text: &str) -> std::result::Result<Vec<u8>, DataTooLong> {
+    let qr = QrCode::encode_text(text, QrCodeEcc::Medium)?;
+    let total_modules = qr.size() + QRCODE_QUIET_ZONE_MODULES * 2;
+    let pixel_size = total_modules * QRCODE_MODULE_SCALE;
+    let mut path = String::new();
+    for y in 0..qr.size() {
+        let mut x = 0;
+        while x < qr.size() {
+            if !qr.get_module(x, y) {
+                x += 1;
+                continue;
+            }
+            let run_start = x;
+            while x < qr.size() && qr.get_module(x, y) {
+                x += 1;
+            }
+            let run = x - run_start;
+            write!(
+                path,
+                "M{} {}h{run}v1h-{run}z",
+                run_start + QRCODE_QUIET_ZONE_MODULES,
+                y + QRCODE_QUIET_ZONE_MODULES
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+
+    let mut svg = String::new();
+    writeln!(
+        svg,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {total_modules} {total_modules}\" width=\"{pixel_size}\" height=\"{pixel_size}\" shape-rendering=\"crispEdges\"><rect width=\"{total_modules}\" height=\"{total_modules}\" fill=\"#fff\"/><path fill=\"#000\" d=\"{path}\"/></svg>"
+    )
+    .expect("writing to a String cannot fail");
+    Ok(svg.into_bytes())
 }
 
 fn builtin_embed_cache_key(status: &TweetStatusUrl, params: EmbedRenderParams) -> String {
@@ -1304,9 +1409,24 @@ fn write_cache_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[derive(Clone, Copy)]
+enum BuiltinSvgRenderer {
+    Mermaid,
+    QrCode,
+}
+
+impl BuiltinSvgRenderer {
+    fn override_help(self) -> &'static str {
+        match self {
+            Self::Mermaid => builtin_mermaid_override_help(),
+            Self::QrCode => builtin_qrcode_override_help(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum CodeImageOutputContext {
     ExternalCommand,
-    BuiltinMermaid,
+    Builtin(BuiltinSvgRenderer),
 }
 
 fn validate_svg_output(
@@ -1868,11 +1988,11 @@ fn svg_empty_output_error(line: usize, tag: &str, context: CodeImageOutputContex
             "command wrote empty stdout",
             format!("make code_images.{tag} write an SVG document to stdout"),
         ),
-        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+        CodeImageOutputContext::Builtin(builtin) => code_image_error(
             line,
             tag,
             "built-in renderer produced empty SVG output",
-            builtin_mermaid_override_help(),
+            builtin.override_help(),
         ),
     }
 }
@@ -1885,11 +2005,11 @@ fn svg_not_document_error(line: usize, tag: &str, context: CodeImageOutputContex
             "command stdout is not an SVG document",
             format!("make code_images.{tag} write an SVG document to stdout"),
         ),
-        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+        CodeImageOutputContext::Builtin(builtin) => code_image_error(
             line,
             tag,
             "built-in renderer output is not an SVG document",
-            builtin_mermaid_override_help(),
+            builtin.override_help(),
         ),
     }
 }
@@ -1908,11 +2028,11 @@ fn svg_missing_namespace_error(
                 "make code_images.{tag} emit xmlns=\"http://www.w3.org/2000/svg\" on the root <svg>"
             ),
         ),
-        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+        CodeImageOutputContext::Builtin(builtin) => code_image_error(
             line,
             tag,
             "built-in renderer's SVG does not declare the SVG namespace on its root <svg>",
-            builtin_mermaid_override_help(),
+            builtin.override_help(),
         ),
     }
 }
@@ -1927,11 +2047,11 @@ fn svg_intrinsic_size_error(line: usize, tag: &str, context: CodeImageOutputCont
                 "make code_images.{tag} emit an SVG with a viewBox (width/height are derived from it) or absolute width/height attributes"
             ),
         ),
-        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+        CodeImageOutputContext::Builtin(builtin) => code_image_error(
             line,
             tag,
             "built-in renderer's SVG has no usable intrinsic size (no absolute width/height and no viewBox)",
-            builtin_mermaid_override_help(),
+            builtin.override_help(),
         ),
     }
 }
@@ -1944,11 +2064,11 @@ fn svg_root_not_found_error(line: usize, tag: &str, context: CodeImageOutputCont
             "could not locate the root <svg> element in the command's SVG output",
             format!("make code_images.{tag} write a standalone SVG document to stdout"),
         ),
-        CodeImageOutputContext::BuiltinMermaid => code_image_error(
+        CodeImageOutputContext::Builtin(builtin) => code_image_error(
             line,
             tag,
             "could not locate the root <svg> element in the built-in renderer's SVG output",
-            builtin_mermaid_override_help(),
+            builtin.override_help(),
         ),
     }
 }
@@ -1994,15 +2114,17 @@ fn code_image_error(
 mod tests {
     use super::{
         builtin_embed_cache_key, builtin_math_override_help, builtin_mermaid_cache_key,
-        builtin_mermaid_override_help, cache_or_fetch_generic_oembed,
-        cache_or_fetch_generic_thumbnail, cache_or_fetch_oembed, cache_or_render_embed,
-        check_image_svg, code_image_cache_key, dispatch_embed_target, hex_encode, is_svg_output,
-        parse_deck_and_transform, parse_embed_block, render_builtin_math_with,
-        render_builtin_mermaid_with, svg_empty_output_error, svg_intrinsic_size_error,
-        svg_missing_namespace_error, svg_not_document_error, svg_root_not_found_error,
-        transform_code_images, valid_cached_oembed_json, valid_cached_png, CodeImageOutputContext,
-        EmbedDispatch, EmbedMode, EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme,
-        GenericPageUrl, OEmbedFetcher, SvgRunner, TweetStatusUrl, BUILTIN_EMBED_PARAMS,
+        builtin_mermaid_override_help, builtin_qrcode_cache_key, builtin_qrcode_override_help,
+        cache_or_fetch_generic_oembed, cache_or_fetch_generic_thumbnail, cache_or_fetch_oembed,
+        cache_or_render_embed, check_image_svg, code_image_cache_key, dispatch_embed_target,
+        hex_encode, is_svg_output, parse_deck_and_transform, parse_embed_block,
+        render_builtin_math_with, render_builtin_mermaid_with, svg_empty_output_error,
+        svg_intrinsic_size_error, svg_missing_namespace_error, svg_not_document_error,
+        svg_root_not_found_error, transform_code_images, valid_cached_oembed_json,
+        valid_cached_png, BuiltinSvgRenderer, CodeImageOutputContext, EmbedDispatch, EmbedMode,
+        EmbedRenderParams, EmbedRenderer, EmbedTarget, EmbedTheme, GenericPageUrl, OEmbedFetcher,
+        SvgRunner, TweetStatusUrl, BUILTIN_EMBED_PARAMS, QRCODE_MODULE_SCALE,
+        QRCODE_QUIET_ZONE_MODULES,
     };
     use crate::embed_card::{
         build_embed_card_html, builtin_embed_card_cache_key, parse_oembed_document,
@@ -2027,6 +2149,7 @@ mod tests {
         },
         BuildError, Result,
     };
+    use qrcodegen::{QrCode, QrCodeEcc};
     use sha2::{Digest, Sha256};
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -4160,6 +4283,31 @@ mod tests {
         )
     }
 
+    fn deck_with_qrcode(body: &str, code_images: CodeImagesConfig) -> Deck<Parsed> {
+        Deck::parsed(
+            deck_settings_with_code_images(code_images),
+            vec![ParsedSlide {
+                index: 0,
+                source_index: 0,
+                source_span: crate::domain::SourceSpan { start: 0, end: 0 },
+                key: crate::domain::SlideKey::new("intro").unwrap(),
+                key_source: KeySource::Derived { line: Some(1) },
+                layout_request: None,
+                fragments: vec![SourceFragment::code(
+                    7,
+                    Some("qrcode".to_owned()),
+                    body.to_owned(),
+                )],
+                skip: false,
+                step_count: 0,
+                page_number_hidden: false,
+                notes: None,
+                settings_span: None,
+                note_spans: Vec::new(),
+            }],
+        )
+    }
+
     fn deck_with_math(latex: &str, code_images: CodeImagesConfig) -> Deck<Parsed> {
         Deck::parsed(
             deck_settings_with_code_images(code_images),
@@ -4496,6 +4644,29 @@ mod tests {
     }
 
     #[test]
+    fn builtin_qrcode_cache_key_uses_its_own_discriminator_version_and_body() {
+        let body = "https://example.com/slides";
+        let expected_input = format!(
+            "\0peitho-builtin-qrcode\0{}\0{}",
+            env!("CARGO_PKG_VERSION"),
+            body
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(expected_input.as_bytes());
+        let expected = hex_encode(&hasher.finalize());
+
+        assert_eq!(builtin_qrcode_cache_key(body), expected);
+        assert_ne!(
+            builtin_qrcode_cache_key(body),
+            builtin_qrcode_cache_key("https://example.com/other")
+        );
+        assert_ne!(
+            builtin_qrcode_cache_key(body),
+            builtin_mermaid_cache_key(body)
+        );
+    }
+
+    #[test]
     fn builtin_mermaid_uses_valid_cache_hit_without_rewriting() {
         let code = "graph TD\n  A-->B\n";
         let key = builtin_mermaid_cache_key(code);
@@ -4567,6 +4738,219 @@ mod tests {
         assert_eq!(cache_files.len(), 1);
         let bytes = fs::read(cache_files[0].as_ref().unwrap().path()).unwrap();
         assert!(check_image_svg(&bytes).is_ok());
+    }
+
+    #[test]
+    fn transforms_bare_qrcode_to_deterministic_structural_svg_and_descriptive_image() {
+        let raw_body = "\nhttps://x\n\n";
+        let encoded_text = raw_body.trim();
+        let qr = QrCode::encode_text(encoded_text, QrCodeEcc::Medium).unwrap();
+        let total_modules = qr.size() + QRCODE_QUIET_ZONE_MODULES * 2;
+        let pixel_size = total_modules * QRCODE_MODULE_SCALE;
+        let dark_runs = (0..qr.size())
+            .flat_map(|y| (0..qr.size()).map(move |x| (x, y)))
+            .filter(|&(x, y)| qr.get_module(x, y) && (x == 0 || !qr.get_module(x - 1, y)))
+            .count();
+        let temp = tempfile::tempdir().unwrap();
+        let first_cache_dir = temp.path().join("first-cache");
+        let second_cache_dir = temp.path().join("second-cache");
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let first = transform_code_images(
+            deck_with_qrcode(raw_body, CodeImagesConfig::default()),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &first_cache_dir,
+            &embed_cache_dir(&first_cache_dir),
+        )
+        .unwrap();
+        transform_code_images(
+            deck_with_qrcode(raw_body, CodeImagesConfig::default()),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &second_cache_dir,
+            &embed_cache_dir(&second_cache_dir),
+        )
+        .unwrap();
+
+        assert_eq!(runner.calls.get(), 0);
+        let key = builtin_qrcode_cache_key(encoded_text);
+        match first.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::Image { alt, src } => {
+                assert_eq!(alt, "QR code: https://x");
+                assert_eq!(
+                    src.as_str(),
+                    format!("{}/{key}.svg", crate::CODE_IMAGES_CACHE_DIR)
+                );
+            }
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+
+        let first_bytes = fs::read(first_cache_dir.join(format!("{key}.svg"))).unwrap();
+        let second_bytes = fs::read(second_cache_dir.join(format!("{key}.svg"))).unwrap();
+        assert_eq!(first_bytes, second_bytes);
+        assert!(check_image_svg(&first_bytes).is_ok());
+
+        let svg = std::str::from_utf8(&first_bytes).unwrap();
+        assert!(svg.contains(&format!(r#"viewBox="0 0 {total_modules} {total_modules}""#)));
+        assert!(svg.contains(&format!(r#"width="{pixel_size}" height="{pixel_size}""#)));
+        assert!(svg.contains("shape-rendering=\"crispEdges\""));
+        assert!(svg.contains(&format!(
+            r##"<rect width="{total_modules}" height="{total_modules}" fill="#fff"/>"##
+        )));
+        assert!(svg.contains(r##"<path fill="#000" d=""##));
+
+        let path = svg
+            .split_once(r##"<path fill="#000" d=""##)
+            .and_then(|(_, tail)| tail.split_once("\"/>").map(|(path, _)| path))
+            .expect("QR SVG has one black path");
+        let runs = path
+            .split('M')
+            .skip(1)
+            .map(|command| {
+                let command = command.strip_suffix('z').expect("subpath ends in z");
+                let (x, command) = command.split_once(' ').expect("subpath has x and y");
+                let (y, command) = command.split_once('h').expect("subpath has a run");
+                let (run, negative_run) = command
+                    .split_once("v1h-")
+                    .expect("subpath closes its horizontal run");
+                assert_eq!(negative_run, run);
+                (
+                    x.parse::<i32>().unwrap(),
+                    y.parse::<i32>().unwrap(),
+                    run.parse::<i32>().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), dark_runs);
+
+        let mut rendered_modules = vec![vec![false; qr.size() as usize]; qr.size() as usize];
+        for (x, y, run) in runs {
+            let module_x = x - QRCODE_QUIET_ZONE_MODULES;
+            let module_y = y - QRCODE_QUIET_ZONE_MODULES;
+            assert!(module_x >= 0 && module_x + run <= qr.size());
+            assert!(module_y >= 0 && module_y < qr.size());
+            for x in module_x..module_x + run {
+                let module = &mut rendered_modules[module_y as usize][x as usize];
+                assert!(!*module, "rendered QR runs must not overlap");
+                *module = true;
+            }
+        }
+        for y in 0..qr.size() {
+            for x in 0..qr.size() {
+                assert_eq!(
+                    rendered_modules[y as usize][x as usize],
+                    qr.get_module(x, y),
+                    "module mismatch at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_qrcode_rejects_invalid_bodies_before_touching_the_cache() {
+        for (name, body, message) in [
+            ("empty", "", "qrcode block is empty"),
+            ("whitespace", " \t\n", "qrcode block is empty"),
+            (
+                "two-lines",
+                "https://one.example\nhttps://two.example\n",
+                "a qrcode block must contain exactly one line",
+            ),
+            (
+                "two-cr-lines",
+                "https://one.example\rhttps://two.example",
+                "a qrcode block must contain exactly one line",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache_dir = temp.path().join(format!("{name}-cache"));
+            let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+            let err = transform_code_images(
+                deck_with_qrcode(body, CodeImagesConfig::default()),
+                &runner,
+                &PanicEmbedRenderer,
+                &PanicOEmbedFetcher,
+                &cache_dir,
+                &embed_cache_dir(&cache_dir),
+            )
+            .unwrap_err();
+
+            assert_eq!(runner.calls.get(), 0, "case {name}");
+            assert_eq!(err.kind, ErrorKind::Asset, "case {name}");
+            assert_eq!(err.line, Some(7), "case {name}");
+            assert_eq!(
+                err.message,
+                format!("code_images 'qrcode' failed: {message}"),
+                "case {name}"
+            );
+            assert_eq!(err.help, builtin_qrcode_override_help(), "case {name}");
+            assert!(!cache_dir.exists(), "case {name}");
+        }
+    }
+
+    #[test]
+    fn explicit_qrcode_override_receives_multiline_body_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let body = "\nhttps://one.example\nhttps://two.example\n";
+        let runner = RecordingSvgRunner {
+            inputs: RefCell::new(Vec::new()),
+        };
+        let config = CodeImagesConfig {
+            entries: BTreeMap::from([(
+                "qrcode".to_owned(),
+                CodeImageCommand {
+                    argv: vec!["qr-to-svg".to_owned()],
+                },
+            )]),
+            key_line: Some(2),
+        };
+
+        let transformed = transform_code_images(
+            deck_with_qrcode(body, config),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &temp.path().join(crate::CODE_IMAGES_CACHE_DIR),
+            &temp.path().join(crate::EMBEDS_CACHE_DIR),
+        )
+        .unwrap();
+
+        assert_eq!(runner.inputs.borrow().as_slice(), [body]);
+        match transformed.parsed_slides()[0].fragments[0].kind() {
+            FragmentKind::Image { alt, .. } => assert_eq!(alt, "diagram (qrcode)"),
+            other => panic!("expected image fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_qrcode_reports_over_capacity_data_with_line_and_shortening_help() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join(crate::CODE_IMAGES_CACHE_DIR);
+        let runner = FakeRunner::svg(r#"<svg viewBox="0 0 1 1">external</svg>"#);
+
+        let err = transform_code_images(
+            deck_with_qrcode(&"x".repeat(4096), CodeImagesConfig::default()),
+            &runner,
+            &PanicEmbedRenderer,
+            &PanicOEmbedFetcher,
+            &cache_dir,
+            &embed_cache_dir(&cache_dir),
+        )
+        .unwrap_err();
+
+        assert_eq!(runner.calls.get(), 0);
+        assert_eq!(err.kind, ErrorKind::Asset);
+        assert_eq!(err.line, Some(7));
+        assert!(err.message.contains("code_images 'qrcode' failed"));
+        assert!(err.message.contains("too long"));
+        assert_eq!(
+            err.help,
+            "shorten the text, for example by using a shorter URL"
+        );
     }
 
     #[test]
@@ -4798,43 +5182,61 @@ mod tests {
 
     #[test]
     fn builtin_svg_output_errors_use_builtin_renderer_context() {
-        let empty = svg_empty_output_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        let mermaid = CodeImageOutputContext::Builtin(BuiltinSvgRenderer::Mermaid);
+        let empty = svg_empty_output_error(7, "mermaid", mermaid);
         assert_eq!(
             empty.message,
             "code_images 'mermaid' failed: built-in renderer produced empty SVG output"
         );
         assert_eq!(empty.help, builtin_mermaid_override_help());
 
-        let not_svg = svg_not_document_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        let not_svg = svg_not_document_error(7, "mermaid", mermaid);
         assert_eq!(
             not_svg.message,
             "code_images 'mermaid' failed: built-in renderer output is not an SVG document"
         );
         assert_eq!(not_svg.help, builtin_mermaid_override_help());
 
-        let no_root =
-            svg_root_not_found_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        let no_root = svg_root_not_found_error(7, "mermaid", mermaid);
         assert_eq!(
             no_root.message,
             "code_images 'mermaid' failed: could not locate the root <svg> element in the built-in renderer's SVG output"
         );
         assert_eq!(no_root.help, builtin_mermaid_override_help());
 
-        let missing_namespace =
-            svg_missing_namespace_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        let missing_namespace = svg_missing_namespace_error(7, "mermaid", mermaid);
         assert_eq!(
             missing_namespace.message,
             "code_images 'mermaid' failed: built-in renderer's SVG does not declare the SVG namespace on its root <svg>"
         );
         assert_eq!(missing_namespace.help, builtin_mermaid_override_help());
 
-        let no_size =
-            svg_intrinsic_size_error(7, "mermaid", CodeImageOutputContext::BuiltinMermaid);
+        let no_size = svg_intrinsic_size_error(7, "mermaid", mermaid);
         assert_eq!(
             no_size.message,
             "code_images 'mermaid' failed: built-in renderer's SVG has no usable intrinsic size (no absolute width/height and no viewBox)"
         );
         assert_eq!(no_size.help, builtin_mermaid_override_help());
+    }
+
+    #[test]
+    fn builtin_qrcode_svg_output_errors_use_qrcode_context() {
+        let qrcode = CodeImageOutputContext::Builtin(BuiltinSvgRenderer::QrCode);
+        let errors = [
+            svg_empty_output_error(7, "qrcode", qrcode),
+            svg_not_document_error(7, "qrcode", qrcode),
+            svg_root_not_found_error(7, "qrcode", qrcode),
+            svg_missing_namespace_error(7, "qrcode", qrcode),
+            svg_intrinsic_size_error(7, "qrcode", qrcode),
+        ];
+
+        for err in errors {
+            assert_eq!(err.kind, ErrorKind::Asset);
+            assert_eq!(err.line, Some(7));
+            assert!(err.message.starts_with("code_images 'qrcode' failed:"));
+            assert!(err.message.contains("built-in renderer"));
+            assert_eq!(err.help, builtin_qrcode_override_help());
+        }
     }
 
     #[test]

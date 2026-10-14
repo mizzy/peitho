@@ -193,6 +193,7 @@ pub enum CodeImageRenderer<'a> {
     External(&'a CodeImageCommand),
     ExternalEmbed(&'a CodeImageCommand),
     BuiltinMermaid,
+    BuiltinQrCode,
     BuiltinMath,
     BuiltinEmbed,
 }
@@ -219,6 +220,7 @@ impl CodeImagesConfig {
         }
         match tag {
             "mermaid" => Some(CodeImageRenderer::BuiltinMermaid),
+            "qrcode" => Some(CodeImageRenderer::BuiltinQrCode),
             "math" => Some(CodeImageRenderer::BuiltinMath),
             "embed" => Some(CodeImageRenderer::BuiltinEmbed),
             _ => None,
@@ -1417,6 +1419,9 @@ mod tests {
         let mermaid_command = CodeImageCommand {
             argv: vec!["mmdc".to_owned(), "-i".to_owned(), "-".to_owned()],
         };
+        let qrcode_command = CodeImageCommand {
+            argv: vec!["qrencode".to_owned(), "-t".to_owned(), "SVG".to_owned()],
+        };
         let math_command = CodeImageCommand {
             argv: vec!["math-to-svg".to_owned()],
         };
@@ -1426,6 +1431,7 @@ mod tests {
         let config = CodeImagesConfig {
             entries: BTreeMap::from([
                 ("mermaid".to_owned(), mermaid_command.clone()),
+                ("qrcode".to_owned(), qrcode_command.clone()),
                 ("math".to_owned(), math_command.clone()),
                 ("dot".to_owned(), dot_command.clone()),
             ]),
@@ -1446,8 +1452,16 @@ mod tests {
             Some(CodeImageRenderer::External(&math_command))
         );
         assert_eq!(
+            config.renderer_for("qrcode"),
+            Some(CodeImageRenderer::External(&qrcode_command))
+        );
+        assert_eq!(
             empty.renderer_for("mermaid"),
             Some(CodeImageRenderer::BuiltinMermaid)
+        );
+        assert_eq!(
+            empty.renderer_for("qrcode"),
+            Some(CodeImageRenderer::BuiltinQrCode)
         );
         assert_eq!(
             empty.renderer_for("math"),

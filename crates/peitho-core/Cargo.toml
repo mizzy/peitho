@@ -13,6 +13,7 @@ katex-rs.workspace = true
 lol_html.workspace = true
 merman.workspace = true
 pulldown-cmark.workspace = true
+qrcodegen.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
 serde_json.workspace = true

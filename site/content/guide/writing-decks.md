@@ -66,6 +66,21 @@ body slots. No client-side math JavaScript or `code_images:` entry is needed.
 Fenced `mermaid` source becomes an SVG image during the build with Peitho's
 built-in Mermaid renderer.
 
+A fenced `qrcode` block becomes a QR code SVG image. Surrounding whitespace is
+trimmed, and the remaining text must be one non-empty line; multiple lines are
+a build error, never joined. The code uses at least Medium error correction, black
+modules, a white background, and a four-module quiet zone. The colors are fixed
+because page CSS cannot reach inside an SVG loaded through `<img>`; for other
+rendering, set `code_images.qrcode` to an external command (it receives the
+body verbatim, like any override). Like Mermaid, the QR code needs an
+`accepts="image"` slot, and fence options are not supported.
+
+````markdown
+```qrcode
+https://peitho.gosu.ke/
+```
+````
+
 An `embed` fence containing one X status URL defaults to an official-widget PNG
 screenshot; `mode=card` on the fence opts into selectable, themeable HTML
 without Chrome:
@@ -103,11 +118,11 @@ WebP, or GIF thumbnails are stored in `.peitho/embeds-cache/`. Complete hits
 work offline, while a JSON hit with a missing thumbnail fetches only the image.
 Failure help identifies the exact cache paths to delete for refresh.
 
-For other diagram tags, or to override Mermaid, math, or embed with an external
-SVG renderer, add `code_images:` frontmatter. Each entry uses the fence language
-tag as the key and a command string as the value. Peitho sends the fenced source
-to stdin and reads SVG from stdout. An `embed` override rejects `mode=` fence
-options; with a bare fence it receives the complete block body verbatim.
+For other diagram tags, or to override Mermaid, QR codes, math, or embed with an
+external SVG renderer, add `code_images:` frontmatter. Each entry uses the fence
+language tag as the key and a command string as the value. Peitho sends the
+complete fenced source verbatim to stdin, including its trailing newline, and
+reads SVG from stdout. An `embed` override rejects `mode=` fence options.
 
 ```yaml
 code_images:

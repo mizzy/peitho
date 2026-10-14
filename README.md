@@ -175,7 +175,7 @@ Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. C
 
 ### Diagrams as code
 
-Fenced `mermaid` blocks render to SVG at build time with Peitho's built-in Mermaid renderer. The generated SVG is cached and then routed as a normal image, so the slide still needs a layout with an `accepts="image"` slot.
+Fenced `mermaid` blocks render to SVG at build time with Peitho's built-in Mermaid renderer, and a one-line `qrcode` block (a URL or other text) renders to a black-on-white QR code SVG. Both generated SVGs are cached and routed as normal images, so the slide still needs a layout with an `accepts="image"` slot.
 
 ### Math
 
@@ -270,7 +270,7 @@ All deck-intrinsic settings live in YAML frontmatter at the top of the deck. Sup
 | `css` | Theme CSS file or directory | Deck-relative path, e.g. `./css` |
 | `syntaxes` | Custom syntect syntaxes | Deck-relative path, e.g. `./syntaxes` |
 | `fonts` | Font files copied into the output | Deck-relative path, e.g. `./fonts` |
-| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid, math, and embed are built in unless overridden) |
+| `code_images` | External renderer overrides for fenced-code-to-SVG conversion | Mapping of `tag: command-string` (nested; Mermaid, QR codes, math, and embed are built in unless overridden) |
 
 Absent asset keys fall back to a deck-adjacent directory of the same name (zero-config), then to the binary's built-in default (fonts simply add nothing when absent). A key that points at a non-existent path is a build error with the frontmatter line number. Asset values may be a file or a directory: `layouts`/`css`/`syntaxes` read `*.html` / `*.css` / `*.sublime-syntax` in filename order, while `fonts` copies files verbatim without an extension filter, so `.woff2`, `.ttf`, and `@font-face` CSS files can sit side by side.
 
@@ -449,7 +449,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/two-column/` | Explicit slot syntax demo | Two-column layout | `::: {slot=left}` / `::: {slot=right}` route content where convention mapping can't decide between two `accepts="blocks"` slots |
 | `examples/layout-pin/` | Explicit layout pin demo | Two looks: light `statement`, dark `spotlight` | Both layouts declare the same slot contract, so structural dispatch can never decide — every slide carries a `{"layout":"…"}` pin |
 | `examples/image-showcase/` | Markdown image slide | Framed visual layout | `accepts="image"` receives `![alt](img/arch.png)` and CSS styles `.image-showcase img` |
-| `examples/code-images/` | Diagram-as-code: fenced mermaid / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid uses the built-in renderer; `code_images:` declares the Graphviz command and any explicit overrides |
+| `examples/code-images/` | Diagram-as-code: fenced mermaid / qrcode / dot blocks become SVG images at build time | Two-tone: dark source panel next to light rendered pane | Mermaid and QR codes use built-in renderers; `code_images:` declares the Graphviz command and any explicit overrides |
 | `examples/math/` | Build-time LaTeX equations | Default theme | Fenced `math` blocks render as KaTeX HTML+MathML body content with embedded KaTeX assets |
 | `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/crn.sublime-syntax` turns an unknown-language build error into build-time Carina highlighting |
 | `examples/custom-fonts/` | Bundled webfonts demo | Playfair Display + JetBrains Mono, all local `.woff2` | Zero-config `fonts/` auto-detect; files (including licenses) are copied verbatim into every output |
