@@ -1816,6 +1816,7 @@ dependencies = [
  "lol_html",
  "merman",
  "pulldown-cmark 0.13.4",
+ "qrcodegen",
  "serde",
  "serde_json",
  "serde_norway",

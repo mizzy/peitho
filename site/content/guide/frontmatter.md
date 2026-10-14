@@ -92,9 +92,12 @@ Peitho places KaTeX CSS after the theme's leading `@charset`, `@import`, and
 statement-form `@layer` rules, but before the rest of the theme, and writes
 fonts under `katex-fonts/`.
 
-Fenced `mermaid` blocks are rendered by Peitho's built-in Mermaid renderer and
-then treated as images. An `embed` block containing one X status URL defaults
-to a cached PNG screenshot. A fence option selects X card mode:
+Fenced `mermaid` and `qrcode` blocks are rendered by Peitho's built-in
+renderers and then treated as images (see
+[Writing decks](@/guide/writing-decks.md) for the `qrcode` body rules).
+
+An `embed` block containing one X status URL defaults to a cached PNG
+screenshot. A fence option selects X card mode:
 
 ````markdown
 ```embed mode=card
@@ -128,7 +131,7 @@ cached. Raw JSON and validated image bytes are cached separately under
 name the exact files to delete to refresh metadata or the complete card.
 
 Use `code_images` for other diagram tags, or when a deck needs to override the
-built-in Mermaid, math, or embed renderer with an external command.
+built-in Mermaid, QR code, math, or embed renderer with an external command.
 
 Each `code_images` entry maps a language tag to a command string. Peitho
 shell-splits the string into argv and executes the program directly; it does
@@ -151,27 +154,26 @@ graph TD
 ```
 ````
 
-The command receives the code block text on stdin and must write an SVG document
-to stdout. The generated SVG is cached under `.peitho/code-images-cache/` and
-then flows through the normal image resolver, so layouts should provide an
-`accepts="image"` slot. This also applies to `code_images.math` overrides; the
-built-in math renderer is the body-inline HTML path. An explicit
-`code_images.embed` override also uses the external SVG/image path. It rejects
-`mode=` fence options; with a bare `embed` fence it receives the entire body
-verbatim on stdin.
+The command receives the code block text verbatim on stdin, including its
+trailing newline, and must write an SVG document to stdout. The generated SVG is
+cached under `.peitho/code-images-cache/` and then flows through the normal image
+resolver, so layouts should provide an `accepts="image"` slot. This also applies
+to `code_images.math` overrides; the built-in math renderer is the body-inline
+HTML path. An explicit `code_images.embed` override also uses the external
+SVG/image path and rejects `mode=` fence options.
 
-Bare boolean values such as `mermaid: false` and `math: true` are reserved for
-possible future built-in opt-out syntax and are rejected with a line-numbered
-error. Use a command string when you want an override.
+Bare boolean values such as `mermaid: false`, `qrcode: false`, and `math: true`
+are reserved for possible future built-in opt-out syntax and are rejected with
+a line-numbered error. Use a command string when you want an override.
 
 Preview watches the deck, author-referenced images, layout, CSS, syntax, and
 font roots. It does not watch files read by the command itself, such as Mermaid
 theme files or config JSON. Restart preview or touch the deck after changing
 those command inputs.
 
-See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid
-and Graphviz example deck, [Math](@/examples/math.md) for built-in math, and
-[Tweet Embed](@/examples/tweet-embed.md) for X and generic embeds.
+See [Code Images](@/examples/code-images.md) for a complete built-in Mermaid,
+QR code, and Graphviz example deck, [Math](@/examples/math.md) for built-in
+math, and [Tweet Embed](@/examples/tweet-embed.md) for X and generic embeds.
 
 ## Asset resolution order
 
