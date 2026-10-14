@@ -419,7 +419,8 @@ never revealed step-by-step, the entry stays visible from the start.
 ## Page settings comments
 
 JSON HTML comments carry page settings. The supported settings are `key`,
-`layout`, `section`, `time`, `draft`, `skip`, `page_number`, and `include`.
+`layout`, `section`, `time`, `draft`, `skip`, `present_only`, `page_number`,
+and `include`.
 
 ```markdown
 <!-- {"key":"checks","layout":"agenda","section":"Contracts","time":"3m"} -->
@@ -440,6 +441,20 @@ navigation, and overview grid selection can still land on skipped slides.
 
 Draft slides cannot also be skipped or declare section markers. If every slide
 is marked draft, the build fails instead of producing an empty deck.
+
+`present_only:true` shows a slide when you present but keeps it out of
+everything you share: `peitho present` and `peitho preview` include it, while
+`peitho build` (and therefore `dist/` and `peitho publish`), `peitho export pdf`,
+and `peitho lint` drop it the same way they drop a draft slide, so its content,
+images, and notes never reach those outputs. Use it for a live demo QR code, a
+temporary URL, or anything that only belongs in the room. In present it counts
+toward the surrounding section's time; published page numbers skip it. It can be
+combined with `skip:true` for a backup slide you reach only by direct
+navigation. A present-only slide cannot be a draft or declare a section marker,
+and if every non-draft slide is present-only, `peitho build` fails rather than
+publishing an empty deck. Keyed CSS rules for a present-only slide stay in the
+built stylesheet (only the slide is removed), so do not put content that must
+stay private in CSS.
 
 `page_number:false` hides the page number on one slide when the deck sets
 [`page_numbers`](@/guide/frontmatter.md). Only `false` is accepted; `true` is a

@@ -1096,6 +1096,7 @@ fn cmd_layouts(input: PathBuf, explain: Option<String>, json: bool) -> miette::R
         &loaded.source,
         loaded.frontmatter.clone(),
         &highlighter,
+        peitho_core::Audience::Live,
         &CliSvgRunner::for_deck(&input),
         &CliEmbedRenderer,
         &CliOEmbedFetcher,
@@ -1841,25 +1842,54 @@ fn resolve_assets_and_highlighter(
     Ok((assets, highlighter))
 }
 
+/// What a build produces. Closed so a public build can never carry preview edit
+/// annotations, and every build names whether `present_only` slides exist in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildTarget {
+    /// `dist/`, PDF export, and lint: shareable output without `present_only` slides.
+    Public,
+    /// `peitho present`: every slide, plain HTML.
+    Present,
+    /// `peitho preview`: every slide, with edit annotations.
+    Preview,
+}
+
+impl BuildTarget {
+    fn audience(self) -> peitho_core::Audience {
+        match self {
+            Self::Public => peitho_core::Audience::Public,
+            Self::Present | Self::Preview => peitho_core::Audience::Live,
+        }
+    }
+
+    fn edit_annotations(self) -> peitho_core::EditAnnotations {
+        match self {
+            Self::Public | Self::Present => peitho_core::EditAnnotations::Off,
+            Self::Preview => peitho_core::EditAnnotations::On,
+        }
+    }
+}
+
 fn build_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
-    build_cli_artifacts(input, peitho_core::EditAnnotations::Off)
+    build_cli_artifacts(input, BuildTarget::Public)
+}
+
+fn build_present_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
+    build_cli_artifacts(input, BuildTarget::Present)
 }
 
 fn build_preview_artifacts(input: &Path) -> miette::Result<BuildArtifacts> {
-    build_cli_artifacts(input, peitho_core::EditAnnotations::On)
+    build_cli_artifacts(input, BuildTarget::Preview)
 }
 
-fn build_cli_artifacts(
-    input: &Path,
-    edit_annotations: peitho_core::EditAnnotations,
-) -> miette::Result<BuildArtifacts> {
+fn build_cli_artifacts(input: &Path, target: BuildTarget) -> miette::Result<BuildArtifacts> {
     let svg_runner = CliSvgRunner::for_deck(input);
     build_artifacts_with_services(
         input,
         &svg_runner,
         &CliEmbedRenderer,
         &CliOEmbedFetcher,
-        edit_annotations,
+        target,
     )
 }
 
@@ -1868,7 +1898,7 @@ fn build_artifacts_with_services<S, E, F>(
     svg_runner: &S,
     embed_renderer: &E,
     oembed_fetcher: &F,
-    edit_annotations: peitho_core::EditAnnotations,
+    target: BuildTarget,
 ) -> miette::Result<BuildArtifacts>
 where
     S: peitho_core::code_images::SvgRunner,
@@ -1883,6 +1913,7 @@ where
         &loaded.source,
         loaded.frontmatter.clone(),
         &highlighter,
+        target.audience(),
         svg_runner,
         embed_renderer,
         oembed_fetcher,
@@ -1919,7 +1950,7 @@ where
         resolved,
         &highlighter,
         theme_css,
-        edit_annotations,
+        target.edit_annotations(),
         &layout_assets,
     ))?;
 
@@ -4520,7 +4551,7 @@ fn present(options: PresentOptions) -> miette::Result<()> {
     }
     fs::create_dir_all(&cache).into_diagnostic()?;
 
-    let artifacts = build_artifacts(&options.input)?;
+    let artifacts = build_present_artifacts(&options.input)?;
     if options.rehearsal {
         validate_rehearsal_sections(&artifacts)?;
     }
@@ -6320,9 +6351,7 @@ contexts:
         assert_eq!(capture_input_snapshot(&targets), missing);
     }
 
-    fn render_example_slides(
-        edit_annotations: peitho_core::EditAnnotations,
-    ) -> Vec<(PathBuf, String)> {
+    fn render_example_slides(target: BuildTarget) -> Vec<(PathBuf, String)> {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let examples_root = repository_root.join("examples");
         let isolated_root = tempfile::tempdir().unwrap();
@@ -6351,7 +6380,7 @@ contexts:
                 &DeterministicSvgRunner,
                 &DeterministicEmbedRenderer,
                 &DeterministicOEmbedFetcher,
-                edit_annotations,
+                target,
             )
             .unwrap_or_else(|err| panic!("failed to build {}: {err:?}", deck.display()));
             for slide in artifacts.rendered.slides() {
@@ -6390,7 +6419,7 @@ contexts:
 
     #[test]
     fn edit_annotations_off_example_slide_hashes() {
-        let slides = render_example_slides(peitho_core::EditAnnotations::Off);
+        let slides = render_example_slides(BuildTarget::Public);
 
         let mut digest_index = String::new();
         for (path, html) in slides {
@@ -6407,8 +6436,8 @@ contexts:
 
     #[test]
     fn edit_annotations_on_minus_attributes_equals_off_for_examples() {
-        let off = render_example_slides(peitho_core::EditAnnotations::Off);
-        let on = render_example_slides(peitho_core::EditAnnotations::On);
+        let off = render_example_slides(BuildTarget::Present);
+        let on = render_example_slides(BuildTarget::Preview);
 
         assert_eq!(on.len(), off.len());
         for ((on_path, on_html), (off_path, off_html)) in on.iter().zip(&off) {
@@ -6435,6 +6464,45 @@ contexts:
             .rendered
             .css()
             .contains("width: var(--peitho-canvas-width, 1280px);"));
+    }
+
+    #[test]
+    fn public_build_omits_present_only_slides_that_present_and_preview_keep() {
+        let fixture = WatchFixture::new(
+            "# Intro\n\n---\n\
+             <!-- {\"key\":\"demo\",\"present_only\":true} -->\n# Live Demo\n\nSecret URL\n\n---\n\
+             # Outro\n",
+        );
+        fs::write(
+            fixture.options.input.with_file_name("css").join("demo.css"),
+            "[data-slide-key=\"demo\"] .slot-title { color: red; }\n",
+        )
+        .unwrap();
+        let keys = |artifacts: &BuildArtifacts| {
+            artifacts
+                .rendered
+                .slides()
+                .iter()
+                .map(|slide| slide.key().as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let public = build_artifacts(&fixture.options.input).unwrap();
+        assert_eq!(public.slide_count, 2);
+        assert_eq!(keys(&public), vec!["intro", "outro"]);
+        assert!(public
+            .rendered
+            .slides()
+            .iter()
+            .all(|slide| !slide.html().contains("Secret URL")));
+        assert!(!public.manifest_json.contains("demo"));
+
+        for live in [
+            build_present_artifacts(&fixture.options.input).unwrap(),
+            build_preview_artifacts(&fixture.options.input).unwrap(),
+        ] {
+            assert_eq!(keys(&live), vec!["intro", "demo", "outro"]);
+        }
     }
 
     #[test]
@@ -12649,7 +12717,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             &DeterministicSvgRunner,
             &DeterministicEmbedRenderer,
             &DeterministicOEmbedFetcher,
-            peitho_core::EditAnnotations::Off,
+            BuildTarget::Public,
         )
         .unwrap();
         let on = build_artifacts_with_services(
@@ -12657,7 +12725,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
             &DeterministicSvgRunner,
             &DeterministicEmbedRenderer,
             &DeterministicOEmbedFetcher,
-            peitho_core::EditAnnotations::On,
+            BuildTarget::Preview,
         )
         .unwrap();
 

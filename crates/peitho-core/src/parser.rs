@@ -34,7 +34,7 @@ use crate::{
 const NOTE_SEPARATOR: &str = "\n\n";
 
 /// Page settings comment, deck-style:
-/// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true,"page_number":false} -->`.
+/// `<!-- {"key":"...","layout":"...","section":"...","time":"...","draft":true,"skip":true,"present_only":true,"page_number":false} -->`.
 /// Unknown fields are rejected so a typo never silently drops a setting.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +45,7 @@ struct PageComment {
     time: Option<PlannedTime>,
     draft: Option<bool>,
     skip: Option<bool>,
+    present_only: Option<bool>,
     page_number: Option<bool>,
 }
 
@@ -200,6 +201,7 @@ struct PageSettings {
     section: Option<PageSectionMarker>,
     draft: Option<bool>,
     skip: Option<bool>,
+    present_only: Option<bool>,
     page_number_hidden: Option<bool>,
 }
 
@@ -214,6 +216,7 @@ struct PendingSlide {
     slide: ParsedSlide,
     section: Option<PageSectionMarker>,
     draft: Option<PageFlag>,
+    present_only: Option<PageFlag>,
     page_number_hidden: Option<PageFlag>,
 }
 
@@ -626,10 +629,30 @@ pub fn referenced_image_paths(
     Ok(paths)
 }
 
+/// Who a build is for, which decides whether `present_only` slides exist in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// `peitho present` and `peitho preview`: every non-draft slide.
+    Live,
+    /// `dist/`, publish, PDF export, and lint: `present_only` slides are dropped
+    /// at parse end, so no later phase can observe them.
+    Public,
+}
+
+/// Parses every non-draft slide, as the [`Audience::Live`] build sees the deck.
 pub(crate) fn parse_markdown(
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
+) -> Result<Deck<Parsed>> {
+    parse_markdown_for(source, frontmatter, highlighter, Audience::Live)
+}
+
+pub(crate) fn parse_markdown_for(
+    source: &str,
+    frontmatter: ParsedFrontmatter,
+    highlighter: &Highlighter,
+    audience: Audience,
 ) -> Result<Deck<Parsed>> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let ParsedFrontmatter {
@@ -689,6 +712,32 @@ pub(crate) fn parse_markdown(
             "remove draft from at least one slide so the deck has content to build",
         ));
     }
+    let is_present_only = |pending_slide: &PendingSlide| {
+        pending_slide
+            .present_only
+            .as_ref()
+            .is_some_and(|flag| flag.enabled)
+    };
+    let present_only_keys = survivors
+        .iter()
+        .filter(|pending_slide| is_present_only(pending_slide))
+        .map(|pending_slide| pending_slide.slide.key.clone())
+        .collect();
+    if audience == Audience::Public {
+        let first_present_only_line = survivors
+            .iter()
+            .find_map(|pending_slide| pending_slide.present_only.as_ref())
+            .map(|flag| flag.line);
+        survivors.retain(|pending_slide| !is_present_only(pending_slide));
+        if survivors.is_empty() {
+            return Err(BuildError::new(
+                ErrorKind::Parse,
+                first_present_only_line,
+                "every published slide in the deck is marked present_only",
+                "remove present_only from at least one slide so the published deck has content",
+            ));
+        }
+    }
     for (index, pending_slide) in survivors.iter_mut().enumerate() {
         // Final index is position among surviving slides; source_index keeps
         // the original parse position for error attribution.
@@ -697,7 +746,7 @@ pub(crate) fn parse_markdown(
 
     let resolved_sections = resolve_deck_sections(&survivors)?;
     let settings = finalize_section_settings(
-        settings.with_override_key_hints(explicit_keys, drafted_keys),
+        settings.with_override_key_hints(explicit_keys, drafted_keys, present_only_keys),
         resolved_sections,
     )?;
     let slides = survivors
@@ -2221,6 +2270,7 @@ fn parse_slide(
     let mut section_marker: Option<PageSectionMarker> = None;
     let mut draft_flag: Option<PageFlag> = None;
     let mut skip_flag: Option<bool> = None;
+    let mut present_only_flag: Option<PageFlag> = None;
     let mut page_number_hidden_flag: Option<PageFlag> = None;
     let mut settings_span: Option<SourceSpan> = None;
     let mut fragments = Vec::new();
@@ -2495,6 +2545,7 @@ fn parse_slide(
                         &mut section_marker,
                         &mut draft_flag,
                         &mut skip_flag,
+                        &mut present_only_flag,
                         &mut page_number_hidden_flag,
                         &mut settings_span,
                         SourceSpan {
@@ -2951,6 +3002,7 @@ fn parse_slide(
                         &mut section_marker,
                         &mut draft_flag,
                         &mut skip_flag,
+                        &mut present_only_flag,
                         &mut page_number_hidden_flag,
                         &mut settings_span,
                         span,
@@ -3074,6 +3126,7 @@ fn parse_slide(
         },
         section: section_marker,
         draft: draft_flag,
+        present_only: present_only_flag,
         page_number_hidden: page_number_hidden_flag,
     })
 }
@@ -3288,6 +3341,7 @@ fn process_html_chunk(
     section_marker: &mut Option<PageSectionMarker>,
     draft_flag: &mut Option<PageFlag>,
     skip_flag: &mut Option<bool>,
+    present_only_flag: &mut Option<PageFlag>,
     page_number_hidden_flag: &mut Option<PageFlag>,
     settings_span: &mut Option<SourceSpan>,
     span: SourceSpan,
@@ -3342,6 +3396,12 @@ fn process_html_chunk(
         }
         if let Some(skip) = settings.skip {
             *skip_flag = Some(skip);
+        }
+        if let Some(present_only) = settings.present_only {
+            *present_only_flag = Some(PageFlag {
+                enabled: present_only,
+                line,
+            });
         }
         if let Some(hidden) = settings.page_number_hidden {
             *page_number_hidden_flag = Some(PageFlag {
@@ -3524,7 +3584,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             ErrorKind::Parse,
             Some(line),
             format!("invalid page settings comment: {err}"),
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"page_number":false} --> (key/layout/draft/skip/page_number optional; section and time must appear together; no other fields)"#,
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"present_only":true,"page_number":false} --> (key/layout/draft/skip/present_only/page_number optional; section and time must appear together; no other fields)"#,
         )
     })?;
     if parsed.key.is_none()
@@ -3533,6 +3593,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         && parsed.time.is_none()
         && parsed.draft.is_none()
         && parsed.skip.is_none()
+        && parsed.present_only.is_none()
         && parsed.page_number.is_none()
     {
         return Err(BuildError::new(
@@ -3606,6 +3667,22 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
             "move the section marker to the next non-draft slide",
         ));
     }
+    if parsed.draft == Some(true) && parsed.present_only == Some(true) {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "slide cannot be both draft and present_only",
+            r#"remove "present_only":true because draft slides are excluded from every output"#,
+        ));
+    }
+    if parsed.present_only == Some(true) && section.is_some() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            "present_only slide cannot declare a section marker",
+            "move the section marker to a slide that is also published",
+        ));
+    }
     let key = parsed
         .key
         .map(|key| {
@@ -3625,6 +3702,7 @@ fn parse_page_comment(raw: &str, line: usize) -> Result<Option<PageSettings>> {
         section,
         draft: parsed.draft,
         skip: parsed.skip,
+        present_only: parsed.present_only,
         page_number_hidden: match parsed.page_number {
             Some(false) => Some(true),
             Some(true) => unreachable!("page_number:true is rejected above"),
@@ -7602,7 +7680,7 @@ After list
         assert!(err.to_string().contains("invalid page settings comment"));
         assert_eq!(
             err.help,
-            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"page_number":false} --> (key/layout/draft/skip/page_number optional; section and time must appear together; no other fields)"#
+            r#"use <!-- {"key":"arch-1","layout":"cover","section":"Setup","time":"1m","draft":true,"skip":true,"present_only":true,"page_number":false} --> (key/layout/draft/skip/present_only/page_number optional; section and time must appear together; no other fields)"#
         );
     }
 
@@ -7647,6 +7725,129 @@ After list
         assert_eq!(slides[0].key.as_str(), "intro");
         assert_eq!(slides[1].index, 1);
         assert_eq!(slides[1].key.as_str(), "live");
+    }
+
+    fn parse_for(source: &str, audience: Audience) -> Result<Deck<Parsed>> {
+        let frontmatter = parse_frontmatter(source)?;
+        super::parse_markdown_for(
+            source,
+            frontmatter,
+            &crate::highlight::Highlighter::defaults(),
+            audience,
+        )
+    }
+
+    const PRESENT_ONLY_DECK: &str = "# Intro\n\n---\n\
+         <!-- {\"present_only\":true} -->\n# Demo QR\n\n<!-- live-only note -->\n\n---\n\
+         # Outro";
+
+    #[test]
+    fn public_audience_drops_present_only_slides_at_parse_end() {
+        let deck = parse_for(PRESENT_ONLY_DECK, Audience::Public).unwrap();
+        let slides = deck.parsed_slides();
+
+        assert_eq!(
+            slides
+                .iter()
+                .map(|slide| (slide.index, slide.source_index, slide.key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, "intro"), (1, 2, "outro")]
+        );
+        assert!(slides.iter().all(|slide| slide.notes.is_none()));
+        assert_eq!(
+            deck.settings()
+                .present_only_keys()
+                .iter()
+                .map(SlideKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["demo-qr"]
+        );
+    }
+
+    #[test]
+    fn live_audience_keeps_present_only_slides() {
+        let deck = parse_for(PRESENT_ONLY_DECK, Audience::Live).unwrap();
+
+        assert_eq!(
+            deck.parsed_slides()
+                .iter()
+                .map(|slide| slide.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["intro", "demo-qr", "outro"]
+        );
+        assert_eq!(
+            deck.parsed_slides()[1].notes.as_deref(),
+            Some("live-only note")
+        );
+    }
+
+    #[test]
+    fn present_only_slide_counts_toward_its_section_only_when_live() {
+        let source = "<!-- {\"section\":\"Talk\",\"time\":\"5m\"} -->\n# Intro\n\n---\n\
+             <!-- {\"present_only\":true} -->\n# Demo\n\n---\n\
+             <!-- {\"section\":\"Q&A\",\"time\":\"1m\"} -->\n# Questions";
+        let ranges = |audience| {
+            parse_for(source, audience)
+                .unwrap()
+                .settings()
+                .sections()
+                .iter()
+                .map(|section| (section.start(), section.end()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ranges(Audience::Live), vec![(0, 1), (2, 2)]);
+        assert_eq!(ranges(Audience::Public), vec![(0, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn rejects_public_deck_where_every_slide_is_present_only() {
+        let source = "<!-- {\"present_only\":true} -->\n# A\n\n---\n\
+             <!-- {\"present_only\":true} -->\n# B";
+
+        assert!(parse_for(source, Audience::Live).is_ok());
+        let err = parse_for(source, Audience::Public).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(1));
+        assert_eq!(
+            err.message,
+            "every published slide in the deck is marked present_only"
+        );
+    }
+
+    #[test]
+    fn false_present_only_keeps_slide_in_public_deck() {
+        let deck = parse_for(
+            "<!-- {\"present_only\":false} -->\n# Kept",
+            Audience::Public,
+        )
+        .unwrap();
+
+        assert_eq!(deck.parsed_slides().len(), 1);
+    }
+
+    #[test]
+    fn rejects_present_only_draft_slide() {
+        let err =
+            parse_page_comment(r#"<!-- {"draft":true,"present_only":true} -->"#, 3).unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "slide cannot be both draft and present_only");
+    }
+
+    #[test]
+    fn rejects_present_only_section_marker() {
+        let err = parse_page_comment(
+            r#"<!-- {"present_only":true,"section":"Setup","time":"1m"} -->"#,
+            3,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(
+            err.message,
+            "present_only slide cannot declare a section marker"
+        );
     }
 
     #[test]
