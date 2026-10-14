@@ -1088,6 +1088,7 @@ mod tests {
             markdown,
             frontmatter,
             &crate::highlight::Highlighter::defaults(),
+            crate::Audience::Live,
             &NoSvgRunner,
             &NoEmbedRenderer,
             &NoOEmbedFetcher,

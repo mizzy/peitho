@@ -61,6 +61,9 @@ pub struct OverrideKeys {
     slide_slots: BTreeMap<String, BTreeSet<String>>,
     explicit_keys: BTreeSet<SlideKey>,
     drafted_keys: BTreeSet<SlideKey>,
+    /// Keys of `present_only` slides. In a public build these slides are gone, so
+    /// their keyed rules are accepted here and validated by the live build.
+    present_only_keys: BTreeSet<SlideKey>,
 }
 
 impl OverrideKeys {
@@ -73,6 +76,7 @@ impl OverrideKeys {
             slide_slots,
             explicit_keys: BTreeSet::new(),
             drafted_keys: BTreeSet::new(),
+            present_only_keys: BTreeSet::new(),
         }
     }
 
@@ -80,11 +84,13 @@ impl OverrideKeys {
         slide_slots: BTreeMap<String, BTreeSet<String>>,
         explicit_keys: BTreeSet<SlideKey>,
         drafted_keys: BTreeSet<SlideKey>,
+        present_only_keys: BTreeSet<SlideKey>,
     ) -> Self {
         Self {
             slide_slots,
             explicit_keys,
             drafted_keys,
+            present_only_keys,
         }
     }
 }
@@ -1261,7 +1267,17 @@ fn validate_override_selectors(
     for (line_index, line) in css.lines().enumerate() {
         let line_no = line_index + 1;
         let selector = line.split('{').next().unwrap_or(line);
-        let keys = extract_slide_key_values(selector, line_no)?;
+        let mut keys = extract_slide_key_values(selector, line_no)?;
+        let had_keys = !keys.is_empty();
+        keys.retain(|key| {
+            override_keys.slide_slots.contains_key(key)
+                || !SlideKey::new(key.clone())
+                    .is_ok_and(|key| override_keys.present_only_keys.contains(&key))
+        });
+        if had_keys && keys.is_empty() {
+            // Every key names a present_only slide absent from this public build.
+            continue;
+        }
         for key in &keys {
             if !override_keys.slide_slots.contains_key(key) {
                 return Err(BuildError::new(

@@ -31,7 +31,7 @@ use crate::{
     },
     highlight::Highlighter,
     math::{KatexRenderer, MathOutput, MathRenderer},
-    parser::{embed_fence_options_help, parse_markdown, ParsedFrontmatter},
+    parser::{embed_fence_options_help, parse_markdown_for, Audience, ParsedFrontmatter},
     phase::{Deck, Parsed},
     MAX_OEMBED_DISCOVERY_PAGE_BYTES, MAX_OEMBED_RESPONSE_BYTES, MAX_OEMBED_THUMBNAIL_BYTES,
 };
@@ -289,13 +289,14 @@ pub fn parse_deck_and_transform<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher
     source: &str,
     frontmatter: ParsedFrontmatter,
     highlighter: &Highlighter,
+    audience: Audience,
     svg_runner: &S,
     embed_renderer: &E,
     oembed_fetcher: &F,
     code_images_cache_dir: &Path,
     embeds_cache_dir: &Path,
 ) -> Result<Deck<Parsed>> {
-    let parsed = parse_markdown(source, frontmatter, highlighter)?;
+    let parsed = parse_markdown_for(source, frontmatter, highlighter, audience)?;
     transform_code_images(
         parsed,
         svg_runner,
@@ -3501,6 +3502,7 @@ mod tests {
             markdown,
             parse_frontmatter(markdown).unwrap(),
             &crate::highlight::Highlighter::defaults(),
+            crate::Audience::Live,
             &NoSvgRunner,
             &PanicEmbedRenderer,
             &PanicOEmbedFetcher,
@@ -3910,6 +3912,7 @@ mod tests {
                 &markdown,
                 parse_frontmatter(&markdown).unwrap(),
                 &crate::highlight::Highlighter::defaults(),
+                crate::Audience::Live,
                 &NoSvgRunner,
                 &FixtureEmbedRenderer::png(b"\x89PNG\r\n\x1a\nfixture".to_vec()),
                 &PanicOEmbedFetcher,

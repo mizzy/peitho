@@ -1,5 +1,5 @@
 <!-- {"key":"cover"} -->
-# Draft and skip flags
+# Draft, skip, and present-only flags
 
 Per-slide page settings for decks that are still moving.
 
@@ -20,10 +20,21 @@ Per-slide page settings for decks that are still moving.
 This slide never leaves the parser. It is dropped at parse end, so it appears in no output at all — not in build, preview, present, publish, or PDF export. Build this deck and count the slides.
 
 ---
+<!-- {"key":"present-only","present_only":true} -->
+# A present-only slide
+
+- `peitho present` and `peitho preview` show this slide
+- `peitho build`, `publish`, `export pdf`, and `lint` drop it like a draft
+- Use it for a live demo QR code or a URL that only belongs in the room
+
+<!-- Present-only slides keep their speaker notes in the presenter; the published deck never sees them. -->
+
+---
 <!-- {"key":"rules"} -->
 # The rules
 
 - `draft` and `skip` on the same slide is a build error
 - `draft` combined with a `section` marker is a build error
+- `present_only` combined with `draft` or a `section` marker is a build error
 - Marking every slide draft is a build error
 - `skip` rides into `manifest.json` (`"skip": true`); `draft` never reaches any phase downstream of the parser

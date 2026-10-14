@@ -344,6 +344,7 @@ pub struct DeckSettings {
     code_images: CodeImagesConfig,
     explicit_keys: BTreeSet<SlideKey>,
     drafted_keys: BTreeSet<SlideKey>,
+    present_only_keys: BTreeSet<SlideKey>,
 }
 
 impl DeckSettings {
@@ -389,6 +390,7 @@ impl DeckSettings {
             code_images,
             explicit_keys: BTreeSet::new(),
             drafted_keys: BTreeSet::new(),
+            present_only_keys: BTreeSet::new(),
         })
     }
 
@@ -448,6 +450,10 @@ impl DeckSettings {
         &self.drafted_keys
     }
 
+    pub(crate) fn present_only_keys(&self) -> &BTreeSet<SlideKey> {
+        &self.present_only_keys
+    }
+
     pub(crate) fn explicit_keys(&self) -> &BTreeSet<SlideKey> {
         &self.explicit_keys
     }
@@ -466,9 +472,11 @@ impl DeckSettings {
         mut self,
         explicit_keys: BTreeSet<SlideKey>,
         drafted_keys: BTreeSet<SlideKey>,
+        present_only_keys: BTreeSet<SlideKey>,
     ) -> Self {
         self.explicit_keys = explicit_keys;
         self.drafted_keys = drafted_keys;
+        self.present_only_keys = present_only_keys;
         self
     }
 }
@@ -854,6 +862,7 @@ impl<S> Deck<Checked<S>> {
             slide_slots,
             self.settings.explicit_keys().clone(),
             self.settings.drafted_keys().clone(),
+            self.settings.present_only_keys().clone(),
         )
     }
 
