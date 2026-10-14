@@ -1846,9 +1846,10 @@ fn resolve_assets_and_highlighter(
 /// annotations, and every build names whether `present_only` slides exist in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildTarget {
-    /// `dist/`, PDF export, and lint: shareable output without `present_only` slides.
+    /// `dist/` and PDF export: shareable output without `present_only` slides.
+    /// Lint validates this target before measuring [`BuildTarget::Present`].
     Public,
-    /// `peitho present`: every slide, plain HTML.
+    /// `peitho present` and lint measurement: every slide, plain HTML.
     Present,
     /// `peitho preview`: every slide, with edit annotations.
     Preview,

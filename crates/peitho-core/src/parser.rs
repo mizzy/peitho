@@ -632,9 +632,9 @@ pub fn referenced_image_paths(
 /// Who a build is for, which decides whether `present_only` slides exist in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// `peitho present` and `peitho preview`: every non-draft slide.
+    /// `peitho present`, `peitho preview`, and lint measurement: every non-draft slide.
     Live,
-    /// `dist/`, publish, PDF export, and lint: `present_only` slides are dropped
+    /// `dist/`, publish, and PDF export: `present_only` slides are dropped
     /// at parse end, so no later phase can observe them.
     Public,
 }

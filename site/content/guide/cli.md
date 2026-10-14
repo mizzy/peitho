@@ -265,6 +265,11 @@ peitho lint
 ```
 
 Overflow warnings include the slide number, axis, and overflow delta in pixels.
+Slide numbers match the ones `peitho preview` shows: draft slides are not
+counted, and `present_only` slides are counted and checked. A deck that
+`peitho build` would refuse also fails lint with the same error, and because
+present-only slides are checked, a problem only they have (one `peitho present`
+would also report) fails lint even though `peitho build` drops them.
 Text truncated by CSS `text-overflow` is reported as a `note:` and does not
 affect the exit code.
 Font-size warnings appear once per slide and report the smallest size in pt

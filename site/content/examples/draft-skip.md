@@ -19,8 +19,9 @@ is the point of this example:
 - The `{"draft":true}` slide is dropped at parse end, so it appears in no output
   at all, not even in `peitho present`.
 - The `{"present_only":true}` slide appears in `peitho present` and
-  `peitho preview` but is dropped from `peitho build`, `peitho publish`,
-  `peitho export pdf`, and `peitho lint`. That is why it is missing here.
+  `peitho preview` but is dropped from `peitho build`, `peitho publish`, and
+  `peitho export pdf`. That is why it is missing here. `peitho lint` still
+  checks it.
 - The `{"skip":true}` slide is a real slide, so it is in the demo. In
   `peitho present` and `peitho preview`, `next`/`prev` step over it; the
   published viewer on this page pages through it normally.
