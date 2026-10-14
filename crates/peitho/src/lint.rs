@@ -167,7 +167,7 @@ pub(crate) fn run(
     stdout: &mut dyn Write,
     style: LabelStyle,
 ) -> miette::Result<i32> {
-    let artifacts = crate::build_artifacts(&input)?;
+    let artifacts = build_lint_artifacts(&input)?;
     let tmp = tempfile::tempdir().into_diagnostic()?;
     emit_lint_workspace(tmp.path(), &artifacts)?;
     let chrome = crate::locate_chrome()?;
@@ -190,6 +190,11 @@ pub(crate) fn run(
     };
     reject_invalid_font_size_waivers(&measurements)?;
     write_lint_report(&measurements, stdout, style)
+}
+
+fn build_lint_artifacts(input: &Path) -> miette::Result<crate::BuildArtifacts> {
+    crate::build_artifacts(input)?;
+    crate::build_present_artifacts(input)
 }
 
 fn reject_invalid_font_size_waivers(measurements: &[SlideMeasurement]) -> miette::Result<()> {
@@ -861,12 +866,62 @@ mod tests {
     }
 
     #[test]
+    fn lint_artifacts_include_present_only_slides_in_live_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            "<!-- {\"present_only\":true} -->\n# Scan me\n\n---\n\n# Cover\n",
+        )
+        .unwrap();
+
+        let artifacts = build_lint_artifacts(&deck).unwrap();
+
+        assert_eq!(artifacts.slide_count, 2);
+        assert_eq!(artifacts.rendered.slides()[0].key().as_str(), "scan-me");
+        assert_eq!(artifacts.rendered.slides()[1].key().as_str(), "cover");
+    }
+
+    #[test]
+    fn lint_artifacts_reject_decks_with_only_present_only_slides() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(&deck, "<!-- {\"present_only\":true} -->\n# Live only\n").unwrap();
+
+        let err = match build_lint_artifacts(&deck) {
+            Ok(_) => panic!("expected an all-present-only deck to fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("every published slide in the deck is marked present_only"),
+            "actual error: {err}"
+        );
+    }
+
+    #[test]
+    fn lint_artifacts_exclude_draft_slides() {
+        let dir = tempfile::tempdir().unwrap();
+        let deck = dir.path().join("deck.md");
+        fs::write(
+            &deck,
+            "<!-- {\"draft\":true} -->\n# Draft\n\n---\n\n# Cover\n",
+        )
+        .unwrap();
+
+        let artifacts = build_lint_artifacts(&deck).unwrap();
+
+        assert_eq!(artifacts.slide_count, 1);
+    }
+
+    #[test]
     fn emit_lint_workspace_writes_theme_fonts() {
         let dir = tempfile::tempdir().unwrap();
         let deck = dir.path().join("deck.md");
         let workspace = dir.path().join("lint-workspace");
         fs::write(&deck, "# Intro\n").unwrap();
-        let artifacts = crate::build_artifacts(&deck).unwrap();
+        let artifacts = build_lint_artifacts(&deck).unwrap();
 
         emit_lint_workspace(&workspace, &artifacts).unwrap();
 
@@ -885,7 +940,7 @@ mod tests {
         let deck = dir.path().join("deck.md");
         let workspace = dir.path().join("lint-workspace");
         fs::write(&deck, "# Intro\n").unwrap();
-        let artifacts = crate::build_artifacts(&deck).unwrap();
+        let artifacts = build_lint_artifacts(&deck).unwrap();
 
         emit_lint_workspace(&workspace, &artifacts).unwrap();
 

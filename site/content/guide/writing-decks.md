@@ -459,9 +459,11 @@ is marked draft, the build fails instead of producing an empty deck.
 
 `present_only:true` shows a slide when you present but keeps it out of
 everything you share: `peitho present` and `peitho preview` include it, while
-`peitho build` (and therefore `dist/` and `peitho publish`), `peitho export pdf`,
-and `peitho lint` drop it the same way they drop a draft slide, so its content,
-images, and notes never reach those outputs. Use it for a live demo QR code, a
+`peitho build` (and therefore `dist/` and `peitho publish`) and `peitho export pdf`
+drop it the same way they drop a draft slide, so its content, images, and notes
+never reach those outputs. `peitho lint` checks it like any other slide and
+numbers slides the way `peitho preview` does, so its warnings point at the
+number you see in preview. Use it for a live demo QR code, a
 temporary URL, or anything that only belongs in the room. In present it counts
 toward the surrounding section's time; published page numbers skip it. It can be
 combined with `skip:true` for a backup slide you reach only by direct
