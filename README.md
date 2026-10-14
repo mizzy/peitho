@@ -454,7 +454,7 @@ Layouts, themes, and the presentation shell use defaults embedded in the binary,
 | `examples/custom-syntax/` | Custom highlight grammar demo | Default theme | A deck-adjacent `syntaxes/crn.sublime-syntax` turns an unknown-language build error into build-time Carina highlighting |
 | `examples/custom-fonts/` | Bundled webfonts demo | Playfair Display + JetBrains Mono, all local `.woff2` | Zero-config `fonts/` auto-detect; files (including licenses) are copied verbatim into every output |
 | `examples/aspect-ratio-4-3/` | 4:3 canvas demo | Default theme | `aspect_ratio: 4:3` frontmatter switches the slide canvas to 960x720 |
-| `examples/draft-skip/` | Per-slide `draft` / `skip` flags | Default theme | A draft slide is dropped at parse end and appears in no output; a skipped slide stays in output but present/preview `next`/`prev` step over it |
+| `examples/draft-skip/` | Per-slide `draft` / `skip` / `present_only` flags | Default theme | A draft slide is dropped at parse end and appears in no output; a skipped slide stays in output but present/preview `next`/`prev` step over it; a present-only slide shows in present/preview but not in build, publish, or PDF |
 | `examples/pdf-export/` | PDF export fixture | Default theme | `aspect_ratio` + `resolution` frontmatter set the PDF page size; speaker notes stay out of the exported PDF |
 
 Same tool, same Markdown conventions — entirely different decks:
