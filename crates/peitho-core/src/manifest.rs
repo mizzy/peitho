@@ -364,7 +364,8 @@ pub fn manifest_json(manifest: &Manifest) -> Result<String> {
 pub fn build_manifest<S>(deck: &Deck<Checked<S>>, image_assets: &[ResolvedImageAsset]) -> Manifest {
     let title = deck
         .checked_slides()
-        .first()
+        .iter()
+        .find(|slide| !deck.settings().present_only_keys().contains(slide.key()))
         .and_then(CheckedSlide::title_text)
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| "Untitled".to_owned());
@@ -556,6 +557,19 @@ mod tests {
         assert!(json.contains(r#""src": "slides/000-arch-1.html""#));
         assert!(json.contains(r#""src": "slides/001-details.html""#));
         assert!(json.contains(r#""hasNotes": false"#));
+    }
+
+    #[test]
+    fn build_manifest_skips_present_only_slide_for_title() {
+        let checked = checked_deck(
+            "<!-- {\"present_only\":true} -->\n# Scan me\n\n---\n# Peitho Architecture",
+            title_body_layout(),
+        );
+
+        let manifest = build_manifest(&checked, &[]);
+
+        assert_eq!(manifest.title, "Peitho Architecture");
+        assert_eq!(manifest.slide_count(), 2);
     }
 
     #[test]
