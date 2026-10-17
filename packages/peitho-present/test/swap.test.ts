@@ -47,23 +47,29 @@ it("dispatches swaprequest on s keydown, ignores repeats, and cleans up", () => 
   const shiftedSwap = new KeyboardEvent("keydown", { key: "S", shiftKey: true, cancelable: true });
   const chordSwap = new KeyboardEvent("keydown", { key: "s", metaKey: true, cancelable: true });
   const repeatedSwap = new KeyboardEvent("keydown", { key: "s", repeat: true, cancelable: true });
-  const other = new KeyboardEvent("keydown", { key: "x", cancelable: true });
+  const keynoteSwap = new KeyboardEvent("keydown", { key: "x", cancelable: true });
+  const shiftedKeynoteSwap = new KeyboardEvent("keydown", { key: "X", shiftKey: true, cancelable: true });
+  const other = new KeyboardEvent("keydown", { key: "d", cancelable: true });
   window.dispatchEvent(swap);
   window.dispatchEvent(shiftedSwap);
+  window.dispatchEvent(keynoteSwap);
+  window.dispatchEvent(shiftedKeynoteSwap);
   window.dispatchEvent(chordSwap);
   window.dispatchEvent(repeatedSwap);
   window.dispatchEvent(other);
 
   expect(swap.defaultPrevented).toBe(true);
   expect(shiftedSwap.defaultPrevented).toBe(true);
+  expect(keynoteSwap.defaultPrevented).toBe(true);
+  expect(shiftedKeynoteSwap.defaultPrevented).toBe(true);
   expect(chordSwap.defaultPrevented).toBe(false);
   expect(repeatedSwap.defaultPrevented).toBe(false);
   expect(other.defaultPrevented).toBe(false);
-  expect(requests).toEqual([null, null]);
+  expect(requests).toEqual([null, null, null, null]);
 
   cleanup();
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", cancelable: true }));
-  expect(requests).toEqual([null, null]);
+  expect(requests).toEqual([null, null, null, null]);
 });
 
 it("leaves S in a shadow-root input for the input", () => {

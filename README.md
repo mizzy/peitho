@@ -91,7 +91,7 @@ Thumbnails and overview tiles carry their slide number in the bottom-left corner
 
 ![Presenter view: current and next slide, speaker notes, timer with slide progress, and a per-section agenda](docs/images/presenter-view.png)
 
-`Space` starts/pauses the timer, arrows navigate, `S` swaps the two windows if the displays were misidentified, and `Esc` closes everything. For debugging (or a single display), `--presenter-windowed` opens normal windows instead of full screen.
+`Space` starts/pauses the timer, arrows navigate, `X` or `S` swaps the two windows if the displays were misidentified, and `Esc` closes everything. For debugging (or a single display), `--presenter-windowed` opens normal windows instead of full screen.
 
 To use a phone as a persistent remote, run `peitho present --host`. Peitho picks the best non-loopback address on your machine (a VPN address such as Tailscale is preferred), pins the port to `6173` so the URL stays the same across runs, and prints a terminal QR code alongside it. Scan the QR once in Safari, use the share sheet's Add to Home Screen action, and the remote opens full-screen without the Safari address bar — landscape or portrait, with iOS safe-area insets already accounted for — every subsequent `peitho present --host`. Pass `--host <IP>` (or `--host 0.0.0.0`) to bind a specific address, and `--port` to override the default when 6173 is taken.
 
