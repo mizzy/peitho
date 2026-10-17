@@ -315,10 +315,10 @@ peitho present --presenter-windowed
 | Arrows, PageUp / PageDown | Previous and next |
 | Home / End | First and last slide |
 | `f` | Fullscreen the current window |
-| `S` | Swap the slides and presenter displays |
+| `X` or `S` | Swap the slides and presenter displays |
 | Esc | Close the presentation and stop the server |
 
-`S` is the escape hatch for a misidentified display: each window navigates to
+`X` (Keynote's key) or `S` is the escape hatch for a misidentified display: each window navigates to
 its counterpart, so the windows stay where they are and only their roles swap.
 The presenter also exposes it as a Swap button. After a swap the slides window
 sits windowed, so press `f` to go back to fullscreen. The timer keeps running:

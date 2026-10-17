@@ -20,7 +20,8 @@ export function installSwapShortcut(win: Window = window, bus: EventTarget = win
   const onKeyDown = (event: KeyboardEvent): void => {
     if (hasChordModifier(event)) return;
     if (keyBelongsToTarget(event)) return;
-    if (event.key !== "s" && event.key !== "S") return;
+    // X matches Keynote's swap-displays key; S is kept for existing users.
+    if (!["s", "S", "x", "X"].includes(event.key)) return;
     if (event.repeat) return;
     event.preventDefault();
     bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));

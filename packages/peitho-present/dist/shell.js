@@ -2549,7 +2549,7 @@ function installSwapShortcut(win = window, bus = win) {
   const onKeyDown = (event) => {
     if (hasChordModifier(event)) return;
     if (keyBelongsToTarget(event)) return;
-    if (event.key !== "s" && event.key !== "S") return;
+    if (!["s", "S", "x", "X"].includes(event.key)) return;
     if (event.repeat) return;
     event.preventDefault();
     bus.dispatchEvent(new CustomEvent("peitho:swaprequest"));
