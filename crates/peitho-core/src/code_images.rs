@@ -354,17 +354,25 @@ fn transform_fragment<S: SvgRunner, E: EmbedRenderer, F: OEmbedFetcher>(
     embeds_cache_dir: &Path,
 ) -> Result<SourceFragment> {
     // Every code fragment passes through here, and one without a renderer is
-    // returned by value with its annotations intact — so carrying emphasis is
-    // normal. What must never happen is emphasis on a fragment that gets
-    // *rebuilt* into an image or math node: that rebuild would drop the
-    // annotation silently, which pillar ③ forbids. The parser rejects that
-    // combination at the `renderer_for` seam; this asserts the ordering holds.
+    // returned by value with its annotations intact — so carrying emphasis or
+    // a title is normal. What must never happen is either annotation on a
+    // fragment that gets *rebuilt* into an image or math node: that rebuild
+    // would drop it silently, which pillar ③ forbids. The parser rejects both
+    // combinations at the `renderer_for` seam; these assertions preserve that
+    // ordering invariant.
     debug_assert!(
         fragment.emphasis().is_none()
             || fragment
                 .language()
                 .is_none_or(|tag| config.renderer_for(tag).is_none()),
         "line emphasis on a rendered code image must be rejected at parse time",
+    );
+    debug_assert!(
+        fragment.code_title().is_none()
+            || fragment
+                .language()
+                .is_none_or(|tag| config.renderer_for(tag).is_none()),
+        "a code title on a rendered code image must be rejected at parse time",
     );
     let reveal_span = fragment.reveal_span();
     let transformed = (|| -> Result<SourceFragment> {

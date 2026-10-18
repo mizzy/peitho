@@ -89,3 +89,24 @@ pub fn render_deck(deck: Deck<Checked>) -> Result<Deck<Rendered>> {
 
 - Decks that do not use the notation are unaffected.
 - Emphasis is opt-in, one code block at a time.
+
+---
+
+# Labels Stay With Their Blocks
+
+`title="..."` puts a caption directly above its own block, so source and output
+stay paired.
+
+```hcl title="main.tf" {2}
+resource "aws_vpc" "main" {
+  tags = { Name = upper(aws_vpc.main.id) }
+}
+```
+
+```text {2} title="terraform plan"
+  + tags = {
+      + "Name" = (known after apply)
+    }
+```
+
+- Titles compose with `{…}` in either order.

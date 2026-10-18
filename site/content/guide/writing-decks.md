@@ -357,6 +357,45 @@ Line numbers past the end of the block, malformed specs, stepped emphasis
 inside a `::: {reveal}` group (which would nest two step spaces), and emphasis
 on a `code_images` block are all line-numbered build errors.
 
+## Code block titles
+
+Add `title=` after the language to label a code block. Fence attributes are
+whitespace-separated, so keep a space between `title=...` and an emphasis
+group. Quote a title when it contains spaces or fence-syntax characters:
+
+````markdown
+```hcl title="main.tf"
+name = upper(aws_vpc.main.id)
+```
+````
+
+A title combines with [code line emphasis](#code-line-emphasis) in either
+order. For example, the form ```` ```ts {2} title="app.ts" ```` is equivalent
+to the form ```` ```ts title="app.ts" {2} ````. Titles also work inside
+`::: {reveal}`; the caption appears at the same reveal step as its code block.
+
+The rendered caption is attached to its block:
+
+```html
+<figure class="code-block">
+  <figcaption class="code-title">main.tf</figcaption>
+  <pre class="slot-code"><code class="language-hcl">…</code></pre>
+</figure>
+```
+
+Theme the wrapper with `.code-block` and the caption with `.code-title`.
+Peitho includes a small default stylesheet only when the deck uses a title: it
+resets the figure margin, adds vertical space on both sides when a titled block
+is adjacent to another element, and gives the caption a modest bottom margin
+and reduced opacity. Existing `.slot-*` code styling still applies to the
+`<pre>`.
+
+A title must be non-empty and may appear only once on a fence. Titles on
+`code_images` renderer blocks are build errors because those fences become
+images or cards rather than code blocks. Titles on fences nested inside lists
+or blockquotes are also line-numbered build errors; move those blocks to the
+slide's top level.
+
 ## Links
 
 A link to an `http:` or `https:` URL (`[source](https://example.com/post)`)

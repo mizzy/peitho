@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::emphasis::LineEmphasis;
+use crate::{emphasis::LineEmphasis, fence_info::CodeTitle};
 
 /// Slide canvas aspect ratio.
 ///
@@ -924,6 +924,7 @@ pub struct SourceFragment<S = RawImagePath> {
     editable_spans: Vec<EditableSpan>,
     reveal_span: Option<RevealSpan>,
     emphasis: Option<LineEmphasis>,
+    code_title: Option<CodeTitle>,
     container_code_languages: Vec<ContainerCodeLanguage>,
     embed_options: Option<EmbedOptions>,
     markdown: String,
@@ -946,6 +947,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
@@ -963,6 +965,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
@@ -980,6 +983,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
@@ -997,6 +1001,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
@@ -1014,6 +1019,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: markdown.into(),
@@ -1032,6 +1038,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: code.clone(),
@@ -1039,6 +1046,17 @@ impl SourceFragment<RawImagePath> {
             code,
             language,
         }
+    }
+
+    pub(crate) fn titled_code(
+        line: usize,
+        language: Option<String>,
+        code: impl Into<String>,
+        title: CodeTitle,
+    ) -> Self {
+        let mut fragment = Self::code(line, language, code);
+        fragment.code_title = Some(title);
+        fragment
     }
 
     pub(crate) fn math(
@@ -1054,6 +1072,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: latex_source.clone(),
@@ -1075,6 +1094,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
@@ -1092,6 +1112,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
@@ -1113,6 +1134,7 @@ impl SourceFragment<RawImagePath> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
@@ -1185,6 +1207,7 @@ impl<S> SourceFragment<S> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
@@ -1219,6 +1242,7 @@ impl<S> SourceFragment<S> {
             editable_spans: Vec::new(),
             reveal_span: None,
             emphasis: None,
+            code_title: None,
             container_code_languages: Vec::new(),
             embed_options: None,
             markdown: String::new(),
@@ -1249,6 +1273,7 @@ impl<S> SourceFragment<S> {
             editable_spans,
             reveal_span,
             emphasis,
+            code_title,
             container_code_languages,
             embed_options,
             markdown,
@@ -1304,6 +1329,7 @@ impl<S> SourceFragment<S> {
             editable_spans,
             reveal_span,
             emphasis,
+            code_title,
             container_code_languages,
             embed_options,
             markdown,
@@ -1335,6 +1361,10 @@ impl<S> SourceFragment<S> {
 
     pub(crate) fn emphasis(&self) -> Option<&LineEmphasis> {
         self.emphasis.as_ref()
+    }
+
+    pub(crate) fn code_title(&self) -> Option<&CodeTitle> {
+        self.code_title.as_ref()
     }
 
     pub(crate) fn container_code_languages(&self) -> &[ContainerCodeLanguage] {

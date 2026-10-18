@@ -19,6 +19,7 @@ use crate::{
     },
     emphasis,
     error::{BuildError, ErrorKind, Result},
+    fence_info::{self, FenceAttributes, FenceInfo, FenceOption},
     highlight::Highlighter,
     notes_edit::is_ascii_blank_line,
     phase::{
@@ -60,18 +61,15 @@ pub(crate) fn embed_fence_options_help() -> &'static str {
     "write card mode on the opening fence as ```embed mode=card```, or use mode=screenshot"
 }
 
-fn parse_embed_fence_options(tail: Option<&str>, line: usize) -> Result<EmbedOptions> {
-    let Some(tail) = tail else {
-        return Ok(EmbedOptions::default());
-    };
-
+fn parse_embed_fence_options(options: &[FenceOption<'_>], line: usize) -> Result<EmbedOptions> {
     let mut mode = None;
     let mut mode_seen = false;
-    for token in tail.split_whitespace() {
-        let Some((key, value)) = token.split_once('=') else {
+    for option in options {
+        let key = option.key;
+        let Some(value) = option.value else {
             return Err(embed_fence_option_error(
                 line,
-                format!("embed option '{token}' must use key=value syntax"),
+                format!("embed option '{}' must use key=value syntax", option.raw),
             ));
         };
         if key.is_empty() {
@@ -2158,20 +2156,19 @@ fn validate_code_fence_info<'info, 'config>(
     line: usize,
     highlighter: &Highlighter,
     code_images: &'config CodeImagesConfig,
-) -> Result<(
-    emphasis::InfoString<'info>,
-    Option<CodeImageRenderer<'config>>,
-)> {
-    let split = emphasis::split_info_string(info, line)?;
-    let renderer = split
-        .language
-        .and_then(|language| code_images.renderer_for(language));
-    if let Some(language) = split.language {
+) -> Result<(FenceInfo<'info>, Option<CodeImageRenderer<'config>>)> {
+    let (language, rest) = fence_info::split_language(info);
+    let renderer = language.and_then(|language| code_images.renderer_for(language));
+    if let Some(language) = language {
         if renderer.is_none() {
             highlighter.validate_language(language, line)?;
         }
     }
-    Ok((split, renderer))
+    let fence = FenceInfo {
+        language,
+        attributes: fence_info::parse_attributes(rest, line)?,
+    };
+    Ok((fence, renderer))
 }
 
 fn validate_container_code_fence(
@@ -2186,11 +2183,18 @@ fn validate_container_code_fence(
         CodeBlockKind::Indented => "",
     };
     let (split, renderer) = validate_code_fence_info(info, line, highlighter, code_images)?;
+    let FenceInfo {
+        language,
+        attributes,
+    } = split;
+    let FenceAttributes {
+        emphasis,
+        title,
+        options,
+    } = attributes;
 
     if renderer.is_some() {
-        let language = split
-            .language
-            .expect("a code_images renderer is resolved from a language tag");
+        let language = language.expect("a code_images renderer is resolved from a language tag");
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
@@ -2201,7 +2205,7 @@ fn validate_container_code_fence(
             "move the block to the top level",
         ));
     }
-    if split.emphasis.is_some() {
+    if emphasis.is_some() {
         return Err(BuildError::new(
             ErrorKind::Parse,
             Some(line),
@@ -2212,10 +2216,21 @@ fn validate_container_code_fence(
             "remove the emphasis spec or move the block to the top level",
         ));
     }
-    if let Some(tail) = split.tail {
-        return Err(emphasis::unexpected_info_tail_error(tail, line));
+    if title.is_some() {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(line),
+            format!(
+                "code block titles are not supported inside a {}",
+                container.name()
+            ),
+            "move the block to the top level",
+        ));
     }
-    Ok(match split.language {
+    if let Some(option) = options.first() {
+        return Err(fence_info::unexpected_info_tail_error(option.raw, line));
+    }
+    Ok(match language {
         Some(language) => ContainerCodeLanguage::Highlighted(language.to_owned()),
         None => ContainerCodeLanguage::Plain,
     })
@@ -2781,10 +2796,8 @@ fn parse_slide(
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                // The info string carries the language tag plus either line
-                // emphasis or a renderer-owned option tail. Splitting is
-                // deferred to the End event, where the code line number is
-                // already computed for error reporting.
+                // Parsing is deferred to the End event, where the code line
+                // number is already computed for error reporting.
                 let info = match kind {
                     CodeBlockKind::Fenced(info) if !info.is_empty() => Some(info.to_string()),
                     _ => None,
@@ -2810,22 +2823,45 @@ fn parse_slide(
                         |err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments);
 
                     // Order is load-bearing. Language validation runs first so
-                    // its error keeps priority over emphasis parsing, and the
-                    // `renderer_for` check rejects emphasis on diagram blocks
-                    // here — before any annotated fragment could reach
-                    // `code_images::transform_fragment`, which rebuilds the
-                    // fragment and would silently drop the annotation.
+                    // its error keeps priority over attribute parsing. The
+                    // resolved renderer is used just below to reject emphasis
+                    // and titles on rendered blocks before any annotated
+                    // fragment reaches `code_images::transform_fragment`,
+                    // which would silently drop the annotation.
                     let info = language.as_deref().unwrap_or_default();
                     let (split, renderer) =
                         validate_code_fence_info(info, code_line, highlighter, code_images)
                             .map_err(slide_err)?;
-                    let language = split.language.map(str::to_owned);
+                    let FenceInfo {
+                        language,
+                        attributes,
+                    } = split;
+                    let FenceAttributes {
+                        emphasis: emphasis_spec,
+                        title,
+                        options,
+                    } = attributes;
+                    let language = language.map(str::to_owned);
 
-                    let embed_options = match (renderer.as_ref(), split.tail) {
-                        (Some(CodeImageRenderer::BuiltinEmbed), tail) => {
-                            Some(parse_embed_fence_options(tail, code_line).map_err(slide_err)?)
-                        }
-                        (Some(CodeImageRenderer::ExternalEmbed(_)), Some(_)) => {
+                    if title.is_some() && renderer.is_some() {
+                        let tag = language
+                            .as_deref()
+                            .expect("a code_images renderer is resolved from a language tag");
+                        return Err(slide_err(BuildError::new(
+                            ErrorKind::Parse,
+                            Some(code_line),
+                            "code block titles are not supported on rendered code images",
+                            format!(
+                                "`{tag}` blocks render to an image, so there is no code block to title; remove the title",
+                            ),
+                        )));
+                    }
+
+                    let embed_options = match renderer.as_ref() {
+                        Some(CodeImageRenderer::BuiltinEmbed) => Some(
+                            parse_embed_fence_options(&options, code_line).map_err(slide_err)?,
+                        ),
+                        Some(CodeImageRenderer::ExternalEmbed(_)) if !options.is_empty() => {
                             return Err(slide_err(BuildError::new(
                                 ErrorKind::Parse,
                                 Some(code_line),
@@ -2833,24 +2869,27 @@ fn parse_slide(
                                 "remove the option or the code_images.embed override",
                             )));
                         }
-                        (Some(CodeImageRenderer::External(_)), Some(tail))
-                        | (Some(CodeImageRenderer::BuiltinMermaid), Some(tail))
-                        | (Some(CodeImageRenderer::BuiltinQrCode), Some(tail))
-                        | (Some(CodeImageRenderer::BuiltinMath), Some(tail))
-                        | (None, Some(tail)) => {
-                            return Err(slide_err(emphasis::unexpected_info_tail_error(
-                                tail, code_line,
+                        Some(CodeImageRenderer::External(_))
+                        | Some(CodeImageRenderer::BuiltinMermaid)
+                        | Some(CodeImageRenderer::BuiltinQrCode)
+                        | Some(CodeImageRenderer::BuiltinMath)
+                        | None
+                            if !options.is_empty() =>
+                        {
+                            return Err(slide_err(fence_info::unexpected_info_tail_error(
+                                options[0].raw,
+                                code_line,
                             )));
                         }
-                        (Some(CodeImageRenderer::ExternalEmbed(_)), None)
-                        | (Some(CodeImageRenderer::External(_)), None)
-                        | (Some(CodeImageRenderer::BuiltinMermaid), None)
-                        | (Some(CodeImageRenderer::BuiltinQrCode), None)
-                        | (Some(CodeImageRenderer::BuiltinMath), None)
-                        | (None, None) => None,
+                        Some(CodeImageRenderer::ExternalEmbed(_))
+                        | Some(CodeImageRenderer::External(_))
+                        | Some(CodeImageRenderer::BuiltinMermaid)
+                        | Some(CodeImageRenderer::BuiltinQrCode)
+                        | Some(CodeImageRenderer::BuiltinMath)
+                        | None => None,
                     };
 
-                    let emphasis = match split.emphasis {
+                    let emphasis = match emphasis_spec {
                         Some(spec) => {
                             if renderer.is_some() {
                                 let tag = language.as_deref().unwrap_or("this");
@@ -2870,7 +2909,12 @@ fn parse_slide(
                         None => None,
                     };
 
-                    let fragment = SourceFragment::code(code_line, language, text);
+                    let fragment = match title {
+                        Some(title) => {
+                            SourceFragment::titled_code(code_line, language, text, title)
+                        }
+                        None => SourceFragment::code(code_line, language, text),
+                    };
                     let fragment = match embed_options {
                         Some(options) => fragment.with_embed_options(options),
                         None => fragment,
@@ -7048,6 +7092,32 @@ After list
     }
 
     #[test]
+    fn container_code_rejects_titles_with_named_source_errors() {
+        for (container, markdown) in [
+            ("list", "# Title\n\n- ```rust title=inside.rs\n  one\n  ```"),
+            (
+                "blockquote",
+                "# Title\n\n> ```rust title=inside.rs\n> one\n> ```",
+            ),
+        ] {
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "{container}: {err}");
+            assert_eq!(err.line, Some(3), "{container}: {err}");
+            assert_eq!(
+                err.message,
+                format!("code block titles are not supported inside a {container}"),
+                "{container}: {err}"
+            );
+            assert_eq!(
+                err.help, "move the block to the top level",
+                "{container}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_thematic_break_inside_blockquote_nested_in_list() {
         let err = parse_markdown(
             "# Title\n\n- > Before.\n  >\n  > ---\n  >\n  > After.",
@@ -8053,15 +8123,24 @@ After list
     #[test]
     fn unknown_language_error_survives_info_splitting() {
         // Regression: splitting the info string must not steal priority from
-        // the language error, with or without an emphasis spec present.
-        let err = parse_markdown(
-            "# Title\n\n```notalang {1}\nx\n```",
-            &crate::highlight::Highlighter::defaults(),
-        )
-        .unwrap_err();
+        // the language error, even when a later attribute is malformed.
+        for info in [
+            "notalang {1}",
+            "notalang title=example.rs",
+            r#"notalang title="unterminated"#,
+        ] {
+            let err = parse_markdown(
+                &format!("# Title\n\n```{info}\nx\n```"),
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap_err();
 
-        assert_eq!(err.line, Some(3));
-        assert!(err.to_string().contains("unknown code language 'notalang'"));
+            assert_eq!(err.line, Some(3), "info: {info}");
+            assert!(
+                err.to_string().contains("unknown code language 'notalang'"),
+                "info: {info}; error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -8167,6 +8246,44 @@ After list
     }
 
     #[test]
+    fn code_title_rides_the_code_fragment_through_parse() {
+        let deck = parse_markdown(
+            "# Title\n\n```rust title=\"  src/main.rs  \"\nfn main() {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert_eq!(fragment.language(), Some("rust"));
+        assert_eq!(
+            fragment.code_title().map(|title| title.as_str()),
+            Some("src/main.rs")
+        );
+    }
+
+    #[test]
+    fn code_title_and_emphasis_compose_in_both_orders() {
+        for info in [
+            r#"rust {1} title="src/main.rs""#,
+            r#"rust title="src/main.rs" {1}"#,
+        ] {
+            let deck = parse_markdown(
+                &format!("# Title\n\n```{info}\nfn main() {{}}\n```"),
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap();
+
+            let fragment = code_fragment(&deck);
+            assert_eq!(
+                fragment.code_title().map(|title| title.as_str()),
+                Some("src/main.rs"),
+                "info: {info}"
+            );
+            assert!(fragment.emphasis().is_some(), "info: {info}");
+        }
+    }
+
+    #[test]
     fn untagged_block_accepts_emphasis() {
         let deck = parse_markdown(
             "# Title\n\n```{1}\nplain\n```",
@@ -8214,6 +8331,61 @@ After list
             "line emphasis is not supported on rendered code images"
         );
         assert!(err.help.contains("qrcode"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn code_title_on_rendered_code_images_is_rejected() {
+        let cases = [
+            (
+                "built-in Mermaid",
+                "# Intro\n\n```mermaid title=diagram\ngraph TD\n```",
+                3,
+                "mermaid",
+            ),
+            (
+                "built-in embed",
+                "# Intro\n\n```embed title=post\nhttps://example.com/post\n```",
+                3,
+                "embed",
+            ),
+            (
+                "built-in QR code",
+                "# Intro\n\n```qrcode title=link\nhttps://example.com\n```",
+                3,
+                "qrcode",
+            ),
+            (
+                "built-in math",
+                "# Intro\n\n```math title=equation\nx^2\n```",
+                3,
+                "math",
+            ),
+            (
+                "external embed override",
+                "---\ncode_images:\n  embed: embed-to-svg\n---\n# Intro\n\n```embed title=post\nhttps://example.com/post\n```",
+                7,
+                "embed",
+            ),
+            (
+                "external renderer",
+                "---\ncode_images:\n  dot: dot -Tsvg\n---\n# Intro\n\n```dot title=graph\ndigraph {}\n```",
+                7,
+                "dot",
+            ),
+        ];
+
+        for (case, markdown, line, tag) in cases {
+            let err =
+                parse_markdown(markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "case: {case}");
+            assert_eq!(err.line, Some(line), "case: {case}");
+            assert_eq!(
+                err.message, "code block titles are not supported on rendered code images",
+                "case: {case}"
+            );
+            assert!(err.help.contains(tag), "case: {case}; help: {}", err.help);
+        }
     }
 
     fn code_fragment(deck: &Deck<Parsed>) -> &SourceFragment<RawImagePath> {
@@ -8304,6 +8476,26 @@ After list
         );
     }
 
+    #[test]
+    fn quoted_embed_mode_matches_the_bare_value() {
+        let bare = parse_markdown(
+            "# T\n\n```embed mode=card\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+        let quoted = parse_markdown(
+            "# T\n\n```embed mode=\"card\"\nhttps://x.com/a/status/1\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            code_fragment(&quoted).embed_options(),
+            code_fragment(&bare).embed_options()
+        );
+        assert_eq!(code_fragment(&quoted).embed_mode(), Some(EmbedMode::Card));
+    }
+
     fn embed_info_error(info: &str) -> BuildError {
         parse_markdown(
             &format!("# T\n\n```{info}\nhttps://x.com/a/status/1\n```"),
@@ -8370,6 +8562,15 @@ After list
     }
 
     #[test]
+    fn quoted_empty_embed_mode_reports_an_empty_value() {
+        let err = embed_info_error(r#"embed mode="""#);
+
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "embed option value is empty");
+        assert!(err.help.contains("mode=card"), "help: {}", err.help);
+    }
+
+    #[test]
     fn embed_braced_info_keeps_the_rendered_image_emphasis_error() {
         let err = parse_markdown(
             "# T\n\n```embed {1}\nhttps://x.com/a/status/1\n```",
@@ -8415,6 +8616,39 @@ After list
         .unwrap_err();
         assert_eq!(err.line, Some(7));
         assert_eq!(err.message, "unexpected text after the code language");
+    }
+
+    #[test]
+    fn unknown_non_embed_option_keeps_the_existing_error() {
+        let err = parse_markdown(
+            "# T\n\n```rust foo=bar\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "unexpected text after the code language");
+        assert!(err.help.contains("foo=bar"), "help: {}", err.help);
+        assert!(err.help.contains("title=\"...\""), "help: {}", err.help);
+    }
+
+    #[test]
+    fn non_embed_option_errors_name_the_exact_source_token() {
+        for (info, raw) in [
+            (r#"rust foo="bar""#, r#"foo="bar""#),
+            (r#"rust label="two words""#, r#"label="two words""#),
+            ("rust bare", "bare"),
+        ] {
+            let err = parse_markdown(
+                &format!("# T\n\n```{info}\nx\n```"),
+                &crate::highlight::Highlighter::defaults(),
+            )
+            .unwrap_err();
+
+            assert_eq!(err.message, "unexpected text after the code language");
+            assert!(err.help.contains(&format!("`{raw}`")), "{info}: {err}");
+        }
     }
 
     #[test]

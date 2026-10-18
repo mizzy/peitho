@@ -181,6 +181,11 @@
   margin-bottom: 24px;
 }
 
+.code-title {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+}
+
 .peitho-slide .hl-comment {
   color: #8a8578;
 }
