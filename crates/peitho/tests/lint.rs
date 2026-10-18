@@ -10,6 +10,13 @@ use util::{test_chrome_path, workspace_root};
 const ELLIPSIS_TITLE_CSS: &str =
     ".slot-title { display: block; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n";
 const OVERLONG_TITLE: &str = "This deliberately overlong presentation title is truncated by the layout with an ellipsis instead of overflowing the title slot";
+const DECORATION_LAYOUT: &str = r#"<section class="peitho-slide crn-section">
+  <div class="section-mark" aria-hidden="true">{child}</div>
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="0..*"></slot></div>
+  <figure class="code"><slot name="code" accepts="code" arity="0..1"></slot></figure>
+  <footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
+</section>"#;
 
 fn write_default_theme(dir: &Path, overrides: &str) {
     let css_dir = dir.join("css");
@@ -20,6 +27,16 @@ fn write_default_theme(dir: &Path, overrides: &str) {
     )
     .unwrap();
     fs::write(css_dir.join("overrides.css"), overrides).unwrap();
+}
+
+fn write_layout(dir: &Path, name: &str, layout: &str) {
+    let layouts_dir = dir.join("layouts");
+    fs::create_dir_all(&layouts_dir).unwrap();
+    fs::write(layouts_dir.join(name), layout).unwrap();
+}
+
+fn decoration_layout(child: &str) -> String {
+    DECORATION_LAYOUT.replace("{child}", child)
 }
 
 fn twelve_bullets() -> String {
@@ -384,6 +401,354 @@ fn lint_reports_positioned_escape_from_clipping_wrapper_as_slide_box_overflow() 
         ".badge { position: absolute; left: -400px; top: 100px; width: 300px; height: 80px; background: red; }\n",
     );
     fs::write(&deck, "# Badge\n\nBody text\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box horizontally by 400px",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_ignores_pseudo_element_overflow_inside_decoration_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_ignores_pseudo_element_overflow_inside_decoration_clipper: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(dir.path(), "section.html", &decoration_layout(""));
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark { position: absolute; inset: 0; overflow: hidden; }
+.section-mark::before {
+  content: "03";
+  position: absolute;
+  right: -24px;
+  bottom: -130px;
+  font-size: 560px;
+  line-height: 1;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("warning:").not())
+        .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
+}
+
+#[test]
+#[ignore]
+fn lint_ignores_start_side_bleed_inside_decoration_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_ignores_start_side_bleed_inside_decoration_clipper: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(
+        dir.path(),
+        "section.html",
+        &decoration_layout(r#"<div class="numeral"></div>"#),
+    );
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark { position: absolute; inset: 0; overflow: hidden; }
+.numeral {
+  position: absolute;
+  left: -24px;
+  top: -130px;
+  width: 600px;
+  height: 600px;
+  background: #000;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("warning:").not())
+        .stdout(predicate::str::contains("checked 1 slide(s): no warnings"));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_overflow_from_slot_bearing_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!("skipping lint_reports_overflow_from_slot_bearing_clipper: Chrome not found");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(
+        dir.path(),
+        "section.html",
+        r#"<section class="peitho-slide crn-section">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body-clipper">
+    <slot name="body" accepts="blocks" arity="0..*"></slot>
+  </div>
+  <figure class="code"><slot name="code" accepts="code" arity="0..1"></slot></figure>
+  <footer class="footnotes"><slot name="footnotes" accepts="blocks" arity="0..1"></slot></footer>
+</section>"#,
+    );
+    write_default_theme(
+        dir.path(),
+        ".body-clipper { flex: none; height: 80px; overflow: hidden; }\n\
+         .slot-body { font-size: 32px; }\n",
+    );
+    fs::write(
+        &deck,
+        "# Clipped body\n\nFirst line.\n\nSecond line.\n\nThird line.\n\nFourth line.\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the `body` slot vertically by",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_decoration_clipper_box_that_escapes_slide() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_decoration_clipper_box_that_escapes_slide: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(dir.path(), "section.html", &decoration_layout(""));
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -200px;
+  width: 400px;
+  overflow: hidden;
+  background: #000;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box horizontally",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_overflow_from_scrollable_slot_free_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_overflow_from_scrollable_slot_free_clipper: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(dir.path(), "section.html", &decoration_layout(""));
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark { position: absolute; inset: 0; overflow: auto; }
+.section-mark::before {
+  content: "03";
+  position: absolute;
+  right: -24px;
+  bottom: -130px;
+  font-size: 560px;
+  line-height: 1;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows a container",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_visible_axis_bleed_from_decoration_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_visible_axis_bleed_from_decoration_clipper: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(
+        dir.path(),
+        "section.html",
+        &decoration_layout(r#"<div class="numeral"></div>"#),
+    );
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark {
+  position: absolute;
+  inset: 0;
+  overflow-x: clip;
+  overflow-y: visible;
+}
+.numeral {
+  position: absolute;
+  left: 0;
+  top: -130px;
+  width: 100px;
+  height: 100px;
+  background: #000;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box vertically by 130px",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_decoration_painted_through_overflow_clip_margin() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_decoration_painted_through_overflow_clip_margin: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(
+        dir.path(),
+        "section.html",
+        &decoration_layout(r#"<div class="numeral"></div>"#),
+    );
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  overflow-clip-margin: 200px;
+}
+.numeral {
+  position: absolute;
+  left: -150px;
+  top: -150px;
+  width: 400px;
+  height: 400px;
+  background: #000;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .arg("lint")
+        .arg(&deck)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: slide 1 content overflows the slide box horizontally by 150px",
+        ));
+}
+
+#[test]
+#[ignore]
+fn lint_reports_positioned_escape_from_static_decoration_clipper() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping lint_reports_positioned_escape_from_static_decoration_clipper: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    write_layout(
+        dir.path(),
+        "section.html",
+        &decoration_layout(r#"<div class="escape"></div>"#),
+    );
+    write_default_theme(
+        dir.path(),
+        r#".crn-section { position: relative; }
+.section-mark { flex: none; height: 100px; overflow: hidden; }
+.escape {
+  position: absolute;
+  left: -400px;
+  top: 100px;
+  width: 300px;
+  height: 80px;
+  background: #000;
+}
+"#,
+    );
+    fs::write(&deck, "# Section\n").unwrap();
 
     Command::cargo_bin("peitho")
         .unwrap()
