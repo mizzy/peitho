@@ -292,6 +292,31 @@ exit code; text below the floor is still a warning that names the floor. The
 value is a length in `pt` or `px`, or `0` to accept any size; any other value
 stops lint with an error naming the slide.
 
+Decoration that deliberately bleeds off the slide edge belongs in an element
+that clips it and holds no slot:
+
+```html
+<div class="decoration-clip" aria-hidden="true"><div class="decoration"></div></div>
+```
+
+```css
+.peitho-slide { position: relative; }
+.decoration-clip { position: absolute; inset: 0; overflow: hidden; }
+.decoration {
+  position: absolute;
+  width: 40rem;
+  height: 40rem;
+  right: -2rem;
+  bottom: -8rem;
+}
+```
+
+Lint ignores what that element hides with `overflow: hidden` or `clip` because
+deck content enters the layout only through slots. Scrollable clippers
+(`overflow: auto` or `scroll`), `clip` with a nonzero `overflow-clip-margin`,
+and clippers that hold a slot still report overflow, as do decoration clipped
+only by the slide and a slot-free clipper whose own box leaves the slide.
+
 ## `peitho present`
 
 Present generates a volatile cache, starts a local server, launches the browser,

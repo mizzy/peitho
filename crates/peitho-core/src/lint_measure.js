@@ -131,7 +131,7 @@
     });
   }
 
-  function contentBounds(slide, slideRect) {
+  function contentBounds(slide, slideRect, holdsNoSlotByClipper) {
     var bounds = {
       minLeft: slideRect.left,
       minTop: slideRect.top,
@@ -144,11 +144,28 @@
       if (rect.width === 0 && rect.height === 0) {
         return;
       }
-      if (isClippedInside(element, slide)) {
-        // The clipper's scrollWidth/scrollHeight report loss past its end/bottom
-        // edge; loss past its start/top edge is invisible to them, so keep those.
-        bounds.minLeft = Math.min(bounds.minLeft, rect.left);
-        bounds.minTop = Math.min(bounds.minTop, rect.top);
+      var clipper = firstClippingAncestor(element, slide);
+      if (clipper !== null) {
+        var clipperStyle = getComputedStyle(clipper);
+        var hidesHorizontal = hidesOverflow(
+          clipperStyle,
+          clipperStyle.overflowX
+        );
+        var hidesVertical = hidesOverflow(
+          clipperStyle,
+          clipperStyle.overflowY
+        );
+        var clipsDecoration = (hidesHorizontal || hidesVertical) &&
+          cachedHoldsNoSlot(clipper, slide, holdsNoSlotByClipper);
+        // A clipper's scrollWidth/scrollHeight report end/bottom loss but not
+        // start/top loss, so clipped elements keep start edges; decoration-hidden
+        // axes drop them too.
+        if (!clipsDecoration || !hidesHorizontal) {
+          bounds.minLeft = Math.min(bounds.minLeft, rect.left);
+        }
+        if (!clipsDecoration || !hidesVertical) {
+          bounds.minTop = Math.min(bounds.minTop, rect.top);
+        }
         return;
       }
       expandBounds(bounds, rect);
@@ -162,7 +179,12 @@
       value === "clip";
   }
 
-  function isClippedInside(element, slide) {
+  function hidesOverflow(style, value) {
+    return value === "hidden" ||
+      (value === "clip" && style.overflowClipMargin === "0px");
+  }
+
+  function firstClippingAncestor(element, slide) {
     var current = element;
     while (current && current !== slide) {
       var style = getComputedStyle(current);
@@ -171,17 +193,17 @@
       var next = (style.position === "absolute" || style.position === "fixed")
         ? current.offsetParent : current.parentElement;
       if (!next || !slide.contains(next)) {
-        return false;
+        return null;
       }
       if (next !== slide) {
         var nextStyle = getComputedStyle(next);
         if (clipsOverflow(nextStyle.overflowX) || clipsOverflow(nextStyle.overflowY)) {
-          return true;
+          return next;
         }
       }
       current = next;
     }
-    return false;
+    return null;
   }
 
   function ownsEllipsizableInlineContent(element) {
@@ -228,6 +250,37 @@
     return null;
   }
 
+  // Content only enters a slide through slots, so a clipper with no slot
+  // around or inside it clips layout-authored decoration only.
+  function holdsNoSlot(element, slide) {
+    var current = element;
+    while (current && current !== slide) {
+      if (slotNameOn(current) !== null) {
+        return false;
+      }
+      current = current.parentElement;
+    }
+
+    function hasDescendantSlot(parent) {
+      for (var index = 0; index < parent.children.length; index += 1) {
+        var child = parent.children.item(index);
+        if (slotNameOn(child) !== null || hasDescendantSlot(child)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    return !hasDescendantSlot(element);
+  }
+
+  function cachedHoldsNoSlot(element, slide, cache) {
+    if (!cache.has(element)) {
+      cache.set(element, holdsNoSlot(element, slide));
+    }
+    return cache.get(element);
+  }
+
   function slotNameFor(element, slide) {
     var current = element;
     while (current) {
@@ -253,7 +306,7 @@
     return descendantNames.length === 1 ? descendantNames[0] : null;
   }
 
-  function measureSlotOverflows(slide) {
+  function measureSlotOverflows(slide, holdsNoSlotByClipper) {
     var worstByKind = {
       horizontal: null,
       vertical: null,
@@ -275,6 +328,12 @@
           !clipsOverflow(overflowValue) ||
           overflowPx <= 0 ||
           (worst !== null && overflowPx <= worst.slotOverflowPx)
+        ) {
+          return;
+        }
+        if (
+          hidesOverflow(style, overflowValue) &&
+          cachedHoldsNoSlot(element, slide, holdsNoSlotByClipper)
         ) {
           return;
         }
@@ -443,9 +502,10 @@
 
   function measureSlide(slide, index) {
     var slideRect = slide.getBoundingClientRect();
-    var bounds = contentBounds(slide, slideRect);
+    var holdsNoSlotByClipper = new Map();
+    var bounds = contentBounds(slide, slideRect, holdsNoSlotByClipper);
     var textFont = measureTextFont(slide);
-    var slotOverflows = measureSlotOverflows(slide);
+    var slotOverflows = measureSlotOverflows(slide, holdsNoSlotByClipper);
 
     return {
       slide: index + 1,
