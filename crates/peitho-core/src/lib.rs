@@ -6,6 +6,7 @@ pub mod domain;
 mod embed_card;
 mod emphasis;
 pub mod error;
+mod fence_info;
 mod generic_oembed;
 pub mod highlight;
 pub mod include;

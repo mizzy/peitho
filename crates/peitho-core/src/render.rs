@@ -18,6 +18,7 @@ use crate::{
     embed_card::{generic_embed_card_css, EmbedCardAssets},
     emphasis::{emphasis_code, LineEmphasis},
     error::{BuildError, ErrorKind, Result},
+    fence_info::CodeTitle,
     highlight::Highlighter,
     layout::{Layout, LayoutAssets},
     math::MathAssets,
@@ -30,11 +31,16 @@ const DISTRIBUTION_VIEWER_JS: &str =
     include_str!("../../../packages/peitho-present/dist/viewer.js");
 const LINT_MEASURE_JS: &str = include_str!("lint_measure.js");
 const CODE_EMPHASIS_CSS: &str = include_str!("../assets/code-emphasis.css");
+const CODE_TITLE_CSS: &str = include_str!("../assets/code-title.css");
 const EDIT_SOURCE_SPAN_ATTRIBUTE: &str = "data-peitho-src";
 const EDIT_MARKDOWN_ATTRIBUTE: &str = "data-peitho-md";
 
 pub(crate) fn code_emphasis_css() -> &'static str {
     CODE_EMPHASIS_CSS
+}
+
+pub(crate) fn code_title_css() -> &'static str {
+    CODE_TITLE_CSS
 }
 
 pub(crate) const BODY_MARKDOWN_OPTIONS: Options = Options::ENABLE_OLD_FOOTNOTES
@@ -103,11 +109,13 @@ pub fn render_deck(
     let mut uses_embed_card = false;
     let mut uses_generic_embed_card = false;
     let mut uses_static_emphasis = false;
+    let mut uses_code_title = false;
     for slide in checked_slides {
         uses_math |= slide_uses_math(slide.slots());
         uses_embed_card |= slide_uses_embed_card(slide.slots());
         uses_generic_embed_card |= slide_uses_generic_embed_card(slide.slots());
         uses_static_emphasis |= slide_uses_static_emphasis(slide.slots());
+        uses_code_title |= slide_uses_code_title(slide.slots());
         let (page_number, page_total) = match (slide.page_number_hidden(), page_numbers) {
             (true, _) | (false, None) => (None, None),
             (false, Some(PageNumberFormat::Current)) => (Some(slide.index() + 1), None),
@@ -154,6 +162,9 @@ pub fn render_deck(
     }
     if uses_static_emphasis {
         css_parts.push(code_emphasis_css());
+    }
+    if uses_code_title {
+        css_parts.push(code_title_css());
     }
     let css = if css_parts.is_empty() {
         theme_css.as_str().to_owned()
@@ -210,6 +221,14 @@ fn slide_uses_static_emphasis(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedIma
                 .emphasis()
                 .is_some_and(|emphasis| !emphasis.stepped())
         })
+    })
+}
+
+fn slide_uses_code_title(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
+    slots.values().any(|slot| {
+        slot.fragments()
+            .iter()
+            .any(|fragment| fragment.code_title().is_some())
     })
 }
 
@@ -531,6 +550,7 @@ fn render_code_slot(
                 class_name,
                 &render_code_fragment(fragment, highlighter)?,
                 fragment.language(),
+                fragment.code_title(),
                 None,
             ));
         }
@@ -542,22 +562,39 @@ fn render_code_block(
     class_name: &str,
     code: &str,
     language: Option<&str>,
+    title: Option<&CodeTitle>,
     reveal_step: Option<usize>,
 ) -> String {
-    let mut html = format!(r#"<pre class="{class_name}""#);
-    if let Some(step) = reveal_step {
-        html.push_str(&format!(r#" data-reveal-step="{step}""#));
+    let mut pre = format!(r#"<pre class="{class_name}""#);
+    if title.is_none() {
+        if let Some(step) = reveal_step {
+            pre.push_str(&format!(r#" data-reveal-step="{step}""#));
+        }
     }
-    html.push_str("><code");
+    pre.push_str("><code");
     if let Some(language) = language {
-        html.push_str(r#" class="language-"#);
-        html.push_str(&encode_double_quoted_attribute(language));
-        html.push('"');
+        pre.push_str(r#" class="language-"#);
+        pre.push_str(&encode_double_quoted_attribute(language));
+        pre.push('"');
     }
-    html.push('>');
-    html.push_str(code);
-    html.push_str("</code></pre>");
-    html
+    pre.push('>');
+    pre.push_str(code);
+    pre.push_str("</code></pre>");
+
+    let Some(title) = title else {
+        return pre;
+    };
+
+    let mut figure = String::from(r#"<figure class="code-block""#);
+    if let Some(step) = reveal_step {
+        figure.push_str(&format!(r#" data-reveal-step="{step}""#));
+    }
+    figure.push_str(r#"><figcaption class="code-title">"#);
+    figure.push_str(&encode_text(title.as_str()));
+    figure.push_str("</figcaption>");
+    figure.push_str(&pre);
+    figure.push_str("</figure>");
+    figure
 }
 
 fn append_code_separator(body: &mut String) {
@@ -793,6 +830,7 @@ fn render_revealed_fragment(
                     class_name,
                     &code,
                     fragment.language(),
+                    fragment.code_title(),
                     None,
                 ));
             } else {
@@ -800,6 +838,7 @@ fn render_revealed_fragment(
                     class_name,
                     &code,
                     fragment.language(),
+                    fragment.code_title(),
                     Some(span.start),
                 ));
             }
@@ -3677,6 +3716,109 @@ mod tests {
             .to_owned()
     }
 
+    fn parsed_code_title(info: &str) -> crate::fence_info::CodeTitle {
+        let (_, rest) = crate::fence_info::split_language(info);
+        crate::fence_info::parse_attributes(rest, 1)
+            .unwrap()
+            .title
+            .expect("fence info has a title")
+    }
+
+    #[test]
+    fn titled_code_block_renders_the_exact_figure_shape() {
+        let title = parsed_code_title("hcl title=main.tf");
+
+        assert_eq!(
+            render_code_block("slot-code", "name = value", Some("hcl"), Some(&title), None,),
+            r#"<figure class="code-block"><figcaption class="code-title">main.tf</figcaption><pre class="slot-code"><code class="language-hcl">name = value</code></pre></figure>"#
+        );
+    }
+
+    #[test]
+    fn untitled_code_block_keeps_the_existing_bytes() {
+        assert_eq!(
+            render_code_block("slot-code", "fn main() {}", Some("rust"), None, Some(4),),
+            r#"<pre class="slot-code" data-reveal-step="4"><code class="language-rust">fn main() {}</code></pre>"#
+        );
+    }
+
+    #[test]
+    fn code_title_is_html_escaped() {
+        let title = parsed_code_title(r#"rust title="<&>""#);
+
+        let html = render_code_block("slot-code", "x", Some("rust"), Some(&title), None);
+
+        assert_eq!(
+            html,
+            r#"<figure class="code-block"><figcaption class="code-title">&lt;&amp;&gt;</figcaption><pre class="slot-code"><code class="language-rust">x</code></pre></figure>"#
+        );
+    }
+
+    #[test]
+    fn titled_reveal_step_moves_to_the_figure() {
+        let title = parsed_code_title("rust title=main.rs");
+
+        let html = render_code_block("slot-code", "x", Some("rust"), Some(&title), Some(3));
+
+        assert_eq!(
+            html,
+            r#"<figure class="code-block" data-reveal-step="3"><figcaption class="code-title">main.rs</figcaption><pre class="slot-code"><code class="language-rust">x</code></pre></figure>"#
+        );
+        assert!(!html.contains(r#"<pre class="slot-code" data-reveal-step="#));
+    }
+
+    #[test]
+    fn revealed_titled_fragment_stamps_the_figure_not_the_pre() {
+        let html = render_code_html(
+            "# T\n\n::: {reveal}\n\n```rust title=revealed.rs\nfn revealed() {}\n```\n\n:::",
+        );
+
+        assert!(
+            html.contains(
+                r#"<figure class="code-block" data-reveal-step="1"><figcaption class="code-title">revealed.rs</figcaption><pre class="slot-code">"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains(r#"<pre class="slot-code" data-reveal-step="#));
+    }
+
+    #[test]
+    fn stepped_emphasis_and_title_render_together_without_stamping_the_block() {
+        let html =
+            render_code_html("# T\n\n```rust {1|2} title=steps.rs\nlet a = 1;\nlet b = 2;\n```");
+
+        assert!(
+            html.contains(
+                r#"<figure class="code-block"><figcaption class="code-title">steps.rs</figcaption><pre class="slot-code"><code class="language-rust">"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-emphasis-step="1""#), "{html}");
+        assert!(html.contains(r#"data-emphasis-step="2""#), "{html}");
+        assert!(!html.contains(r#"<figure class="code-block" data-reveal-step="#));
+        assert!(!html.contains(r#"<pre class="slot-code" data-reveal-step="#));
+    }
+
+    #[test]
+    fn multiple_titled_blocks_keep_their_own_captions() {
+        let html = render_code_html(
+            "# T\n\n```rust title=first.rs\nfn first() {}\n```\n\n```rust title=second.rs\nfn second() {}\n```",
+        );
+
+        let figures = html
+            .match_indices(r#"<figure class="code-block""#)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let first = html.find(">first.rs</figcaption>").unwrap();
+        let second = html.find(">second.rs</figcaption>").unwrap();
+        assert_eq!(figures.len(), 2, "{html}");
+        assert!(
+            figures[0] < first && first < figures[1] && figures[1] < second,
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"<figcaption class="code-title""#).count(), 2);
+    }
+
     /// Extract each `code-line` span's *inner* HTML, excluding the wrapper's
     /// own tags.
     ///
@@ -4851,6 +4993,38 @@ mod tests {
         assert!(!emphasis_css.contains("[data-emphasis-active]"));
         assert!(!emphasis_css.contains(".slot-code"));
         assert_eq!(emphasis_css.matches("--peitho-emphasis-").count(), 3);
+    }
+
+    #[test]
+    fn rendered_deck_places_code_title_css_after_emphasis_only_when_used() {
+        let theme_css = ".peitho-slide { color: red; }\n";
+        let with_title = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust title=main.rs\nfn main() {}\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let with_title_and_emphasis = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust {1} title=main.rs\nfn main() {}\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let without_title = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust\nfn main() {}\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
+        let title_css = code_title_css();
+
+        assert_eq!(with_title.css(), format!("{title_css}\n{theme_css}"));
+        assert_eq!(
+            with_title_and_emphasis.css(),
+            format!("{}\n{title_css}\n{theme_css}", code_emphasis_css())
+        );
+        assert_eq!(without_title.css(), theme_css);
+        assert_eq!(
+            title_css,
+            ".code-block {\n  margin: 0;\n}\n\n* + .code-block,\n.code-block + * {\n  margin-top: 1.5em;\n}\n\n.code-title {\n  display: block;\n  margin: 0 0 0.4em;\n  opacity: 0.7;\n}\n"
+        );
     }
 
     #[test]

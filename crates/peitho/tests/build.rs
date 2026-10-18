@@ -1976,6 +1976,25 @@ fn base_theme_reads_canvas_dimensions_from_css_variables_with_16_9_fallback() {
 }
 
 #[test]
+fn base_theme_gives_code_titles_code_typography() {
+    let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
+
+    assert!(
+        css.contains(
+            r#".slot-body pre {
+  margin-bottom: 24px;
+}
+
+.code-title {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+}"#
+        ),
+        "{css}"
+    );
+}
+
+#[test]
 fn base_theme_contains_footnote_rules() {
     let css = fs::read_to_string(workspace_root().join("themes/base.css")).unwrap();
     let rule_block = |selector: &str| {

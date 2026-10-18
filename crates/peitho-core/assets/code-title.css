@@ -1,0 +1,14 @@
+.code-block {
+  margin: 0;
+}
+
+* + .code-block,
+.code-block + * {
+  margin-top: 1.5em;
+}
+
+.code-title {
+  display: block;
+  margin: 0 0 0.4em;
+  opacity: 0.7;
+}
