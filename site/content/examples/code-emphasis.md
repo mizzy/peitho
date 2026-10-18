@@ -2,7 +2,7 @@
 title = "Code Line Emphasis"
 weight = 71
 template = "example-page.html"
-description = "A zero-config deck that emphasizes specific code lines, stepping the emphasis through a function during a talk."
+description = "A deck that emphasizes specific code lines, steps through a function, and labels paired source and output blocks."
 
 [extra]
 deck = "code-emphasis"
@@ -27,9 +27,12 @@ group, with the emphasis moving rather than accumulating as you advance.
 The third slide uses `{1,4-5}` on a block with no language tag, showing that
 `,` lists individual entries, `-` makes a range, and emphasis does not require
 highlighting. The fourth slide mixes emphasis with `::: {reveal}`, since
-emphasis steps *are* reveal steps and both advance in source order. The last
+emphasis steps *are* reveal steps and both advance in source order. The fifth
 slide is the contrast case: a block with no spec renders exactly as it always
-has.
+has. The final slide stacks Terraform source above its plan output.
+Each fence has its own `title="..."` caption and static emphasis; placing the
+title before `{2}` on one fence and after it on the other shows that the two
+attributes compose in either order.
 
 To step through the emphasis locally, run
 `peitho present examples/code-emphasis/deck.md` and use the arrow keys.
@@ -44,9 +47,15 @@ never did. Static emphasis says "these lines are the important ones", which is
 a property of the content, so it ships with the deck and is visible in the
 published version above.
 
-The deck uses no frontmatter, custom layouts, or custom CSS. When a deck uses
-static emphasis, its default styling travels with the deck, including when the
-deck has its own `css/`. Restyle it with the `--peitho-emphasis-background`,
-`--peitho-emphasis-marker`, and `--peitho-emphasis-dim` custom properties, or
-override `.code-line-emphasis` directly. Stepped emphasis is styled only by
+The deck uses no frontmatter. Its `layouts/title-body-code.html` is a copy of
+the built-in layout with one intentional change: the `code` slot arity is
+`0..*` instead of `0..1`, allowing the final slide to carry two typed code
+blocks while the existing one-block slides render the same HTML. There is no
+custom CSS: the built-in theme styles the captions.
+
+When a deck uses static emphasis, its default styling travels with the deck,
+including when the deck has its own `css/`. Restyle it with the
+`--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
+`--peitho-emphasis-dim` custom properties, or override
+`.code-line-emphasis` directly. Stepped emphasis is styled only by
 `peitho present`.
