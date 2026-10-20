@@ -22,7 +22,7 @@ use crate::{
     highlight::Highlighter,
     layout::{Layout, LayoutAssets},
     math::MathAssets,
-    phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, Rendered},
+    phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, PublicReveal, Rendered},
     theme::{build_font_scope_css, ThemeCss},
 };
 
@@ -2004,7 +2004,21 @@ fn render_error(err: RewritingError) -> BuildError {
     }
 }
 
-pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> String {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DistributionViewerConfig {
+    walk_reveal_steps: bool,
+}
+
+pub fn render_distribution_index(
+    aspect_ratio: AspectRatio,
+    lang: &DeckLang,
+    public_reveal: PublicReveal,
+) -> String {
+    let viewer_config = serde_json::to_string(&DistributionViewerConfig {
+        walk_reveal_steps: matches!(public_reveal, PublicReveal::Steps),
+    })
+    .expect("distribution viewer config is serializable");
     const TEMPLATE: &str = r#"<!doctype html>
 <html lang="__PEITHO_LANG__">
 <head>
@@ -2026,11 +2040,16 @@ pub fn render_distribution_index(aspect_ratio: AspectRatio, lang: &DeckLang) -> 
   <script>
 (() => {
 __PEITHO_DISTRIBUTION_VIEWER_JS__
+    const viewerConfig = __PEITHO_DISTRIBUTION_VIEWER_CONFIG__;
     const CANVAS_WIDTH = __PEITHO_CANVAS_WIDTH__;
     const CANVAS_HEIGHT = __PEITHO_CANVAS_HEIGHT__;
     let slides = [];
-    let currentIndex = 0;
+    let navigator = null;
+    let currentPosition = { index: 0, step: 0 };
     let mountedIndex = null;
+    if (viewerConfig.walkRevealSteps) {
+      document.head.appendChild(PeithoViewer.createStepStateStyle(document));
+    }
     PeithoViewer.shadowMountedBacklog(window);
 
     function showError(message) {
@@ -2056,62 +2075,61 @@ __PEITHO_DISTRIBUTION_VIEWER_JS__
       canvas.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
     }
 
-    function parsePositiveInt(raw) {
-      const match = raw.trim().match(/^\d+$/);
-      return match === null ? 1 : Number(match[0]);
+    function writePositionToUrl(position) {
+      const nextUrl = PeithoViewer.writeViewerPosition(
+        new URL(window.location.href),
+        position,
+        navigator
+      );
+      history.replaceState(null, '', nextUrl.pathname + nextUrl.search + nextUrl.hash);
     }
 
-    function readSlideIndexFromUrl() {
-      const searchSlide = new URLSearchParams(location.search).get('slide');
-      if (searchSlide !== null) return parsePositiveInt(searchSlide);
-      const hash = location.hash;
-      if (hash.startsWith('#slide=')) {
-        return parsePositiveInt(hash.slice('#slide='.length).split('&')[0]);
-      }
-      if (hash.startsWith('#') && hash.length > 1) {
-        return parsePositiveInt(hash.slice(1).split('&')[0]);
-      }
-      return 1;
-    }
-
-    function showSlide(index) {
+    function showPosition(position) {
       if (slides.length === 0) {
         document.getElementById('peitho-canvas').replaceChildren();
         return;
       }
-      const next = Math.max(0, Math.min(index, slides.length - 1));
-      if (mountedIndex !== null && next === currentIndex) return;
-      currentIndex = next;
-      writeSlideIndexToUrl(currentIndex + 1);
+      const next = navigator.direct(position.index, position.step);
+      const indexChanged = mountedIndex === null || next.index !== mountedIndex;
+      const positionChanged =
+        next.index !== currentPosition.index || next.step !== currentPosition.step;
+      if (!indexChanged && !positionChanged) return;
+      currentPosition = next;
+      writePositionToUrl(currentPosition);
       const canvas = document.getElementById('peitho-canvas');
-      canvas.innerHTML = slides[next].html;
-      const sections = Array.from(canvas.querySelectorAll('.peitho-slide'));
-      const key = slides[next].key;
-      const slideIndex = slides[next].index;
-      mountedIndex = next;
-      PeithoViewer.dropDisconnectedShadowMounted(window);
-      PeithoViewer.executeInlineScripts(canvas, document);
-      for (const section of sections) {
-        if (!section.isConnected) continue;
-        PeithoViewer.announceShadowMounted(
-          section,
-          { root: section, key, index: slideIndex },
-          window
-        );
+      let sections = [];
+      if (indexChanged) {
+        canvas.innerHTML = slides[next.index].html;
+        sections = Array.from(canvas.querySelectorAll('.peitho-slide'));
+        mountedIndex = next.index;
+        PeithoViewer.dropDisconnectedShadowMounted(window);
+        PeithoViewer.executeInlineScripts(canvas, document);
+      }
+      if (viewerConfig.walkRevealSteps) {
+        PeithoViewer.applyStepState(canvas, next.step);
+      }
+      if (indexChanged) {
+        const key = slides[next.index].key;
+        const slideIndex = slides[next.index].index;
+        for (const section of sections) {
+          if (!section.isConnected) continue;
+          PeithoViewer.announceShadowMounted(
+            section,
+            { root: section, key, index: slideIndex },
+            window
+          );
+        }
       }
     }
 
-    function writeSlideIndexToUrl(oneBased) {
-      const params = new URLSearchParams(location.search);
-      params.set('slide', String(oneBased));
-      history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash);
-    }
-
     function navigate(to) {
-      if (to === 'next') showSlide(currentIndex + 1);
-      if (to === 'prev') showSlide(currentIndex - 1);
-      if (to === 'first') showSlide(0);
-      if (to === 'last') showSlide(slides.length - 1);
+      if (navigator === null) return;
+      let next = currentPosition;
+      if (to === 'next') next = navigator.move(currentPosition, 1);
+      if (to === 'prev') next = navigator.move(currentPosition, -1);
+      if (to === 'first') next = navigator.direct(0);
+      if (to === 'last') next = navigator.direct(slides.length - 1);
+      showPosition(next);
     }
 
     async function loadDeck() {
@@ -2122,10 +2140,17 @@ __PEITHO_DISTRIBUTION_VIEWER_JS__
           manifest.slides.map(async (slide) => ({
             index: slide.index,
             key: slide.key,
+            revealSteps: slide.revealSteps,
             html: await fetchOk(slide.src).then((response) => response.text())
           }))
         );
-        showSlide(readSlideIndexFromUrl() - 1);
+        navigator = PeithoViewer.createViewerNavigator({
+          slides: slides.map(({ revealSteps }) => ({ revealSteps })),
+          walkRevealSteps: viewerConfig.walkRevealSteps
+        });
+        showPosition(
+          PeithoViewer.readViewerPosition(new URL(window.location.href), navigator)
+        );
         resizeCanvas();
       } catch (error) {
         showError(error.message);
@@ -2214,9 +2239,9 @@ __PEITHO_DISTRIBUTION_VIEWER_JS__
       navigate(dx < 0 ? 'next' : 'prev');
     }, { passive: false });
     document.addEventListener('touchcancel', () => { __swipeState = null; });
-    // `#slide=N` / `#N` are load-time fallbacks only; after load, query is canonical.
     window.addEventListener('popstate', () => {
-      showSlide(readSlideIndexFromUrl() - 1);
+      if (navigator === null) return;
+      showPosition(PeithoViewer.readViewerPosition(new URL(window.location.href), navigator));
     });
     window.addEventListener('resize', resizeCanvas);
     loadDeck();
@@ -2227,6 +2252,7 @@ __PEITHO_DISTRIBUTION_VIEWER_JS__
 
     fill_canvas_tokens(TEMPLATE, aspect_ratio, lang)
         .replace("__PEITHO_DISTRIBUTION_VIEWER_JS__", DISTRIBUTION_VIEWER_JS)
+        .replace("__PEITHO_DISTRIBUTION_VIEWER_CONFIG__", &viewer_config)
 }
 
 fn embedded_distribution_viewer_script(body: &str) -> String {
@@ -2997,7 +3023,7 @@ mod tests {
         layout::{parse_layout, Layout, LayoutAssets},
         mapping::map_by_convention,
         parser::{parse_frontmatter, parse_markdown as parse_markdown_impl},
-        phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime},
+        phase::{CheckedSlide, CheckedSlot, DeckSettings, PlannedTime, PublicReveal},
     };
 
     fn parse_markdown(
@@ -5774,7 +5800,7 @@ Paragraph after heading.
         )
         .unwrap();
         let parsed = parse_markdown(
-            "---\ntime: 15m\nlayouts: ./layouts\ncss: ./css\nsyntaxes: ./syntaxes\n---\n# Intro",
+            "---\ntime: 15m\npublic_reveal: steps\nlayouts: ./layouts\ncss: ./css\nsyntaxes: ./syntaxes\n---\n# Intro",
             &crate::highlight::Highlighter::defaults(),
         )
         .unwrap();
@@ -5801,11 +5827,62 @@ Paragraph after heading.
             rendered.settings().syntaxes().map(|path| path.as_path()),
             Some(std::path::Path::new("./syntaxes"))
         );
+        assert_eq!(rendered.settings().public_reveal(), PublicReveal::Steps);
+    }
+
+    #[test]
+    fn distribution_index_embeds_typed_viewer_config() {
+        let final_html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
+        let steps_html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Steps,
+        );
+
+        assert!(final_html.contains(r#"const viewerConfig = {"walkRevealSteps":false};"#));
+        assert!(steps_html.contains(r#"const viewerConfig = {"walkRevealSteps":true};"#));
+        assert_eq!(final_html.matches(DISTRIBUTION_VIEWER_JS).count(), 1);
+        assert_eq!(steps_html.matches(DISTRIBUTION_VIEWER_JS).count(), 1);
+    }
+
+    #[test]
+    fn distribution_index_wires_one_viewer_bootstrap() {
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Steps,
+        );
+        let bootstrap = html.split_once(DISTRIBUTION_VIEWER_JS).unwrap().1;
+
+        assert_eq!(html.matches("<script>").count(), 1);
+        assert_eq!(html.matches(DISTRIBUTION_VIEWER_JS).count(), 1);
+        assert!(bootstrap.contains("PeithoViewer.createViewerNavigator({"));
+        assert!(bootstrap.contains("PeithoViewer.readViewerPosition("));
+        assert!(bootstrap.contains("PeithoViewer.writeViewerPosition("));
+        assert!(bootstrap.contains("history.replaceState"));
+        assert!(!bootstrap.contains("history.pushState"));
+        assert!(bootstrap.contains("PeithoViewer.applyStepState("));
+        assert_eq!(
+            bootstrap
+                .matches("PeithoViewer.createStepStateStyle(document)")
+                .count(),
+            1,
+        );
+        assert!(!bootstrap.contains("function parsePositiveInt"));
+        assert!(!bootstrap.contains("resolveStepTarget("));
     }
 
     #[test]
     fn distribution_index_uses_one_slide_canvas_without_shell_bundle() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(html.contains(r#"<link rel="stylesheet" href="peitho.css">"#));
         assert!(html.contains(r#"id="peitho-canvas""#));
@@ -5821,7 +5898,7 @@ Paragraph after heading.
         assert!(html.contains("const CANVAS_WIDTH = 1280"));
         assert!(html.contains("const CANVAS_HEIGHT = 720"));
         assert!(html.contains("function resizeCanvas()"));
-        assert!(html.contains("function showSlide(index)"));
+        assert!(html.contains("function showPosition(position)"));
         assert!(html.contains("document.addEventListener('keydown'"));
         assert!(html.contains("document.addEventListener('click'"));
         assert!(html.contains("__swipeState"));
@@ -5863,7 +5940,11 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_scopes_bundle_and_viewer_code_in_one_iife() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert_eq!(html.matches(DISTRIBUTION_VIEWER_JS).count(), 1);
         assert_eq!(html.matches("<script>").count(), 1);
@@ -5884,71 +5965,56 @@ Paragraph after heading.
 
         assert!(bundle_index < viewer_index);
         assert!(scoped_body.contains("let slides = [];"));
-        assert!(scoped_body.contains("function showSlide(index)"));
-    }
-
-    #[test]
-    fn distribution_index_does_not_remount_the_current_slide() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-        assert!(html.contains("let mountedIndex = null;"));
-        let show_slide = html
-            .split_once("function showSlide(index)")
-            .unwrap()
-            .1
-            .split_once("function writeSlideIndexToUrl")
-            .unwrap()
-            .0;
-
-        let clamp_index = show_slide
-            .find("const next = Math.max(0, Math.min(index, slides.length - 1));")
-            .unwrap();
-        let no_op_index = show_slide
-            .find("if (mountedIndex !== null && next === currentIndex) return;")
-            .unwrap();
-        let current_index = show_slide.find("currentIndex = next;").unwrap();
-        let inject_index = show_slide
-            .find("canvas.innerHTML = slides[next].html;")
-            .unwrap();
-        let mounted_index = show_slide.find("mountedIndex = next;").unwrap();
-
-        assert!(clamp_index < no_op_index);
-        assert!(no_op_index < current_index);
-        assert!(current_index < inject_index);
-        assert!(inject_index < mounted_index);
+        assert!(scoped_body.contains("function showPosition(position)"));
     }
 
     #[test]
     fn distribution_index_rehydrates_then_announces_each_injected_slide() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-        let show_slide = html
-            .split_once("function showSlide(index)")
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
+        let show_position = html
+            .split_once("function showPosition(position)")
             .unwrap()
             .1
-            .split_once("function writeSlideIndexToUrl")
+            .split_once("function navigate(to)")
             .unwrap()
             .0;
 
-        let inner_html_index = show_slide
-            .find("canvas.innerHTML = slides[next].html;")
+        let inner_html_index = show_position
+            .find("canvas.innerHTML = slides[next.index].html;")
             .unwrap();
-        let sections_index = show_slide
+        let sections_index = show_position
             .find("const sections = Array.from(canvas.querySelectorAll('.peitho-slide'));")
-            .unwrap();
-        let key_index = show_slide.find("const key = slides[next].key;").unwrap();
-        let slide_index = show_slide
-            .find("const slideIndex = slides[next].index;")
-            .unwrap();
-        let drop_index = show_slide
+            .unwrap_or_else(|| {
+                show_position
+                    .find("sections = Array.from(canvas.querySelectorAll('.peitho-slide'));")
+                    .unwrap()
+            });
+        let drop_index = show_position
             .find("PeithoViewer.dropDisconnectedShadowMounted(window);")
             .unwrap();
-        let execute_index = show_slide
+        let execute_index = show_position
             .find("PeithoViewer.executeInlineScripts(canvas, document);")
             .unwrap();
-        let announce_loop_index = show_slide.find("for (const section of sections)").unwrap();
-        let connected_index = show_slide
+        let apply_index = show_position
+            .find("PeithoViewer.applyStepState(canvas, next.step);")
+            .unwrap();
+        let key_index = show_position
+            .find("const key = slides[next.index].key;")
+            .unwrap();
+        let slide_index = show_position
+            .find("const slideIndex = slides[next.index].index;")
+            .unwrap();
+        let announce_loop_index = show_position
+            .find("for (const section of sections)")
+            .unwrap();
+        let connected_index = show_position
             .find("if (!section.isConnected) continue;")
             .unwrap();
-        let announce_index = show_slide
+        let announce_index = show_position
             .find("PeithoViewer.announceShadowMounted(")
             .unwrap();
 
@@ -5957,19 +6023,24 @@ Paragraph after heading.
         assert!(inner_html_index < slide_index);
         assert!(inner_html_index < drop_index);
         assert!(sections_index < execute_index);
-        assert!(key_index < execute_index);
-        assert!(slide_index < execute_index);
         assert!(drop_index < execute_index);
-        assert!(execute_index < announce_loop_index);
+        assert!(execute_index < apply_index);
+        assert!(apply_index < key_index);
+        assert!(apply_index < slide_index);
+        assert!(key_index < announce_loop_index);
+        assert!(slide_index < announce_loop_index);
+        assert!(apply_index < announce_loop_index);
         assert!(announce_loop_index < connected_index);
         assert!(connected_index < announce_index);
         assert!(execute_index < announce_index);
-        assert!(show_slide.contains("{ root: section, key, index: slideIndex }"));
-        assert!(!show_slide.contains("section.dataset.slide"));
-        assert!(!show_slide.contains("typeof slides[next].index"));
-        assert!(!show_slide.contains("showError("));
+        assert!(show_position.contains("{ root: section, key, index: slideIndex }"));
+        assert!(!show_position.contains("section.dataset.slide"));
+        assert!(!show_position.contains("typeof slides[next.index].index"));
+        assert!(!show_position.contains("showError("));
         assert!(html.contains("index: slide.index"));
         assert!(html.contains("key: slide.key"));
+        assert!(html.contains("revealSteps: slide.revealSteps"));
+        assert!(!html.contains("skip: slide.skip"));
         assert!(DISTRIBUTION_VIEWER_JS.contains("(function () {\n"));
         assert!(DISTRIBUTION_VIEWER_JS.contains("hasAttribute(\"src\")"));
         assert!(DISTRIBUTION_VIEWER_JS.contains("text/javascript"));
@@ -5977,20 +6048,28 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_creates_backlog_before_showing_the_first_slide() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         let backlog_index = html
             .find("PeithoViewer.shadowMountedBacklog(window);")
             .unwrap();
         let first_show_index = html
-            .find("showSlide(readSlideIndexFromUrl() - 1);")
+            .find("showPosition(\n          PeithoViewer.readViewerPosition(")
             .unwrap();
         assert!(backlog_index < first_show_index);
     }
 
     #[test]
     fn distribution_index_click_navigation_ignores_selection_gestures() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(html.contains("window.getSelection()"));
         assert!(html.contains("__clickStart"));
@@ -6000,14 +6079,22 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_click_navigation_ignores_interactive_targets() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(html.contains("if (PeithoViewer.pointerBelongsToTarget(event)) return true;"));
     }
 
     #[test]
     fn distribution_index_navigation_defers_to_interactive_slide_content() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
         let keydown = html
             .split_once("document.addEventListener('keydown'")
             .unwrap()
@@ -6036,69 +6123,6 @@ Paragraph after heading.
     }
 
     #[test]
-    fn distribution_index_reads_slide_query_on_load() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(html.contains("URLSearchParams(location.search)"));
-        assert!(html.contains(".get('slide')"));
-        assert!(html.contains("showSlide(readSlideIndexFromUrl() - 1)"));
-    }
-
-    #[test]
-    fn distribution_index_supports_hash_fallback() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(html.contains("location.hash"));
-        assert!(html.contains("hash.startsWith('#slide=')"));
-        assert!(html.contains("hash.startsWith('#')"));
-        assert!(html.contains(".split('&')[0]"));
-    }
-
-    #[test]
-    fn distribution_index_updates_url_on_slide_change() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(html.contains("history.replaceState"));
-        let show_slide_index = html.find("function showSlide(index)").unwrap();
-        let current_index = html.find("currentIndex = next;").unwrap();
-        let write_call_index = html
-            .find("writeSlideIndexToUrl(currentIndex + 1);")
-            .unwrap();
-        let replace_state_index = html[current_index..]
-            .find("history.replaceState")
-            .map(|index| current_index + index)
-            .unwrap();
-
-        assert!(show_slide_index < current_index);
-        assert!(current_index < write_call_index);
-        assert!(current_index < replace_state_index);
-    }
-
-    #[test]
-    fn distribution_index_never_uses_pushstate() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(!html.contains("history.pushState"));
-    }
-
-    #[test]
-    fn distribution_index_handles_popstate() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(html.contains("window.addEventListener('popstate'"));
-    }
-
-    #[test]
-    fn distribution_index_preserves_query_and_hash_when_writing_slide() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
-
-        assert!(html.contains("location.pathname"));
-        assert!(html.contains("params.set('slide'"));
-        assert!(html.contains("location.hash"));
-        assert!(html.contains("location.pathname + '?' + params.toString() + location.hash"));
-    }
-
-    #[test]
     fn distribution_index_url_deep_link_leaves_present_and_presenter_alone() {
         let present_html = render_present_index(AspectRatio::Ratio16To9, &DeckLang::default());
         let presenter_html = render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default());
@@ -6111,7 +6135,11 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_uses_deck_aspect_ratio_canvas_dimensions() {
-        let html = render_distribution_index(AspectRatio::Ratio4To3, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio4To3,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(html.contains("--peitho-canvas-width: 960px;"));
         assert!(html.contains("--peitho-canvas-height: 720px;"));
@@ -6565,7 +6593,11 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_does_not_include_time_tracker() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(!html.contains("installTimeTracker"));
         assert!(!html.contains("peitho-time-tracker"));
@@ -6574,7 +6606,11 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_maps_escape_to_index_navigation() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         assert!(html.contains("event.key === 'Escape'"));
         assert!(html.contains("function exitToIndex()"));
@@ -6584,7 +6620,11 @@ Paragraph after heading.
 
     #[test]
     fn distribution_index_escape_never_navigates_to_site_root() {
-        let html = render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default());
+        let html = render_distribution_index(
+            AspectRatio::Ratio16To9,
+            &DeckLang::default(),
+            PublicReveal::Final,
+        );
 
         // peitho only ever generates the deck directory, so it cannot know what
         // (if anything) lives at the origin root. A deck published under a
@@ -6677,7 +6717,7 @@ Paragraph after heading.
         let ja = DeckLang::parse("ja").unwrap();
 
         for html in [
-            render_distribution_index(AspectRatio::Ratio16To9, &ja),
+            render_distribution_index(AspectRatio::Ratio16To9, &ja, PublicReveal::Final),
             render_present_index(AspectRatio::Ratio16To9, &ja),
             render_preview_index(AspectRatio::Ratio16To9, &ja),
             render_presenter_index(AspectRatio::Ratio16To9, &ja),
@@ -6689,7 +6729,11 @@ Paragraph after heading.
     #[test]
     fn slide_pages_default_to_english_lang() {
         for html in [
-            render_distribution_index(AspectRatio::Ratio16To9, &DeckLang::default()),
+            render_distribution_index(
+                AspectRatio::Ratio16To9,
+                &DeckLang::default(),
+                PublicReveal::Final,
+            ),
             render_present_index(AspectRatio::Ratio16To9, &DeckLang::default()),
             render_preview_index(AspectRatio::Ratio16To9, &DeckLang::default()),
             render_presenter_index(AspectRatio::Ratio16To9, &DeckLang::default()),
@@ -6924,9 +6968,16 @@ Paragraph after heading.
             title_body_layout(),
         );
         let html = render_pdf_document(&rendered);
+        let slide_body = html
+            .split_once("<body>\n")
+            .unwrap()
+            .1
+            .split_once("  <script>\n")
+            .unwrap()
+            .0;
 
-        assert!(html.contains(r#"data-reveal-step="1""#), "{html}");
-        assert!(!html.contains("data-reveal-hidden"), "{html}");
+        assert!(slide_body.contains(r#"data-reveal-step="1""#), "{html}");
+        assert!(!slide_body.contains("data-reveal-hidden"), "{html}");
     }
 
     #[test]

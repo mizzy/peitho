@@ -14,6 +14,7 @@ import {
 } from "./scripts";
 import { initialSlideIndex } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
+import { applyStepState, createStepStateStyle } from "./stepState";
 
 export type NavigateTarget =
   | "next"
@@ -134,30 +135,6 @@ const DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
 const POINTER_TRAIL_DURATION_MS = 500;
 const POINTER_TRAIL_CAP = 64;
 const POINTER_CORE_MIX_TO_WHITE = 0.65;
-const REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
-
-/**
- * Stepped code line emphasis defaults, injected by the present shell.
- *
- * Static emphasis defaults ship in the rendered deck CSS so every output and
- * every slot name receives them. The shell owns only stepped emphasis
- * (`[data-emphasis-active]`, toggled per step). It retains the `.code-line`
- * layout rule because stepped-only decks do not receive the static CSS block.
- *
- * Appearance stays themeable through the custom properties; a deck overriding
- * them in its own CSS wins, because these rules only supply the fallbacks.
- */
-const EMPHASIS_ACTIVE_CSS = [
-  ".code-line{display:inline-block;width:100%}",
-  "[data-emphasis-active]{",
-  "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
-  "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
-  "}",
-  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
-  "opacity:var(--peitho-emphasis-dim,0.45)",
-  "}"
-].join("");
-
 const CSS_NAMED_COLORS: Record<string, string> = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -791,9 +768,7 @@ class PresentShellController implements PresentShell {
       })
     );
     const shadow = attachSlideShadow(host, this.doc, css);
-    const revealStyle = this.doc.createElement("style");
-    revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
-    shadow.appendChild(revealStyle);
+    shadow.appendChild(createStepStateStyle(this.doc));
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     const fragment = template.content.cloneNode(true) as DocumentFragment;
@@ -883,7 +858,7 @@ class PresentShellController implements PresentShell {
     this.currentIndex = index;
     this.currentStep = nextStep;
     const slide = this.slides[index];
-    this.applyRevealState(slide.host, nextStep);
+    applyStepState(slide.shadow, nextStep);
     if (indexChanged) {
       this.bus.dispatchEvent(
         new CustomEvent<SlideChangeDetail>("peitho:slidechange", {
@@ -908,41 +883,6 @@ class PresentShellController implements PresentShell {
         }
       })
     );
-  }
-
-  private applyRevealState(host: HTMLElement, step: number): void {
-    const markers = host.shadowRoot?.querySelectorAll<HTMLElement>("[data-reveal-step]");
-    if (markers == null) return;
-    for (const marker of markers) {
-      const revealStep = Number(marker.dataset.revealStep);
-      marker.toggleAttribute(
-        "data-reveal-hidden",
-        Number.isFinite(revealStep) && revealStep > step
-      );
-    }
-    this.applyEmphasisState(host, step);
-  }
-
-  /**
-   * Move code line emphasis to every marker listing the current step.
-   *
-   * Unlike reveal, emphasis is not cumulative: it points at one group at a
-   * time and moves, so each whitespace-separated step token is compared for
-   * equality rather than "step or earlier". Stepping past the last group
-   * leaves the block unemphasized, which is the correct final state — the
-   * pointer is gone once the speaker has moved on.
-   */
-  private applyEmphasisState(host: HTMLElement, step: number): void {
-    const markers = host.shadowRoot?.querySelectorAll<HTMLElement>("[data-emphasis-step]");
-    if (markers == null) return;
-    for (const marker of markers) {
-      const steps = (marker.dataset.emphasisStep ?? "")
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean)
-        .map(Number);
-      marker.toggleAttribute("data-emphasis-active", steps.includes(step));
-    }
   }
 
   private startPresentation(): void {

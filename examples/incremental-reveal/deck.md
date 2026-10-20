@@ -1,7 +1,11 @@
+---
+public_reveal: steps
+---
+
 # Incremental Reveal
 
-The published deck shows the final state; presenter mode steps through the same
-content.
+Presenter mode and this published deck step through the same content; press
+the right arrow to advance.
 
 ::: {reveal}
 
