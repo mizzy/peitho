@@ -23,8 +23,19 @@ import {
   type PreviewSourceEdit,
   type PreviewSourceEditCommitResult
 } from "./previewSourceEdit";
-import type { NavigateTarget, SlideChangeDetail } from "./shell";
+import type {
+  NavigateTarget,
+  SlideChangeDetail,
+  StepChangeDetail
+} from "./shell";
 import { initialSlideIndex, nextNonSkippedIndex } from "./skipnav";
+import {
+  clampStep,
+  revealStepCount,
+  resolveStepTarget,
+  type StepPosition
+} from "./stepnav";
+import { applyStepState, createStepStateStyle } from "./stepState";
 import {
   isBuildErrorSyncMessage,
   isGenerationSyncMessage,
@@ -42,6 +53,7 @@ type PreviewNavigateDetail = { to: PreviewNavigateTarget };
 export type PreviewShell = {
   manifest: Manifest | null;
   currentIndex: number;
+  currentStep: number;
   selectedIndex: number;
   mode: PreviewMode;
   generation: number;
@@ -106,8 +118,11 @@ type PreviewDraft = {
 type PreviewState = {
   mode: PreviewMode;
   index: number;
+  step: number;
   draft?: PreviewDraft;
 };
+
+type RestoredPreviewState = Omit<PreviewState, "step"> & { step?: number };
 
 type PanelStatusSource = "notes" | "slide-edit" | "slide-source";
 
@@ -639,6 +654,7 @@ export function installPreviewReload(
 class PreviewShellController implements PreviewShell {
   manifest: Manifest | null = null;
   currentIndex = -1;
+  currentStep = 0;
   selectedIndex = -1;
   mode: PreviewMode = DEFAULT_PREVIEW_MODE;
   generation = 0;
@@ -654,7 +670,7 @@ class PreviewShellController implements PreviewShell {
   private readonly syncUrl: string;
   private readonly viewport?: () => CanvasViewport;
   private readonly selectionRangeProvider: PreviewSelectionRangeProvider;
-  private readonly restoredState: PreviewState | null;
+  private readonly restoredState: RestoredPreviewState | null;
   private readonly slides: PreviewSlideView[] = [];
   private notes: Notes = { version: 1, notes: {} };
   private sources: SlideSources = { version: 1, sources: {}, unavailable: {} };
@@ -835,6 +851,12 @@ class PreviewShellController implements PreviewShell {
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
+      const restoredStep = restored?.step;
+      const stepCount = this.stepCountFor(restoredIndex);
+      this.currentStep =
+        this.mode === "single" && restoredStep !== undefined
+          ? clampStep(restoredStep, stepCount)
+          : stepCount;
       this.applyLayout();
       if (this.notesTextareaKey === null) this.renderNotes();
       this.restoreDraft(restored?.draft);
@@ -929,15 +951,19 @@ class PreviewShellController implements PreviewShell {
   }
 
   private navigateToTarget(to: PreviewNavigateTarget): boolean {
-    const index = this.resolveTarget(to);
-    if (index === null) return false;
-    this.setIndex(index);
+    const position = this.resolveTarget(to);
+    if (position === null) return false;
+    this.commitTransition(position, this.mode);
     return true;
   }
 
   saveState(): void {
     if (!this.isLoaded()) return;
-    const state: PreviewState = { mode: this.mode, index: this.stateIndex() };
+    const state: PreviewState = {
+      mode: this.mode,
+      index: this.stateIndex(),
+      step: this.currentStep
+    };
     const focused = this.doc.activeElement === this.notesTextarea;
     const dirty = !this.notesSettled();
     if (this.notesTextareaKey !== null && (dirty || focused)) {
@@ -1029,7 +1055,11 @@ class PreviewShellController implements PreviewShell {
       if (editsLink) event.preventDefault();
       if (clickGuard.shouldIgnoreClick(event) && !editsLink) return;
       if (this.tryStartSlideEdit(editable)) return;
-      this.commitTransition(slide.index, "single");
+      const step =
+        this.mode === "grid" || slide.index !== this.currentIndex
+          ? this.stepCountFor(slide.index)
+          : this.currentStep;
+      this.commitTransition({ index: slide.index, step }, "single");
     };
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
@@ -1532,6 +1562,7 @@ class PreviewShellController implements PreviewShell {
       css,
       "peitho-preview-slide"
     );
+    shadow.appendChild(createStepStateStyle(this.doc));
     executeInlineScripts(fragment, this.doc);
     shadow.appendChild(fragment);
     return { host, shadow };
@@ -1876,11 +1907,13 @@ class PreviewShellController implements PreviewShell {
   }
 
   private enterGrid(): void {
-    this.commitTransition(this.currentIndex, "grid");
+    const position = this.resolveDirectIndex(this.clampIndex(this.currentIndex));
+    if (position !== null) this.commitTransition(position, "grid");
   }
 
   private exitGrid(): void {
-    this.commitTransition(this.selectedIndex, "single");
+    const position = this.resolveDirectIndex(this.clampIndex(this.selectedIndex));
+    if (position !== null) this.commitTransition(position, "single");
   }
 
   private activateSelection(): void {
@@ -1889,7 +1922,11 @@ class PreviewShellController implements PreviewShell {
       return;
     }
     if (this.isEditOpen()) {
-      this.commitTransition(this.currentIndex, "single", () => this.focusNotes());
+      this.commitTransition(
+        { index: this.currentIndex, step: this.currentStep },
+        "single",
+        () => this.focusNotes()
+      );
       return;
     }
     this.focusNotes();
@@ -1903,18 +1940,25 @@ class PreviewShellController implements PreviewShell {
   }
 
   private setIndex(index: number): void {
-    this.commitTransition(index, this.mode);
+    const position = this.resolveDirectIndex(this.clampIndex(index));
+    if (position !== null) this.commitTransition(position, this.mode);
   }
 
   private commitTransition(
-    index: number,
+    position: StepPosition,
     mode: PreviewMode,
     afterCommit?: () => void
   ): void {
-    index = this.clampIndex(index);
+    const index = this.clampIndex(position.index);
+    const stepCount = this.stepCountFor(index);
+    const step =
+      mode === "grid" ? stepCount : clampStep(position.step, stepCount);
+    const stepOnlyMove =
+      index === this.currentIndex && mode === this.mode && step !== this.currentStep;
     if (
       afterCommit === undefined &&
       index === this.currentIndex &&
+      step === this.currentStep &&
       index === this.selectedIndex &&
       mode === this.mode
     ) {
@@ -1922,26 +1966,38 @@ class PreviewShellController implements PreviewShell {
     }
     const sequence = this.advanceTransitionSequence();
     this.renderPanelStatus();
+    const editOpen = this.isEditOpen();
     const needsFlush =
-      (mode === "grid" && this.mode === "single") ||
-      (mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey);
+      !stepOnlyMove &&
+      (editOpen ||
+        (mode === "grid" && this.mode === "single") ||
+        (mode === "single" &&
+          this.slides[index]?.meta.key !== this.notesTextareaKey));
     const commit = (): void => {
       const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
+      const previousStep = this.currentStep;
       const previousMode = this.mode;
       this.currentIndex = index;
+      this.currentStep = step;
       this.selectedIndex = index;
       this.mode = mode;
       if (previousIndex !== index || previousMode !== mode) this.setSlideSourceStatus("");
       if (mode === "grid" && this.doc.activeElement === this.notesTextarea) {
         this.notesTextarea.blur();
       }
+      if (previousMode !== "grid" && mode === "grid") {
+        this.resetGridStepState();
+      }
       this.applyLayout();
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
+      else if (previousStep !== step) {
+        this.dispatchStepChange();
+      }
       this.saveState();
       afterCommit?.();
     };
 
-    if (!this.isEditOpen() && (!needsFlush || this.notesSettled())) {
+    if (!editOpen && (!needsFlush || this.notesSettled())) {
       commit();
       this.releaseDeferredReload();
       return;
@@ -1950,7 +2006,7 @@ class PreviewShellController implements PreviewShell {
     this.pendingTransitionSettlements += 1;
     void (async () => {
       try {
-        const settled = await this.settleForTransition(sequence);
+        const settled = await this.settleForTransition(sequence, needsFlush);
         if (sequence !== this.transitionSequence) return;
         if (!settled) {
           if (!this.isEditOpen()) this.releaseDeferredReload();
@@ -1964,9 +2020,13 @@ class PreviewShellController implements PreviewShell {
     })();
   }
 
-  private async settleForTransition(sequence: number): Promise<boolean> {
+  private async settleForTransition(
+    sequence: number,
+    needsNotesFlush: boolean
+  ): Promise<boolean> {
     if (!(await this.commitActiveEdit())) return false;
     if (sequence !== this.transitionSequence) return false;
+    if (!needsNotesFlush) return true;
     while (!this.notesSettled()) {
       if (!(await this.flushNotes())) return false;
       if (sequence !== this.transitionSequence) return false;
@@ -1986,34 +2046,56 @@ class PreviewShellController implements PreviewShell {
     return key !== null && text !== (this.notes.notes[key] ?? "");
   }
 
-  private resolveTarget(to: PreviewNavigateTarget): number | null {
-    if (to === "first") return 0;
-    if (to === "last") return this.slides.length - 1;
+  private resolveTarget(to: PreviewNavigateTarget): StepPosition | null {
+    if (to === "first") return this.resolveDirectIndex(0);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
     if (to === "next") {
-      if (this.mode === "grid") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
-      return this.resolveSequentialTarget(1);
+      if (this.mode === "grid") {
+        return this.resolveDirectIndex(
+          Math.min(this.selectedIndex + 1, this.slides.length - 1)
+        );
+      }
+      return this.resolveStepTarget(1);
     }
     if (to === "prev") {
-      if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
-      return this.resolveSequentialTarget(-1);
+      if (this.mode === "grid") {
+        return this.resolveDirectIndex(Math.max(this.selectedIndex - 1, 0));
+      }
+      return this.resolveStepTarget(-1);
     }
     if (to === "up" || to === "down") {
-      if (this.mode === "grid") return this.resolveGridVerticalTarget(to);
-      return this.resolveSequentialTarget(to === "up" ? -1 : 1);
+      const index =
+        this.mode === "grid"
+          ? this.resolveGridVerticalTarget(to)
+          : this.resolveSequentialTarget(to === "up" ? -1 : 1);
+      return index === null ? null : this.resolveDirectIndex(index);
     }
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return to.index;
+      return this.resolveDirectIndex(to.index);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return index;
+    return this.resolveDirectIndex(index);
+  }
+
+  private resolveDirectIndex(index: number): StepPosition | null {
+    if (index < 0 || index >= this.slides.length) return null;
+    return { index, step: this.stepCountFor(index) };
+  }
+
+  private resolveStepTarget(direction: 1 | -1): StepPosition | null {
+    return resolveStepTarget(
+      this.slides.map((slide) => slide.meta),
+      { index: this.currentIndex, step: this.currentStep },
+      direction
+    );
   }
 
   private resolveSequentialTarget(direction: 1 | -1): number | null {
@@ -2022,6 +2104,10 @@ class PreviewShellController implements PreviewShell {
       this.selectedIndex,
       direction
     );
+  }
+
+  private stepCountFor(index: number): number {
+    return revealStepCount(this.slides[index]?.meta);
   }
 
   private resolveGridVerticalTarget(direction: "up" | "down"): number | null {
@@ -2138,7 +2224,18 @@ class PreviewShellController implements PreviewShell {
       slide.thumb.style.cursor = "pointer";
       this.applyHostFrame(slide.thumbHost, 0, 0, thumbScale);
     });
+    const active = this.slides[this.currentIndex];
+    if (active !== undefined) {
+      applyStepState(active.shadow, this.currentStep);
+    }
     this.scrollIntoViewOnLayout(this.slides[this.currentIndex]?.thumb);
+  }
+
+  private resetGridStepState(): void {
+    this.slides.forEach((slide) => {
+      // One past final reveals everything and clears equality-based emphasis.
+      applyStepState(slide.shadow, revealStepCount(slide.meta) + 1);
+    });
   }
 
   private applyGridLayout(): void {
@@ -2210,13 +2307,29 @@ class PreviewShellController implements PreviewShell {
           key: slide.meta.key,
           index: slide.meta.index,
           total: this.slides.length,
-          previousIndex
+          previousIndex,
+          step: this.currentStep,
+          stepCount: this.stepCountFor(this.currentIndex)
         }
       })
     );
   }
 
-  private readState(): PreviewState | null {
+  private dispatchStepChange(): void {
+    const slide = this.slides[this.currentIndex];
+    if (!slide) return;
+    this.bus.dispatchEvent(
+      new CustomEvent<StepChangeDetail>("peitho:stepchange", {
+        detail: {
+          index: slide.meta.index,
+          step: this.currentStep,
+          stepCount: this.stepCountFor(this.currentIndex)
+        }
+      })
+    );
+  }
+
+  private readState(): RestoredPreviewState | null {
     let raw: string | null = null;
     try {
       raw = this.storage?.getItem(PREVIEW_STATE_KEY) ?? null;
@@ -2229,13 +2342,24 @@ class PreviewShellController implements PreviewShell {
       const parsed = JSON.parse(raw) as {
         mode?: unknown;
         index?: unknown;
+        step?: unknown;
         draft?: unknown;
       };
       if (
         (parsed.mode === "single" || parsed.mode === "grid") &&
         typeof parsed.index === "number"
       ) {
-        const state: PreviewState = { mode: parsed.mode, index: parsed.index };
+        const state: RestoredPreviewState = {
+          mode: parsed.mode,
+          index: parsed.index
+        };
+        if (
+          typeof parsed.step === "number" &&
+          Number.isSafeInteger(parsed.step) &&
+          parsed.step >= 0
+        ) {
+          state.step = parsed.step;
+        }
         if (isPreviewDraft(parsed.draft)) state.draft = parsed.draft;
         return state;
       }
@@ -2255,7 +2379,11 @@ class PreviewShellController implements PreviewShell {
       this.notesTextarea.setSelectionRange(selectionStart, selectionEnd);
       if (draft.focused && this.mode === "single") this.notesTextarea.focus();
     }
-    this.writeState({ mode: this.mode, index: this.stateIndex() });
+    this.writeState({
+      mode: this.mode,
+      index: this.stateIndex(),
+      step: this.currentStep
+    });
   }
 
   private stateIndex(): number {

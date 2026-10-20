@@ -73,15 +73,16 @@ peitho preview
 
 Preview watches the deck, its referenced images, and its assets, serves the
 deck locally, and reloads the browser after each successful rebuild while
-preserving the current slide and overview mode.
+preserving the current slide, reveal step, and overview mode.
 
 ![peitho preview showing a single slide in the browser](/guide-shots/preview-single.png)
 
 In preview, `o` toggles single-slide and tile overview modes, while Esc returns
-to the overview and Enter opens the selected tile; arrows move through slides
-and overview tiles, and clicking a tile opens it. The single-slide view keeps a
-filmstrip of thumbnails on the left; Up/Down walk it and clicking one jumps to
-that slide.
+to the overview and Enter opens the selected tile. On the single-slide stage,
+ArrowRight/ArrowLeft and PageDown/PageUp walk reveal positions. Up/Down move
+between non-skipped slides and land fully revealed; filmstrip clicks, grid
+opens, Home, and End also land fully revealed. Grid arrows keep moving between
+tiles. The filmstrip of final-state thumbnails stays on the left.
 
 The single-slide view is also an editor: speaker notes are typed into the panel
 below the slide, a click on slide text swaps that block to its Markdown source,

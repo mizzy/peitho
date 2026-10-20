@@ -91,7 +91,9 @@ slide number and the logical slide total, so three pages for slide 2 still
 display `2`, or `2 / total`, rather than being renumbered as PDF pages.
 
 Only `final` and `steps` are accepted. `peitho present` keeps its normal step
-navigation in either mode. Preview and lint remain fully revealed.
+navigation in either mode. Preview ignores `public_reveal`: its single-slide
+stage always walks steps, while its filmstrip and overview grid remain fully
+revealed. Lint remains fully revealed.
 
 ## Remote pointer color
 
