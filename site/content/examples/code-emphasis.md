@@ -9,7 +9,7 @@ deck = "code-emphasis"
 demo_path = "/demo/code-emphasis/"
 source_path = "static/deck-sources/code-emphasis/deck.md"
 github_path = "examples/code-emphasis"
-demo_label = "Open published deck (static emphasis only)"
+demo_label = "Open published deck (steps)"
 +++
 
 ## What it demonstrates
@@ -34,20 +34,23 @@ Each fence has its own `title="..."` caption and static emphasis; placing the
 title before `{2}` on one fence and after it on the other shows that the two
 attributes compose in either order.
 
-To step through the emphasis locally, run
-`peitho present examples/code-emphasis/deck.md` and use the arrow keys.
+The deck sets `public_reveal: steps`, so the published deck above walks the
+stepped emphasis with the arrow keys. To step through it in presenter mode, run
+`peitho present examples/code-emphasis/deck.md`.
 
 ## What to look at
 
-Stepped emphasis is a pointer that follows narration, so it appears only in
-`peitho present`. Published output, previews, PDF export, and the gallery
-screenshot show those blocks unemphasized — freezing an arbitrary moment of a
+Stepped emphasis is a pointer that follows narration, so it appears only while
+walking steps: in `peitho present`, and in published output when the deck sets
+`public_reveal: steps` as this one does. A published deck landing on a slide
+fully revealed, previews, PDF export, and the gallery screenshot show those
+blocks unemphasized — freezing an arbitrary moment of a
 moving pointer into a distributed artifact would assert something the author
 never did. Static emphasis says "these lines are the important ones", which is
 a property of the content, so it ships with the deck and is visible in the
 published version above.
 
-The deck uses no frontmatter. Its `layouts/title-body-code.html` is a copy of
+The deck's only frontmatter is `public_reveal: steps`. Its `layouts/title-body-code.html` is a copy of
 the built-in layout with one intentional change: the `code` slot arity is
 `0..*` instead of `0..1`, allowing the final slide to carry two typed code
 blocks while the existing one-block slides render the same HTML. There is no
@@ -57,5 +60,5 @@ When a deck uses static emphasis, its default styling travels with the deck,
 including when the deck has its own `css/`. Restyle it with the
 `--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
 `--peitho-emphasis-dim` custom properties, or override
-`.code-line-emphasis` directly. Stepped emphasis is styled only by
-`peitho present`.
+`.code-line-emphasis` directly. Stepped emphasis is styled by the present
+shell and the published viewer, through the same custom properties.

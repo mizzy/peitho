@@ -1,3 +1,7 @@
+---
+public_reveal: steps
+---
+
 # Code Line Emphasis
 
 Emphasis points at the line you are talking about — a separate layer from
