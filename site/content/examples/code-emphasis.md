@@ -21,7 +21,7 @@ talk.
 
 The `|` separator is the only difference between the two modes. Without it,
 `{3}` is static emphasis: always applied, consuming no steps, and baked into
-the published deck. With it, `{2|5-7|10}` becomes a walkthrough — one step per
+the published deck. With it, `{2|4-6|9}` becomes a walkthrough — one step per
 group, with the emphasis moving rather than accumulating as you advance.
 
 The third slide uses `{1,4-5}` on a block with no language tag, showing that
