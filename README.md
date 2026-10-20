@@ -169,7 +169,7 @@ Unclosed or nested blocks, unknown slot names, and contract violations inside th
 
 ### Incremental reveal
 
-Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. Content outside reveal groups is always visible; each direct child block is one step, lists reveal one top-level item per step with nested items attached to their parent, and multiple groups on a slide keep numbering continuously. `peitho preview`, PDF export, lint, and published output show the final state. `{reveal=value}`, empty groups, unclosed fences, nested fences, and multi-attribute fences are line-numbered build errors.
+Use `::: {reveal}` to group blocks that `peitho present` reveals step by step. Content outside reveal groups is always visible; each direct child block is one step, lists reveal one top-level item per step with nested items attached to their parent, and multiple groups on a slide keep numbering continuously. `peitho preview` and lint show the final state. Published output and PDF export also show only the final state by default; set `public_reveal: steps` to make the published viewer walk positions 0 through N and PDF export one page per position. `{reveal=value}`, empty groups, unclosed fences, nested fences, and multi-attribute fences are line-numbered build errors.
 
 ![Reveal steps advancing one at a time in peitho present](docs/images/reveal-demo.gif)
 

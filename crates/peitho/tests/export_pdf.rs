@@ -43,6 +43,56 @@ fn export_pdf_writes_nonempty_pdf() {
 #[test]
 #[ignore]
 // Chrome-backed E2E test; run explicitly with cargo test -- --ignored.
+fn export_pdf_expands_public_reveal_steps_into_pages() {
+    let Some(chrome) = test_chrome_path() else {
+        println!("skipping export_pdf_expands_public_reveal_steps_into_pages: Chrome not found");
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let out = dir.path().join("out.pdf");
+    fs::write(
+        &deck,
+        r#"---
+public_reveal: steps
+---
+
+# Stepped
+
+::: {reveal}
+
+- First item
+- Second item
+
+:::
+
+---
+
+# Plain
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .args(["export", "pdf"])
+        .arg(&deck)
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exported 2 slide(s)"));
+
+    let bytes = fs::read(&out).unwrap();
+    assert!(bytes.len() > 4);
+    assert_eq!(&bytes[..5], b"%PDF-");
+    assert_eq!(pdf_page_object_count(&bytes), 4);
+}
+
+#[test]
+#[ignore]
+// Chrome-backed E2E test; run explicitly with cargo test -- --ignored.
 fn export_pdf_reports_shadow_mounted_failure_without_writing_pdf() {
     let Some(chrome) = test_chrome_path() else {
         println!(
@@ -207,6 +257,130 @@ fn export_pdf_flattens_box_shadows_without_luminosity_smask_to_images() {
 
 #[test]
 #[ignore]
+// Chrome-backed E2E test; run explicitly with cargo test -- --ignored.
+fn export_pdf_skips_hidden_box_shadows_without_emitting_images() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping export_pdf_skips_hidden_box_shadows_without_emitting_images: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let css_dir = dir.path().join("css");
+    let out = dir.path().join("out.pdf");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::write(
+        css_dir.join("shadow.css"),
+        r#".peitho-slide {
+  background: #fff;
+  color: #111827;
+}
+.peitho-slide h1 {
+  display: inline-block;
+  visibility: hidden;
+  padding: 24px 48px;
+  background: #fff;
+  box-shadow: rgba(0, 0, 0, 0.45) 0px 18px 48px 0px;
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &deck,
+        "---\naspect_ratio: 16:9\nresolution: 1920x1080\n---\n# Hidden Shadow\n\nVisible text\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .args(["export", "pdf"])
+        .arg(&deck)
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exported 1 slide(s)"));
+
+    let bytes = fs::read(&out).unwrap();
+    assert!(bytes.len() > 4);
+    assert_eq!(&bytes[..5], b"%PDF-");
+    assert_eq!(pdf_image_object_count(&bytes), 0);
+    assert!(pdf_bytes_contain(&bytes, b"/Font"));
+}
+
+#[test]
+#[ignore]
+// Chrome-backed E2E test; run explicitly with cargo test -- --ignored.
+fn export_pdf_skips_box_shadows_under_zero_opacity_ancestor() {
+    let Some(chrome) = test_chrome_path() else {
+        println!(
+            "skipping export_pdf_skips_box_shadows_under_zero_opacity_ancestor: Chrome not found"
+        );
+        return;
+    };
+    let dir = tempdir().unwrap();
+    let deck = dir.path().join("deck.md");
+    let css_dir = dir.path().join("css");
+    let layouts_dir = dir.path().join("layouts");
+    let out = dir.path().join("out.pdf");
+    fs::create_dir_all(&css_dir).unwrap();
+    fs::create_dir_all(&layouts_dir).unwrap();
+    fs::write(
+        css_dir.join("shadow.css"),
+        r#".peitho-slide {
+  background: #fff;
+  color: #111827;
+}
+.transparent-shadow-parent {
+  opacity: 0;
+}
+.shadow-child {
+  width: 320px;
+  height: 180px;
+  background: #fff;
+  box-shadow: rgba(0, 0, 0, 0.45) 0px 18px 48px 0px;
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        layouts_dir.join("zero-opacity-shadow.html"),
+        r#"<section class="peitho-slide">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="transparent-shadow-parent">
+    <div class="shadow-child"></div>
+  </div>
+</section>"#,
+    )
+    .unwrap();
+    fs::write(
+        &deck,
+        "---\naspect_ratio: 16:9\nresolution: 1920x1080\nlayouts: ./layouts\n---\n# Hidden Ancestor Shadow\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("peitho")
+        .unwrap()
+        .env("PEITHO_CHROME_PATH", chrome)
+        .args(["export", "pdf"])
+        .arg(&deck)
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exported 1 slide(s)"));
+
+    let bytes = fs::read(&out).unwrap();
+    assert!(bytes.len() > 4);
+    assert_eq!(&bytes[..5], b"%PDF-");
+    assert_eq!(pdf_image_object_count(&bytes), 0);
+    assert!(pdf_bytes_contain(&bytes, b"/Font"));
+}
+
+#[test]
+#[ignore]
 // Chromeを実行するE2Eテスト。cargo test -- --ignored で明示的に実行。
 fn export_pdf_flattens_inset_box_shadows_without_luminosity_smask_to_images() {
     let Some(chrome) = test_chrome_path() else {
@@ -264,4 +438,32 @@ fn export_pdf_flattens_inset_box_shadows_without_luminosity_smask_to_images() {
 
 fn pdf_bytes_contain(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+fn pdf_page_object_count(bytes: &[u8]) -> usize {
+    const PAGE_TYPE_TOKENS: [&[u8]; 2] = [b"/Type /Page", b"/Type/Page"];
+
+    PAGE_TYPE_TOKENS
+        .iter()
+        .map(|token| {
+            bytes
+                .windows(token.len() + 1)
+                .filter(|window| window.starts_with(token) && window[token.len()] != b's')
+                .count()
+        })
+        .sum()
+}
+
+fn pdf_image_object_count(bytes: &[u8]) -> usize {
+    const IMAGE_SUBTYPE_TOKENS: [&[u8]; 2] = [b"/Subtype /Image", b"/Subtype/Image"];
+
+    IMAGE_SUBTYPE_TOKENS
+        .iter()
+        .map(|token| {
+            bytes
+                .windows(token.len())
+                .filter(|window| *window == *token)
+                .count()
+        })
+        .sum()
 }

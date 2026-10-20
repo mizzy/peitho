@@ -23,8 +23,9 @@ numbers continue from the first group.
 Content outside reveal groups stays visible in every presenter state. The deck
 sets `public_reveal: steps`, so the published deck above steps through the same
 reveal groups with the arrow keys, and its URL keeps the step (`?slide=1&step=2`).
-Without that key, published output renders the final state. Previews, PDF
-export, and gallery screenshots render the final state either way.
+Without that key, published output and PDF export render only the final state.
+With it, PDF export emits one page per position from step 0 through step N.
+Previews, lint, and gallery screenshots render the final state in either mode.
 
 To step through the reveal in presenter mode, run `peitho present examples/incremental-reveal/deck.md` and use the arrow keys.
 

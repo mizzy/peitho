@@ -29,7 +29,7 @@ Supported keys are `time`, `aspect_ratio`, `resolution`, `breaks`,
 | `resolution` | PDF-only physical page size in `WxH` CSS pixels. |
 | `breaks` | Render single newlines in slide body Markdown as hard line breaks: `true` or `false` (default). |
 | `page_numbers` | Show a page number on every slide: `current` or `current_of_total`. Omitted means no page numbers. |
-| `public_reveal` | Published distribution navigation: `final` (default) or `steps`. |
+| `public_reveal` | Published distribution and PDF reveal behavior: `final` (default) or `steps`. |
 | `pointer_color` | Color of the laser pointer overlay driven from the phone remote: `#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA`, or a CSS named color. |
 | `lang` | Deck language as a BCP 47 tag, emitted as `<html lang>` on every page that renders slides: `en` (default), `ja`, `zh-Hans`, … Language-sensitive CSS such as `word-break: auto-phrase` keys off this. |
 | `layouts` | Layout HTML file or directory. |
@@ -72,20 +72,26 @@ the deck-level key is what turns numbering on. Using `"page_number":false`
 without a deck-level `page_numbers` is also a line-numbered error rather than a
 silent no-op.
 
-## Published reveal steps
+## Public reveal steps
 
-`public_reveal` controls only the viewer written by `peitho build`. The default
-is `final`, which moves one whole slide at a time and shows every reveal item.
-Use `steps` to make the published viewer walk incremental reveal and stepped
+`public_reveal` controls the viewer written by `peitho build` and reveal-page
+expansion in `peitho export pdf`. The default is `final`: the published viewer
+moves one whole slide at a time, and PDF writes one fully revealed page per
+slide. Use `steps` to make the viewer walk incremental reveal and stepped
 code-emphasis states:
 
 ```yaml
 public_reveal: steps
 ```
 
+In `steps` mode, the viewer walks positions 0 through N for a slide with N
+reveal steps, while PDF exports the same N + 1 positions as pages. A slide
+without steps still exports one page. Every expanded PDF page keeps its own
+slide number and the logical slide total, so three pages for slide 2 still
+display `2`, or `2 / total`, rather than being renumbered as PDF pages.
+
 Only `final` and `steps` are accepted. `peitho present` keeps its normal step
-navigation in either mode. Preview, lint, and PDF export remain fully revealed;
-PDF step expansion is tracked separately in Issue #723.
+navigation in either mode. Preview and lint remain fully revealed.
 
 ## Remote pointer color
 

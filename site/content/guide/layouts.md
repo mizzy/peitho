@@ -264,10 +264,14 @@ Tab.
 ### PDF export and lint
 
 `peitho export pdf` and `peitho lint` render every slide in one ordinary page,
-so layout scripts run there as well and receive the same event. Only drawing
-that finishes synchronously, or before the page's `load` event, is guaranteed
-to be in the output, and both commands stop waiting for `load` after two
-seconds: work after a `fetch` or an `await` races the print or the
+so layout scripts run there as well and receive the same event. With
+`public_reveal: steps`, PDF step pages are copied immediately after that
+announcement. The copies include DOM state and canvas bitmaps present at that
+moment; later canvas drawing, even before `load`, and other script-held state
+reach only the original fully revealed page. Only drawing that finishes
+synchronously, or before the page's `load` event, is guaranteed to be in the
+final PDF page or lint output, and both commands stop waiting for `load` after
+two seconds: work after a `fetch` or an `await` races the print or the
 measurement. A layout script must not duplicate or remove its own slide
 section — moving it is fine — because both commands then fail with the slide's
 key rather than printing a slide whose script never found its root.

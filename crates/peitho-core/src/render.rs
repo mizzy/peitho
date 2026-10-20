@@ -111,6 +111,7 @@ pub fn render_deck(
     let mut uses_static_emphasis = false;
     let mut uses_code_title = false;
     for slide in checked_slides {
+        let reveal_steps = slide.step_count();
         uses_math |= slide_uses_math(slide.slots());
         uses_embed_card |= slide_uses_embed_card(slide.slots());
         uses_generic_embed_card |= slide_uses_generic_embed_card(slide.slots());
@@ -131,7 +132,7 @@ pub fn render_deck(
             SlideRenderAttributes {
                 page_number,
                 page_total,
-                reveal_steps: slide.step_count(),
+                reveal_steps,
             },
             DeckRenderContext {
                 highlighter,
@@ -143,6 +144,7 @@ pub fn render_deck(
         slides.push(RenderedSlide::new(
             slide.index(),
             slide.key().clone(),
+            reveal_steps,
             html,
             notes,
         ));
@@ -2307,6 +2309,45 @@ fn shadow_mounted_announce_script_from_entries<'a>(
     embedded_distribution_viewer_script(&body)
 }
 
+#[derive(serde::Serialize)]
+struct PdfStepPageSlide<'a> {
+    key: &'a str,
+    #[serde(rename = "revealSteps")]
+    reveal_steps: usize,
+}
+
+fn pdf_step_pages_script(slides: &[RenderedSlide]) -> String {
+    pdf_step_pages_script_from_entries(
+        slides
+            .iter()
+            .map(|slide| (slide.key().as_str(), slide.reveal_steps())),
+    )
+}
+
+fn pdf_step_pages_script_from_entries<'a>(
+    slides: impl IntoIterator<Item = (&'a str, usize)>,
+) -> String {
+    let slides = slides
+        .into_iter()
+        .map(|(key, reveal_steps)| PdfStepPageSlide { key, reveal_steps })
+        .collect::<Vec<_>>();
+    let slides_json = serde_json::to_string(&slides)
+        .expect("slide keys and reveal-step counts serialize as JSON")
+        .replace('<', "\\u003c");
+    let body = format!(
+        r#"    try {{
+      document.head.appendChild(PeithoViewer.createStepStateStyle(document));
+      PeithoViewer.expandRevealStepPages(document, {slides_json});
+    }} catch (error) {{
+      const message = error instanceof Error ? error.message : String(error);
+      document.documentElement.setAttribute("data-peitho-pdf-step-pages-error", message);
+      throw error;
+    }}
+"#
+    );
+    embedded_distribution_viewer_script(&body)
+}
+
 pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
     let settings = deck.settings();
     let aspect_ratio = settings.aspect_ratio();
@@ -2314,6 +2355,10 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
     let scale = format_pdf_scale(resolution.width(), aspect_ratio.width());
     let backlog_script = shadow_mounted_backlog_script();
     let announce_script = shadow_mounted_announce_script(deck.slides());
+    let step_pages_script = match settings.public_reveal() {
+        PublicReveal::Final => String::new(),
+        PublicReveal::Steps => pdf_step_pages_script(deck.slides()),
+    };
     let mut slides = String::new();
     for slide in deck.slides() {
         slides.push_str(r#"  <div class="peitho-slide-wrap">"#);
@@ -2340,7 +2385,7 @@ pub fn render_pdf_document(deck: &Deck<Rendered>) -> String {
 {backlog_script}
 </head>
 <body>
-{slides}{announce_script}  <script>
+{slides}{announce_script}{step_pages_script}  <script>
 {pdf_flatten_js}
   </script>
 </body>
@@ -3119,6 +3164,26 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(slides_json).unwrap(),
             serde_json::json!([{ "key": hostile_key, "index": 7 }])
+        );
+    }
+
+    #[test]
+    fn pdf_step_pages_script_embeds_script_safe_round_trippable_json() {
+        let hostile_key = "quoted\"</script><!--";
+        let script = pdf_step_pages_script_from_entries([(hostile_key, 3)]);
+        let body = embedded_script_body(&script, "PeithoViewer.expandRevealStepPages(");
+        let json_prefix = "PeithoViewer.expandRevealStepPages(document, ";
+        let json_start = body.find(json_prefix).unwrap() + json_prefix.len();
+        let json_end = json_start + body[json_start..].find(");").unwrap();
+        let slides_json = &body[json_start..json_end];
+
+        assert!(!body.to_ascii_lowercase().contains("</script"));
+        assert!(!slides_json.contains('<'));
+        assert!(slides_json.contains(r#"\u003c/script>"#));
+        assert!(slides_json.contains(r#"\""#));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(slides_json).unwrap(),
+            serde_json::json!([{ "key": hostile_key, "revealSteps": 3 }])
         );
     }
 
@@ -6938,6 +7003,74 @@ Paragraph after heading.
     }
 
     #[test]
+    fn pdf_flatten_shadow_collection_skips_invisible_elements_before_parsing() {
+        let collect_shadow_targets = PDF_FLATTEN_JS
+            .split_once("function collectShadowTargets()")
+            .unwrap()
+            .1
+            .split_once("function shadowCacheKey")
+            .unwrap()
+            .0;
+        let computed_index = collect_shadow_targets
+            .find("var computed = getComputedStyle(element);")
+            .unwrap();
+        let visibility_index = collect_shadow_targets
+            .find(r#"if (computed.visibility !== "visible") return;"#)
+            .unwrap();
+        let parse_index = collect_shadow_targets
+            .find("var shadows = parseShadowList(computed.boxShadow);")
+            .unwrap();
+
+        assert!(computed_index < visibility_index);
+        assert!(visibility_index < parse_index);
+    }
+
+    #[test]
+    fn pdf_flatten_outer_shadows_preserve_effective_ancestor_opacity() {
+        let opacity_helper = PDF_FLATTEN_JS
+            .split_once("function effectiveOpacityBelowSlide(element, slide)")
+            .unwrap()
+            .1
+            .split_once("function hasTransformBeforeSlide")
+            .unwrap()
+            .0;
+        assert!(opacity_helper.contains(
+            "for (var node = element; node && node !== slide; node = node.parentElement)"
+        ));
+        assert!(opacity_helper.contains(
+            r#"if (node !== slide) throw new Error(".peitho-slide is not an ancestor");"#
+        ));
+
+        let collect_shadow_targets = PDF_FLATTEN_JS
+            .split_once("function collectShadowTargets()")
+            .unwrap()
+            .1
+            .split_once("function shadowCacheKey")
+            .unwrap()
+            .0;
+        let opacity_index = collect_shadow_targets
+            .find("var opacity = effectiveOpacityBelowSlide(element, slide);")
+            .unwrap();
+        let zero_skip_index = collect_shadow_targets
+            .find("if (opacity === 0) return;")
+            .unwrap();
+        let target_index = collect_shadow_targets.find("targets.push({").unwrap();
+        assert!(opacity_index < zero_skip_index);
+        assert!(zero_skip_index < target_index);
+        assert!(collect_shadow_targets.contains("opacity: opacity,"));
+
+        let apply_outer_shadow = PDF_FLATTEN_JS
+            .split_once("async function applyOuterShadow(target, raster)")
+            .unwrap()
+            .1
+            .split_once("async function applyShadowTarget")
+            .unwrap()
+            .0;
+        assert!(apply_outer_shadow
+            .contains("if (target.opacity < 1) image.style.opacity = String(target.opacity);"));
+    }
+
+    #[test]
     fn pdf_document_uses_four_by_three_resolution_and_scale() {
         let rendered = render_checked_deck("---\naspect_ratio: 4:3\n---\n# Intro");
 
@@ -6981,6 +7114,64 @@ Paragraph after heading.
     }
 
     #[test]
+    fn pdf_final_and_omitted_modes_are_byte_identical() {
+        const BODY: &str = "# T\n\n::: {reveal}\n\nBody\n\n:::\n";
+        let omitted = render_checked_deck_with_layout(BODY, title_body_layout());
+        let final_mode = render_checked_deck_with_layout(
+            &format!("---\npublic_reveal: final\n---\n{BODY}"),
+            title_body_layout(),
+        );
+
+        let omitted_html = render_pdf_document(&omitted);
+        let final_html = render_pdf_document(&final_mode);
+
+        assert_eq!(omitted_html, final_html);
+        assert!(!final_html.contains("PeithoViewer.expandRevealStepPages("));
+        assert!(!final_html.contains("data-peitho-pdf-step-pages-error"));
+    }
+
+    #[test]
+    fn pdf_steps_mode_expands_after_announcement_and_before_flattening() {
+        let rendered = render_checked_deck_with_layout(
+            "---\npublic_reveal: steps\n---\n# T\n\n::: {reveal}\n\nBody\n\n:::\n",
+            title_body_layout(),
+        );
+
+        let html = render_pdf_document(&rendered);
+        let last_slide_index = html.rfind(r#"data-slide-key="t""#).unwrap();
+        let announce_index = html.find("PeithoViewer.announceParsedSlides(").unwrap();
+        let style_index = html
+            .find("document.head.appendChild(PeithoViewer.createStepStateStyle(document));")
+            .unwrap();
+        let expand_index = html
+            .find("PeithoViewer.expandRevealStepPages(document, ")
+            .unwrap();
+        let flatten_index = html.find(PDF_FLATTEN_JS).unwrap();
+        let expansion_script =
+            embedded_script_body(&html, "PeithoViewer.expandRevealStepPages(document, ");
+        let expansion_bootstrap = expansion_script
+            .split_once(DISTRIBUTION_VIEWER_JS)
+            .unwrap()
+            .1;
+
+        assert_eq!(
+            html.matches(r#"<div class="peitho-slide-wrap">"#).count(),
+            1,
+        );
+        assert!(last_slide_index < announce_index);
+        assert!(announce_index < style_index);
+        assert!(style_index < expand_index);
+        assert!(expand_index < flatten_index);
+        assert_eq!(html.matches(DISTRIBUTION_VIEWER_JS).count(), 3);
+        assert!(expansion_bootstrap.contains("data-peitho-pdf-step-pages-error"));
+        assert!(expansion_bootstrap.contains("throw error;"));
+        assert!(!expansion_bootstrap.contains("executeInlineScripts"));
+        assert!(expansion_bootstrap.contains(
+            r#"PeithoViewer.expandRevealStepPages(document, [{"key":"t","revealSteps":1}]);"#
+        ));
+    }
+
+    #[test]
     fn lint_document_uses_aspect_ratio_canvas_and_ignores_resolution() {
         let rendered = render_checked_deck("---\nresolution: 1920x1080\n---\n# Intro");
 
@@ -6994,7 +7185,7 @@ Paragraph after heading.
         assert!(!html.contains("html, body { margin: 0; padding: 0; background: #fff; }"));
         assert!(!html.contains("1920px"));
         assert!(!html.contains("1080px"));
-        assert!(!html.contains(".peitho-slide-wrap"));
+        assert!(!html.contains(".peitho-slide-wrap {"));
         assert!(!html.contains("transform: scale(1.5"));
     }
 
@@ -7014,7 +7205,7 @@ Paragraph after heading.
         assert!(html.contains(">Details</span>"));
         assert!(!html.contains("flattenGradients"));
         assert!(!html.contains("flattenBoxShadows"));
-        assert!(!html.contains(".peitho-slide-wrap"));
+        assert!(!html.contains(r#"<div class="peitho-slide-wrap">"#));
     }
 
     #[test]
