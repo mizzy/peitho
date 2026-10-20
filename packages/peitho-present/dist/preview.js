@@ -535,6 +535,66 @@ function initialSlideIndex(slides) {
   return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
 
+// src/stepnav.ts
+function revealStepCount(slide) {
+  const value = slide?.revealSteps;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+function clampStep(step, stepCount) {
+  if (!Number.isFinite(step)) return 0;
+  return Math.max(0, Math.min(Math.floor(step), stepCount));
+}
+function resolveStepTarget(slides, position, direction) {
+  if (direction === 1) {
+    const stepCount = revealStepCount(slides[position.index]);
+    if (position.step < stepCount) {
+      return { index: position.index, step: position.step + 1 };
+    }
+    const index2 = nextNonSkippedIndex(slides, position.index, 1);
+    return index2 === null ? null : { index: index2, step: 0 };
+  }
+  if (position.step > 0) {
+    return { index: position.index, step: position.step - 1 };
+  }
+  const index = nextNonSkippedIndex(slides, position.index, -1);
+  return index === null ? null : { index, step: revealStepCount(slides[index]) };
+}
+
+// src/stepState.ts
+var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
+var EMPHASIS_ACTIVE_CSS = [
+  ".code-line{display:inline-block;width:100%}",
+  "[data-emphasis-active]{",
+  "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+  "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
+  "}",
+  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+  "opacity:var(--peitho-emphasis-dim,0.45)",
+  "}"
+].join("");
+function createStepStateStyle(doc) {
+  const style = doc.createElement("style");
+  style.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
+  return style;
+}
+function applyEmphasisState(root, step) {
+  for (const marker of root.querySelectorAll("[data-emphasis-step]")) {
+    const steps = (marker.dataset.emphasisStep ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+    marker.toggleAttribute("data-emphasis-active", steps.includes(step));
+  }
+}
+function applyStepState(root, step) {
+  for (const marker of root.querySelectorAll("[data-reveal-step]")) {
+    const revealStep = Number(marker.dataset.revealStep);
+    marker.toggleAttribute(
+      "data-reveal-hidden",
+      Number.isFinite(revealStep) && revealStep > step
+    );
+  }
+  applyEmphasisState(root, step);
+}
+
 // src/swap.ts
 var SWAP_ROUTES = Object.freeze({
   "/present.html": Object.freeze({ swapped: false, counterpart: "presenter-swapped" }),
@@ -1150,6 +1210,7 @@ function installPreviewReload(shell, channelFactory = serverSyncChannelFactory()
 var PreviewShellController = class {
   manifest = null;
   currentIndex = -1;
+  currentStep = 0;
   selectedIndex = -1;
   mode = DEFAULT_PREVIEW_MODE;
   generation = 0;
@@ -1337,6 +1398,9 @@ var PreviewShellController = class {
       this.currentIndex = restoredIndex;
       this.selectedIndex = restoredIndex;
       this.mode = restored?.mode ?? DEFAULT_PREVIEW_MODE;
+      const restoredStep = restored?.step;
+      const stepCount = this.stepCountFor(restoredIndex);
+      this.currentStep = this.mode === "single" && restoredStep !== void 0 ? clampStep(restoredStep, stepCount) : stepCount;
       this.applyLayout();
       if (this.notesTextareaKey === null) this.renderNotes();
       this.restoreDraft(restored?.draft);
@@ -1419,14 +1483,18 @@ var PreviewShellController = class {
     return false;
   }
   navigateToTarget(to) {
-    const index = this.resolveTarget(to);
-    if (index === null) return false;
-    this.setIndex(index);
+    const position = this.resolveTarget(to);
+    if (position === null) return false;
+    this.commitTransition(position, this.mode);
     return true;
   }
   saveState() {
     if (!this.isLoaded()) return;
-    const state = { mode: this.mode, index: this.stateIndex() };
+    const state = {
+      mode: this.mode,
+      index: this.stateIndex(),
+      step: this.currentStep
+    };
     const focused = this.doc.activeElement === this.notesTextarea;
     const dirty = !this.notesSettled();
     if (this.notesTextareaKey !== null && (dirty || focused)) {
@@ -1510,7 +1578,8 @@ var PreviewShellController = class {
       if (editsLink) event.preventDefault();
       if (clickGuard.shouldIgnoreClick(event) && !editsLink) return;
       if (this.tryStartSlideEdit(editable)) return;
-      this.commitTransition(slide.index, "single");
+      const step = this.mode === "grid" || slide.index !== this.currentIndex ? this.stepCountFor(slide.index) : this.currentStep;
+      this.commitTransition({ index: slide.index, step }, "single");
     };
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
@@ -1930,6 +1999,7 @@ var PreviewShellController = class {
       css,
       "peitho-preview-slide"
     );
+    shadow.appendChild(createStepStateStyle(this.doc));
     executeInlineScripts(fragment, this.doc);
     shadow.appendChild(fragment);
     return { host, shadow };
@@ -2219,10 +2289,12 @@ var PreviewShellController = class {
     else this.enterGrid();
   }
   enterGrid() {
-    this.commitTransition(this.currentIndex, "grid");
+    const position = this.resolveDirectIndex(this.clampIndex(this.currentIndex));
+    if (position !== null) this.commitTransition(position, "grid");
   }
   exitGrid() {
-    this.commitTransition(this.selectedIndex, "single");
+    const position = this.resolveDirectIndex(this.clampIndex(this.selectedIndex));
+    if (position !== null) this.commitTransition(position, "single");
   }
   activateSelection() {
     if (this.mode === "grid") {
@@ -2230,7 +2302,11 @@ var PreviewShellController = class {
       return;
     }
     if (this.isEditOpen()) {
-      this.commitTransition(this.currentIndex, "single", () => this.focusNotes());
+      this.commitTransition(
+        { index: this.currentIndex, step: this.currentStep },
+        "single",
+        () => this.focusNotes()
+      );
       return;
     }
     this.focusNotes();
@@ -2242,32 +2318,45 @@ var PreviewShellController = class {
     this.swallowEnterRepeat = true;
   }
   setIndex(index) {
-    this.commitTransition(index, this.mode);
+    const position = this.resolveDirectIndex(this.clampIndex(index));
+    if (position !== null) this.commitTransition(position, this.mode);
   }
-  commitTransition(index, mode, afterCommit) {
-    index = this.clampIndex(index);
-    if (afterCommit === void 0 && index === this.currentIndex && index === this.selectedIndex && mode === this.mode) {
+  commitTransition(position, mode, afterCommit) {
+    const index = this.clampIndex(position.index);
+    const stepCount = this.stepCountFor(index);
+    const step = mode === "grid" ? stepCount : clampStep(position.step, stepCount);
+    const stepOnlyMove = index === this.currentIndex && mode === this.mode && step !== this.currentStep;
+    if (afterCommit === void 0 && index === this.currentIndex && step === this.currentStep && index === this.selectedIndex && mode === this.mode) {
       return;
     }
     const sequence = this.advanceTransitionSequence();
     this.renderPanelStatus();
-    const needsFlush = mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey;
+    const editOpen = this.isEditOpen();
+    const needsFlush = !stepOnlyMove && (editOpen || mode === "grid" && this.mode === "single" || mode === "single" && this.slides[index]?.meta.key !== this.notesTextareaKey);
     const commit = () => {
       const previousIndex = this.currentIndex < 0 ? null : this.currentIndex;
+      const previousStep = this.currentStep;
       const previousMode = this.mode;
       this.currentIndex = index;
+      this.currentStep = step;
       this.selectedIndex = index;
       this.mode = mode;
       if (previousIndex !== index || previousMode !== mode) this.setSlideSourceStatus("");
       if (mode === "grid" && this.doc.activeElement === this.notesTextarea) {
         this.notesTextarea.blur();
       }
+      if (previousMode !== "grid" && mode === "grid") {
+        this.resetGridStepState();
+      }
       this.applyLayout();
       if (previousIndex !== index) this.dispatchSlideChange(previousIndex);
+      else if (previousStep !== step) {
+        this.dispatchStepChange();
+      }
       this.saveState();
       afterCommit?.();
     };
-    if (!this.isEditOpen() && (!needsFlush || this.notesSettled())) {
+    if (!editOpen && (!needsFlush || this.notesSettled())) {
       commit();
       this.releaseDeferredReload();
       return;
@@ -2275,7 +2364,7 @@ var PreviewShellController = class {
     this.pendingTransitionSettlements += 1;
     void (async () => {
       try {
-        const settled = await this.settleForTransition(sequence);
+        const settled = await this.settleForTransition(sequence, needsFlush);
         if (sequence !== this.transitionSequence) return;
         if (!settled) {
           if (!this.isEditOpen()) this.releaseDeferredReload();
@@ -2288,9 +2377,10 @@ var PreviewShellController = class {
       }
     })();
   }
-  async settleForTransition(sequence) {
+  async settleForTransition(sequence, needsNotesFlush) {
     if (!await this.commitActiveEdit()) return false;
     if (sequence !== this.transitionSequence) return false;
+    if (!needsNotesFlush) return true;
     while (!this.notesSettled()) {
       if (!await this.flushNotes()) return false;
       if (sequence !== this.transitionSequence) return false;
@@ -2307,33 +2397,50 @@ var PreviewShellController = class {
     return key !== null && text !== (this.notes.notes[key] ?? "");
   }
   resolveTarget(to) {
-    if (to === "first") return 0;
-    if (to === "last") return this.slides.length - 1;
+    if (to === "first") return this.resolveDirectIndex(0);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
     if (to === "next") {
-      if (this.mode === "grid") return Math.min(this.selectedIndex + 1, this.slides.length - 1);
-      return this.resolveSequentialTarget(1);
+      if (this.mode === "grid") {
+        return this.resolveDirectIndex(
+          Math.min(this.selectedIndex + 1, this.slides.length - 1)
+        );
+      }
+      return this.resolveStepTarget(1);
     }
     if (to === "prev") {
-      if (this.mode === "grid") return Math.max(this.selectedIndex - 1, 0);
-      return this.resolveSequentialTarget(-1);
+      if (this.mode === "grid") {
+        return this.resolveDirectIndex(Math.max(this.selectedIndex - 1, 0));
+      }
+      return this.resolveStepTarget(-1);
     }
     if (to === "up" || to === "down") {
-      if (this.mode === "grid") return this.resolveGridVerticalTarget(to);
-      return this.resolveSequentialTarget(to === "up" ? -1 : 1);
+      const index2 = this.mode === "grid" ? this.resolveGridVerticalTarget(to) : this.resolveSequentialTarget(to === "up" ? -1 : 1);
+      return index2 === null ? null : this.resolveDirectIndex(index2);
     }
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return to.index;
+      return this.resolveDirectIndex(to.index);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return index;
+    return this.resolveDirectIndex(index);
+  }
+  resolveDirectIndex(index) {
+    if (index < 0 || index >= this.slides.length) return null;
+    return { index, step: this.stepCountFor(index) };
+  }
+  resolveStepTarget(direction) {
+    return resolveStepTarget(
+      this.slides.map((slide) => slide.meta),
+      { index: this.currentIndex, step: this.currentStep },
+      direction
+    );
   }
   resolveSequentialTarget(direction) {
     return nextNonSkippedIndex(
@@ -2341,6 +2448,9 @@ var PreviewShellController = class {
       this.selectedIndex,
       direction
     );
+  }
+  stepCountFor(index) {
+    return revealStepCount(this.slides[index]?.meta);
   }
   resolveGridVerticalTarget(direction) {
     const columns = previewGridColumnCount(this.gridRootWidth());
@@ -2401,10 +2511,10 @@ var PreviewShellController = class {
     this.root.style.removeProperty("scroll-padding-top");
     this.root.style.removeProperty("scroll-padding-bottom");
     this.slides.forEach((slide, index) => {
-      const active = index === this.currentIndex;
-      const sourceEdit = active && this.activeEdit?.kind === "source" && this.activeEdit.view === slide ? this.activeEdit.edit : null;
-      slide.tile.hidden = !active;
-      slide.tile.classList.toggle("is-selected", active);
+      const active2 = index === this.currentIndex;
+      const sourceEdit = active2 && this.activeEdit?.kind === "source" && this.activeEdit.view === slide ? this.activeEdit.edit : null;
+      slide.tile.hidden = !active2;
+      slide.tile.classList.toggle("is-selected", active2);
       slide.tile.style.position = "absolute";
       slide.tile.style.left = `${PREVIEW_STRIP_WIDTH}px`;
       slide.tile.style.top = "0";
@@ -2418,7 +2528,7 @@ var PreviewShellController = class {
       slide.tile.style.outlineColor = "";
       slide.tile.style.outlineOffset = "";
       slide.tile.style.background = "transparent";
-      slide.host.hidden = !active || sourceEdit !== null;
+      slide.host.hidden = !active2 || sourceEdit !== null;
       slide.tileNumber.hidden = true;
       if (sourceEdit === null) {
         this.applyHostFrame(slide.host, fit.left, fit.top, fit.scale);
@@ -2430,8 +2540,8 @@ var PreviewShellController = class {
           height: this.dimensions.height * fit.scale
         });
       }
-      slide.thumb.classList.toggle("is-selected", active);
-      slide.thumb.setAttribute("aria-current", active ? "true" : "false");
+      slide.thumb.classList.toggle("is-selected", active2);
+      slide.thumb.setAttribute("aria-current", active2 ? "true" : "false");
       slide.thumb.style.position = "relative";
       slide.thumb.style.flexShrink = "0";
       slide.thumb.style.width = `${thumbWidth}px`;
@@ -2439,13 +2549,22 @@ var PreviewShellController = class {
       slide.thumb.style.overflow = "hidden";
       slide.thumb.style.border = "1px solid rgba(255,255,255,0.24)";
       slide.thumb.style.borderRadius = "4px";
-      slide.thumb.style.outline = active ? "3px solid #7dd3fc" : "";
-      slide.thumb.style.outlineOffset = active ? "1px" : "";
+      slide.thumb.style.outline = active2 ? "3px solid #7dd3fc" : "";
+      slide.thumb.style.outlineOffset = active2 ? "1px" : "";
       slide.thumb.style.background = "#000";
       slide.thumb.style.cursor = "pointer";
       this.applyHostFrame(slide.thumbHost, 0, 0, thumbScale);
     });
+    const active = this.slides[this.currentIndex];
+    if (active !== void 0) {
+      applyStepState(active.shadow, this.currentStep);
+    }
     this.scrollIntoViewOnLayout(this.slides[this.currentIndex]?.thumb);
+  }
+  resetGridStepState() {
+    this.slides.forEach((slide) => {
+      applyStepState(slide.shadow, revealStepCount(slide.meta) + 1);
+    });
   }
   applyGridLayout() {
     const scale = GRID_TILE_WIDTH / this.dimensions.width;
@@ -2511,7 +2630,22 @@ var PreviewShellController = class {
           key: slide.meta.key,
           index: slide.meta.index,
           total: this.slides.length,
-          previousIndex
+          previousIndex,
+          step: this.currentStep,
+          stepCount: this.stepCountFor(this.currentIndex)
+        }
+      })
+    );
+  }
+  dispatchStepChange() {
+    const slide = this.slides[this.currentIndex];
+    if (!slide) return;
+    this.bus.dispatchEvent(
+      new CustomEvent("peitho:stepchange", {
+        detail: {
+          index: slide.meta.index,
+          step: this.currentStep,
+          stepCount: this.stepCountFor(this.currentIndex)
         }
       })
     );
@@ -2528,7 +2662,13 @@ var PreviewShellController = class {
     try {
       const parsed = JSON.parse(raw);
       if ((parsed.mode === "single" || parsed.mode === "grid") && typeof parsed.index === "number") {
-        const state = { mode: parsed.mode, index: parsed.index };
+        const state = {
+          mode: parsed.mode,
+          index: parsed.index
+        };
+        if (typeof parsed.step === "number" && Number.isSafeInteger(parsed.step) && parsed.step >= 0) {
+          state.step = parsed.step;
+        }
         if (isPreviewDraft(parsed.draft)) state.draft = parsed.draft;
         return state;
       }
@@ -2547,7 +2687,11 @@ var PreviewShellController = class {
       this.notesTextarea.setSelectionRange(selectionStart, selectionEnd);
       if (draft.focused && this.mode === "single") this.notesTextarea.focus();
     }
-    this.writeState({ mode: this.mode, index: this.stateIndex() });
+    this.writeState({
+      mode: this.mode,
+      index: this.stateIndex(),
+      step: this.currentStep
+    });
   }
   stateIndex() {
     return this.clampIndex(this.selectedIndex >= 0 ? this.selectedIndex : this.currentIndex);

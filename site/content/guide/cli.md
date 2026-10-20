@@ -37,8 +37,15 @@ peitho preview
 ```
 
 It watches the deck, its referenced images, and its assets, serves locally,
-and reloads while preserving the current slide and overview state. The
-single-slide view keeps a filmstrip of thumbnails on the left and shows the
+and reloads while preserving the current slide, reveal step, and overview
+state. The single-slide stage always walks incremental-reveal and stepped
+emphasis positions, independently of `public_reveal`. ArrowRight/ArrowLeft and
+PageDown/PageUp move through that sequence; next-entry starts at step 0 and
+previous-entry lands fully revealed. Up/Down move to the next or previous
+non-skipped slide and land fully revealed. Filmstrip clicks, grid opens, Home,
+and End also land fully revealed, while grid arrows retain their tile
+navigation. The filmstrip thumbnails and overview grid always show the final
+state. The single-slide view keeps that filmstrip on the left and shows the
 current slide's speaker notes in an editable panel below the slide, headed by
 the slide's position (`3 / 25`); the overview grid shows neither. The position
 row shows one hint at a time: a save failure silences it; otherwise a restore
@@ -72,7 +79,8 @@ The notes panel is an editable textarea. Type into it and the note is saved
 when the panel loses focus (click away), when you move to another slide, and
 when the page is reloaded or closed. While the textarea has focus, arrows,
 Home, End, and every other key edit text; only PageUp and PageDown still
-change slides (the note is saved first), and Esc leaves the textarea so that
+request the previous or next reveal position. A same-slide step move does not
+flush the note; crossing a slide saves it first. Esc leaves the textarea so that
 a second Esc enters the overview. The other direction is symmetric: Enter in
 the overview opens the selected slide, and Enter in the single-slide view
 focuses the textarea with the caret at the end, so the whole loop works
@@ -141,8 +149,11 @@ runs, and the preview reloads on the same slide.
   edit immediately and puts the rendered block back; see
   [Restoring a discarded slide edit](#restoring-a-discarded-slide-edit). The
   notes panel is different: Escape only leaves its textarea and keeps the text.
-  While a block is being edited the other preview shortcuts are off; only
-  PageUp and PageDown still change slides, and they save first. The Enter
+  Only a currently revealed block can be clicked; content from a future step
+  is not an edit target. While a block is being edited the other preview
+  shortcuts are off; only PageUp and PageDown still request the previous or
+  next reveal position, possibly crossing a slide. An actual move saves the
+  edit before the step state changes; a boundary no-op leaves it open. The Enter
   that confirms an IME conversion never saves.
 - **Text only, not structure.** An edit may change the words and the inline
   syntax of that one block. Anything that would change the slide's structure
@@ -188,7 +199,9 @@ rather than the Markdown. Inline editing exists only in `peitho preview`;
 
 Press `e` in single mode to replace the rendered slide with its body Markdown.
 Cmd/Ctrl+Enter or blur saves; plain Enter inserts a newline; Escape discards
-immediately. The same one-shot restoration described under
+immediately and restores the same reveal step. PageUp/PageDown request the
+previous or next reveal position and save an actual move before changing the
+stage. The same one-shot restoration described under
 [Restoring a discarded slide edit](#restoring-a-discarded-slide-edit) applies.
 
 Where clicking a block is for a typo, this is for reworking the slide: the
@@ -247,8 +260,8 @@ Escape in either slide editor discards the edit immediately. When the discarded
 text differs from the last server version, the notes panel offers
 `Draft discarded · Press u to restore`. Press `u` to reopen the same editor —
 the whole-slide textarea or the clicked block — with the discarded text. The
-offer can be used once. Opening either editor, changing slides or modes, or a
-rebuild drops it silently. The retained text exists only in this page's memory
+offer can be used once. Opening either editor, changing slides, reveal steps,
+or modes, or a rebuild drops it silently. The retained text exists only in this page's memory
 and does not survive a reload.
 
 This does not change the notes textarea: Escape there leaves the textarea

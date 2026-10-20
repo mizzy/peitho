@@ -11,6 +11,7 @@ import {
 import { calculateCanvasFit } from "../src/canvas";
 import { resetKeepaliveBudgetForTests } from "../src/previewHttp";
 import { SHADOW_MOUNTED_EVENT, type ShadowMountedDetail } from "../src/scripts";
+import type { SlideChangeDetail, StepChangeDetail } from "../src/shell";
 import type { Notes } from "../../../bindings/Notes";
 import type { SlideSources } from "../../../bindings/SlideSources";
 import type { SyncChannel } from "../src/sync";
@@ -146,7 +147,9 @@ function manifestWithSlideCount(slideCount: number): typeof manifest {
   };
 }
 
-function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typeof manifest {
+function manifestWithSlides(
+  slides: Array<{ key: string; skip?: boolean; revealSteps?: number }>
+): typeof manifest {
   return {
     ...manifest,
     slideCount: slides.length,
@@ -156,7 +159,7 @@ function manifestWithSlides(slides: Array<{ key: string; skip?: boolean }>): typ
       src: `slides/${String(index).padStart(3, "0")}-${slide.key}.html`,
       hasNotes: false,
       skip: slide.skip ?? false,
-      revealSteps: 0,
+      revealSteps: slide.revealSteps ?? 0,
       text: { title: "", body: "", code: "" }
     }))
   };
@@ -288,6 +291,27 @@ function inlineEditFetchFixture(
   };
 }
 
+function steppedInlineFixture(): InlineEditFetchFixture {
+  const base = inlineEditFetchFixture();
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 1 },
+    { key: "middle" }
+  ]);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "manifest.json") return okJson(deck);
+    if (url === "slides/000-intro.html") {
+      return okText(
+        '<section><p id="always" data-peitho-src="1-7" data-peitho-md="Always">Always</p>' +
+          '<p id="stepped-edit" data-reveal-step="1" data-peitho-src="8-15" ' +
+          'data-peitho-md="Visible">Visible</p></section>'
+      );
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  return { ...base, fetcher };
+}
+
 type SourceEditFetchFixture = InlineEditFetchFixture & {
   sourceEditPosts(): Array<[string, RequestInit]>;
   resolveSourceEditPost(response: Response): void;
@@ -377,6 +401,7 @@ async function mountForTest(root: HTMLElement, bus: EventTarget = window): Promi
 async function mountInlineEditForTest(options: {
   mode?: "single" | "grid";
   index?: number;
+  step?: number;
   bus?: EventTarget;
   fixture?: InlineEditFetchFixture;
   viewport?: () => { width: number; height: number };
@@ -395,7 +420,12 @@ async function mountInlineEditForTest(options: {
   cleanups.push(() => root.remove());
   const mode = options.mode ?? "single";
   const index = options.index ?? 0;
-  sessionStorage.setItem("peitho:preview-state", JSON.stringify({ mode, index }));
+  const state: { mode: "single" | "grid"; index: number; step?: number } = {
+    mode,
+    index
+  };
+  if (options.step !== undefined) state.step = options.step;
+  sessionStorage.setItem("peitho:preview-state", JSON.stringify(state));
   const fixture = options.fixture ?? inlineEditFetchFixture();
   const bus = options.bus ?? window;
   const shell = await mountPreviewShell({
@@ -683,6 +713,56 @@ it("shadow_mounted_fires_for_the_stage_only", async () => {
   for (const [index, event] of events.entries()) {
     expect((backlog as ShadowMountedDetail[])[index]).toBe(event.detail);
   }
+});
+
+it("applies a restored step before the remounted stage announcement", async () => {
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 1 })
+  );
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 2 }]);
+  const base = previewFetchFixture(deck);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).startsWith("slides/")) {
+      return okText(
+        '<section><script>window.previewMounted = true</script>' +
+          '<p data-reveal-step="1">A</p><p data-reveal-step="2">B</p></section>'
+      );
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  let stateAtAnnouncement: boolean[] | null = null;
+  let announcements = 0;
+  const listener: EventListener = (event) => {
+    const detail = (event as CustomEvent<ShadowMountedDetail>).detail;
+    if (detail.key !== "intro") return;
+    announcements += 1;
+    expect(detail.root.querySelector("script")?.textContent).toContain(
+      "(function () {"
+    );
+    stateAtAnnouncement = [
+      ...detail.root.querySelectorAll<HTMLElement>("[data-reveal-step]")
+    ].map((node) => node.hasAttribute("data-reveal-hidden"));
+  };
+  document.addEventListener(SHADOW_MOUNTED_EVENT, listener);
+  cleanups.push(() => document.removeEventListener(SHADOW_MOUNTED_EVENT, listener));
+
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  const shell = await mountPreviewShell({
+    root,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  expect(stateAtAnnouncement).toEqual([false, true]);
+  expect(announcements).toBe(1);
+  shell.navigate("next");
+  expect(shell.currentStep).toBe(2);
+  expect(announcements).toBe(1);
 });
 
 it("sets the document title from the manifest", async () => {
@@ -1643,6 +1723,47 @@ it("entering grid scrolls the current slide tile into view", async () => {
   expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
 });
 
+it("clamps stale indexes before overview toggles and direct selection", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountForTest(root, bus);
+  const controller = shell as unknown as {
+    currentIndex: number;
+    selectedIndex: number;
+    setIndex(index: number): void;
+  };
+
+  controller.selectedIndex = 99;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
+  );
+  expect([shell.mode, shell.currentIndex, shell.selectedIndex]).toEqual([
+    "single",
+    2,
+    2
+  ]);
+
+  controller.currentIndex = -99;
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect([shell.mode, shell.currentIndex, shell.selectedIndex]).toEqual([
+    "grid",
+    0,
+    0
+  ]);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
+  );
+  controller.setIndex(99);
+  expect([shell.mode, shell.currentIndex, shell.selectedIndex]).toEqual([
+    "single",
+    2,
+    2
+  ]);
+});
+
 it("single mode navigation does not scroll preview tiles into view", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
@@ -1657,6 +1778,411 @@ it("single mode navigation does not scroll preview tiles into view", async () =>
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(1);
   expect(scrollIntoView).not.toHaveBeenCalled();
+});
+
+it("walks steps horizontally while vertical and direct moves land fully revealed", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "skip", skip: true, revealSteps: 4 },
+    { key: "middle", revealSteps: 1 }
+  ]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  shell.navigate("next");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 1]);
+  shell.navigate("next");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  shell.navigate("next");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 0]);
+  shell.navigate("prev");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+
+  shell.navigate("down");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  shell.navigate("up");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  shell.navigate("last");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  shell.navigate("first");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  shell.navigate({ index: 2, step: 0 });
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  shell.navigate({ key: "intro" });
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+});
+
+it("dispatches present-compatible slide and step change details", async () => {
+  const bus = new EventTarget();
+  const slideChanges: SlideChangeDetail[] = [];
+  const stepChanges: StepChangeDetail[] = [];
+  bus.addEventListener("peitho:slidechange", (event) => {
+    slideChanges.push((event as CustomEvent<SlideChangeDetail>).detail);
+  });
+  bus.addEventListener("peitho:stepchange", (event) => {
+    stepChanges.push((event as CustomEvent<StepChangeDetail>).detail);
+  });
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const root = document.createElement("main");
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "middle", revealSteps: 1 }
+  ]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect(slideChanges).toEqual([
+    {
+      key: "intro",
+      index: 0,
+      total: 2,
+      previousIndex: null,
+      step: 0,
+      stepCount: 2
+    }
+  ]);
+  expect(stepChanges).toEqual([]);
+
+  shell.navigate("next");
+  expect(slideChanges).toHaveLength(1);
+  expect(stepChanges).toEqual([{ index: 0, step: 1, stepCount: 2 }]);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect(stepChanges).toEqual([
+    { index: 0, step: 1, stepCount: 2 },
+    { index: 0, step: 2, stepCount: 2 }
+  ]);
+  shell.navigate("next");
+  expect(slideChanges).toEqual([
+    {
+      key: "intro",
+      index: 0,
+      total: 2,
+      previousIndex: null,
+      step: 0,
+      stepCount: 2
+    },
+    {
+      key: "middle",
+      index: 1,
+      total: 2,
+      previousIndex: 0,
+      step: 1,
+      stepCount: 1
+    }
+  ]);
+  expect(stepChanges).toHaveLength(2);
+});
+
+it("dispatches the fully revealed step when entering grid from a partial step", async () => {
+  const bus = new EventTarget();
+  const stepChanges: StepChangeDetail[] = [];
+  bus.addEventListener("peitho:stepchange", (event) => {
+    stepChanges.push((event as CustomEvent<StepChangeDetail>).detail);
+  });
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 1 })
+  );
+  const root = document.createElement("main");
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 2 }]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect([shell.mode, shell.currentStep]).toEqual(["grid", 2]);
+  expect(stepChanges).toEqual([{ index: 0, step: 2, stepCount: 2 }]);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
+  );
+  expect([shell.mode, shell.currentStep]).toEqual(["single", 2]);
+  expect(stepChanges).toEqual([{ index: 0, step: 2, stepCount: 2 }]);
+});
+
+it("filmstrip clicks and grid opens land fully revealed", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 2 },
+    { key: "middle", revealSteps: 1 }
+  ]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  mockSelection(true);
+  stageTile(root, "intro").click();
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
+
+  root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
+  expect([shell.currentIndex, shell.currentStep]).toEqual([1, 1]);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:navigate", { detail: { to: { index: 0 } } })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+  );
+  expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual([
+    "single",
+    0,
+    2
+  ]);
+});
+
+it("clicking the current slide thumbnail at a partial step lands fully revealed", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 1 })
+  );
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 2 }]);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  root.querySelector<HTMLElement>(".peitho-preview-thumb")!.click();
+
+  expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual([
+    "single",
+    0,
+    2
+  ]);
+});
+
+it("keeps whole-slide skip navigation for a deck without reveal steps", async () => {
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0 })
+  );
+  const deck = manifestWithSlides([
+    { key: "intro" },
+    { key: "appendix", skip: true },
+    { key: "summary" }
+  ]);
+  const shell = await mountPreviewShell({
+    root,
+    bus: new EventTarget(),
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  shell.navigate("next");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 0]);
+  shell.navigate("prev");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
+});
+
+it("installs one step style per stage host and applies state only to the active stage", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 3 },
+    { key: "end", revealSteps: 3 }
+  ]);
+  const base = previewFetchFixture(deck);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).startsWith("slides/")) {
+      return okText(
+        '<section><p data-reveal-step="1">A</p>' +
+          '<p data-reveal-step="2">B</p>' +
+          '<span data-emphasis-step="3">code</span></section>'
+      );
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  const stage = slideShadow(root, "intro");
+  const otherStage = slideShadow(root, "end");
+  const thumb = slideShadow(root, "intro", true);
+  const stepStyleCount = (shadow: ShadowRoot): number =>
+    [...shadow.querySelectorAll("style")].filter((style) =>
+      style.textContent?.includes("[data-reveal-hidden]")
+    ).length;
+  const hidden = (shadow: ShadowRoot): boolean[] =>
+    [...shadow.querySelectorAll<HTMLElement>("[data-reveal-step]")].map((node) =>
+      node.hasAttribute("data-reveal-hidden")
+    );
+
+  expect(stepStyleCount(stage)).toBe(1);
+  expect(stepStyleCount(otherStage)).toBe(1);
+  expect(hidden(stage)).toEqual([true, true]);
+  expect(stepStyleCount(thumb)).toBe(0);
+  expect(hidden(thumb)).toEqual([false, false]);
+  expect(thumb.querySelector("[data-emphasis-active]")).toBeNull();
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect(shell.mode).toBe("grid");
+  expect(shell.currentStep).toBe(3);
+  for (const host of root.querySelectorAll<HTMLElement>(".peitho-preview-slide")) {
+    expect(stepStyleCount(host.shadowRoot!)).toBe(1);
+    expect(host.shadowRoot!.querySelector("[data-reveal-hidden]")).toBeNull();
+    expect(host.shadowRoot!.querySelector("[data-emphasis-active]")).toBeNull();
+  }
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+  );
+  expect(shell.mode).toBe("single");
+  expect(shell.currentStep).toBe(3);
+  expect(stepStyleCount(stage)).toBe(1);
+  expect(hidden(stage)).toEqual([false, false]);
+  expect(stage.querySelector("[data-emphasis-active]")?.textContent).toBe("code");
+});
+
+it("resets stage step attributes only when entering grid", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 1 }]);
+  const base = previewFetchFixture(deck);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).startsWith("slides/")) {
+      return okText('<section><p data-reveal-step="1">A</p></section>');
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const marker = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "[data-reveal-step]"
+  )!;
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect(marker.hasAttribute("data-reveal-hidden")).toBe(false);
+
+  marker.setAttribute("data-reveal-hidden", "");
+  window.dispatchEvent(new Event("resize"));
+  expect(marker.hasAttribute("data-reveal-hidden")).toBe(true);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
+  );
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
+  );
+  expect(marker.hasAttribute("data-reveal-hidden")).toBe(false);
+});
+
+it("lets a stage range input own reveal-navigation keys", async () => {
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  document.body.appendChild(root);
+  cleanups.push(() => root.remove());
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 1 }]);
+  const base = previewFetchFixture(deck);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).startsWith("slides/")) {
+      return okText('<section><input id="range" type="range"></section>');
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  cleanups.push(installPreviewKeyboard(window, bus));
+
+  const range = slideShadow(root, "intro").querySelector<HTMLInputElement>("#range")!;
+  expect(press(range, "ArrowRight").defaultPrevented).toBe(false);
+  expect(shell.currentStep).toBe(0);
+  expect(press(window, "ArrowRight").defaultPrevented).toBe(true);
+  expect(shell.currentStep).toBe(1);
 });
 
 it("single mode next skips one or more skipped slides in preview", async () => {
@@ -1684,6 +2210,7 @@ it("single mode next skips one or more skipped slides in preview", async () => {
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(3);
+  expect(shell.currentStep).toBe(0);
   expect(shell.selectedIndex).toBe(3);
 });
 
@@ -1713,6 +2240,7 @@ it("single mode prev skips one or more skipped slides in preview", async () => {
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(0);
   expect(shell.selectedIndex).toBe(0);
 });
 
@@ -1743,6 +2271,7 @@ it("single mode next is a no-op when only skipped slides remain in preview", asy
   bus.dispatchEvent(event);
 
   expect(shell.currentIndex).toBe(0);
+  expect(shell.currentStep).toBe(0);
   expect(shell.selectedIndex).toBe(0);
   expect(event.defaultPrevented).toBe(false);
 });
@@ -1912,6 +2441,62 @@ it("saves and restores mode and slide index from sessionStorage", async () => {
   expect(second.selectedIndex).toBe(1);
   expect(second.currentIndex).toBe(1);
 });
+
+it.each([
+  ["legacy missing", "single", undefined, 2],
+  ["null", "single", null, 2],
+  ["string", "single", "1", 2],
+  ["negative", "single", -1, 2],
+  ["fraction", "single", 1.5, 2],
+  ["beyond maximum", "single", 99, 2],
+  ["exact zero", "single", 0, 0],
+  ["exact middle", "single", 1, 1],
+  ["grid ignores a partial step", "grid", 0, 2]
+])(
+  "restores %s in %s mode from %s as step %s",
+  async (_case, mode, savedStep, expectedStep) => {
+    const state: Record<string, unknown> = { mode, index: 0 };
+    if (savedStep !== undefined) state.step = savedStep;
+    sessionStorage.setItem("peitho:preview-state", JSON.stringify(state));
+    const root = document.createElement("main");
+    const deck = manifestWithSlides([{ key: "intro", revealSteps: 2 }]);
+    const shell = await mountPreviewShell({
+      root,
+      fetcher: fetchForManifest(deck),
+      window,
+      storage: sessionStorage,
+      viewport: () => ({ width: 1280, height: 720 })
+    });
+    shells.push(shell);
+
+    expect(shell.currentIndex).toBe(0);
+    expect(shell.currentStep).toBe(expectedStep);
+  }
+);
+
+it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+  "drops invalid restored step %s while reading session state",
+  async (step) => {
+    sessionStorage.setItem(
+      "peitho:preview-state",
+      JSON.stringify({ mode: "single", index: 0, step })
+    );
+    const root = document.createElement("main");
+    const shell = await mountPreviewShell({
+      root,
+      fetcher: fetchForManifest(manifestWithSlides([{ key: "intro", revealSteps: 2 }])),
+      window,
+      storage: sessionStorage,
+      viewport: () => ({ width: 1280, height: 720 })
+    });
+    shells.push(shell);
+
+    const restored = (shell as unknown as { restoredState: Record<string, unknown> })
+      .restoredState;
+    expect(restored).not.toHaveProperty("step");
+    expect(shell.currentStep).toBe(2);
+  }
+);
 
 it("ignores preview commands while content is still loading without clobbering saved state", async () => {
   const bus = new EventTarget();
@@ -2197,23 +2782,86 @@ it("fetches preview slide fragments in parallel", async () => {
   expect(root.querySelectorAll(".peitho-preview-slide")).toHaveLength(3);
 });
 
-it("generation changes save preview state before reloading", async () => {
+it("generation reload saves and remounts the current step", async () => {
   const bus = new EventTarget();
-  const root = document.createElement("main");
-  const shell = await mountForTest(root, bus);
+  const deck = manifestWithSlides([{ key: "intro", revealSteps: 2 }]);
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 0 })
+  );
+  const firstRoot = document.createElement("main");
+  const first = await mountPreviewShell({
+    root: firstRoot,
+    bus,
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(first);
   const channel = mockChannel();
   const reload = vi.fn();
+  cleanups.push(installPreviewReload(first, () => channel, reload));
 
-  bus.dispatchEvent(new CustomEvent("peitho:navigate", { detail: { to: "next" } }));
-  cleanups.push(installPreviewReload(shell, () => channel, reload));
-
-  channel.onmessage?.({ data: { generation: shell.generation } });
+  first.navigate("next");
+  channel.onmessage?.({ data: { generation: first.generation } });
   expect(reload).not.toHaveBeenCalled();
-  channel.onmessage?.({ data: { generation: shell.generation + 1 } });
+  channel.onmessage?.({ data: { generation: first.generation + 1 } });
 
-  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state") ?? "{}")).toEqual({
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
+    mode: "single",
+    index: 0,
+    step: 1
+  });
+  expect(reload).toHaveBeenCalledTimes(1);
+
+  first.destroy();
+  shells.pop();
+  const secondRoot = document.createElement("main");
+  const second = await mountPreviewShell({
+    root: secondRoot,
+    bus: new EventTarget(),
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(second);
+  expect(second.currentStep).toBe(1);
+
+  window.dispatchEvent(new Event("pagehide"));
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    mode: "single",
+    index: 0,
+    step: 1
+  });
+});
+
+it("generation reload saves a grid selection at its fully revealed step", async () => {
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 1 },
+    { key: "middle", revealSteps: 3 }
+  ]);
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "grid", index: 1, step: 0 })
+  );
+  const shell = await mountPreviewShell({
+    root: document.createElement("main"),
+    fetcher: fetchForManifest(deck),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  const reload = vi.fn();
+
+  shell.requestGenerationReload(shell.generation + 1, reload);
+
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
     mode: "grid",
-    index: 1
+    index: 1,
+    step: 3
   });
   expect(reload).toHaveBeenCalledTimes(1);
 });
@@ -2804,6 +3452,9 @@ it("reload_state_keeps_text_while_a_save_is_in_flight", async () => {
   shell.saveState();
 
   expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    mode: "single",
+    index: 0,
+    step: 0,
     draft: { key: "intro", text: "", focused: true }
   });
   fixture.resolveNotesPost(okJson({ saved: true }));
@@ -2875,6 +3526,9 @@ it("pagehide_saves_a_draft_and_posts_with_keepalive", async () => {
   window.dispatchEvent(new Event("pagehide"));
   expect(fixture.notesPosts()).toHaveLength(2);
   expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    mode: "single",
+    index: 1,
+    step: 0,
     draft: {
       key: "middle",
       text: "reload draft",
@@ -2931,7 +3585,8 @@ it("restores_and_clears_a_focused_draft_with_selection", async () => {
   expect(document.activeElement).toBe(cleanNote);
   expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
     mode: "single",
-    index: 1
+    index: 1,
+    step: 0
   });
   cleanNote.blur();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2962,7 +3617,8 @@ it("restores_and_clears_a_focused_draft_with_selection", async () => {
   expect(document.activeElement).toBe(dirtyNote);
   expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
     mode: "single",
-    index: 1
+    index: 1,
+    step: 0
   });
 
   dirtyNote.blur();
@@ -3019,7 +3675,8 @@ it("clean_draft_does_not_overwrite_freshly_loaded_notes", async () => {
   expect(document.activeElement).toBe(note);
   expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toEqual({
     mode: "single",
-    index: 1
+    index: 1,
+    step: 0
   });
 
   note.blur();
@@ -3078,7 +3735,7 @@ it("drops_a_draft_whose_key_is_gone", async () => {
 
   expect(note.value).toBe("Pause here.\nThen ask.");
   expect(document.activeElement).not.toBe(note);
-  expect(restoredState).toEqual({ mode: "single", index: 1 });
+  expect(restoredState).toEqual({ mode: "single", index: 1, step: 0 });
   expect(restoredState).not.toHaveProperty("draft");
 });
 
@@ -3155,6 +3812,59 @@ it("navigating_away_and_back_during_an_in_flight_save_does_not_revert_it", async
   note.dispatchEvent(new Event("blur"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(fixture.notesPosts()).toHaveLength(2);
+});
+
+it("a step move cancels a pending slide move without losing its dirty note", async () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 1 },
+    { key: "middle" }
+  ]);
+  const fixture = previewFetchFixture(deck);
+  sessionStorage.setItem(
+    "peitho:preview-state",
+    JSON.stringify({ mode: "single", index: 0, step: 1 })
+  );
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fixture.fetcher,
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+  cleanups.push(installPreviewKeyboard(window, bus));
+  const note = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+  note.value = "Keep this stepped-slide draft";
+
+  expect(press(window, "PageDown").defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 1]);
+
+  expect(press(window, "PageUp").defaultPrevented).toBe(true);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
+  expect(note.value).toBe("Keep this stepped-slide draft");
+  expect(JSON.parse(sessionStorage.getItem("peitho:preview-state")!)).toMatchObject({
+    mode: "single",
+    index: 0,
+    step: 0,
+    draft: {
+      key: "intro",
+      text: "Keep this stepped-slide draft"
+    }
+  });
+
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() =>
+    expect(fixture.notes.notes.intro).toBe("Keep this stepped-slide draft")
+  );
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
+  expect(note.value).toBe("Keep this stepped-slide draft");
+  expect(fixture.notesPosts()).toHaveLength(1);
 });
 
 it("destroy_cancels_a_pending_transition_commit", async () => {
@@ -3437,6 +4147,133 @@ it("centres the restored slide on first layout, then steps with nearest", async 
   } finally {
     HTMLElement.prototype.scrollIntoView = original;
   }
+});
+
+it("settles an inline edit before hiding its step without flushing same-slide notes", async () => {
+  const fixture = steppedInlineFixture();
+  const { root, shell } = await mountInlineEditForTest({ fixture, step: 0 });
+  shell.navigate("next");
+  expect(shell.currentStep).toBe(1);
+  const note = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+  const block = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#stepped-edit"
+  )!;
+
+  note.value = "dirty note stays on this slide";
+  dispatchShadowClick(block);
+  block.textContent = "Saved before hide";
+  shell.navigate("prev");
+
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+  expect(shell.currentStep).toBe(1);
+  expect(block.hasAttribute("data-reveal-hidden")).toBe(false);
+  expect(fixture.notesPosts()).toHaveLength(0);
+
+  fixture.resolveSlideEditPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentStep).toBe(0));
+  expect(block.hasAttribute("data-reveal-hidden")).toBe(true);
+  expect(fixture.notesPosts()).toHaveLength(0);
+  expect(note.value).toBe("dirty note stays on this slide");
+
+  shell.navigate("next");
+  shell.navigate("next");
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(shell.currentIndex).toBe(0);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
+});
+
+it("a failed inline save blocks the requested step", async () => {
+  const fixture = steppedInlineFixture();
+  const { root, shell } = await mountInlineEditForTest({ fixture, step: 0 });
+  shell.navigate("next");
+  expect(shell.currentStep).toBe(1);
+  const block = slideShadow(root, "intro").querySelector<HTMLElement>(
+    "#stepped-edit"
+  )!;
+  dispatchShadowClick(block);
+  block.textContent = "Rejected before hide";
+  shell.navigate("prev");
+  await vi.waitFor(() => expect(fixture.slideEditPosts()).toHaveLength(1));
+
+  fixture.resolveSlideEditPost(errorJson(422, "replacement changes the slide"));
+  await vi.waitFor(() =>
+    expect(
+      root.querySelector('[data-peitho-preview="status"]')?.textContent
+    ).toContain("replacement changes the slide")
+  );
+  expect(shell.currentStep).toBe(1);
+  expect(block.hasAttribute("data-reveal-hidden")).toBe(false);
+  expect(block.getAttribute("contenteditable")).toBe("plaintext-only");
+});
+
+it("a boundary no-op does not settle an open edit", async () => {
+  const fixture = steppedInlineFixture();
+  const { root, shell } = await mountInlineEditForTest({ fixture, step: 0 });
+  shell.navigate("prev");
+  expect(shell.currentStep).toBe(0);
+  const always = slideShadow(root, "intro").querySelector<HTMLElement>("#always")!;
+  dispatchShadowClick(always);
+  always.textContent = "Still editing";
+  shell.navigate("prev");
+  expect(shell.currentStep).toBe(0);
+  expect(fixture.slideEditPosts()).toHaveLength(0);
+  expect(always.getAttribute("contenteditable")).toBe("plaintext-only");
+});
+
+it("whole-slide source edit preserves and reapplies the current step", async () => {
+  const bus = new EventTarget();
+  const base = sourceEditFetchFixture();
+  const deck = manifestWithSlides([
+    { key: "intro", revealSteps: 1 },
+    { key: "middle" },
+    { key: "end" }
+  ]);
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "manifest.json") return okJson(deck);
+    if (url === "slides/000-intro.html") {
+      return okText('<section><p data-reveal-step="1">Visible</p></section>');
+    }
+    return base.fetcher(input, init);
+  }) as unknown as typeof fetch;
+  const fixture: SourceEditFetchFixture = { ...base, fetcher };
+  const { root, shell } = await mountInlineEditForTest({
+    bus,
+    fixture,
+    step: 0
+  });
+  cleanups.push(installPreviewKeyboard(window, bus));
+  shell.navigate("next");
+  expect(shell.currentStep).toBe(1);
+
+  const editor = openSourceEditor(root, bus);
+  expect(shell.currentStep).toBe(1);
+  expect(
+    stageTile(root).querySelector<HTMLElement>(".peitho-preview-slide")!.hidden
+  ).toBe(true);
+  press(editor, "Escape");
+  expect(shell.currentStep).toBe(1);
+  expect(
+    slideShadow(root, "intro").querySelector("[data-reveal-hidden]")
+  ).toBeNull();
+
+  const committing = openSourceEditor(root, bus);
+  committing.value = "# Intro edited";
+  expect(press(committing, "PageUp").defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  expect(shell.currentStep).toBe(1);
+  fixture.resolveSourceEditPost(
+    okJson({ key: "intro", body: "# Intro edited" })
+  );
+  await vi.waitFor(() => expect(shell.currentStep).toBe(0));
+  expect(
+    slideShadow(root, "intro")
+      .querySelector<HTMLElement>("[data-reveal-step]")!
+      .hasAttribute("data-reveal-hidden")
+  ).toBe(true);
 });
 
 it("source_edit_request_obeys_single_mode_and_one_edit_union", async () => {
@@ -4490,6 +5327,36 @@ it("source_edit_transition_commits_before_notes_and_navigation", async () => {
   ).toBe(false);
 });
 
+it("activate selection commits the source edit then flushes dirty notes before focusing", async () => {
+  const bus = new EventTarget();
+  const fixture = sourceEditFetchFixture();
+  const { root } = await mountInlineEditForTest({ bus, fixture });
+  const note = root.querySelector<HTMLTextAreaElement>(
+    '[data-peitho-preview="note"]'
+  )!;
+  note.value = "Flush me before focus";
+  const editor = openSourceEditor(root, bus);
+  editor.value = "# Saved before notes";
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+  );
+
+  await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
+  expect(fixture.notesPosts()).toHaveLength(0);
+  expect(document.activeElement).toBe(editor);
+  fixture.resolveSourceEditPost(okJson({ key: "intro", body: "# Saved before notes" }));
+
+  await vi.waitFor(() => expect(fixture.notesPosts()).toHaveLength(1));
+  expect(JSON.parse(fixture.notesPosts()[0][1].body as string)).toEqual({
+    key: "intro",
+    text: "Flush me before focus"
+  });
+  expect(document.activeElement).not.toBe(note);
+  fixture.resolveNotesPost(okJson({ saved: true }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(note));
+});
+
 it.each([
   { outcome: "saved", response: okJson({ key: "intro", body: "# Saved body" }) },
   { outcome: "failed", response: errorJson(409, "source save failed") }
@@ -4646,7 +5513,7 @@ it("source_edit_reload_releases_once", async () => {
   await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(1));
   fixture.resolveSourceEditPost(okJson({ key: "intro", body: "# Saved canonical" }));
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-  expect(statesAtReload).toEqual([{ mode: "single", index: 0 }]);
+  expect(statesAtReload).toEqual([{ mode: "single", index: 0, step: 0 }]);
 
   reload.mockClear();
   statesAtReload.length = 0;
@@ -4669,7 +5536,7 @@ it("source_edit_reload_releases_once", async () => {
   failed.value = "# Source text must never reach PreviewState";
   deferReload();
   const stored = sessionStorage.getItem("peitho:preview-state")!;
-  expect(JSON.parse(stored)).toEqual({ mode: "single", index: 0 });
+  expect(JSON.parse(stored)).toEqual({ mode: "single", index: 0, step: 0 });
   expect(stored).not.toContain("Source text must never reach PreviewState");
   press(failed, "Enter", { metaKey: true });
   await vi.waitFor(() => expect(fixture.sourceEditPosts()).toHaveLength(2));
@@ -4689,7 +5556,7 @@ it("source_edit_reload_releases_once", async () => {
   fixture.resolveSourceEditPost(okJson({ key: "intro", body: "# Transition canonical" }));
   await vi.waitFor(() => expect(shell.currentIndex).toBe(1));
   expect(reload).toHaveBeenCalledTimes(1);
-  expect(statesAtReload).toEqual([{ mode: "single", index: 1 }]);
+  expect(statesAtReload).toEqual([{ mode: "single", index: 1, step: 0 }]);
 });
 
 it("source_edit_derived_key_can_recover_after_build_failure", async () => {
@@ -5761,7 +6628,7 @@ it("successful_commit_releases_deferred_reload", async () => {
   fixture.resolveSlideEditPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   expect(editFrame(root)).toBeNull();
-  expect(statesAtReload).toEqual([{ mode: "single", index: 0 }]);
+  expect(statesAtReload).toEqual([{ mode: "single", index: 0, step: 0 }]);
 });
 
 it("transition_commit_saves_destination_state_before_releasing_deferred_reload", async () => {
@@ -5787,7 +6654,7 @@ it("transition_commit_saves_destination_state_before_releasing_deferred_reload",
 
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   expect(shell.currentIndex).toBe(1);
-  expect(statesAtReload).toEqual([{ mode: "single", index: 1 }]);
+  expect(statesAtReload).toEqual([{ mode: "single", index: 1, step: 0 }]);
 });
 
 it("generation_reload_during_settling_transition_waits_for_navigation", async () => {
@@ -5818,7 +6685,7 @@ it("generation_reload_during_settling_transition_waits_for_navigation", async ()
   fixture.resolveNotesPost(okJson({ saved: true }));
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   expect(shell.currentIndex).toBe(1);
-  expect(statesAtReload).toEqual([{ mode: "single", index: 1 }]);
+  expect(statesAtReload).toEqual([{ mode: "single", index: 1, step: 0 }]);
 });
 
 it("generation_reload_deferred_by_settling_is_released_when_notes_flush_fails", async () => {
@@ -5856,6 +6723,7 @@ it("generation_reload_deferred_by_settling_is_released_when_notes_flush_fails", 
     expect.objectContaining({
       mode: "single",
       index: 0,
+      step: 0,
       draft: expect.objectContaining({ key: "intro", text: "keep failed note draft" })
     })
   ]);
@@ -6122,7 +6990,7 @@ it("slide_edits_are_never_written_to_session_storage", async () => {
   window.dispatchEvent(new Event("pagehide"));
 
   const stored = sessionStorage.getItem("peitho:preview-state")!;
-  expect(JSON.parse(stored)).toEqual({ mode: "single", index: 0 });
+  expect(JSON.parse(stored)).toEqual({ mode: "single", index: 0, step: 0 });
   expect(stored).not.toContain("never persist this slide edit");
   expect(stored).not.toContain("Peitho is a *fast* tool");
 });
@@ -6139,7 +7007,7 @@ it("discarded_drafts_are_never_written_to_session_storage", async () => {
   shell.saveState();
   let stored = sessionStorage.getItem("peitho:preview-state");
   expect(stored).not.toBeNull();
-  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0 });
+  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0, step: 0 });
   expect(stored!).not.toContain(sourceDraft);
 
   const paragraph = slideShadow(root, "intro").querySelector<HTMLElement>(
@@ -6154,7 +7022,7 @@ it("discarded_drafts_are_never_written_to_session_storage", async () => {
   shell.saveState();
   stored = sessionStorage.getItem("peitho:preview-state");
   expect(stored).not.toBeNull();
-  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0 });
+  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0, step: 0 });
   expect(stored!).not.toContain(sourceDraft);
   expect(stored!).not.toContain(inlineDraft);
   expect(stored!).not.toContain("Peitho is a *fast* tool");
@@ -6163,7 +7031,7 @@ it("discarded_drafts_are_never_written_to_session_storage", async () => {
   window.dispatchEvent(new Event("pagehide"));
   stored = sessionStorage.getItem("peitho:preview-state");
   expect(stored).not.toBeNull();
-  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0 });
+  expect(JSON.parse(stored!)).toEqual({ mode: "single", index: 0, step: 0 });
   expect(stored!).not.toContain(sourceDraft);
   expect(stored!).not.toContain(inlineDraft);
   expect(stored!).not.toContain("Peitho is a *fast* tool");
