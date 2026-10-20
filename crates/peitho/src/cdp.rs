@@ -24,8 +24,10 @@ const FULLSCREEN_STABLE: Duration = Duration::from_secs(1);
 // RemoteObject decoding below stays exhaustive.
 const PDF_FLATTENED_EXPRESSION: &str =
     "document.documentElement?.getAttribute('data-peitho-pdf-flattened') ?? null";
-const SHADOW_MOUNTED_ERROR_EXPRESSION: &str =
+pub const SHADOW_MOUNTED_ERROR_EXPRESSION: &str =
     "document.documentElement?.getAttribute('data-peitho-shadow-mounted-error') ?? null";
+pub const PDF_STEP_PAGES_ERROR_EXPRESSION: &str =
+    "document.documentElement?.getAttribute('data-peitho-pdf-step-pages-error') ?? null";
 
 pub fn wait_for_devtools_port(
     profile: &Path,
@@ -320,16 +322,21 @@ impl CdpClient {
         }
     }
 
-    pub fn ensure_shadow_mounted_succeeded(&mut self, deadline: Instant) -> miette::Result<()> {
+    pub fn ensure_pdf_status_succeeded(
+        &mut self,
+        expression: &str,
+        label: &str,
+        deadline: Instant,
+    ) -> miette::Result<()> {
         let result = self.call(
             "Runtime.evaluate",
             json!({
-                "expression": SHADOW_MOUNTED_ERROR_EXPRESSION,
+                "expression": expression,
                 "returnByValue": true
             }),
             deadline,
         )?;
-        validate_shadow_mounted_error_evaluation(&result)
+        validate_pdf_status_evaluation(&result, label)
     }
 
     pub fn page_print_to_pdf(&mut self, deadline: Instant) -> miette::Result<Vec<u8>> {
@@ -472,26 +479,24 @@ impl CdpClient {
     }
 }
 
-fn validate_shadow_mounted_error_evaluation(result: &Value) -> miette::Result<()> {
+fn validate_pdf_status_evaluation(result: &Value, label: &str) -> miette::Result<()> {
     if let Some(exception) = result.get("exceptionDetails") {
         return Err(miette::miette!(
-            "Chrome failed to read PDF slide initialization status: {exception}"
+            "Chrome failed to read {label} status: {exception}"
         ));
     }
     let remote_object = result.get("result").ok_or_else(|| {
         miette::miette!("Chrome Runtime.evaluate response omitted its result object")
     })?;
     match remote_object.get("value") {
-        Some(Value::String(message)) => Err(miette::miette!(
-            "PDF slide initialization failed: {message}"
-        )),
+        Some(Value::String(message)) => Err(miette::miette!("{label} failed: {message}")),
         Some(Value::Null) => Ok(()),
         Some(value) => Err(miette::miette!(
-            "Chrome returned unexpected PDF slide initialization status: {value}"
+            "Chrome returned unexpected {label} status: {value}"
         )),
         None if remote_object.get("subtype").and_then(Value::as_str) == Some("null") => Ok(()),
         None => Err(miette::miette!(
-            "Chrome Runtime.evaluate response omitted the PDF slide initialization status"
+            "Chrome Runtime.evaluate response omitted the {label} status"
         )),
     }
 }
@@ -848,27 +853,57 @@ mod tests {
             SHADOW_MOUNTED_ERROR_EXPRESSION,
             "document.documentElement?.getAttribute('data-peitho-shadow-mounted-error') ?? null"
         );
-        validate_shadow_mounted_error_evaluation(&json!({
-            "result": { "type": "object", "subtype": "null", "value": null }
-        }))
+        validate_pdf_status_evaluation(
+            &json!({
+                "result": { "type": "object", "subtype": "null", "value": null }
+            }),
+            "PDF slide initialization",
+        )
         .unwrap();
 
-        let err = validate_shadow_mounted_error_evaluation(&json!({
-            "result": {
-                "type": "string",
-                "value": "Unable to announce parsed slides: \"intro\" matched 2"
-            }
-        }))
+        let err = validate_pdf_status_evaluation(
+            &json!({
+                "result": {
+                    "type": "string",
+                    "value": "Unable to announce parsed slides: \"intro\" matched 2"
+                }
+            }),
+            "PDF slide initialization",
+        )
         .unwrap_err();
-        let message = err.to_string();
-
-        assert!(
-            message.contains("PDF slide initialization failed"),
-            "actual error: {message}"
+        assert_eq!(
+            err.to_string(),
+            "PDF slide initialization failed: Unable to announce parsed slides: \"intro\" matched 2"
         );
-        assert!(
-            message.contains("Unable to announce parsed slides: \"intro\" matched 2"),
-            "actual error: {message}"
+    }
+
+    #[test]
+    fn pdf_step_pages_error_evaluation_fails_with_the_recorded_message() {
+        assert_eq!(
+            PDF_STEP_PAGES_ERROR_EXPRESSION,
+            "document.documentElement?.getAttribute('data-peitho-pdf-step-pages-error') ?? null"
+        );
+        validate_pdf_status_evaluation(
+            &json!({
+                "result": { "type": "object", "subtype": "null", "value": null }
+            }),
+            "PDF reveal-step page expansion",
+        )
+        .unwrap();
+
+        let err = validate_pdf_status_evaluation(
+            &json!({
+                "result": {
+                    "type": "string",
+                    "value": "failed to clone reveal page 1"
+                }
+            }),
+            "PDF reveal-step page expansion",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "PDF reveal-step page expansion failed: failed to clone reveal page 1"
         );
     }
 

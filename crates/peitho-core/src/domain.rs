@@ -1405,15 +1405,23 @@ impl<S> SourceFragment<S> {
 pub struct RenderedSlide {
     index: usize,
     key: SlideKey,
+    reveal_steps: usize,
     html: String,
     notes: Option<String>,
 }
 
 impl RenderedSlide {
-    pub(crate) fn new(index: usize, key: SlideKey, html: String, notes: Option<String>) -> Self {
+    pub(crate) fn new(
+        index: usize,
+        key: SlideKey,
+        reveal_steps: usize,
+        html: String,
+        notes: Option<String>,
+    ) -> Self {
         Self {
             index,
             key,
+            reveal_steps,
             html,
             notes,
         }
@@ -1425,6 +1433,10 @@ impl RenderedSlide {
 
     pub fn key(&self) -> &SlideKey {
         &self.key
+    }
+
+    pub fn reveal_steps(&self) -> usize {
+        self.reveal_steps
     }
 
     pub fn html(&self) -> &str {

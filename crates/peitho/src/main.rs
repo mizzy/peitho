@@ -3525,7 +3525,16 @@ fn run_chrome_print_with_timeout(
         client.page_enable(deadline)?;
         client.page_navigate(&url, deadline)?;
         cdp::wait_for_pdf_flattening(&mut client, deadline)?;
-        client.ensure_shadow_mounted_succeeded(deadline)?;
+        client.ensure_pdf_status_succeeded(
+            cdp::SHADOW_MOUNTED_ERROR_EXPRESSION,
+            "PDF slide initialization",
+            deadline,
+        )?;
+        client.ensure_pdf_status_succeeded(
+            cdp::PDF_STEP_PAGES_ERROR_EXPRESSION,
+            "PDF reveal-step page expansion",
+            deadline,
+        )?;
 
         let pdf = client.page_print_to_pdf(deadline)?;
         if pdf.is_empty() {
@@ -13969,7 +13978,7 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
     }
 
     #[test]
-    fn public_reveal_only_changes_distribution_index() {
+    fn public_reveal_steps_changes_distribution_index_and_pdf_only() {
         const BODY: &str = r#"# Intro
 
 ::: {reveal}
@@ -13994,7 +14003,13 @@ let second = 2;
         assert_eq!(final_mode.manifest, steps_mode.manifest);
         assert_eq!(final_mode.slides, steps_mode.slides);
         assert_eq!(omitted.pdf, final_mode.pdf);
-        assert_eq!(final_mode.pdf, steps_mode.pdf);
+        assert_ne!(final_mode.pdf, steps_mode.pdf);
+        assert!(!final_mode
+            .pdf
+            .contains("PeithoViewer.expandRevealStepPages("));
+        assert!(steps_mode
+            .pdf
+            .contains("PeithoViewer.expandRevealStepPages(document, ["));
         assert_eq!(omitted.lint, final_mode.lint);
         assert_eq!(final_mode.lint, steps_mode.lint);
     }

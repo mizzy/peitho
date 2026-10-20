@@ -619,6 +619,17 @@
     return radii;
   }
 
+  function effectiveOpacityBelowSlide(element, slide) {
+    var opacity = 1;
+    for (var node = element; node && node !== slide; node = node.parentElement) {
+      var nodeOpacity = Number(getComputedStyle(node).opacity);
+      if (!Number.isFinite(nodeOpacity)) throw new Error("invalid computed opacity");
+      opacity *= nodeOpacity;
+    }
+    if (node !== slide) throw new Error(".peitho-slide is not an ancestor");
+    return opacity;
+  }
+
   function hasTransformBeforeSlide(element, slide) {
     for (var node = element; node && node !== slide; node = node.parentElement) {
       if (getComputedStyle(node).transform !== "none") return true;
@@ -647,11 +658,14 @@
     elements.forEach(function (element) {
       try {
         var computed = getComputedStyle(element);
+        if (computed.visibility !== "visible") return;
         var shadows = parseShadowList(computed.boxShadow);
         if (shadows.length === 0) return;
 
         var slide = element.closest(".peitho-slide");
         if (!slide) throw new Error("element is outside .peitho-slide");
+        var opacity = effectiveOpacityBelowSlide(element, slide);
+        if (opacity === 0) return;
         if (hasTransformBeforeSlide(element, slide)) throw new Error("transformed element ancestor");
         if (element.getClientRects().length !== 1) throw new Error("fragmented element");
 
@@ -675,6 +689,7 @@
           shadows: shadows,
           outerShadows: outerShadows,
           insetShadows: insetShadows,
+          opacity: opacity,
           localX: (elementRect.left - slideRect.left) / scale - slide.clientLeft,
           localY: (elementRect.top - slideRect.top) / scale - slide.clientTop,
           width: width,
@@ -879,6 +894,7 @@
     image.style.pointerEvents = "none";
     image.style.maxWidth = "none";
     image.style.border = "0";
+    if (target.opacity < 1) image.style.opacity = String(target.opacity);
     target.slide.appendChild(image);
     return image;
   }

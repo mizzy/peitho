@@ -15,6 +15,7 @@ it("exports exactly the distribution viewer runtime surface", () => {
     "createViewerNavigator",
     "dropDisconnectedShadowMounted",
     "executeInlineScripts",
+    "expandRevealStepPages",
     "keyBelongsToTarget",
     "pointerBelongsToTarget",
     "readViewerPosition",

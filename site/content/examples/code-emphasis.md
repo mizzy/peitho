@@ -40,15 +40,14 @@ stepped emphasis with the arrow keys. To step through it in presenter mode, run
 
 ## What to look at
 
-Stepped emphasis is a pointer that follows narration, so it appears only while
-walking steps: in `peitho present`, and in published output when the deck sets
-`public_reveal: steps` as this one does. A published deck landing on a slide
-fully revealed, previews, PDF export, and the gallery screenshot show those
-blocks unemphasized — freezing an arbitrary moment of a
-moving pointer into a distributed artifact would assert something the author
-never did. Static emphasis says "these lines are the important ones", which is
-a property of the content, so it ships with the deck and is visible in the
-published version above.
+Stepped emphasis is a pointer that follows narration, so it appears while
+walking steps in `peitho present` and, with `public_reveal: steps`, in both the
+published viewer and PDF export. The PDF contains every exact-match emphasis
+position in the shared step sequence. Previews, lint, the gallery screenshot,
+and default/final published and PDF output leave that pointer inactive. Static
+emphasis says "these lines are the important ones", which is a property of the
+content, so it ships with the deck and is visible in the published version
+above.
 
 The deck's only frontmatter is `public_reveal: steps`. Its `layouts/title-body-code.html` is a copy of
 the built-in layout with one intentional change: the `code` slot arity is

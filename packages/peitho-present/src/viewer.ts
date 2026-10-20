@@ -96,4 +96,5 @@ export {
   shadowMountedBacklog
 } from "./scripts";
 export { keyBelongsToTarget, pointerBelongsToTarget } from "./interactiveTarget";
+export { expandRevealStepPages } from "./pdfStepPages";
 export { applyStepState, createStepStateStyle } from "./stepState";

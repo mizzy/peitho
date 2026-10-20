@@ -108,13 +108,15 @@ mod tests {
             RenderedSlide::new(
                 0,
                 SlideKey::new("intro").unwrap(),
+                0,
                 String::new(),
                 Some("only the intro has a note".to_owned()),
             ),
-            RenderedSlide::new(1, SlideKey::new("plain").unwrap(), String::new(), None),
+            RenderedSlide::new(1, SlideKey::new("plain").unwrap(), 0, String::new(), None),
             RenderedSlide::new(
                 2,
                 SlideKey::new("outro").unwrap(),
+                0,
                 String::new(),
                 Some("closing thought".to_owned()),
             ),
