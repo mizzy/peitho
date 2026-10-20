@@ -32,6 +32,14 @@ pub enum PageNumberFormat {
     CurrentOfTotal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicReveal {
+    #[default]
+    Final,
+    Steps,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointerColor(String);
 
@@ -334,6 +342,7 @@ pub struct DeckSettings {
     resolution: Resolution,
     breaks: bool,
     page_numbers: Option<PageNumberFormat>,
+    public_reveal: PublicReveal,
     pointer_color: Option<PointerColor>,
     lang: DeckLang,
     sections: Vec<DeckSection>,
@@ -361,6 +370,7 @@ impl DeckSettings {
         resolution: Option<Resolution>,
         breaks: bool,
         page_numbers: Option<PageNumberFormat>,
+        public_reveal: PublicReveal,
         pointer_color: Option<PointerColor>,
         lang: DeckLang,
         sections: Vec<DeckSection>,
@@ -380,6 +390,7 @@ impl DeckSettings {
             resolution,
             breaks,
             page_numbers,
+            public_reveal,
             pointer_color,
             lang,
             sections,
@@ -412,6 +423,10 @@ impl DeckSettings {
 
     pub fn page_numbers(&self) -> Option<PageNumberFormat> {
         self.page_numbers
+    }
+
+    pub fn public_reveal(&self) -> PublicReveal {
+        self.public_reveal
     }
 
     pub fn pointer_color(&self) -> Option<&PointerColor> {
@@ -1203,6 +1218,7 @@ mod tests {
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
             None,
+            Default::default(),
             None,
             DeckLang::default(),
             vec![setup.clone()],
@@ -1235,6 +1251,7 @@ mod tests {
             Some(Resolution::from_aspect_ratio_default(AspectRatio::default())),
             false,
             None,
+            Default::default(),
             None,
             DeckLang::default(),
             vec![setup.clone()],
@@ -1259,6 +1276,7 @@ mod tests {
             None,
             false,
             None,
+            Default::default(),
             None,
             DeckLang::default(),
             Vec::new(),
@@ -1282,6 +1300,7 @@ mod tests {
             Some(Resolution::from_frontmatter("1024x768").unwrap()),
             false,
             None,
+            Default::default(),
             None,
             DeckLang::default(),
             Vec::new(),
@@ -1304,6 +1323,7 @@ mod tests {
             Some(Resolution::from_frontmatter("16x9").unwrap()),
             false,
             None,
+            Default::default(),
             None,
             DeckLang::default(),
             Vec::new(),

@@ -174,6 +174,18 @@ child block is one step; a list contributes one step per top-level item, and
 nested items appear with their parent. Multiple reveal groups on the same slide
 number continuously.
 
+Published distributions show the final state by default. Opt their viewer into
+the same step sequence with deck frontmatter:
+
+```yaml
+public_reveal: steps
+```
+
+In that mode, next-entry starts a slide at step 0 and previous-entry returns to
+the preceding slide fully revealed. A direct slide jump is fully revealed, and
+a missing or invalid `step` URL value also selects the fully revealed state.
+The URL records the current position as `?slide=N&step=M`.
+
 [Watch reveal steps advance in peitho present](/guide-videos/reveal-demo.mp4)
 
 ````markdown
@@ -215,7 +227,8 @@ directly before a closing `:::` marker. Images and other block shapes, such as
 lists, still need blank lines around the markers; those shapes are not split if
 Markdown fuses them to a marker, and the build fails with a line-numbered error.
 
-`peitho preview`, PDF export, lint, and published output show the final state.
+`peitho preview`, PDF export, and lint show the final state. Published output
+also shows the final state when `public_reveal` is omitted or set to `final`.
 `{reveal=value}`, empty groups, unclosed fences, nested fences, and
 multi-attribute fences are line-numbered build errors.
 
@@ -300,7 +313,9 @@ pub struct Deck<Phase> {
 ````
 
 A `|` turns emphasis into a walkthrough: each group becomes one step in
-`peitho present`, and the emphasis moves from group to group as you advance.
+`peitho present`, and in a `public_reveal: steps` distribution. Emphasis uses
+equality with the current step, so it moves from group to group rather than
+accumulating as you advance.
 
 ````markdown
 ```rust {3|6-8}
@@ -337,21 +352,21 @@ The language tag is optional — ` ```{2-4} ` works on an untagged block.
 | Notation | Steps used | Where it appears |
 | --- | --- | --- |
 | `{2-4}` (no `\|`) | none | everywhere, including PDF and published output |
-| `{\|3}` | one | `peitho present` only |
-| `{2-4\|6-8}` | one per group | `peitho present` only |
+| `{\|3}` | one | `peitho present`, and distributions with `public_reveal: steps` |
+| `{2-4\|6-8}` | one per group | `peitho present`, and distributions with `public_reveal: steps` |
 
 Static emphasis says "these lines are the important ones" — a property of the
 content, so it ships with the deck. Stepped emphasis is a pointer that follows
 your narration, so freezing an arbitrary moment of it into a PDF would say
-something you never meant; `peitho preview`, PDF export, lint, and published
-output show the code unemphasized.
+something you never meant; `peitho preview`, PDF export, lint, and default/final
+published output show the code unemphasized.
 
 When a deck uses static emphasis, its default styling travels with the deck,
 including when the deck has its own `css/`. Restyle it with the
 `--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
 `--peitho-emphasis-dim` custom properties, or override
-`.code-line-emphasis` directly. Stepped emphasis is styled only by
-`peitho present`.
+`.code-line-emphasis` directly. Stepped emphasis is styled by `peitho present`
+and by distributions that set `public_reveal: steps`.
 
 Line numbers past the end of the block, malformed specs, stepped emphasis
 inside a `::: {reveal}` group (which would nest two step spaces), and emphasis

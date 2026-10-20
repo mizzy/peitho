@@ -312,12 +312,7 @@ function resolveStepTarget(slides, position, direction) {
   return index === null ? null : { index, step: revealStepCount(slides[index]) };
 }
 
-// src/shell.ts
-var DEFAULT_POINTER_BASE_COLOR = "#38bdf8";
-var DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
-var POINTER_TRAIL_DURATION_MS = 500;
-var POINTER_TRAIL_CAP = 64;
-var POINTER_CORE_MIX_TO_WHITE = 0.65;
+// src/stepState.ts
 var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 var EMPHASIS_ACTIVE_CSS = [
   ".code-line{display:inline-block;width:100%}",
@@ -329,6 +324,34 @@ var EMPHASIS_ACTIVE_CSS = [
   "opacity:var(--peitho-emphasis-dim,0.45)",
   "}"
 ].join("");
+function createStepStateStyle(doc) {
+  const style = doc.createElement("style");
+  style.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
+  return style;
+}
+function applyEmphasisState(root, step) {
+  for (const marker of root.querySelectorAll("[data-emphasis-step]")) {
+    const steps = (marker.dataset.emphasisStep ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+    marker.toggleAttribute("data-emphasis-active", steps.includes(step));
+  }
+}
+function applyStepState(root, step) {
+  for (const marker of root.querySelectorAll("[data-reveal-step]")) {
+    const revealStep = Number(marker.dataset.revealStep);
+    marker.toggleAttribute(
+      "data-reveal-hidden",
+      Number.isFinite(revealStep) && revealStep > step
+    );
+  }
+  applyEmphasisState(root, step);
+}
+
+// src/shell.ts
+var DEFAULT_POINTER_BASE_COLOR = "#38bdf8";
+var DEFAULT_POINTER_CORE_COLOR = "#e0f2fe";
+var POINTER_TRAIL_DURATION_MS = 500;
+var POINTER_TRAIL_CAP = 64;
+var POINTER_CORE_MIX_TO_WHITE = 0.65;
 var CSS_NAMED_COLORS = {
   aliceblue: "#f0f8ff",
   antiquewhite: "#faebd7",
@@ -907,9 +930,7 @@ var PresentShellController = class {
       })
     );
     const shadow = attachSlideShadow(host, this.doc, css);
-    const revealStyle = this.doc.createElement("style");
-    revealStyle.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
-    shadow.appendChild(revealStyle);
+    shadow.appendChild(createStepStateStyle(this.doc));
     const template = this.doc.createElement("template");
     template.innerHTML = html;
     const fragment = template.content.cloneNode(true);
@@ -992,7 +1013,7 @@ var PresentShellController = class {
     this.currentIndex = index;
     this.currentStep = nextStep;
     const slide = this.slides[index];
-    this.applyRevealState(slide.host, nextStep);
+    applyStepState(slide.shadow, nextStep);
     if (indexChanged) {
       this.bus.dispatchEvent(
         new CustomEvent("peitho:slidechange", {
@@ -1017,35 +1038,6 @@ var PresentShellController = class {
         }
       })
     );
-  }
-  applyRevealState(host, step) {
-    const markers = host.shadowRoot?.querySelectorAll("[data-reveal-step]");
-    if (markers == null) return;
-    for (const marker of markers) {
-      const revealStep = Number(marker.dataset.revealStep);
-      marker.toggleAttribute(
-        "data-reveal-hidden",
-        Number.isFinite(revealStep) && revealStep > step
-      );
-    }
-    this.applyEmphasisState(host, step);
-  }
-  /**
-   * Move code line emphasis to every marker listing the current step.
-   *
-   * Unlike reveal, emphasis is not cumulative: it points at one group at a
-   * time and moves, so each whitespace-separated step token is compared for
-   * equality rather than "step or earlier". Stepping past the last group
-   * leaves the block unemphasized, which is the correct final state — the
-   * pointer is gone once the speaker has moved on.
-   */
-  applyEmphasisState(host, step) {
-    const markers = host.shadowRoot?.querySelectorAll("[data-emphasis-step]");
-    if (markers == null) return;
-    for (const marker of markers) {
-      const steps = (marker.dataset.emphasisStep ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
-      marker.toggleAttribute("data-emphasis-active", steps.includes(step));
-    }
   }
   startPresentation() {
     if (this.startedAtValue !== null) return;

@@ -23,12 +23,53 @@ var PeithoViewer = (() => {
   __export(viewer_exports, {
     announceParsedSlides: () => announceParsedSlides,
     announceShadowMounted: () => announceShadowMounted,
+    applyStepState: () => applyStepState,
+    createStepStateStyle: () => createStepStateStyle,
+    createViewerNavigator: () => createViewerNavigator,
     dropDisconnectedShadowMounted: () => dropDisconnectedShadowMounted,
     executeInlineScripts: () => executeInlineScripts,
     keyBelongsToTarget: () => keyBelongsToTarget,
     pointerBelongsToTarget: () => pointerBelongsToTarget,
-    shadowMountedBacklog: () => shadowMountedBacklog
+    readViewerPosition: () => readViewerPosition,
+    shadowMountedBacklog: () => shadowMountedBacklog,
+    writeViewerPosition: () => writeViewerPosition
   });
+
+  // src/skipnav.ts
+  function nextNonSkippedIndex(slides, from, direction) {
+    let index = from + direction;
+    while (index >= 0 && index < slides.length) {
+      if (slides[index].skip !== true) return index;
+      index += direction;
+    }
+    return null;
+  }
+
+  // src/stepnav.ts
+  function revealStepCount(slide) {
+    const value = slide?.revealSteps;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+    return Math.floor(value);
+  }
+  function clampStep(step, stepCount) {
+    if (!Number.isFinite(step)) return 0;
+    return Math.max(0, Math.min(Math.floor(step), stepCount));
+  }
+  function resolveStepTarget(slides, position, direction) {
+    if (direction === 1) {
+      const stepCount = revealStepCount(slides[position.index]);
+      if (position.step < stepCount) {
+        return { index: position.index, step: position.step + 1 };
+      }
+      const index2 = nextNonSkippedIndex(slides, position.index, 1);
+      return index2 === null ? null : { index: index2, step: 0 };
+    }
+    if (position.step > 0) {
+      return { index: position.index, step: position.step - 1 };
+    }
+    const index = nextNonSkippedIndex(slides, position.index, -1);
+    return index === null ? null : { index, step: revealStepCount(slides[index]) };
+  }
 
   // src/scripts.ts
   var CLASSIC_JAVASCRIPT_TYPES = /* @__PURE__ */ new Set(["text/javascript", "application/javascript"]);
@@ -211,6 +252,103 @@ ${text}
       return true;
     }
     return isEditableTarget(event);
+  }
+
+  // src/stepState.ts
+  var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
+  var EMPHASIS_ACTIVE_CSS = [
+    ".code-line{display:inline-block;width:100%}",
+    "[data-emphasis-active]{",
+    "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+    "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
+    "}",
+    "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+    "opacity:var(--peitho-emphasis-dim,0.45)",
+    "}"
+  ].join("");
+  function createStepStateStyle(doc) {
+    const style = doc.createElement("style");
+    style.textContent = REVEAL_HIDDEN_CSS + EMPHASIS_ACTIVE_CSS;
+    return style;
+  }
+  function applyEmphasisState(root, step) {
+    for (const marker of root.querySelectorAll("[data-emphasis-step]")) {
+      const steps = (marker.dataset.emphasisStep ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+      marker.toggleAttribute("data-emphasis-active", steps.includes(step));
+    }
+  }
+  function applyStepState(root, step) {
+    for (const marker of root.querySelectorAll("[data-reveal-step]")) {
+      const revealStep = Number(marker.dataset.revealStep);
+      marker.toggleAttribute(
+        "data-reveal-hidden",
+        Number.isFinite(revealStep) && revealStep > step
+      );
+    }
+    applyEmphasisState(root, step);
+  }
+
+  // src/viewer.ts
+  function createViewerNavigator(options) {
+    const slides = options.slides.map(({ revealSteps }) => ({ revealSteps }));
+    function normalizedIndex(index) {
+      if (slides.length === 0) return 0;
+      const integer = Number.isFinite(index) ? Math.floor(index) : 0;
+      return Math.max(0, Math.min(integer, slides.length - 1));
+    }
+    function direct(index, requestedStep) {
+      const nextIndex = normalizedIndex(index);
+      const stepCount = revealStepCount(slides[nextIndex]);
+      if (!options.walkRevealSteps) return { index: nextIndex, step: stepCount };
+      const validStep = requestedStep !== void 0 && Number.isSafeInteger(requestedStep) && requestedStep >= 0;
+      return {
+        index: nextIndex,
+        step: validStep ? clampStep(requestedStep, stepCount) : stepCount
+      };
+    }
+    function move(position, direction) {
+      const current = direct(position.index, position.step);
+      if (slides.length === 0) return current;
+      if (!options.walkRevealSteps) {
+        const nextIndex = current.index + direction;
+        if (nextIndex < 0 || nextIndex >= slides.length) return current;
+        return direct(nextIndex);
+      }
+      return resolveStepTarget(slides, current, direction) ?? current;
+    }
+    return { walkRevealSteps: options.walkRevealSteps, direct, move };
+  }
+  function parseUrlInteger(raw) {
+    if (raw === null || !/^\d+$/.test(raw)) return void 0;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) ? value : void 0;
+  }
+  function slideFromUrl(url) {
+    const querySlide = url.searchParams.get("slide");
+    if (querySlide !== null) return parseUrlInteger(querySlide) ?? 1;
+    if (url.hash.startsWith("#slide=")) {
+      return parseUrlInteger(url.hash.slice("#slide=".length).split("&")[0] ?? null) ?? 1;
+    }
+    if (url.hash.startsWith("#") && url.hash.length > 1) {
+      return parseUrlInteger(url.hash.slice(1).split("&")[0] ?? null) ?? 1;
+    }
+    return 1;
+  }
+  function readViewerPosition(url, navigator) {
+    const oneBasedSlide = slideFromUrl(url);
+    const requestedStep = parseUrlInteger(url.searchParams.get("step"));
+    return navigator.direct(oneBasedSlide - 1, requestedStep);
+  }
+  function writeViewerPosition(url, position, navigator) {
+    const next = new URL(url.href);
+    const normalized = navigator.direct(position.index, position.step);
+    next.searchParams.set("slide", String(normalized.index + 1));
+    if (navigator.walkRevealSteps) {
+      next.searchParams.set("step", String(normalized.step));
+    } else {
+      next.searchParams.delete("step");
+    }
+    return next;
   }
   return __toCommonJS(viewer_exports);
 })();

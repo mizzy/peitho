@@ -24,7 +24,7 @@ use crate::{
     notes_edit::is_ascii_blank_line,
     phase::{
         AssetPath, Deck, DeckLang, DeckSection, DeckSettings, KeySource, LayoutRequest,
-        PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor,
+        PageNumberFormat, Parsed, ParsedSlide, PlannedTime, PointerColor, PublicReveal,
     },
     render::{
         walk_body_markdown_list_items, walk_body_markdown_list_items_with_ranges,
@@ -130,6 +130,8 @@ struct DeckFrontmatter {
     breaks: bool,
     #[serde(default, deserialize_with = "deserialize_optional_page_number_format")]
     page_numbers: Option<PageNumberFormat>,
+    #[serde(default)]
+    public_reveal: PublicReveal,
     #[serde(default)]
     pointer_color: Option<String>,
     #[serde(default)]
@@ -1126,6 +1128,7 @@ fn parse_deck_frontmatter(raw: Option<&RawFrontmatter>) -> Result<DeckSettings> 
         resolution,
         parsed.breaks,
         parsed.page_numbers,
+        parsed.public_reveal,
         pointer_color,
         lang,
         Vec::new(),
@@ -1262,6 +1265,7 @@ fn frontmatter_key_lines(raw: Option<&RawFrontmatter>) -> HashMap<&'static str, 
             "resolution",
             "breaks",
             "page_numbers",
+            "public_reveal",
             "pointer_color",
             "lang",
             "layouts",
@@ -1509,7 +1513,7 @@ fn frontmatter_yaml_error(raw: &RawFrontmatter, err: &serde_norway::Error) -> Bu
 
 fn frontmatter_help(message: &str) -> &'static str {
     if message.contains("unknown field") || message.contains("duplicate entry") {
-        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
+        "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, public_reveal, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
     } else if frontmatter_message_mentions_key(message, "aspect_ratio") {
         "set aspect_ratio to 16:9 or 4:3"
     } else if frontmatter_message_mentions_key(message, "resolution") {
@@ -1520,6 +1524,12 @@ fn frontmatter_help(message: &str) -> &'static str {
         || message.contains(r#"use "current" or "current_of_total""#)
     {
         r#"use "current" or "current_of_total""#
+    } else if frontmatter_message_mentions_key(message, "public_reveal")
+        || (message.contains("unknown variant")
+            && message.contains("final")
+            && message.contains("steps"))
+    {
+        r#"use "final" or "steps""#
     } else if frontmatter_message_mentions_key(message, "pointer_color") {
         PointerColor::HELP
     } else if frontmatter_message_mentions_key(message, "lang") {
@@ -4996,6 +5006,39 @@ mod tests {
         let deck = parse_markdown("# Intro", &crate::highlight::Highlighter::defaults()).unwrap();
 
         assert_eq!(deck.settings().page_numbers(), None);
+    }
+
+    #[test]
+    fn public_reveal_is_typed_and_defaults_to_final() {
+        let cases = [
+            ("# Intro", PublicReveal::Final),
+            (
+                "---\npublic_reveal: final\n---\n# Intro",
+                PublicReveal::Final,
+            ),
+            (
+                "---\npublic_reveal: steps\n---\n# Intro",
+                PublicReveal::Steps,
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let deck = parse_markdown(source, &crate::highlight::Highlighter::defaults()).unwrap();
+            assert_eq!(deck.settings().public_reveal(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_public_reveal_has_its_line_and_focused_help() {
+        for value in ["all", "true", "false"] {
+            let source = format!("---\npublic_reveal: {value}\n---\n# Intro");
+            let err =
+                parse_markdown(&source, &crate::highlight::Highlighter::defaults()).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Parse);
+            assert_eq!(err.line, Some(2));
+            assert!(err.to_string().contains("public_reveal"));
+            assert_eq!(err.help, r#"use "final" or "steps""#);
+        }
     }
 
     #[test]
@@ -9150,7 +9193,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, public_reveal, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -9355,7 +9398,7 @@ After list
         assert!(err.to_string().contains("duplicate entry"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, public_reveal, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 
@@ -9412,7 +9455,7 @@ After list
         assert!(err.to_string().contains("invalid deck frontmatter"));
         assert_eq!(
             err.help,
-            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
+            "use only the supported deck frontmatter keys: time, aspect_ratio, resolution, breaks, page_numbers, public_reveal, pointer_color, lang, layouts, css, syntaxes, fonts, code_images"
         );
     }
 

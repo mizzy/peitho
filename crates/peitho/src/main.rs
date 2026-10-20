@@ -2445,6 +2445,7 @@ fn emit_distribution(out: &Path, artifacts: &BuildArtifacts) -> miette::Result<(
         peitho_core::render_distribution_index(
             artifacts.rendered.settings().aspect_ratio(),
             artifacts.rendered.settings().lang(),
+            artifacts.rendered.settings().public_reveal(),
         ),
     )
     .into_diagnostic()?;
@@ -13934,6 +13935,68 @@ rehearsal-20260918-120000  (recorded 2026-09-18 12:00)
                 targets,
             }
         }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct StablePublicOutputs {
+        manifest: Vec<u8>,
+        slides: BTreeMap<OsString, Vec<u8>>,
+        pdf: String,
+        lint: String,
+    }
+
+    fn stable_public_outputs(markdown: &str) -> StablePublicOutputs {
+        let fixture = WatchFixture::new(markdown);
+        let artifacts = build_artifacts(&fixture.options.input).unwrap();
+        emit_distribution(&fixture.options.out, &artifacts).unwrap();
+
+        let manifest = fs::read(fixture.options.out.join("manifest.json")).unwrap();
+        let slides = fs::read_dir(fixture.options.out.join("slides"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_file());
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+
+        StablePublicOutputs {
+            manifest,
+            slides,
+            pdf: peitho_core::render_pdf_document(&artifacts.rendered),
+            lint: peitho_core::render_lint_document(&artifacts.rendered),
+        }
+    }
+
+    #[test]
+    fn public_reveal_only_changes_distribution_index() {
+        const BODY: &str = r#"# Intro
+
+::: {reveal}
+
+- First item
+- Second item
+
+:::
+
+```rust {1|2}
+let first = 1;
+let second = 2;
+```
+"#;
+
+        let omitted = stable_public_outputs(BODY);
+        let final_mode = stable_public_outputs(&format!("---\npublic_reveal: final\n---\n{BODY}"));
+        let steps_mode = stable_public_outputs(&format!("---\npublic_reveal: steps\n---\n{BODY}"));
+
+        assert_eq!(omitted.manifest, final_mode.manifest);
+        assert_eq!(omitted.slides, final_mode.slides);
+        assert_eq!(final_mode.manifest, steps_mode.manifest);
+        assert_eq!(final_mode.slides, steps_mode.slides);
+        assert_eq!(omitted.pdf, final_mode.pdf);
+        assert_eq!(final_mode.pdf, steps_mode.pdf);
+        assert_eq!(omitted.lint, final_mode.lint);
+        assert_eq!(final_mode.lint, steps_mode.lint);
     }
 
     fn katex_font_bytes(file_name: &str) -> &'static [u8] {
