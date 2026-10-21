@@ -41,12 +41,13 @@ and reloads while preserving the current slide, reveal step, and overview
 state. The single-slide stage always walks incremental-reveal and stepped
 emphasis positions, independently of `public_reveal`. ArrowRight/ArrowLeft and
 PageDown/PageUp move through that sequence; next-entry starts at step 0 and
-previous-entry lands fully revealed. Up/Down move to the next or previous
-non-skipped slide and land fully revealed. Filmstrip clicks, grid opens, Home,
-and End also land fully revealed, while grid arrows retain their tile
-navigation. The filmstrip thumbnails and overview grid always show the final
-state. The single-slide view keeps that filmstrip on the left and shows the
-current slide's speaker notes in an editable panel below the slide, headed by
+previous-entry lands fully revealed. Direct single-slide landings all start at
+step 0, including Up/Down navigation to the next or previous non-skipped slide,
+filmstrip clicks, grid opens, Home, End, and key/index navigation. Entering and
+moving within the grid stays fully revealed. The filmstrip thumbnails and
+overview grid always show the final state. The single-slide view keeps that
+filmstrip on the left and shows the current slide's speaker notes in an editable
+panel below the slide, headed by
 the slide's position (`3 / 25`); the overview grid shows neither. The position
 row shows one hint at a time: a save failure silences it; otherwise a restore
 offer wins while focus is outside the notes textarea, then an open editor's
@@ -139,6 +140,9 @@ runs, and the preview reloads on the same slide.
   overview grid keeps its click-to-open meaning and the filmstrip thumbnails
   stay inert. A click on a link edits the block it sits in, so the link text
   and URL can be changed too; Cmd+click (Ctrl+click) opens the link instead.
+  A direct landing starts at step 0, so text revealed by a later step cannot be
+  clicked for inline editing until you step to it; whole-slide `e` editing is
+  unaffected.
 - **Keys.** Enter saves and Shift+Enter inserts a newline (with
   `breaks: true` that is a visible line break). A heading written as `# Title`
   or `## Title` cannot hold a newline, so saving one rewrites the heading to

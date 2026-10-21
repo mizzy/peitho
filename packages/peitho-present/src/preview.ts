@@ -854,9 +854,11 @@ class PreviewShellController implements PreviewShell {
       const restoredStep = restored?.step;
       const stepCount = this.stepCountFor(restoredIndex);
       this.currentStep =
-        this.mode === "single" && restoredStep !== undefined
-          ? clampStep(restoredStep, stepCount)
-          : stepCount;
+        this.mode === "grid"
+          ? stepCount
+          : restoredStep === undefined
+            ? 0
+            : clampStep(restoredStep, stepCount);
       this.applyLayout();
       if (this.notesTextareaKey === null) this.renderNotes();
       this.restoreDraft(restored?.draft);
@@ -951,9 +953,10 @@ class PreviewShellController implements PreviewShell {
   }
 
   private navigateToTarget(to: PreviewNavigateTarget): boolean {
-    const position = this.resolveTarget(to);
+    const mode = this.mode;
+    const position = this.resolveTarget(to, mode);
     if (position === null) return false;
-    this.commitTransition(position, this.mode);
+    this.commitTransition(position, mode);
     return true;
   }
 
@@ -1055,11 +1058,11 @@ class PreviewShellController implements PreviewShell {
       if (editsLink) event.preventDefault();
       if (clickGuard.shouldIgnoreClick(event) && !editsLink) return;
       if (this.tryStartSlideEdit(editable)) return;
-      const step =
+      const position =
         this.mode === "grid" || slide.index !== this.currentIndex
-          ? this.stepCountFor(slide.index)
-          : this.currentStep;
-      this.commitTransition({ index: slide.index, step }, "single");
+          ? this.resolveDirectIndex(slide.index, "single")
+          : { index: slide.index, step: this.currentStep };
+      if (position !== null) this.commitTransition(position, "single");
     };
     tile.addEventListener("click", onTileClick);
     this.tileListenerCleanups.push(() => tile.removeEventListener("click", onTileClick));
@@ -1907,12 +1910,12 @@ class PreviewShellController implements PreviewShell {
   }
 
   private enterGrid(): void {
-    const position = this.resolveDirectIndex(this.clampIndex(this.currentIndex));
+    const position = this.resolveDirectIndex(this.clampIndex(this.currentIndex), "grid");
     if (position !== null) this.commitTransition(position, "grid");
   }
 
   private exitGrid(): void {
-    const position = this.resolveDirectIndex(this.clampIndex(this.selectedIndex));
+    const position = this.resolveDirectIndex(this.clampIndex(this.selectedIndex), "single");
     if (position !== null) this.commitTransition(position, "single");
   }
 
@@ -1940,8 +1943,9 @@ class PreviewShellController implements PreviewShell {
   }
 
   private setIndex(index: number): void {
-    const position = this.resolveDirectIndex(this.clampIndex(index));
-    if (position !== null) this.commitTransition(position, this.mode);
+    const mode = this.mode;
+    const position = this.resolveDirectIndex(this.clampIndex(index), mode);
+    if (position !== null) this.commitTransition(position, mode);
   }
 
   private commitTransition(
@@ -2046,48 +2050,55 @@ class PreviewShellController implements PreviewShell {
     return key !== null && text !== (this.notes.notes[key] ?? "");
   }
 
-  private resolveTarget(to: PreviewNavigateTarget): StepPosition | null {
-    if (to === "first") return this.resolveDirectIndex(0);
-    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1);
+  private resolveTarget(
+    to: PreviewNavigateTarget,
+    destinationMode: PreviewMode
+  ): StepPosition | null {
+    if (to === "first") return this.resolveDirectIndex(0, destinationMode);
+    if (to === "last") return this.resolveDirectIndex(this.slides.length - 1, destinationMode);
     if (to === "next") {
-      if (this.mode === "grid") {
+      if (destinationMode === "grid") {
         return this.resolveDirectIndex(
-          Math.min(this.selectedIndex + 1, this.slides.length - 1)
+          Math.min(this.selectedIndex + 1, this.slides.length - 1),
+          destinationMode
         );
       }
       return this.resolveStepTarget(1);
     }
     if (to === "prev") {
-      if (this.mode === "grid") {
-        return this.resolveDirectIndex(Math.max(this.selectedIndex - 1, 0));
+      if (destinationMode === "grid") {
+        return this.resolveDirectIndex(
+          Math.max(this.selectedIndex - 1, 0),
+          destinationMode
+        );
       }
       return this.resolveStepTarget(-1);
     }
     if (to === "up" || to === "down") {
       const index =
-        this.mode === "grid"
+        destinationMode === "grid"
           ? this.resolveGridVerticalTarget(to)
           : this.resolveSequentialTarget(to === "up" ? -1 : 1);
-      return index === null ? null : this.resolveDirectIndex(index);
+      return index === null ? null : this.resolveDirectIndex(index, destinationMode);
     }
     if ("index" in to) {
       if (to.index < 0 || to.index >= this.slides.length) {
         this.log.error(`Unknown slide index: ${to.index}`);
         return null;
       }
-      return this.resolveDirectIndex(to.index);
+      return this.resolveDirectIndex(to.index, destinationMode);
     }
     const index = this.slides.findIndex((slide) => slide.meta.key === to.key);
     if (index < 0) {
       this.log.error(`Unknown slide key: ${to.key}`);
       return null;
     }
-    return this.resolveDirectIndex(index);
+    return this.resolveDirectIndex(index, destinationMode);
   }
 
-  private resolveDirectIndex(index: number): StepPosition | null {
+  private resolveDirectIndex(index: number, destinationMode: PreviewMode): StepPosition | null {
     if (index < 0 || index >= this.slides.length) return null;
-    return { index, step: this.stepCountFor(index) };
+    return { index, step: destinationMode === "single" ? 0 : this.stepCountFor(index) };
   }
 
   private resolveStepTarget(direction: 1 | -1): StepPosition | null {
