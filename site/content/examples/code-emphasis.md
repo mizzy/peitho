@@ -44,11 +44,13 @@ Stepped emphasis is a pointer that follows narration, so it appears while
 walking steps in `peitho present` and on the `peitho preview` stage regardless
 of `public_reveal`. With `public_reveal: steps`, it also appears in the
 published viewer and PDF export; the PDF contains every exact-match emphasis
-position in the shared step sequence. Preview filmstrip thumbnails and
-overview tiles, lint, the gallery screenshot, and default/final published and
-PDF output leave that pointer inactive. Static emphasis says "these lines are
-the important ones", which is a property of the content, so it ships with the
-deck and is visible in the published version above.
+position in the shared step sequence. A direct preview single-mode landing
+starts at step 0, so stepped emphasis activates only after you advance to its
+matching step. Preview filmstrip thumbnails and overview tiles, lint, the
+gallery screenshot, and default/final published and PDF output leave that
+pointer inactive. Static emphasis says "these lines are the important ones",
+which is a property of the content, so it ships with the deck and is visible in
+the published version above.
 
 The deck's only frontmatter is `public_reveal: steps`. Its `layouts/title-body-code.html` is a copy of
 the built-in layout with one intentional change: the `code` slot arity is

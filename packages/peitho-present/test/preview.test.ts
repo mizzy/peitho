@@ -1780,7 +1780,7 @@ it("single mode navigation does not scroll preview tiles into view", async () =>
   expect(scrollIntoView).not.toHaveBeenCalled();
 });
 
-it("walks steps horizontally while vertical and direct moves land fully revealed", async () => {
+it("walks steps horizontally while direct single-mode moves land at step zero", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   sessionStorage.setItem(
@@ -1812,17 +1812,17 @@ it("walks steps horizontally while vertical and direct moves land fully revealed
   expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
 
   shell.navigate("down");
-  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 0]);
   shell.navigate("up");
-  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
   shell.navigate("last");
-  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 0]);
   shell.navigate("first");
-  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
   shell.navigate({ index: 2, step: 0 });
-  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 1]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([2, 0]);
   shell.navigate({ key: "intro" });
-  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 2]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
 });
 
 it("dispatches present-compatible slide and step change details", async () => {
@@ -1930,11 +1930,14 @@ it("dispatches the fully revealed step when entering grid from a partial step", 
   bus.dispatchEvent(
     new CustomEvent("peitho:overviewrequest", { detail: { action: "exit" } })
   );
-  expect([shell.mode, shell.currentStep]).toEqual(["single", 2]);
-  expect(stepChanges).toEqual([{ index: 0, step: 2, stepCount: 2 }]);
+  expect([shell.mode, shell.currentStep]).toEqual(["single", 0]);
+  expect(stepChanges).toEqual([
+    { index: 0, step: 2, stepCount: 2 },
+    { index: 0, step: 0, stepCount: 2 }
+  ]);
 });
 
-it("filmstrip clicks and grid opens land fully revealed", async () => {
+it("filmstrip clicks and grid opens land at step zero", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   sessionStorage.setItem(
@@ -1955,12 +1958,14 @@ it("filmstrip clicks and grid opens land fully revealed", async () => {
   });
   shells.push(shell);
 
+  shell.navigate("next");
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 1]);
   mockSelection(true);
   stageTile(root, "intro").click();
-  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 0]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([0, 1]);
 
   root.querySelectorAll<HTMLElement>(".peitho-preview-thumb")[1].click();
-  expect([shell.currentIndex, shell.currentStep]).toEqual([1, 1]);
+  expect([shell.currentIndex, shell.currentStep]).toEqual([1, 0]);
 
   bus.dispatchEvent(
     new CustomEvent("peitho:overviewrequest", { detail: { action: "enter" } })
@@ -1974,11 +1979,11 @@ it("filmstrip clicks and grid opens land fully revealed", async () => {
   expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual([
     "single",
     0,
-    2
+    0
   ]);
 });
 
-it("clicking the current slide thumbnail at a partial step lands fully revealed", async () => {
+it("clicking the current slide thumbnail at a partial step lands at step zero", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
   sessionStorage.setItem(
@@ -2001,7 +2006,7 @@ it("clicking the current slide thumbnail at a partial step lands fully revealed"
   expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual([
     "single",
     0,
-    2
+    0
   ]);
 });
 
@@ -2098,10 +2103,10 @@ it("installs one step style per stage host and applies state only to the active 
     new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
   );
   expect(shell.mode).toBe("single");
-  expect(shell.currentStep).toBe(3);
+  expect(shell.currentStep).toBe(0);
   expect(stepStyleCount(stage)).toBe(1);
-  expect(hidden(stage)).toEqual([false, false]);
-  expect(stage.querySelector("[data-emphasis-active]")?.textContent).toBe("code");
+  expect(hidden(stage)).toEqual([true, true]);
+  expect(stage.querySelector("[data-emphasis-active]")).toBeNull();
 });
 
 it("resets stage step attributes only when entering grid", async () => {
@@ -2351,16 +2356,31 @@ it("grid vertical navigation moves by one computed row and stops at row edges", 
   expect(shell.selectedIndex).toBe(6);
 });
 
-it("clicking a grid tile shows that slide in single mode", async () => {
+it("clicking a grid tile opens that slide at step zero", async () => {
   const bus = new EventTarget();
   const root = document.createElement("main");
-  const shell = await mountForTest(root, bus);
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(
+      manifestWithSlides([
+        { key: "intro" },
+        { key: "middle" },
+        { key: "end", revealSteps: 2 }
+      ])
+    ),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
   mockSelection(true);
 
   root.querySelectorAll<HTMLElement>(".peitho-preview-tile")[2].click();
 
   expect(shell.mode).toBe("single");
   expect(shell.currentIndex).toBe(2);
+  expect(shell.currentStep).toBe(0);
 });
 
 it("clicking a layout button in a shadow-root grid tile does not open the slide", async () => {
@@ -2443,11 +2463,11 @@ it("saves and restores mode and slide index from sessionStorage", async () => {
 });
 
 it.each([
-  ["legacy missing", "single", undefined, 2],
-  ["null", "single", null, 2],
-  ["string", "single", "1", 2],
-  ["negative", "single", -1, 2],
-  ["fraction", "single", 1.5, 2],
+  ["legacy missing", "single", undefined, 0],
+  ["null", "single", null, 0],
+  ["string", "single", "1", 0],
+  ["negative", "single", -1, 0],
+  ["fraction", "single", 1.5, 0],
   ["beyond maximum", "single", 99, 2],
   ["exact zero", "single", 0, 0],
   ["exact middle", "single", 1, 1],
@@ -2494,7 +2514,7 @@ it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
     const restored = (shell as unknown as { restoredState: Record<string, unknown> })
       .restoredState;
     expect(restored).not.toHaveProperty("step");
-    expect(shell.currentStep).toBe(2);
+    expect(shell.currentStep).toBe(0);
   }
 );
 
@@ -2578,6 +2598,29 @@ it("starts on the first non-skipped slide in preview when there is no restored s
   expect(shell.mode).toBe("grid");
   expect(shell.currentIndex).toBe(1);
   expect(shell.selectedIndex).toBe(1);
+});
+
+it("opens the first reveal slide at step zero from a fresh grid session", async () => {
+  sessionStorage.clear();
+  const bus = new EventTarget();
+  const root = document.createElement("main");
+  const shell = await mountPreviewShell({
+    root,
+    bus,
+    fetcher: fetchForManifest(manifestWithSlides([{ key: "intro", revealSteps: 2 }])),
+    window,
+    storage: sessionStorage,
+    viewport: () => ({ width: 1280, height: 720 })
+  });
+  shells.push(shell);
+
+  expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual(["grid", 0, 2]);
+
+  bus.dispatchEvent(
+    new CustomEvent("peitho:overviewrequest", { detail: { action: "activate" } })
+  );
+
+  expect([shell.mode, shell.currentIndex, shell.currentStep]).toEqual(["single", 0, 0]);
 });
 
 it("restores a skipped slide index exactly in preview", async () => {

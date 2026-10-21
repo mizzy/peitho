@@ -234,8 +234,13 @@ PDF export emits one page per position, step 0 through the fully revealed step
 N. A slide with N steps therefore contributes N + 1 PDF pages; a slide without
 steps contributes one. Repeated PDF pages keep the slide's own page number and
 the logical slide total. The preview stage walks the same positions regardless
-of `public_reveal`; preview filmstrip thumbnails and overview tiles, plus lint,
-always show the final state.
+of `public_reveal`; next-entry starts at step 0 and previous-entry is fully
+revealed. Every direct single-mode landing starts at step 0, including Up/Down,
+filmstrip clicks, grid opens, Home/End, key/index navigation, and leaving the
+grid. A valid saved step is clamped to the current slide's step count when
+restored; a missing or invalid saved step in single mode starts at step 0, while
+grid restoration stays fully revealed. Preview filmstrip thumbnails and
+overview tiles, plus lint, always show the final state.
 
 `{reveal=value}`, empty groups, unclosed fences, nested fences, and
 multi-attribute fences are line-numbered build errors.
@@ -367,9 +372,11 @@ The language tag is optional — ` ```{2-4} ` works on an untagged block.
 Static emphasis says "these lines are the important ones" — a property of the
 content, so it ships with the deck. Stepped emphasis is a pointer that follows
 your narration. The `peitho preview` stage moves it with the current step;
-preview filmstrip thumbnails and overview tiles, lint, and default/final
-published and PDF output leave it inactive. PDFs with `public_reveal: steps`
-emit each exact-match emphasis state in the shared step sequence.
+direct single-mode landings start at step 0, so the pointer activates only after
+you advance to its matching step. Preview filmstrip thumbnails and overview
+tiles, lint, and default/final published and PDF output leave it inactive. PDFs
+with `public_reveal: steps` emit each exact-match emphasis state in the shared
+step sequence.
 
 When a deck uses static emphasis, its default styling travels with the deck,
 including when the deck has its own `css/`. Restyle it with the
@@ -517,7 +524,8 @@ not counted, not written to the manifest, and do not contribute notes.
 navigation step over it in the presentation and single-slide preview shells.
 Presentation and preview open on the first non-skipped slide (unless preview
 restores a saved index). Direct navigation by key or index, Home/End first/last
-navigation, and overview grid selection can still land on skipped slides.
+navigation, and overview grid selection can still land on skipped slides; a
+preview single-mode landing on one starts at step 0.
 
 Draft slides cannot also be skipped or declare section markers. If every slide
 is marked draft, the build fails instead of producing an empty deck.

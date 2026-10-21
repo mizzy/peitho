@@ -79,10 +79,12 @@ preserving the current slide, reveal step, and overview mode.
 
 In preview, `o` toggles single-slide and tile overview modes, while Esc returns
 to the overview and Enter opens the selected tile. On the single-slide stage,
-ArrowRight/ArrowLeft and PageDown/PageUp walk reveal positions. Up/Down move
-between non-skipped slides and land fully revealed; filmstrip clicks, grid
-opens, Home, and End also land fully revealed. Grid arrows keep moving between
-tiles. The filmstrip of final-state thumbnails stays on the left.
+ArrowRight/ArrowLeft and PageDown/PageUp walk reveal positions, with the
+previous-slide entry fully revealed. Direct single-slide landings all start at
+step 0, including Up/Down navigation between non-skipped slides, filmstrip
+clicks, grid opens, Home, End, and key/index navigation. Grid arrows keep moving
+between fully revealed tiles. The filmstrip of final-state thumbnails stays on
+the left.
 
 The single-slide view is also an editor: speaker notes are typed into the panel
 below the slide, a click on slide text swaps that block to its Markdown source,

@@ -25,9 +25,9 @@ sets `public_reveal: steps`, so the published deck above steps through the same
 reveal groups with the arrow keys, and its URL keeps the step (`?slide=1&step=2`).
 Without that key, published output and PDF export render only the final state.
 With it, PDF export emits one page per position from step 0 through step N.
-The preview stage walks the same positions regardless of `public_reveal`.
-Preview filmstrip thumbnails and overview tiles, lint, and gallery screenshots
-always render the final state.
+The preview stage walks the same positions regardless of `public_reveal`, and
+every direct single-mode landing starts at step 0. Preview filmstrip thumbnails
+and overview tiles, lint, and gallery screenshots always render the final state.
 
 To step through the reveal in presenter mode, run `peitho present examples/incremental-reveal/deck.md` and use the arrow keys.
 
