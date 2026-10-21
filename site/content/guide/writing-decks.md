@@ -392,15 +392,33 @@ on a `code_images` block are all line-numbered build errors.
 
 ## Code block titles
 
-Add `title=` after the language to label a code block. Fence attributes are
-whitespace-separated, so keep a space between `title=...` and an emphasis
-group. Quote a title when it contains spaces or fence-syntax characters:
+Add `title=` after the language to label a code block. Titles are one-line
+inline Markdown: text, links, code spans, emphasis, strong emphasis, and
+strikethrough are supported. Fence attributes are whitespace-separated, so
+keep a space between `title=...` and an emphasis group. Quote a title when it
+contains spaces or fence-syntax characters:
 
 ````markdown
-```hcl title="main.tf"
+```hcl title="network ([provider docs](https://registry.terraform.io/))"
 name = upper(aws_vpc.main.id)
 ```
 ````
+
+A backtick fence's info line cannot contain backticks under CommonMark. To use
+a code span in a title, use a `~~~` fence:
+
+````markdown
+~~~python title="`__init__.py`"
+def create_app(): ...
+~~~
+````
+
+Markdown-significant characters follow normal Markdown rules. For example,
+write `\_\_init\_\_.py` with backslash escapes, or use a `~~~` fence with the
+code span shown above. Escape a literal `<` as `\<`, for example `Vec\<T>`.
+Reference-style links are not resolved in titles; use an inline link such as
+`[text](url)`. Block syntax, images, and HTML in a title are line-numbered build
+errors.
 
 A title combines with [code line emphasis](#code-line-emphasis) in either
 order. For example, the form ```` ```ts {2} title="app.ts" ```` is equivalent
@@ -411,7 +429,7 @@ The rendered caption is attached to its block:
 
 ```html
 <figure class="code-block">
-  <figcaption class="code-title">main.tf</figcaption>
+  <figcaption class="code-title">network (<a href="https://registry.terraform.io/" target="_blank" rel="noopener">provider docs</a>)</figcaption>
   <pre class="slot-code"><code class="language-hcl">…</code></pre>
 </figure>
 ```

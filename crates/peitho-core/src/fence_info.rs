@@ -4,20 +4,146 @@
 //! renderer-owned options are recognized in one pass. Consumers receive
 //! typed attributes and never reinterpret a raw tail.
 
+use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
+
 use crate::error::{BuildError, ErrorKind, Result};
+
+const CODE_TITLE_MARKDOWN_OPTIONS: Options = Options::ENABLE_STRIKETHROUGH;
 
 /// A validated, display-ready title for one authored code block.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CodeTitle(String);
+pub(crate) struct CodeTitle {
+    html: String,
+}
 
 impl CodeTitle {
-    fn new(value: &str) -> Option<Self> {
+    fn new(value: &str, line: usize) -> Result<Self> {
         let value = value.trim();
-        (!value.is_empty()).then(|| Self(value.to_owned()))
+        if value.is_empty() {
+            return Err(error(
+                line,
+                "code block title cannot be empty",
+                "write a non-empty title, e.g. `title=\"main.rs\"`, or remove the option",
+            ));
+        }
+        let events = Parser::new_ext(value, CODE_TITLE_MARKDOWN_OPTIONS).collect::<Vec<_>>();
+        let inner = code_title_inner_events(&events)
+            .map_err(|violation| violation.into_build_error(line))?;
+        let mut rendered = String::new();
+        html::push_html(&mut rendered, inner.iter().cloned());
+        Ok(Self { html: rendered })
     }
 
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    pub(crate) fn html(&self) -> &str {
+        &self.html
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeTitleViolation {
+    BlockMarkdown,
+    Image,
+    Html,
+    // Unreachable with CODE_TITLE_MARKDOWN_OPTIONS, kept so the event match stays exhaustive.
+    UnsupportedInline,
+}
+
+impl CodeTitleViolation {
+    fn into_build_error(self, line: usize) -> BuildError {
+        match self {
+            Self::BlockMarkdown => error(
+                line,
+                "code block title must be inline Markdown",
+                "escape a Markdown-significant leading character with a backslash if it should appear literally, e.g. `\\# title`",
+            ),
+            Self::Image => error(
+                line,
+                "code block titles cannot contain images",
+                "use a text link instead, e.g. `[label](https://example.com)`",
+            ),
+            Self::Html => error(
+                line,
+                "code block titles cannot contain HTML",
+                "escape a literal `<` as `\\<`, e.g. `Vec\\<T>`",
+            ),
+            Self::UnsupportedInline => error(
+                line,
+                "code block title contains unsupported inline Markdown",
+                "use only text, code spans, emphasis, strong emphasis, strikethrough, and links",
+            ),
+        }
+    }
+}
+
+fn code_title_inner_events<'events, 'input>(
+    events: &'events [Event<'input>],
+) -> std::result::Result<&'events [Event<'input>], CodeTitleViolation> {
+    if !matches!(events.first(), Some(Event::Start(Tag::Paragraph)))
+        || !matches!(events.last(), Some(Event::End(TagEnd::Paragraph)))
+    {
+        return Err(events
+            .first()
+            .and_then(violation)
+            .unwrap_or(CodeTitleViolation::BlockMarkdown));
+    }
+
+    let inner = &events[1..events.len() - 1];
+    inner.iter().find_map(violation).map_or(Ok(inner), Err)
+}
+
+fn violation(event: &Event<'_>) -> Option<CodeTitleViolation> {
+    match event {
+        Event::Start(tag) => match tag {
+            Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } => None,
+            Tag::Image { .. } => Some(CodeTitleViolation::Image),
+            Tag::HtmlBlock => Some(CodeTitleViolation::Html),
+            Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::BlockQuote(_)
+            | Tag::CodeBlock(_)
+            | Tag::List(_)
+            | Tag::Item
+            | Tag::FootnoteDefinition(_)
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
+            | Tag::MetadataBlock(_) => Some(CodeTitleViolation::BlockMarkdown),
+            Tag::Superscript | Tag::Subscript => Some(CodeTitleViolation::UnsupportedInline),
+        },
+        Event::End(tag) => match tag {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => None,
+            TagEnd::Image => Some(CodeTitleViolation::Image),
+            TagEnd::HtmlBlock => Some(CodeTitleViolation::Html),
+            TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::BlockQuote(_)
+            | TagEnd::CodeBlock
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::FootnoteDefinition
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::TableCell
+            | TagEnd::MetadataBlock(_) => Some(CodeTitleViolation::BlockMarkdown),
+            TagEnd::Superscript | TagEnd::Subscript => Some(CodeTitleViolation::UnsupportedInline),
+        },
+        Event::Text(_) | Event::Code(_) => None,
+        Event::Html(_) | Event::InlineHtml(_) => Some(CodeTitleViolation::Html),
+        Event::InlineMath(_)
+        | Event::DisplayMath(_)
+        | Event::FootnoteReference(_)
+        | Event::SoftBreak
+        | Event::HardBreak
+        | Event::TaskListMarker(_) => Some(CodeTitleViolation::UnsupportedInline),
+        Event::Rule => Some(CodeTitleViolation::BlockMarkdown),
     }
 }
 
@@ -90,14 +216,7 @@ pub(crate) fn parse_attributes(mut rest: &str, line: usize) -> Result<FenceAttri
                         "keep only one title= option on this code fence",
                     ));
                 }
-                let Some(parsed_title) = CodeTitle::new(value) else {
-                    return Err(error(
-                        line,
-                        "code block title cannot be empty",
-                        "write a non-empty title, e.g. `title=\"main.rs\"`, or remove the option",
-                    ));
-                };
-                title = Some(parsed_title);
+                title = Some(CodeTitle::new(value, line)?);
                 continue;
             }
         }
@@ -349,7 +468,7 @@ mod tests {
                 .attributes
                 .title
                 .as_ref()
-                .map(|title| title.as_str()),
+                .map(|title| title.html()),
             Some("app.ts")
         );
         assert_eq!(emphasis_first, title_first);
@@ -360,7 +479,7 @@ mod tests {
         let info = parse(r#"hcl title="  network main.tf  ""#);
 
         assert_eq!(
-            info.attributes.title.as_ref().map(|title| title.as_str()),
+            info.attributes.title.as_ref().map(|title| title.html()),
             Some("network main.tf")
         );
     }
@@ -370,9 +489,79 @@ mod tests {
         let info = parse("hcl title=main.tf");
 
         assert_eq!(
-            info.attributes.title.as_ref().map(|title| title.as_str()),
+            info.attributes.title.as_ref().map(|title| title.html()),
             Some("main.tf")
         );
+    }
+
+    #[test]
+    fn accepts_allowlisted_inline_markdown_titles() {
+        for (title, expected_html) in [
+            ("plain title", "plain title"),
+            (
+                "[docs](https://example.com)",
+                r#"<a href="https://example.com">docs</a>"#,
+            ),
+            ("`main.rs`", "<code>main.rs</code>"),
+            (
+                "*emphasis* **strong** ~~strikethrough~~",
+                "<em>emphasis</em> <strong>strong</strong> <del>strikethrough</del>",
+            ),
+            ("__init__.py", "<strong>init</strong>.py"),
+            (r"\_\_init\_\_.py", "__init__.py"),
+            ("[WIP] main.rs", "[WIP] main.rs"),
+        ] {
+            let fence_info = format!(r#"rust title="{title}""#);
+            let info = parse(&fence_info);
+
+            assert_eq!(
+                info.attributes.title.as_ref().map(|title| title.html()),
+                Some(expected_html),
+                "title {title:?}"
+            );
+        }
+    }
+
+    fn assert_title_error(title: &str, line: usize, message: &str) -> BuildError {
+        let err = parse_error(&format!(r#"rust title="{title}""#), line);
+        assert_eq!(err.kind, ErrorKind::Parse, "title {title:?}");
+        assert_eq!(err.line, Some(line), "title {title:?}");
+        assert_eq!(err.message, message, "title {title:?}");
+        assert!(!err.help.is_empty(), "title {title:?}");
+        err
+    }
+
+    #[test]
+    fn block_markdown_titles_are_line_numbered_errors() {
+        for title in [
+            "# heading",
+            "+",
+            "- item",
+            "1.",
+            "1. item",
+            "> quote",
+            "---",
+        ] {
+            let err = assert_title_error(title, 21, "code block title must be inline Markdown");
+            assert!(err.help.contains("backslash"), "title {title:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn image_titles_are_line_numbered_errors() {
+        assert_title_error(
+            "![alt](image.png)",
+            22,
+            "code block titles cannot contain images",
+        );
+    }
+
+    #[test]
+    fn html_titles_are_line_numbered_errors() {
+        for title in ["<em>title</em>", "<stdin>"] {
+            let err = assert_title_error(title, 23, "code block titles cannot contain HTML");
+            assert_eq!(err.help, r"escape a literal `<` as `\<`, e.g. `Vec\<T>`");
+        }
     }
 
     #[test]
@@ -407,7 +596,7 @@ mod tests {
         let info = parse(r#"rust title="main{2}.rs""#);
 
         assert_eq!(
-            info.attributes.title.as_ref().map(|title| title.as_str()),
+            info.attributes.title.as_ref().map(|title| title.html()),
             Some("main{2}.rs")
         );
     }
