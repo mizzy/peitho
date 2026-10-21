@@ -592,7 +592,7 @@ fn render_code_block(
         figure.push_str(&format!(r#" data-reveal-step="{step}""#));
     }
     figure.push_str(r#"><figcaption class="code-title">"#);
-    figure.push_str(&encode_text(title.as_str()));
+    figure.push_str(title.html());
     figure.push_str("</figcaption>");
     figure.push_str(&pre);
     figure.push_str("</figure>");
@@ -3826,6 +3826,30 @@ mod tests {
     }
 
     #[test]
+    fn code_title_renders_a_markdown_link() {
+        let title = parsed_code_title(r#"rust title="[docs](https://example.com/)""#);
+
+        let html = render_code_block("slot-code", "x", Some("rust"), Some(&title), None);
+
+        assert_eq!(
+            html,
+            r#"<figure class="code-block"><figcaption class="code-title"><a href="https://example.com/">docs</a></figcaption><pre class="slot-code"><code class="language-rust">x</code></pre></figure>"#
+        );
+    }
+
+    #[test]
+    fn code_title_renders_a_markdown_code_span() {
+        let title = parsed_code_title(r#"rust title="`main.rs`""#);
+
+        let html = render_code_block("slot-code", "x", Some("rust"), Some(&title), None);
+
+        assert_eq!(
+            html,
+            r#"<figure class="code-block"><figcaption class="code-title"><code>main.rs</code></figcaption><pre class="slot-code"><code class="language-rust">x</code></pre></figure>"#
+        );
+    }
+
+    #[test]
     fn untitled_code_block_keeps_the_existing_bytes() {
         assert_eq!(
             render_code_block("slot-code", "fn main() {}", Some("rust"), None, Some(4),),
@@ -3842,6 +3866,20 @@ mod tests {
         assert_eq!(
             html,
             r#"<figure class="code-block"><figcaption class="code-title">&lt;&amp;&gt;</figcaption><pre class="slot-code"><code class="language-rust">x</code></pre></figure>"#
+        );
+    }
+
+    #[test]
+    fn render_slot_opens_code_title_https_link_in_new_tab() {
+        let html = render_code_html(
+            "# T\n\n```rust title=\"[docs](https://example.com/)\"\nfn main() {}\n```",
+        );
+
+        assert!(
+            html.contains(
+                r#"<figcaption class="code-title"><a href="https://example.com/" target="_blank" rel="noopener">docs</a></figcaption>"#
+            ),
+            "{html}"
         );
     }
 

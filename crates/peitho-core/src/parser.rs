@@ -239,7 +239,7 @@ enum OpenBlock {
     },
     Code {
         start: usize,
-        language: Option<String>,
+        info: String,
         text: String,
     },
 }
@@ -2181,17 +2181,24 @@ fn validate_code_fence_info<'info, 'config>(
     Ok((fence, renderer))
 }
 
+fn raw_fence_info(source: &str, range: Range<usize>) -> &str {
+    let opener = source[range.start..]
+        .split_once('\n')
+        .map_or(&source[range.start..], |(line, _)| line)
+        .trim_end_matches('\r')
+        .trim_start();
+    let (_, fence_len) =
+        opening_code_fence(opener).expect("a fenced code block event starts on its opening fence");
+    &opener[fence_len..]
+}
+
 fn validate_container_code_fence(
     container: ContainerKind,
-    kind: &CodeBlockKind<'_>,
+    info: &str,
     line: usize,
     highlighter: &Highlighter,
     code_images: &CodeImagesConfig,
 ) -> Result<ContainerCodeLanguage> {
-    let info = match kind {
-        CodeBlockKind::Fenced(info) => info.as_ref(),
-        CodeBlockKind::Indented => "",
-    };
     let (split, renderer) = validate_code_fence_info(info, line, highlighter, code_images)?;
     let FenceInfo {
         language,
@@ -2507,8 +2514,12 @@ fn parse_slide(
         if let (Some(open), Event::Start(Tag::CodeBlock(kind))) = (container.last(), &event) {
             if matches!(open.kind, ContainerKind::List | ContainerKind::Blockquote) {
                 let line = line_for_offset(source, global_start);
+                let info = match kind {
+                    CodeBlockKind::Fenced(_) => raw_fence_info(source, global_start..global_end),
+                    CodeBlockKind::Indented => "",
+                };
                 let language =
-                    validate_container_code_fence(open.kind, kind, line, highlighter, code_images)
+                    validate_container_code_fence(open.kind, info, line, highlighter, code_images)
                         .map_err(|err| {
                             attach_slide_context(err, index, explicit_key.as_ref(), &fragments)
                         })?;
@@ -2809,23 +2820,20 @@ fn parse_slide(
                 // Parsing is deferred to the End event, where the code line
                 // number is already computed for error reporting.
                 let info = match kind {
-                    CodeBlockKind::Fenced(info) if !info.is_empty() => Some(info.to_string()),
-                    _ => None,
+                    CodeBlockKind::Fenced(_) => {
+                        raw_fence_info(source, global_start..global_end).to_owned()
+                    }
+                    CodeBlockKind::Indented => String::new(),
                 };
                 block = Some(OpenBlock::Code {
                     start: global_start,
-                    language: info,
+                    info,
                     text: String::new(),
                 });
             }
             Event::End(TagEnd::CodeBlock) => {
                 if matches!(block, Some(OpenBlock::Code { .. })) {
-                    let Some(OpenBlock::Code {
-                        start,
-                        language,
-                        text,
-                    }) = block.take()
-                    else {
+                    let Some(OpenBlock::Code { start, info, text }) = block.take() else {
                         unreachable!();
                     };
                     let code_line = line_for_offset(source, start);
@@ -2838,9 +2846,8 @@ fn parse_slide(
                     // and titles on rendered blocks before any annotated
                     // fragment reaches `code_images::transform_fragment`,
                     // which would silently drop the annotation.
-                    let info = language.as_deref().unwrap_or_default();
                     let (split, renderer) =
-                        validate_code_fence_info(info, code_line, highlighter, code_images)
+                        validate_code_fence_info(&info, code_line, highlighter, code_images)
                             .map_err(slide_err)?;
                     let FenceInfo {
                         language,
@@ -8299,9 +8306,59 @@ After list
         let fragment = code_fragment(&deck);
         assert_eq!(fragment.language(), Some("rust"));
         assert_eq!(
-            fragment.code_title().map(|title| title.as_str()),
+            fragment.code_title().map(|title| title.html()),
             Some("src/main.rs")
         );
+    }
+
+    #[test]
+    fn code_span_title_rides_a_tilde_fence_through_parse() {
+        let deck = parse_markdown(
+            "# Title\n\n~~~rust title=\"`main.rs`\"\nfn main() {}\n~~~",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert_eq!(fragment.language(), Some("rust"));
+        assert_eq!(
+            fragment.code_title().map(|title| title.html()),
+            Some("<code>main.rs</code>")
+        );
+    }
+
+    #[test]
+    fn code_title_markdown_is_parsed_from_raw_fence_info() {
+        for (title, expected_html) in [
+            (r"\_\_init\_\_.py", "__init__.py"),
+            ("&lt;stdin&gt;", "&lt;stdin&gt;"),
+            (r"Vec\<T>", "Vec&lt;T&gt;"),
+            (r"\# x", "# x"),
+        ] {
+            let markdown = format!("# Title\n\n```py title=\"{title}\"\npass\n```");
+            let deck = parse_markdown(&markdown, &crate::highlight::Highlighter::defaults())
+                .unwrap_or_else(|err| panic!("title {title:?}: {err}"));
+
+            let fragment = code_fragment(&deck);
+            assert_eq!(
+                fragment.code_title().map(|title| title.html()),
+                Some(expected_html),
+                "title {title:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_title_image_error_uses_the_deck_fence_line() {
+        let err = parse_markdown(
+            "---\ntime: 1m\n---\n# T\n\n```rust title=\"![a](b.png)\"\nx\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(6));
+        assert_eq!(err.message, "code block titles cannot contain images");
     }
 
     #[test]
@@ -8318,7 +8375,7 @@ After list
 
             let fragment = code_fragment(&deck);
             assert_eq!(
-                fragment.code_title().map(|title| title.as_str()),
+                fragment.code_title().map(|title| title.html()),
                 Some("src/main.rs"),
                 "info: {info}"
             );
