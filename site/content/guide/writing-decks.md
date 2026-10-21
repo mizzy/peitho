@@ -415,9 +415,9 @@ def create_app(): ...
 
 Markdown-significant characters follow normal Markdown rules. For example,
 write `\_\_init\_\_.py` with backslash escapes, or use a `~~~` fence with the
-code span shown above. Escape a literal `<` as `\<`, for example `Vec\<T>`.
-Reference-style links are not resolved in titles; use an inline link such as
-`[text](url)`. Block syntax, images, and HTML in a title are line-numbered build
+code span shown above. HTML-looking text such as `Output<string>` is shown as
+written. Reference-style links are not resolved in titles; use an inline link
+such as `[text](url)`. Block syntax and images in a title are line-numbered build
 errors.
 
 A title combines with [code line emphasis](#code-line-emphasis) in either
