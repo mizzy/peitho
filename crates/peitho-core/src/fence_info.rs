@@ -27,10 +27,10 @@ impl CodeTitle {
             ));
         }
         let events = Parser::new_ext(value, CODE_TITLE_MARKDOWN_OPTIONS).collect::<Vec<_>>();
-        let inner = code_title_inner_events(&events)
+        let inner = code_title_inner_events(value, &events)
             .map_err(|violation| violation.into_build_error(line))?;
         let mut rendered = String::new();
-        html::push_html(&mut rendered, inner.iter().cloned());
+        html::push_html(&mut rendered, inner.into_iter());
         Ok(Self { html: rendered })
     }
 
@@ -43,7 +43,6 @@ impl CodeTitle {
 enum CodeTitleViolation {
     BlockMarkdown,
     Image,
-    Html,
     // Unreachable with CODE_TITLE_MARKDOWN_OPTIONS, kept so the event match stays exhaustive.
     UnsupportedInline,
 }
@@ -61,11 +60,6 @@ impl CodeTitleViolation {
                 "code block titles cannot contain images",
                 "use a text link instead, e.g. `[label](https://example.com)`",
             ),
-            Self::Html => error(
-                line,
-                "code block titles cannot contain HTML",
-                "escape a literal `<` as `\\<`, e.g. `Vec\\<T>`",
-            ),
             Self::UnsupportedInline => error(
                 line,
                 "code block title contains unsupported inline Markdown",
@@ -75,9 +69,15 @@ impl CodeTitleViolation {
     }
 }
 
-fn code_title_inner_events<'events, 'input>(
-    events: &'events [Event<'input>],
-) -> std::result::Result<&'events [Event<'input>], CodeTitleViolation> {
+fn code_title_inner_events<'input>(
+    value: &'input str,
+    events: &[Event<'input>],
+) -> std::result::Result<Vec<Event<'input>>, CodeTitleViolation> {
+    if matches!(events.first(), Some(Event::Start(Tag::HtmlBlock)))
+        && matches!(events.last(), Some(Event::End(TagEnd::HtmlBlock)))
+    {
+        return Ok(vec![Event::Text(value.into())]);
+    }
     if !matches!(events.first(), Some(Event::Start(Tag::Paragraph)))
         || !matches!(events.last(), Some(Event::End(TagEnd::Paragraph)))
     {
@@ -88,7 +88,17 @@ fn code_title_inner_events<'events, 'input>(
     }
 
     let inner = &events[1..events.len() - 1];
-    inner.iter().find_map(violation).map_or(Ok(inner), Err)
+    if let Some(violation) = inner.iter().find_map(violation) {
+        return Err(violation);
+    }
+    Ok(inner
+        .iter()
+        .cloned()
+        .map(|event| match event {
+            Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+            event => event,
+        })
+        .collect())
 }
 
 fn violation(event: &Event<'_>) -> Option<CodeTitleViolation> {
@@ -96,8 +106,8 @@ fn violation(event: &Event<'_>) -> Option<CodeTitleViolation> {
         Event::Start(tag) => match tag {
             Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } => None,
             Tag::Image { .. } => Some(CodeTitleViolation::Image),
-            Tag::HtmlBlock => Some(CodeTitleViolation::Html),
             Tag::Paragraph
+            | Tag::HtmlBlock
             | Tag::Heading { .. }
             | Tag::BlockQuote(_)
             | Tag::CodeBlock(_)
@@ -117,8 +127,8 @@ fn violation(event: &Event<'_>) -> Option<CodeTitleViolation> {
         Event::End(tag) => match tag {
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => None,
             TagEnd::Image => Some(CodeTitleViolation::Image),
-            TagEnd::HtmlBlock => Some(CodeTitleViolation::Html),
             TagEnd::Paragraph
+            | TagEnd::HtmlBlock
             | TagEnd::Heading(_)
             | TagEnd::BlockQuote(_)
             | TagEnd::CodeBlock
@@ -136,7 +146,7 @@ fn violation(event: &Event<'_>) -> Option<CodeTitleViolation> {
             TagEnd::Superscript | TagEnd::Subscript => Some(CodeTitleViolation::UnsupportedInline),
         },
         Event::Text(_) | Event::Code(_) => None,
-        Event::Html(_) | Event::InlineHtml(_) => Some(CodeTitleViolation::Html),
+        Event::Html(_) | Event::InlineHtml(_) => None,
         Event::InlineMath(_)
         | Event::DisplayMath(_)
         | Event::FootnoteReference(_)
@@ -557,10 +567,27 @@ mod tests {
     }
 
     #[test]
-    fn html_titles_are_line_numbered_errors() {
-        for title in ["<em>title</em>", "<stdin>"] {
-            let err = assert_title_error(title, 23, "code block titles cannot contain HTML");
-            assert_eq!(err.help, r"escape a literal `<` as `\<`, e.g. `Vec\<T>`");
+    fn html_in_titles_is_rendered_as_literal_text() {
+        for (title, expected_html) in [
+            ("Output<string>", "Output&lt;string&gt;"),
+            ("<stdin>", "&lt;stdin&gt;"),
+            ("<b>x</b> y", "&lt;b&gt;x&lt;/b&gt; y"),
+            ("<div>x</div>", "&lt;div&gt;x&lt;/div&gt;"),
+            ("<div> **x**", "&lt;div&gt; **x**"),
+            ("<custom> **x**", "&lt;custom&gt; <strong>x</strong>"),
+            ("<!-- c -->", "&lt;!-- c --&gt;"),
+            ("<?x ?>", "&lt;?x ?&gt;"),
+            ("</figcaption><script>", "&lt;/figcaption&gt;&lt;script&gt;"),
+            (r"Vec\<T>", "Vec&lt;T&gt;"),
+        ] {
+            let fence_info = format!(r#"rust title="{title}""#);
+            let info = parse(&fence_info);
+
+            assert_eq!(
+                info.attributes.title.as_ref().map(|title| title.html()),
+                Some(expected_html),
+                "title {title:?}"
+            );
         }
     }
 

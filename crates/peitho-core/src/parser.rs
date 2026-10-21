@@ -8349,6 +8349,21 @@ After list
     }
 
     #[test]
+    fn code_title_with_generic_type_rides_a_real_fence_through_parse() {
+        let deck = parse_markdown(
+            "# Title\n\n```rust title=\"applyの中で分解する（結果はOutput<string>）\"\nfn apply() {}\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let fragment = code_fragment(&deck);
+        assert_eq!(
+            fragment.code_title().map(|title| title.html()),
+            Some("applyの中で分解する（結果はOutput&lt;string&gt;）")
+        );
+    }
+
+    #[test]
     fn code_title_image_error_uses_the_deck_fence_line() {
         let err = parse_markdown(
             "---\ntime: 1m\n---\n# T\n\n```rust title=\"![a](b.png)\"\nx\n```",

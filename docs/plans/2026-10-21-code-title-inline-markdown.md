@@ -33,8 +33,15 @@ validated once, at the constructor, and rendering cannot fail afterwards:
     title must be inline Markdown", help: escape the leading character with a
     backslash;
   - images: titles cannot hold images;
-  - inline HTML (including comments): titles cannot hold HTML (`Vec<T>` needs
-    `Vec\<T>`).
+- Inline HTML and HTML blocks (`Output<string>`, `<!-- x -->`) are not an
+  error: their raw text is rendered escaped, as literal characters (author
+  decision 2026-10-21, after the first real deck hit `Output<string>` on
+  v1.46.0: generics are common in code titles and HTML in a title has no use).
+  Nothing is dropped and no HTML from a title reaches the output.
+  A title that pulldown-cmark reads as a whole HTML block (`<div> **x**`) is
+  shown entirely as written, with no Markdown, escape, or entity processing;
+  a type-7 tag followed by text (`<custom> **x**`) is a paragraph, so its
+  Markdown still applies.
 - Titles parse with their own options (`ENABLE_STRIKETHROUGH` only), so
   `[^1]` and undefined `[ref]` stay literal text, as in any Markdown where they
   are undefined.
@@ -55,8 +62,7 @@ Plain titles (`main.rs`, `main.tf`) render byte-identically. Titles that contain
 Markdown-significant characters now follow Markdown rules, the same as
 headings (`__init__.py` becomes `<strong>init</strong>.py`; write
 `\_\_init\_\_.py`, or a code span in a `~~~` fence, since a backtick fence's
-info line cannot contain backticks). `Vec<T>` is now an HTML error (write
-`Vec\<T>`), and entities such as `&lt;` decode once as Markdown. Reading the raw info also means escapes and entities
+info line cannot contain backticks). Entities such as `&lt;` decode once as Markdown. Reading the raw info also means escapes and entities
 in language and option tokens are no longer decoded (`rus&#116;` is an
 unknown-language error instead of `rust`). Accepted: the title is
 now inline Markdown like every other text on a slide.
@@ -68,3 +74,8 @@ now inline Markdown like every other text on a slide.
 - render: link title renders an `<a>`; code span renders `<code>`; plain title
   unchanged; `<&>` still escaped.
 - An end-to-end build asserting the external link gains `target="_blank"`.
+
+## Follow-up (v1.46.1)
+
+v1.46.0 refused `title="...Output<string>..."` as HTML. The author chose to
+render title HTML as literal text instead; see the Design bullet above.
