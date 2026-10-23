@@ -4556,11 +4556,9 @@ mod tests {
             .expect("the code fragment survives transformation");
 
         assert!(fragment.emphasis().is_some());
-        // Stepped emphasis also keeps the span that places it in step space.
-        assert_eq!(
-            fragment.reveal_span(),
-            Some(RevealSpan { start: 1, len: 2 })
-        );
+        // Emphasis carries its own absolute steps; only appearing content has
+        // a reveal span.
+        assert_eq!(fragment.reveal_span(), None);
     }
 
     #[test]

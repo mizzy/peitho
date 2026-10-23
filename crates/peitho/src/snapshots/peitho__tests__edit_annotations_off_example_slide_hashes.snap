@@ -6,10 +6,11 @@ expression: digest_index
 989c2bd68009eaf29889ef4508aec5a22b5d4a07962523029605b239a066bba9  aspect-ratio-4-3/slides/001-same-height.html
 b430d0bceb45ec8363c4fa14654506dcc66e36e6619b4f9aaf7bb987a15acac5  code-emphasis/slides/000-code-line-emphasis.html
 8a1090afac0d5914387790378ad593eef901b851fb4120bba4e880e372c2e28b  code-emphasis/slides/001-stepping-through-a-function.html
-e5753836946ec1f16bf8c5745b52483f0de2e408fd32bfd789128f7d9400b65f  code-emphasis/slides/002-ranges-and-no-language-tag.html
-2bf32c06765f5ce9fb57a09cb24e1b93ffd42bba670dee8e46972a3bf03560bc  code-emphasis/slides/003-sharing-steps-with-reveal.html
-753748c7329bcfe47e607499242e65b7b480c3b6126cd550e76868d1f6c15f22  code-emphasis/slides/004-ordinary-code-is-untouched.html
-1bbe4787079fc8fe6f001012a9682ee5a704512c6d66dd081bd22b915089d4b2  code-emphasis/slides/005-labels-stay-with-their-blocks.html
+1e782a30521ac802e1355dd5059b078282bccbe01b46244445c336e3b4576655  code-emphasis/slides/002-interleaving-two-blocks.html
+e5753836946ec1f16bf8c5745b52483f0de2e408fd32bfd789128f7d9400b65f  code-emphasis/slides/003-ranges-and-no-language-tag.html
+33db2b91cb0b1a3da8fc4ae7232ab7811205a34bb9a4076f67b8c8a558162a90  code-emphasis/slides/004-sharing-steps-with-reveal.html
+753748c7329bcfe47e607499242e65b7b480c3b6126cd550e76868d1f6c15f22  code-emphasis/slides/005-ordinary-code-is-untouched.html
+1bbe4787079fc8fe6f001012a9682ee5a704512c6d66dd081bd22b915089d4b2  code-emphasis/slides/006-labels-stay-with-their-blocks.html
 b808410f3aca9240a8a853eb7f409b8592ae1ef9fed13d73853c163a05649fbf  code-images/slides/000-mermaid-flow.html
 9dfa553c7ec2f628a8b424a6ff8ed16a0ad2696a7641896a3564fb0be5f17b0a  code-images/slides/001-qrcode-link.html
 e835ca4b5666f27f8e7ccdda99b93bce69a895a51c4ada8104eb09ca0364992a  code-images/slides/002-graphviz-flow.html
