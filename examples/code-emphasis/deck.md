@@ -137,3 +137,23 @@ resource "aws_vpc" "main" {
 ```
 
 - Titles compose with `{…}` in either order.
+
+---
+
+# Partial Types, Not Whole Lines
+
+Quoted entries emphasize only the differing type, even across syntax spans.
+
+```text {2:"aws.ec2.Vpc.Id"@1|3:"'dev' | 'stg' | 'prod'"@2} title="module.crn"
+arguments {
+  vpc_id: aws.ec2.Vpc.Id
+  environment: 'dev' | 'stg' | 'prod'
+}
+```
+
+```hcl {1:"string"@1|2:"set(string)"@2} title="variables.tf"
+variable "vpc_id"      { type = string }
+variable "environment" { type = set(string) }
+```
+
+- Step 1 compares VPC types; step 2 compares environment types.

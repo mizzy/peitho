@@ -248,16 +248,24 @@ fn extract_braced_spec(rest: &str, line: usize) -> Result<(&str, &str)> {
         return Err(error(
             line,
             "unclosed emphasis spec",
-            "close the emphasis spec with `}`, e.g. `{2-4}`",
+            r#"close the emphasis spec with `}`, e.g. `{2-4}`; partial emphasis text cannot contain `}` or `"`"#,
         ));
     };
     let spec = &inner[..close];
+    if quote_is_open(spec) {
+        return Err(error(
+            line,
+            "partial emphasis text cannot contain `\"` or `}`",
+            r#"partial emphasis text ends at the next `"` and cannot contain `"` or `}`; there is no escape syntax"#,
+        ));
+    }
 
     // Pandoc-flavored Markdown puts attributes where peitho puts emphasis:
     // ```{.rust} selects a language, ```{=html} an output format. Name the
     // case explicitly instead of letting it fall through to a confusing
     // "expects line numbers" error.
-    let looks_like_pandoc = spec.trim_start().starts_with(['.', '=', '#']) || spec.contains('=');
+    let looks_like_pandoc =
+        spec.trim_start().starts_with(['.', '=', '#']) || contains_unquoted(spec, '=');
     if looks_like_pandoc {
         return Err(error(
             line,
@@ -269,7 +277,7 @@ fn extract_braced_spec(rest: &str, line: usize) -> Result<(&str, &str)> {
         ));
     }
 
-    if spec.contains('{') {
+    if contains_unquoted(spec, '{') {
         return Err(malformed_emphasis_error(line));
     }
 
@@ -289,6 +297,23 @@ fn extract_braced_spec(rest: &str, line: usize) -> Result<(&str, &str)> {
     }
 
     Ok((spec, remaining))
+}
+
+fn quote_is_open(text: &str) -> bool {
+    text.chars()
+        .fold(false, |quoted, character| quoted ^ (character == '"'))
+}
+
+fn contains_unquoted(text: &str, wanted: char) -> bool {
+    let mut quoted = false;
+    for character in text.chars() {
+        if character == '"' {
+            quoted = !quoted;
+        } else if character == wanted && !quoted {
+            return true;
+        }
+    }
+    false
 }
 
 fn extract_option(rest: &str, line: usize) -> Result<(FenceOption<'_>, &str)> {
@@ -734,5 +759,61 @@ mod tests {
         assert_eq!(unclosed.line, Some(9));
         assert_eq!(unclosed.message, "unclosed emphasis spec");
         assert!(!unclosed.help.is_empty());
+    }
+
+    #[test]
+    fn missing_closing_brace_does_not_depend_on_later_quote_counts() {
+        for info in [
+            r#"rust {2:"string" title="caption""#,
+            r#"rust {2:"string" title="caption"#,
+        ] {
+            let err = parse_error(info, 21);
+            assert_eq!(err.kind, ErrorKind::Parse, "info {info:?}");
+            assert_eq!(err.line, Some(21), "info {info:?}");
+            assert_eq!(err.message, "unclosed emphasis spec", "info {info:?}");
+            assert!(
+                err.help.contains("partial emphasis text cannot contain"),
+                "info {info:?}: {}",
+                err.help
+            );
+            assert!(err.help.contains("`}`"), "info {info:?}: {}", err.help);
+            assert!(err.help.contains("`\"`"), "info {info:?}: {}", err.help);
+        }
+    }
+
+    #[test]
+    fn partial_emphasis_truncated_by_a_brace_is_focused_at_fence_extraction() {
+        let truncated = parse_error(r#"rust {2:"before}after"}"#, 22);
+        assert_eq!(truncated.kind, ErrorKind::Parse);
+        assert_eq!(truncated.line, Some(22));
+        assert_eq!(
+            truncated.message,
+            "partial emphasis text cannot contain `\"` or `}`"
+        );
+        assert!(
+            truncated.help.contains("cannot contain `\"` or `}`"),
+            "{}",
+            truncated.help
+        );
+        assert!(truncated.help.contains("`\"`"));
+    }
+
+    #[test]
+    fn quote_inside_partial_text_reports_both_unsupported_delimiters() {
+        let err = parse_error(r#"rust {1:"x\"y"}"#, 23);
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(23));
+        assert_eq!(
+            err.message,
+            "partial emphasis text cannot contain `\"` or `}`"
+        );
+        assert!(err.help.contains("ends at the next `\"`"), "{}", err.help);
+        assert!(
+            err.help.contains("cannot contain `\"` or `}`"),
+            "{}",
+            err.help
+        );
+        assert!(err.help.contains("no escape syntax"), "{}", err.help);
     }
 }

@@ -5,19 +5,24 @@ const REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
  *
  * Static emphasis defaults ship in the rendered deck CSS so every output and
  * every slot name receives them. This module owns only stepped emphasis
- * (`[data-emphasis-active]`, toggled per step). It retains the `.code-line`
- * layout rule because stepped-only decks do not receive the static CSS block.
+ * (`[data-emphasis-active]`, toggled per step). Whole lines keep the inset
+ * marker bar; `.code-range` spans receive a tight rounded box. It retains the
+ * `.code-line` layout rule because stepped-only decks do not receive the
+ * static CSS block.
  *
  * Appearance stays themeable through the custom properties; a deck overriding
  * them in its own CSS wins, because these rules only supply the fallbacks.
  */
 const EMPHASIS_ACTIVE_CSS = [
   ".code-line{display:inline-block;width:100%}",
-  "[data-emphasis-active]{",
+  ".code-line[data-emphasis-active],.code-range[data-emphasis-active]{",
   "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+  "}",
+  ".code-line[data-emphasis-active]{",
   "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
   "}",
-  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+  ".code-range[data-emphasis-active]{border-radius:.15em}",
+  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]):not(:has([data-emphasis-active])){",
   "opacity:var(--peitho-emphasis-dim,0.45)",
   "}"
 ].join("");

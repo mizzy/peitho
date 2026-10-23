@@ -2,7 +2,7 @@
 title = "Code Line Emphasis"
 weight = 71
 template = "example-page.html"
-description = "A deck that emphasizes specific code lines, interleaves steps across blocks, and labels paired source and output blocks."
+description = "A deck that emphasizes whole or partial code lines, interleaves steps across blocks, and labels paired source and output blocks."
 
 [extra]
 deck = "code-emphasis"
@@ -31,11 +31,18 @@ individual entries, `-` makes a range, and emphasis does not require
 highlighting. The fifth slide places static emphasis after a `::: {reveal}`
 group: the bullets step in, while the code emphasis stays visible and consumes
 no step. The sixth slide is the contrast case: a block with no spec renders
-exactly as it always has. The final slide stacks Terraform source above its plan
-output.
+exactly as it always has. The seventh slide stacks Terraform source above its
+plan output.
 Each fence has its own `title="..."` caption and static emphasis; placing the
 title before `{2}` on one fence and after it on the other shows that the two
 attributes compose in either order.
+
+The final slide compares two typed declarations with partial entries.
+`2:"aws.ec2.Vpc.Id"` and `1:"string"` emphasize only the type text on step 1;
+step 2 uses a quoted match containing literal `|` characters on the left and
+`2:"set(string)"` on the right. This demonstrates quote-aware separators,
+cross-block explicit steps, and one continuous emphasis box across syntax
+highlight spans.
 
 The deck sets `public_reveal: steps`, so the published deck above walks the
 stepped emphasis with the arrow keys. To step through it in presenter mode, run
@@ -67,4 +74,5 @@ including when the deck has its own `css/`. Restyle it with the
 `--peitho-emphasis-dim` custom properties, or override
 `.code-line-emphasis` directly. Stepped emphasis is styled by the shared step
 state used in present, preview, and the stepped published viewer, through the
-same custom properties.
+same custom properties. Partial emphasis uses `.code-range-emphasis` for its
+tight rounded box and deliberately has no inset marker bar.

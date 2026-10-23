@@ -1,5 +1,7 @@
 use std::{
+    fmt::Write as _,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -7,15 +9,19 @@ use std::{
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use html_escape::encode_text;
 use sha2::{Digest, Sha256};
 use syntect::{
     html::{line_tokens_to_classed_spans, ClassStyle, ClassedHTMLGenerator},
-    parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet},
+    parsing::{ParseState, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxSet},
     util::LinesWithEndings,
 };
 use walkdir::WalkDir;
 
-use crate::error::{BuildError, ErrorKind, Result};
+use crate::{
+    emphasis::{LineMark, PartialEmphasis, PartialMark},
+    error::{BuildError, ErrorKind, Result},
+};
 
 /// Highlight classes are scope atoms prefixed with `hl-` (e.g. `hl-keyword`,
 /// `hl-string`, `hl-comment`), so themes color code from CSS and the prefix
@@ -125,12 +131,17 @@ impl Highlighter {
     /// Scopes routinely stay open across lines (multi-line strings, block
     /// comments), which is exactly why the close/reopen is required: without
     /// it a line span would inherit unbalanced `<span>` tags from its
-    /// predecessor.
+    /// predecessor. Partial emphasis uses the same operation stream and
+    /// closes/reopens that stack at every byte-range boundary, placing one
+    /// outer `code-range` span around all highlight spans in the segment.
+    /// Empty `line_marks`, and marks without partials, preserve the original
+    /// per-line HTML path byte-for-byte.
     pub(crate) fn highlight_lines(
         &self,
         code: &str,
         token: &str,
         line: usize,
+        line_marks: &[LineMark],
     ) -> Result<Vec<String>> {
         let Some(syntax) = self.syntax_set.find_syntax_by_token(token) else {
             // Unreachable after parse-time validation, but stay a loud error.
@@ -170,36 +181,22 @@ impl Highlighter {
                 .map(|(offset, op)| (offset.min(text.len()), op))
                 .collect::<Vec<_>>();
 
-            // Reopen the scopes inherited from previous lines:
-            // `line_tokens_to_classed_spans` emits tags only for scopes it
-            // pushes on this line, so an inherited multi-line string or block
-            // comment would otherwise lose its classes here.
-            let inherited = scope_stack.as_slice().to_vec();
-            let mut html = String::new();
-            for scope in &inherited {
-                html.push_str("<span class=\"");
-                push_scope_classes(&mut html, *scope);
-                html.push_str("\">");
-            }
-
-            let (line_html, _delta) = line_tokens_to_classed_spans(
-                text,
-                clamped_ops.as_slice(),
-                CLASS_STYLE,
-                &mut scope_stack,
-            )
-            .map_err(|err| fail(&err))?;
-            html.push_str(&line_html);
-
-            // Close every span still open at end of line, which is exactly the
-            // depth of the scope stack now: `line_html` leaves
-            // `stack_after - stack_before` spans unclosed, and `stack_before`
-            // more were reopened above. A line that *closes* an inherited scope
-            // is already accounted for — syntect emitted that `</span>` inside
-            // `line_html`, which is why the reopening has to come first.
-            for _ in 0..scope_stack.len() {
-                html.push_str("</span>");
-            }
+            let partials = line_marks
+                .get(lines.len())
+                .map(LineMark::partials)
+                .unwrap_or_default();
+            let html = if partials.is_empty() {
+                render_highlighted_line(text, clamped_ops.as_slice(), &mut scope_stack)
+                    .map_err(|err| fail(&err))?
+            } else {
+                render_highlighted_line_with_partials(
+                    text,
+                    clamped_ops.as_slice(),
+                    &mut scope_stack,
+                    partials,
+                )
+                .map_err(|err| fail(&err))?
+            };
 
             lines.push(html);
         }
@@ -227,6 +224,171 @@ impl Highlighter {
                 })?;
         }
         Ok(generator.finalize())
+    }
+}
+
+fn render_highlighted_line(
+    text: &str,
+    ops: &[(usize, syntect::parsing::ScopeStackOp)],
+    scope_stack: &mut ScopeStack,
+) -> std::result::Result<String, syntect::Error> {
+    // Reopen the scopes inherited from previous lines:
+    // `line_tokens_to_classed_spans` emits tags only for scopes it pushes on
+    // this line, so an inherited multi-line string or block comment would
+    // otherwise lose its classes here.
+    let mut html = String::new();
+    push_scope_stack_openings(&mut html, scope_stack.as_slice());
+
+    let (line_html, _delta) = line_tokens_to_classed_spans(text, ops, CLASS_STYLE, scope_stack)?;
+    html.push_str(&line_html);
+
+    // Close every span still open at end of line, which is exactly the depth
+    // of the scope stack now. A line that closes an inherited scope already
+    // emitted that close inside `line_html`, so reopening must happen first.
+    push_scope_stack_closings(&mut html, scope_stack.len());
+    Ok(html)
+}
+
+fn render_highlighted_line_with_partials(
+    text: &str,
+    ops: &[(usize, ScopeStackOp)],
+    scope_stack: &mut ScopeStack,
+    partials: &[PartialMark],
+) -> std::result::Result<String, syntect::Error> {
+    let segments = code_segments(text.len(), partials);
+    let mut html = String::new();
+    let mut op_index = 0;
+
+    for (segment_index, segment) in segments.iter().enumerate() {
+        if let Some(mark) = segment.mark {
+            push_partial_opening(&mut html, mark);
+        }
+
+        push_scope_stack_openings(&mut html, scope_stack.as_slice());
+
+        let is_last = segment_index + 1 == segments.len();
+        let mut segment_ops = Vec::new();
+        while let Some((offset, op)) = ops.get(op_index) {
+            // Pops at the boundary close scopes opened by text in this
+            // segment. Consume that leading run here, but leave pushes (and
+            // other operations) at the same offset for the next segment.
+            if !is_last
+                && (*offset > segment.range.end
+                    || (*offset == segment.range.end && !matches!(op, ScopeStackOp::Pop(_))))
+            {
+                break;
+            }
+            debug_assert!(*offset >= segment.range.start);
+            segment_ops.push((offset - segment.range.start, op.clone()));
+            op_index += 1;
+        }
+        let (segment_html, _delta) = line_tokens_to_classed_spans(
+            &text[segment.range.clone()],
+            &segment_ops,
+            CLASS_STYLE,
+            scope_stack,
+        )?;
+        html.push_str(&segment_html);
+        push_scope_stack_closings(&mut html, scope_stack.len());
+
+        if segment.mark.is_some() {
+            html.push_str("</span>");
+        }
+    }
+
+    debug_assert_eq!(op_index, ops.len());
+    Ok(html)
+}
+
+pub(crate) fn render_plain_lines(code: &str, line_marks: &[LineMark]) -> Vec<String> {
+    code.lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let partials = line_marks
+                .get(index)
+                .map(LineMark::partials)
+                .unwrap_or_default();
+            if partials.is_empty() {
+                return encode_text(line).into_owned();
+            }
+
+            let mut html = String::new();
+            for segment in code_segments(line.len(), partials) {
+                if let Some(mark) = segment.mark {
+                    push_partial_opening(&mut html, mark);
+                }
+                html.push_str(&encode_text(&line[segment.range]));
+                if segment.mark.is_some() {
+                    html.push_str("</span>");
+                }
+            }
+            html
+        })
+        .collect()
+}
+
+struct CodeSegment<'a> {
+    range: Range<usize>,
+    mark: Option<&'a PartialMark>,
+}
+
+fn code_segments(line_len: usize, partials: &[PartialMark]) -> Vec<CodeSegment<'_>> {
+    let mut segments = Vec::with_capacity(partials.len() * 2 + 1);
+    let mut cursor = 0;
+    for partial in partials {
+        let range = partial.range();
+        debug_assert!(cursor <= range.start);
+        debug_assert!(range.start < range.end && range.end <= line_len);
+        if cursor < range.start {
+            segments.push(CodeSegment {
+                range: cursor..range.start,
+                mark: None,
+            });
+        }
+        segments.push(CodeSegment {
+            range: range.clone(),
+            mark: Some(partial),
+        });
+        cursor = range.end;
+    }
+    if cursor < line_len {
+        segments.push(CodeSegment {
+            range: cursor..line_len,
+            mark: None,
+        });
+    }
+    segments
+}
+
+fn push_partial_opening(out: &mut String, partial: &PartialMark) {
+    match partial.mark() {
+        PartialEmphasis::Static => {
+            out.push_str(r#"<span class="code-range code-range-emphasis">"#);
+        }
+        PartialEmphasis::Stepped(steps) => {
+            out.push_str("<span class=\"code-range\" data-emphasis-step=\"");
+            for (index, step) in steps.iter().enumerate() {
+                if index != 0 {
+                    out.push(' ');
+                }
+                write!(out, "{step}").expect("writing to a String cannot fail");
+            }
+            out.push_str("\">");
+        }
+    }
+}
+
+fn push_scope_stack_openings(out: &mut String, scopes: &[syntect::parsing::Scope]) {
+    for scope in scopes {
+        out.push_str("<span class=\"");
+        push_scope_classes(out, *scope);
+        out.push_str("\">");
+    }
+}
+
+fn push_scope_stack_closings(out: &mut String, count: usize) {
+    for _ in 0..count {
+        out.push_str("</span>");
     }
 }
 
@@ -516,7 +678,7 @@ contexts:
             assert!(html.contains("<span class=\"hl-"), "{token}: {html}");
 
             let lines = highlighter
-                .highlight_lines(code, token, 1)
+                .highlight_lines(code, token, 1, &[])
                 .unwrap_or_else(|err| panic!("{token} lines should highlight: {err}"));
             assert!(
                 lines.iter().any(|line| line.contains("<span class=\"hl-")),
@@ -530,7 +692,7 @@ contexts:
         let highlighter = Highlighter::defaults();
         let code = "plain <text>\nsecond & line\n";
         let txt_html = highlighter.highlight_html(code, "txt", 1).unwrap();
-        let txt_lines = highlighter.highlight_lines(code, "txt", 1).unwrap();
+        let txt_lines = highlighter.highlight_lines(code, "txt", 1, &[]).unwrap();
 
         for token in ["text", "plaintext"] {
             assert!(highlighter.validate_language(token, 1).is_ok(), "{token}");
@@ -540,7 +702,7 @@ contexts:
                 "{token} whole-block rendering differs from txt"
             );
             assert_eq!(
-                highlighter.highlight_lines(code, token, 1).unwrap(),
+                highlighter.highlight_lines(code, token, 1, &[]).unwrap(),
                 txt_lines,
                 "{token} line rendering differs from txt"
             );
@@ -615,7 +777,7 @@ contexts:
             ),
             ("txt", "plain <text>\r\nsecond & line\r\nlast\r"),
         ] {
-            let highlighted = highlighter.highlight_lines(code, token, 1).unwrap();
+            let highlighted = highlighter.highlight_lines(code, token, 1, &[]).unwrap();
             let expected = LinesWithEndings::from(code)
                 .map(source_line_text)
                 .collect::<Vec<_>>();
