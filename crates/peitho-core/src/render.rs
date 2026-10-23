@@ -16,10 +16,10 @@ use crate::{
         SourceSpan,
     },
     embed_card::{generic_embed_card_css, EmbedCardAssets},
-    emphasis::{emphasis_code, LineEmphasis, LineMark},
+    emphasis::{emphasis_code, EmphasisMark, LineEmphasis, LineMark},
     error::{BuildError, ErrorKind, Result},
     fence_info::CodeTitle,
-    highlight::Highlighter,
+    highlight::{render_plain_lines, Highlighter},
     layout::{Layout, LayoutAssets},
     math::MathAssets,
     phase::{Checked, CheckedSlot, Deck, DeckLang, PageNumberFormat, PublicReveal, Rendered},
@@ -1733,15 +1733,17 @@ fn render_code_fragment(
     };
 
     let code = emphasis_code(fragment.code_text());
+    let line_marks = (1..=code.lines().count())
+        .map(|line| emphasis.mark_for_line(line))
+        .collect::<Vec<_>>();
     let lines: Vec<String> = match fragment.language() {
-        Some(language) => highlighter.highlight_lines(code, language, fragment.line())?,
-        None => code
-            .lines()
-            .map(|line| encode_text(line).into_owned())
-            .collect(),
+        Some(language) => {
+            highlighter.highlight_lines(code, language, fragment.line(), &line_marks)?
+        }
+        None => render_plain_lines(code, &line_marks),
     };
 
-    Ok(wrap_emphasis_lines(&lines, emphasis))
+    Ok(wrap_emphasis_lines(&lines, &line_marks))
 }
 
 /// The one non-emphasis highlighting seam for top-level and container code.
@@ -1766,16 +1768,16 @@ fn render_highlighted_code(
 /// emits every containing group's step in a space-separated
 /// `data-emphasis-step` token list; step-aware surfaces activate a token only
 /// when it equals the current slide step.
-fn wrap_emphasis_lines(lines: &[String], emphasis: &LineEmphasis) -> String {
+fn wrap_emphasis_lines(lines: &[String], line_marks: &[LineMark]) -> String {
+    debug_assert_eq!(lines.len(), line_marks.len());
     let mut out = String::new();
-    for (offset, line_html) in lines.iter().enumerate() {
-        // Code lines are 1-based, matching what the author wrote.
-        match emphasis.mark_for_line(offset + 1) {
-            LineMark::None => out.push_str(r#"<span class="code-line">"#),
-            LineMark::Static => {
+    for (offset, (line_html, mark)) in lines.iter().zip(line_marks).enumerate() {
+        match mark.whole() {
+            EmphasisMark::None => out.push_str(r#"<span class="code-line">"#),
+            EmphasisMark::Static => {
                 out.push_str(r#"<span class="code-line code-line-emphasis">"#);
             }
-            LineMark::Stepped(steps) => {
+            EmphasisMark::Stepped(steps) => {
                 let steps = steps
                     .iter()
                     .map(ToString::to_string)
@@ -3939,6 +3941,25 @@ mod tests {
             .collect()
     }
 
+    fn assert_no_empty_highlight_spans(line: &str) {
+        let mut remainder = line;
+        while let Some(opening) = remainder.find(r#"<span class="hl-"#) {
+            remainder = &remainder[opening..];
+            let opening_end = remainder.find('>').expect("closed highlight span opening");
+            assert!(
+                !remainder[opening_end + 1..].starts_with("</span>"),
+                "empty highlight span: {line}"
+            );
+            remainder = &remainder[opening_end + 1..];
+        }
+
+        assert_eq!(
+            line.matches("<span").count(),
+            line.matches("</span>").count(),
+            "unbalanced line span: {line}"
+        );
+    }
+
     #[test]
     fn code_without_emphasis_is_not_line_wrapped() {
         // Decks that do not use the notation must render exactly as before.
@@ -3969,6 +3990,163 @@ mod tests {
         );
         // Static emphasis rides no step: it is present in every output.
         assert!(!html.contains("data-emphasis-step"), "{html}");
+    }
+
+    #[test]
+    fn static_partial_emphasis_wraps_only_the_escaped_matching_text() {
+        let html = render_code_html("# T\n\n```{1:\"<middle>\"}\nprefix <middle> suffix\n```");
+
+        assert!(
+            html.contains(
+                r#"<span class="code-line">prefix <span class="code-range code-range-emphasis">&lt;middle&gt;</span> suffix</span>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("code-line-emphasis"), "{html}");
+        assert!(!html.contains("data-emphasis-step"), "{html}");
+    }
+
+    #[test]
+    fn partial_text_keeps_equals_and_open_brace_literal_during_fence_extraction() {
+        let html = render_code_html("# T\n\n```{1:\"a = {b\"}\nx a = {b y\n```");
+
+        assert!(
+            html.contains(
+                r#"<span class="code-line">x <span class="code-range code-range-emphasis">a = {b</span> y</span>"#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn multibyte_partial_boundaries_work_in_plain_and_highlighted_code() {
+        let plain = render_code_html("# T\n\n```{1:\"界🌍\"}\n前界🌍後\n```");
+        assert!(
+            plain.contains(
+                r#"<span class="code-line">前<span class="code-range code-range-emphasis">界🌍</span>後</span>"#
+            ),
+            "{plain}"
+        );
+
+        let highlighted =
+            render_code_html("# T\n\n```rust {1:\"界🌍\"}\nlet s = \"前界🌍後\";\n```");
+        let line = &extract_line_spans(&highlighted)[0];
+        assert_eq!(
+            line.matches(r#"class="code-range code-range-emphasis""#)
+                .count(),
+            1,
+            "{line}"
+        );
+        let range = extract_span_inner(line, r#"class="code-range code-range-emphasis""#);
+        assert!(range.contains("界🌍"), "{range}");
+        assert!(!range.contains('前'), "{range}");
+        assert!(!range.contains('後'), "{range}");
+    }
+
+    #[test]
+    fn stepped_and_overlapping_partial_emphasis_emit_segment_token_sets() {
+        let html = render_code_html("# T\n\n```{1:\"abcd\"|1:\"cdef\"}\nabcdef\n```");
+
+        assert!(
+            html.contains(
+                r#"<span class="code-line"><span class="code-range" data-emphasis-step="1">ab</span><span class="code-range" data-emphasis-step="1 2">cd</span><span class="code-range" data-emphasis-step="2">ef</span></span>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("code-range-emphasis"), "{html}");
+        assert!(!html.contains("code-line-emphasis"), "{html}");
+    }
+
+    #[test]
+    fn equal_partial_marks_render_as_one_box() {
+        let static_html = render_code_html("# T\n\n```{1:\"abcd\",1:\"cd\"}\nabcd\n```");
+        assert_eq!(
+            static_html
+                .matches(r#"class="code-range code-range-emphasis""#)
+                .count(),
+            1,
+            "{static_html}"
+        );
+        assert!(
+            static_html.contains(r#"<span class="code-range code-range-emphasis">abcd</span>"#),
+            "{static_html}"
+        );
+
+        let stepped_html = render_code_html("# T\n\n```{|1:\"ab\",1:\"cd\"@1}\nabcd\n```");
+        assert_eq!(
+            stepped_html.matches(r#"class="code-range""#).count(),
+            1,
+            "{stepped_html}"
+        );
+        assert!(
+            stepped_html.contains(r#"<span class="code-range" data-emphasis-step="1">abcd</span>"#),
+            "{stepped_html}"
+        );
+    }
+
+    #[test]
+    fn whole_line_emphasis_is_not_repeated_on_partial_ranges() {
+        let static_html = render_code_html("# T\n\n```{1,1:\"x\"}\nxy\n```");
+        assert!(static_html.contains("code-line-emphasis"), "{static_html}");
+        assert!(!static_html.contains("code-range"), "{static_html}");
+
+        let stepped_html = render_code_html("# T\n\n```{1,1:\"x\"@1|1:\"y\"@2}\nxy\n```");
+        assert!(
+            stepped_html.contains(
+                r#"<span class="code-line" data-emphasis-step="1">x<span class="code-range" data-emphasis-step="2">y</span></span>"#
+            ),
+            "{stepped_html}"
+        );
+        assert_eq!(
+            stepped_html.matches(r#"data-emphasis-step="1""#).count(),
+            1,
+            "{stepped_html}"
+        );
+    }
+
+    #[test]
+    fn highlighted_partial_emphasis_is_one_balanced_box_across_highlight_spans() {
+        let html = render_code_html(
+            "# T\n\n```rust {1:\"Option<String>\"}\nlet value: Option<String> = None;\n```",
+        );
+        let line = &extract_line_spans(&html)[0];
+        let range = extract_span_inner(line, r#"class="code-range code-range-emphasis""#);
+
+        assert_eq!(
+            line.matches(r#"class="code-range code-range-emphasis""#)
+                .count(),
+            1,
+            "{line}"
+        );
+        assert!(
+            range.matches(r#"<span class="hl-"#).count() >= 2,
+            "the match should cross syntax spans: {range}"
+        );
+        assert_eq!(
+            range.matches("<span").count(),
+            range.matches("</span>").count(),
+            "highlight spans inside the range must balance: {range}"
+        );
+    }
+
+    #[test]
+    fn token_end_partial_boundary_emits_no_empty_highlight_span() {
+        let html =
+            render_code_html("# T\n\n```rust {1:\"let\"}\nlet value: Option<String> = None;\n```");
+        let line = &extract_line_spans(&html)[0];
+
+        assert_no_empty_highlight_spans(line);
+    }
+
+    #[test]
+    fn operator_and_comment_partial_boundaries_emit_no_empty_highlight_spans() {
+        let html = render_code_html(
+            "# T\n\n```rust {2:\"s =\",3:\"//\"}\nfn main() {\n    let s = 1;\n    // comment\n}\n```",
+        );
+        let lines = extract_line_spans(&html);
+
+        assert_no_empty_highlight_spans(&lines[1]);
+        assert_no_empty_highlight_spans(&lines[2]);
     }
 
     #[test]
@@ -4133,6 +4311,53 @@ mod tests {
             "continuation line lost its string scope: {:?}",
             spans[1]
         );
+    }
+
+    #[test]
+    fn partial_boundary_inside_an_inherited_open_scope_preserves_exact_nesting() {
+        let html = render_code_html(
+            "# T\n\n```rust {2:\"world\"}\n/* a\nhello world */\nlet s = \"x y\";\n```",
+        );
+        let lines = extract_line_spans(&html);
+
+        assert_eq!(
+            lines[1],
+            r#"<span class="hl-source hl-rust"><span class="hl-comment hl-block hl-rust">hello </span></span><span class="code-range code-range-emphasis"><span class="hl-source hl-rust"><span class="hl-comment hl-block hl-rust">world</span></span></span><span class="hl-source hl-rust"><span class="hl-comment hl-block hl-rust"> <span class="hl-punctuation hl-definition hl-comment hl-rust">*/</span></span></span>"#
+        );
+    }
+
+    fn extract_span_inner<'a>(html: &'a str, opening_attribute: &str) -> &'a str {
+        let attribute = html
+            .find(opening_attribute)
+            .expect("target span opening attribute");
+        let opening = html[..attribute]
+            .rfind("<span")
+            .expect("target span opening");
+        let content = html[attribute..]
+            .find('>')
+            .map(|offset| attribute + offset + 1)
+            .expect("target span opening end");
+        let mut cursor = content;
+        let mut depth = 1usize;
+        while depth > 0 {
+            let next_open = html[cursor..].find("<span").map(|offset| cursor + offset);
+            let next_close = html[cursor..].find("</span>").map(|offset| cursor + offset);
+            match (next_open, next_close) {
+                (Some(open), Some(close)) if open < close => {
+                    depth += 1;
+                    cursor = open + "<span".len();
+                }
+                (_, Some(close)) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &html[content..close];
+                    }
+                    cursor = close + "</span>".len();
+                }
+                _ => panic!("unclosed target span starting at {opening}: {html}"),
+            }
+        }
+        unreachable!()
     }
 
     #[test]
@@ -5088,6 +5313,11 @@ mod tests {
             title_body_code_layout(),
             theme_css,
         );
+        let with_static_partial_emphasis = render_checked_deck_with_layout_and_css(
+            "# Intro\n\n```rust {1:\"a\"}\nlet a = 1;\n```\n",
+            title_body_code_layout(),
+            theme_css,
+        );
         let without_emphasis = render_checked_deck_with_layout_and_css(
             "# Intro\n\n```rust\nlet a = 1;\n```\n",
             title_body_code_layout(),
@@ -5100,6 +5330,10 @@ mod tests {
             format!("{emphasis_css}\n{theme_css}")
         );
         assert_eq!(with_stepped_emphasis.css(), theme_css);
+        assert_eq!(
+            with_static_partial_emphasis.css(),
+            format!("{emphasis_css}\n{theme_css}")
+        );
         assert_eq!(without_emphasis.css(), theme_css);
         assert_eq!(
             with_static_emphasis
@@ -5207,7 +5441,9 @@ mod tests {
         assert!(html.contains(r#"class="slot-snippet""#), "{html}");
         assert!(html.contains("code-line-emphasis"), "{html}");
         assert!(
-            css.contains("pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis)"),
+            css.contains(
+                "pre:has(.code-line-emphasis, .code-range-emphasis)\n  .code-line:not(.code-line-emphasis):not(:has(.code-range-emphasis))"
+            ),
             "{css}"
         );
         assert!(!css.contains(".slot-code .code-line"), "{css}");

@@ -565,9 +565,13 @@ it("injects only stepped emphasis styling from the present shell", async () => {
   const shellCss = styles[styles.length - 1].textContent ?? "";
 
   expect(shellCss).toContain(".code-line{display:inline-block;width:100%}");
-  expect(shellCss).toContain("[data-emphasis-active]{");
   expect(shellCss).toContain(
-    "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){"
+    ".code-line[data-emphasis-active],.code-range[data-emphasis-active]{"
+  );
+  expect(shellCss).toContain(".code-line[data-emphasis-active]{box-shadow:");
+  expect(shellCss).toContain(".code-range[data-emphasis-active]{border-radius:");
+  expect(shellCss).toContain(
+    "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]):not(:has([data-emphasis-active])){"
   );
   expect(shellCss).not.toContain(".code-line-emphasis");
 });

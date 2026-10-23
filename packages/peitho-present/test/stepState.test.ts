@@ -36,6 +36,12 @@ it("applies cumulative reveal and equality emphasis in light and shadow DOM", ()
 
   const css = createStepStateStyle(document).textContent ?? "";
   expect(css).toContain("[data-reveal-hidden]{visibility:hidden}");
-  expect(css).toContain("[data-emphasis-active]{");
+  expect(css).toContain(
+    ".code-line[data-emphasis-active],.code-range[data-emphasis-active]{"
+  );
+  expect(css).toContain(".code-line[data-emphasis-active]{box-shadow:");
+  expect(css).toContain(".code-range[data-emphasis-active]{border-radius:");
   expect(css).toContain("pre:has([data-emphasis-active])");
+  expect(css).toContain(":not(:has([data-emphasis-active]))");
+  expect(css).not.toMatch(/(?:^|})\[data-emphasis-active\]\{/);
 });

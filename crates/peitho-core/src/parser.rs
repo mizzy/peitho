@@ -8428,7 +8428,10 @@ After list
         assert_eq!(fragment.language(), Some("rust"));
         let emphasis = fragment.emphasis().expect("emphasis rides the fragment");
         assert!(emphasis.is_static());
-        assert_eq!(emphasis.mark_for_line(1), emphasis::LineMark::Static);
+        assert_eq!(
+            emphasis.mark_for_line(1).whole(),
+            &emphasis::EmphasisMark::Static
+        );
     }
 
     #[test]
@@ -8648,9 +8651,10 @@ After list
     }
 
     fn stepped_steps_at(emphasis: &emphasis::LineEmphasis, line: usize) -> Vec<usize> {
-        match emphasis.mark_for_line(line) {
-            emphasis::LineMark::Stepped(steps) => {
-                steps.into_iter().map(NonZeroUsize::get).collect()
+        let mark = emphasis.mark_for_line(line);
+        match mark.whole() {
+            emphasis::EmphasisMark::Stepped(steps) => {
+                steps.iter().copied().map(NonZeroUsize::get).collect()
             }
             other => panic!("expected stepped line mark, got {other:?}"),
         }
@@ -10625,8 +10629,8 @@ After list
             .collect::<Vec<_>>();
         assert_eq!(code.len(), 2);
         assert_eq!(
-            code[0].emphasis().unwrap().mark_for_line(1),
-            emphasis::LineMark::Static
+            code[0].emphasis().unwrap().mark_for_line(1).whole(),
+            &emphasis::EmphasisMark::Static
         );
     }
 

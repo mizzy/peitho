@@ -316,11 +316,14 @@ function resolveStepTarget(slides, position, direction) {
 var REVEAL_HIDDEN_CSS = "[data-reveal-hidden]{visibility:hidden}";
 var EMPHASIS_ACTIVE_CSS = [
   ".code-line{display:inline-block;width:100%}",
-  "[data-emphasis-active]{",
+  ".code-line[data-emphasis-active],.code-range[data-emphasis-active]{",
   "background:var(--peitho-emphasis-background,rgba(217,163,0,0.18));",
+  "}",
+  ".code-line[data-emphasis-active]{",
   "box-shadow:inset 3px 0 0 var(--peitho-emphasis-marker,#d9a300)",
   "}",
-  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]){",
+  ".code-range[data-emphasis-active]{border-radius:.15em}",
+  "pre:has([data-emphasis-active]) .code-line:not([data-emphasis-active]):not(:has([data-emphasis-active])){",
   "opacity:var(--peitho-emphasis-dim,0.45)",
   "}"
 ].join("");

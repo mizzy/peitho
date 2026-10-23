@@ -6605,12 +6605,22 @@ contexts:
         assert!(artifacts.rendered.slides()[0]
             .html()
             .contains(r#"class="code-line code-line-emphasis""#));
-        assert!(css.contains(".code-line-emphasis {"), "{css}");
         assert!(
-            css.contains("pre:has(.code-line-emphasis) .code-line:not(.code-line-emphasis)"),
+            css.contains(".code-line-emphasis,\n.code-range-emphasis {"),
             "{css}"
         );
-        let emphasis_index = css.find(".code-line-emphasis {").unwrap();
+        assert!(css.contains(".code-line-emphasis {\n  box-shadow"), "{css}");
+        assert!(
+            css.contains(".code-range-emphasis {\n  border-radius"),
+            "{css}"
+        );
+        assert!(
+            css.contains(
+                "pre:has(.code-line-emphasis, .code-range-emphasis)\n  .code-line:not(.code-line-emphasis):not(:has(.code-range-emphasis))"
+            ),
+            "{css}"
+        );
+        let emphasis_index = css.find(".code-line-emphasis,").unwrap();
         let theme_index = css.find(".slot-title { font-weight: 700; }").unwrap();
         assert!(
             emphasis_index < theme_index,

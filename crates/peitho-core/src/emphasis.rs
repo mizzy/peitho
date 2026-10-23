@@ -9,7 +9,9 @@
 //!
 //! ```text
 //! ```rust {2-4}        static: always emphasized, consumes no slide steps
+//! ```rust {2:"aws.ec2.Vpc.Id"}  static: only the unique matching text on line 2
 //! ```rust {|3}         stepped: one group consuming one slide step
+//! ```rust {|2:"aws.ec2.Vpc.Id"} stepped: matching text on the next slide step
 //! ```rust {2,5-7|9}    stepped: one slide step per `|`-separated group
 //! ```rust {1@1|8@3}    stepped: groups assigned to absolute slide steps
 //! ```
@@ -17,7 +19,11 @@
 //! The `|` separator is the sole discriminator between the two modes. See
 //! `docs/specs/2026-08-01-code-line-emphasis-design.md`.
 
-use std::{num::NonZeroUsize, ops::RangeInclusive};
+use std::{
+    collections::BTreeSet,
+    num::NonZeroUsize,
+    ops::{Range, RangeInclusive},
+};
 
 use crate::error::{BuildError, ErrorKind, Result};
 
@@ -66,10 +72,54 @@ pub(crate) enum UnresolvedStepsRef<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LineMark {
+pub(crate) enum EmphasisMark {
     None,
     Static,
     Stepped(Vec<NonZeroUsize>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PartialEmphasis {
+    Static,
+    Stepped(Vec<NonZeroUsize>),
+}
+
+/// One non-overlapping partial-line segment and the emphasis that covers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartialMark {
+    range: Range<usize>,
+    mark: PartialEmphasis,
+}
+
+impl PartialMark {
+    pub(crate) fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+
+    pub(crate) fn mark(&self) -> &PartialEmphasis {
+        &self.mark
+    }
+}
+
+/// Every emphasis membership for one source line.
+///
+/// Whole-line membership is reported separately. Partial ranges carry only
+/// emphasis not already supplied by the whole line, split where their marks
+/// change, with adjacent equal marks coalesced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineMark {
+    whole: EmphasisMark,
+    partials: Vec<PartialMark>,
+}
+
+impl LineMark {
+    pub(crate) fn whole(&self) -> &EmphasisMark {
+        &self.whole
+    }
+
+    pub(crate) fn partials(&self) -> &[PartialMark] {
+        &self.partials
+    }
 }
 
 impl LineEmphasis {
@@ -79,32 +129,128 @@ impl LineEmphasis {
 
     /// How `line` is marked by this emphasis spec.
     ///
-    /// Overlap is legal, so stepped membership carries every matching
-    /// absolute step in authored order. This is the sole line-membership
-    /// accessor.
+    /// Returns whole-line state plus normalized partial segments. Overlap is
+    /// legal, so stepped membership carries every matching absolute step in
+    /// authored order. This is the sole line-membership accessor.
     pub(crate) fn mark_for_line(&self, line: usize) -> LineMark {
-        match &self.kind {
+        let (whole, contributions) = match &self.kind {
             LineEmphasisKind::Static(groups) => {
-                if groups.iter().any(|group| group.contains(line)) {
-                    LineMark::Static
+                let whole = if groups.iter().any(|group| group.contains_whole_line(line)) {
+                    EmphasisMark::Static
                 } else {
-                    LineMark::None
-                }
+                    EmphasisMark::None
+                };
+                let contributions = groups
+                    .iter()
+                    .flat_map(|group| group.partial_ranges(line))
+                    .map(|range| (range.clone(), PartialContribution::Static))
+                    .collect::<Vec<_>>();
+                (whole, contributions)
             }
             LineEmphasisKind::Stepped(groups) => {
                 let steps = groups
                     .iter()
-                    .filter(|group| group.group.contains(line))
+                    .filter(|group| group.group.contains_whole_line(line))
                     .map(|group| group.step)
                     .collect::<Vec<_>>();
-                if steps.is_empty() {
-                    LineMark::None
+                let whole = if steps.is_empty() {
+                    EmphasisMark::None
                 } else {
-                    LineMark::Stepped(steps)
-                }
+                    EmphasisMark::Stepped(steps)
+                };
+                let contributions = groups
+                    .iter()
+                    .flat_map(|group| {
+                        group.group.partial_ranges(line).map(move |range| {
+                            (range.clone(), PartialContribution::Step(group.step))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (whole, contributions)
+            }
+        };
+        let partials = partial_marks(&contributions, &whole);
+        LineMark { whole, partials }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialContribution {
+    Static,
+    Step(NonZeroUsize),
+}
+
+fn partial_marks(
+    contributions: &[(Range<usize>, PartialContribution)],
+    whole: &EmphasisMark,
+) -> Vec<PartialMark> {
+    let mut marks = Vec::<PartialMark>::new();
+    for range in partial_boundaries(contributions.iter().map(|(range, _)| range)) {
+        let mut is_static = false;
+        let mut steps = Vec::new();
+        for (candidate, contribution) in contributions {
+            if !covers(candidate, &range) {
+                continue;
+            }
+            match contribution {
+                PartialContribution::Static => is_static = true,
+                PartialContribution::Step(step) if !steps.contains(step) => steps.push(*step),
+                PartialContribution::Step(_) => {}
             }
         }
+
+        let mark = if is_static {
+            debug_assert!(steps.is_empty());
+            PartialEmphasis::Static
+        } else if steps.is_empty() {
+            continue;
+        } else {
+            PartialEmphasis::Stepped(steps)
+        };
+        let Some(mark) = without_whole_membership(mark, whole) else {
+            continue;
+        };
+
+        if let Some(previous) = marks.last_mut() {
+            if previous.range.end == range.start && previous.mark == mark {
+                previous.range.end = range.end;
+                continue;
+            }
+        }
+        marks.push(PartialMark { range, mark });
     }
+    marks
+}
+
+fn without_whole_membership(
+    partial: PartialEmphasis,
+    whole: &EmphasisMark,
+) -> Option<PartialEmphasis> {
+    match (partial, whole) {
+        (PartialEmphasis::Static, EmphasisMark::Static) => None,
+        (PartialEmphasis::Stepped(mut partial_steps), EmphasisMark::Stepped(whole_steps)) => {
+            partial_steps.retain(|step| !whole_steps.contains(step));
+            (!partial_steps.is_empty()).then_some(PartialEmphasis::Stepped(partial_steps))
+        }
+        (partial, _) => Some(partial),
+    }
+}
+
+fn partial_boundaries<'a>(ranges: impl Iterator<Item = &'a Range<usize>>) -> Vec<Range<usize>> {
+    let mut boundaries = BTreeSet::new();
+    for range in ranges {
+        boundaries.insert(range.start);
+        boundaries.insert(range.end);
+    }
+    let boundaries = boundaries.into_iter().collect::<Vec<_>>();
+    boundaries
+        .windows(2)
+        .map(|pair| pair[0]..pair[1])
+        .collect::<Vec<_>>()
+}
+
+fn covers(outer: &Range<usize>, inner: &Range<usize>) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 impl UnresolvedLineEmphasis {
@@ -154,19 +300,6 @@ impl UnresolvedLineEmphasis {
         };
         Some(LineEmphasis { kind })
     }
-
-    /// The highest line number referenced by any group.
-    ///
-    /// Validation at construction compares this with the block's emphasizable
-    /// line count, so an out-of-range emphasis can never reach the renderer.
-    fn max_line(&self) -> usize {
-        self.groups
-            .iter()
-            .flat_map(|group| group.ranges.iter())
-            .map(|range| *range.end())
-            .max()
-            .expect("line emphasis always has at least one group with one range")
-    }
 }
 
 /// The code text whose lines can carry emphasis.
@@ -179,21 +312,63 @@ pub(crate) fn emphasis_code(text: &str) -> &str {
     text.trim_end_matches('\n')
 }
 
-/// One emphasis group: the set of lines emphasized together.
+/// One resolved entry in an emphasis group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupEntry {
+    WholeLines(RangeInclusive<usize>),
+    Partial { line: usize, range: Range<usize> },
+}
+
+/// One emphasis group: whole lines and partial ranges emphasized together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LineGroup {
-    ranges: Vec<RangeInclusive<usize>>,
+    entries: Vec<GroupEntry>,
 }
 
 impl LineGroup {
-    fn contains(&self, line: usize) -> bool {
-        self.ranges.iter().any(|range| range.contains(&line))
+    fn contains_whole_line(&self, line: usize) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, GroupEntry::WholeLines(range) if range.contains(&line)))
+    }
+
+    fn partial_ranges(&self, line: usize) -> impl Iterator<Item = &Range<usize>> {
+        self.entries.iter().filter_map(move |entry| match entry {
+            GroupEntry::Partial {
+                line: entry_line,
+                range,
+            } if *entry_line == line => Some(range),
+            GroupEntry::WholeLines(_) | GroupEntry::Partial { .. } => None,
+        })
     }
 
     #[cfg(test)]
     fn lines(&self) -> impl Iterator<Item = usize> + '_ {
-        self.ranges.iter().flat_map(|range| range.clone())
+        self.entries.iter().flat_map(|entry| match entry {
+            GroupEntry::WholeLines(range) => range.clone().collect::<Vec<_>>(),
+            GroupEntry::Partial { line, .. } => vec![*line],
+        })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedGroupEntry<'a> {
+    WholeLines(RangeInclusive<usize>),
+    Partial { line: usize, text: &'a str },
+}
+
+impl ParsedGroupEntry<'_> {
+    fn line_end(&self) -> usize {
+        match self {
+            Self::WholeLines(range) => *range.end(),
+            Self::Partial { line, .. } => *line,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedLineGroup<'a> {
+    entries: Vec<ParsedGroupEntry<'a>>,
 }
 
 /// Parse the text between the braces of an emphasis spec and validate it
@@ -204,7 +379,7 @@ impl LineGroup {
 /// ```text
 /// spec  := "|"? group ("|" group)*
 /// group := item ("," item)* ("@" step)?
-/// item  := N | N "-" M          (1-based, inclusive, N <= M)
+/// item  := N | N "-" M | N ":" '"' text '"'
 /// step  := N                      (1-based)
 /// ```
 ///
@@ -229,13 +404,17 @@ pub(crate) fn parse_emphasis_spec(
         ));
     }
 
-    let stepped = trimmed.contains('|');
-    let groups_spec = trimmed.strip_prefix('|').unwrap_or(trimmed);
-    let mut groups = Vec::new();
+    let mut raw_groups = split_unquoted(trimmed, '|', line)?;
+    let stepped = raw_groups.len() > 1;
+    if trimmed.starts_with('|') {
+        raw_groups.remove(0);
+    }
+
+    let mut parsed_groups = Vec::new();
     let mut authored_steps = Vec::new();
-    for raw_group in groups_spec.split('|') {
+    for raw_group in raw_groups {
         let (group, step) = parse_group(raw_group, line)?;
-        groups.push(group);
+        parsed_groups.push(group);
         authored_steps.push(step);
     }
 
@@ -260,7 +439,7 @@ pub(crate) fn parse_emphasis_spec(
             ));
         } else {
             let steps = authored_steps.into_iter().flatten().collect::<Vec<_>>();
-            let mut seen = std::collections::BTreeSet::new();
+            let mut seen = BTreeSet::new();
             if let Some(repeated) = steps.iter().copied().find(|step| !seen.insert(*step)) {
                 return Err(error(
                     line,
@@ -272,10 +451,15 @@ pub(crate) fn parse_emphasis_spec(
         }
     };
 
-    let emphasis = UnresolvedLineEmphasis { groups, steps };
-    let line_count = emphasis_code(code_text).lines().count();
-    if emphasis.max_line() > line_count {
-        let max = emphasis.max_line();
+    let code_lines = emphasis_code(code_text).lines().collect::<Vec<_>>();
+    let line_count = code_lines.len();
+    let max = parsed_groups
+        .iter()
+        .flat_map(|group| group.entries.iter())
+        .map(ParsedGroupEntry::line_end)
+        .max()
+        .expect("line emphasis always has at least one group with one entry");
+    if max > line_count {
         return Err(error(
             line,
             format!("emphasis line {max} is past the end of a {line_count}-line code block"),
@@ -283,10 +467,16 @@ pub(crate) fn parse_emphasis_spec(
         ));
     }
 
+    let groups = parsed_groups
+        .into_iter()
+        .map(|group| resolve_group(group, &code_lines, line))
+        .collect::<Result<Vec<_>>>()?;
+    let emphasis = UnresolvedLineEmphasis { groups, steps };
+
     Ok(emphasis)
 }
 
-fn parse_group(raw: &str, line: usize) -> Result<(LineGroup, Option<NonZeroUsize>)> {
+fn parse_group(raw: &str, line: usize) -> Result<(ParsedLineGroup<'_>, Option<NonZeroUsize>)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(error(
@@ -296,19 +486,16 @@ fn parse_group(raw: &str, line: usize) -> Result<(LineGroup, Option<NonZeroUsize
         ));
     }
 
-    let mut at_parts = trimmed.split('@');
-    let group_spec = at_parts
-        .next()
-        .expect("split always yields one part")
-        .trim();
-    let raw_step = at_parts.next();
-    if at_parts.next().is_some() {
+    let at_parts = split_unquoted(trimmed, '@', line)?;
+    if at_parts.len() > 2 {
         return Err(error(
             line,
             "emphasis group has more than one `@`",
             "write one step after the group, e.g. `2,5@1`",
         ));
     }
+    let group_spec = at_parts[0].trim();
+    let raw_step = at_parts.get(1).copied();
     let step = raw_step
         .map(|raw_step| parse_step_number(raw_step.trim(), line))
         .transpose()?;
@@ -321,11 +508,32 @@ fn parse_group(raw: &str, line: usize) -> Result<(LineGroup, Option<NonZeroUsize
         ));
     }
 
-    let mut ranges = Vec::new();
-    for raw_item in group_spec.split(',') {
-        ranges.push(parse_item(raw_item, line)?);
+    let mut entries = Vec::new();
+    for raw_item in split_unquoted(group_spec, ',', line)? {
+        entries.push(parse_item(raw_item, line)?);
     }
-    Ok((LineGroup { ranges }, step))
+    Ok((ParsedLineGroup { entries }, step))
+}
+
+fn split_unquoted(text: &str, delimiter: char, line: usize) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (index, character) in text.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character == delimiter && !quoted => {
+                parts.push(&text[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quoted {
+        return Err(unclosed_partial_text_error(line));
+    }
+    parts.push(&text[start..]);
+    Ok(parts)
 }
 
 fn parse_step_number(text: &str, line: usize) -> Result<NonZeroUsize> {
@@ -351,7 +559,7 @@ fn parse_step_number(text: &str, line: usize) -> Result<NonZeroUsize> {
     )
 }
 
-fn parse_item(raw: &str, line: usize) -> Result<RangeInclusive<usize>> {
+fn parse_item(raw: &str, line: usize) -> Result<ParsedGroupEntry<'_>> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(error(
@@ -359,6 +567,10 @@ fn parse_item(raw: &str, line: usize) -> Result<RangeInclusive<usize>> {
             "empty emphasis group",
             "every `,`-separated entry needs a line number, e.g. `{2,5}`",
         ));
+    }
+
+    if let Some(colon) = partial_entry_colon(trimmed) {
+        return parse_partial_item(trimmed, colon, line);
     }
 
     match trimmed.split_once('-') {
@@ -372,13 +584,132 @@ fn parse_item(raw: &str, line: usize) -> Result<RangeInclusive<usize>> {
                     format!("write the range as `{end}-{start}`, or check the line numbers"),
                 ));
             }
-            Ok(start..=end)
+            Ok(ParsedGroupEntry::WholeLines(start..=end))
         }
         None => {
             let only = parse_line_number(trimmed, trimmed, line)?;
-            Ok(only..=only)
+            Ok(ParsedGroupEntry::WholeLines(only..=only))
         }
     }
+}
+
+fn partial_entry_colon(item: &str) -> Option<usize> {
+    item.char_indices().find_map(|(index, character)| {
+        (character == ':' && item[index + 1..].trim_start().starts_with('"')).then_some(index)
+    })
+}
+
+fn parse_partial_item(item: &str, colon: usize, line: usize) -> Result<ParsedGroupEntry<'_>> {
+    let line_spec = item[..colon].trim();
+    if line_spec.is_empty() {
+        return Err(error(
+            line,
+            "partial emphasis needs a line number",
+            r#"write a line number before the text, e.g. `2:"text"`"#,
+        ));
+    }
+    if line_spec.contains('-') {
+        return Err(error(
+            line,
+            "partial emphasis cannot use a line range",
+            "name each line separately, e.g. `2:\"text\",3:\"text\",4:\"text\"`",
+        ));
+    }
+    let target_line = parse_line_number(line_spec, line_spec, line)?;
+
+    let quoted = item[colon + 1..]
+        .trim_start()
+        .strip_prefix('"')
+        .expect("partial_entry_colon requires a quote after the colon");
+    let Some(close) = quoted.find('"') else {
+        return Err(unclosed_partial_text_error(line));
+    };
+    let text = &quoted[..close];
+    if text.is_empty() {
+        return Err(error(
+            line,
+            "partial emphasis text cannot be empty",
+            "put the exact text to emphasize between the quotes",
+        ));
+    }
+    let trailing = &quoted[close + 1..];
+    if !trailing.trim().is_empty() {
+        if trailing.contains('"') {
+            return Err(error(
+                line,
+                "partial emphasis text cannot contain `\"` or `}`",
+                r#"partial emphasis text ends at the next `"` and cannot contain `"` or `}`; there is no escape syntax"#,
+            ));
+        }
+        return Err(error(
+            line,
+            "unexpected text after partial emphasis text",
+            "put `,`, `|`, or `@N` after the closing quote",
+        ));
+    }
+
+    Ok(ParsedGroupEntry::Partial {
+        line: target_line,
+        text,
+    })
+}
+
+fn unclosed_partial_text_error(line: usize) -> BuildError {
+    error(
+        line,
+        "unclosed partial emphasis text",
+        "close the text with `\"`; emphasis text has no escape syntax",
+    )
+}
+
+fn resolve_group(
+    group: ParsedLineGroup<'_>,
+    code_lines: &[&str],
+    source_line: usize,
+) -> Result<LineGroup> {
+    let entries = group
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            ParsedGroupEntry::WholeLines(range) => Ok(GroupEntry::WholeLines(range)),
+            ParsedGroupEntry::Partial { line, text } => {
+                let code_line = code_lines
+                    .get(line - 1)
+                    .expect("partial emphasis line was bounds-checked");
+                resolve_partial_entry(line, text, code_line, source_line)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LineGroup { entries })
+}
+
+fn resolve_partial_entry(
+    target_line: usize,
+    text: &str,
+    code_line: &str,
+    source_line: usize,
+) -> Result<GroupEntry> {
+    let mut matches = code_line
+        .char_indices()
+        .filter_map(|(start, _)| code_line[start..].starts_with(text).then_some(start));
+    let Some(start) = matches.next() else {
+        return Err(error(
+            source_line,
+            format!("partial emphasis text was not found on code line {target_line}"),
+            format!("choose text that occurs exactly once on code line {target_line}"),
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(error(
+            source_line,
+            format!("partial emphasis text occurs more than once on code line {target_line}"),
+            "lengthen the string until it is unique on that line",
+        ));
+    }
+    Ok(GroupEntry::Partial {
+        line: target_line,
+        range: start..start + text.len(),
+    })
 }
 
 fn parse_line_number(text: &str, item: &str, line: usize) -> Result<usize> {
@@ -461,8 +792,8 @@ mod tests {
     }
 
     fn stepped_values(mark: LineMark) -> Vec<usize> {
-        match mark {
-            LineMark::Stepped(steps) => steps.into_iter().map(NonZeroUsize::get).collect(),
+        match mark.whole {
+            EmphasisMark::Stepped(steps) => steps.into_iter().map(NonZeroUsize::get).collect(),
             other => panic!("expected stepped line mark, got {other:?}"),
         }
     }
@@ -596,6 +927,157 @@ mod tests {
     }
 
     #[test]
+    fn quoted_partial_entries_keep_separators_punctuation_and_spaces_literal() {
+        let code = "environment: 'dev' | 'stg' | 'prod', owner@example.com - ready\n\
+                    value: alpha, beta @ gamma - delta: epsilon\n";
+        let emphasis = parse_emphasis_spec(
+            r#"1:"environment: 'dev' | 'stg' | 'prod', owner@example.com - ready"@1|2:"alpha, beta @ gamma - delta: epsilon"@2"#,
+            code,
+            13,
+        )
+        .unwrap();
+
+        let UnresolvedStepsRef::Explicit(steps) = emphasis.steps() else {
+            panic!("expected explicit emphasis");
+        };
+        assert_eq!(
+            steps
+                .iter()
+                .copied()
+                .map(NonZeroUsize::get)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(emphasis.groups.len(), 2);
+
+        let spaced =
+            parse_emphasis_spec(r#"1:"  exact text  ""#, "prefix  exact text  suffix\n", 13);
+        assert!(spaced.is_ok(), "spaces inside quotes must not be trimmed");
+
+        let static_punctuation =
+            parse_emphasis_spec(r#"1:"a|b,c@d-e: f""#, "a|b,c@d-e: f\n", 13).unwrap();
+        assert_eq!(static_punctuation.steps(), UnresolvedStepsRef::Static);
+    }
+
+    #[test]
+    fn whole_line_and_partial_entries_can_share_one_group() {
+        let emphasis =
+            parse_emphasis_spec(r#"1,2:"string""#, "whole line\ntype = string\n", 11).unwrap();
+
+        assert_eq!(emphasis.steps(), UnresolvedStepsRef::Static);
+        assert_eq!(emphasis.groups.len(), 1);
+    }
+
+    #[test]
+    fn partial_match_errors_distinguish_missing_and_non_unique_text() {
+        let missing =
+            parse_emphasis_spec(r#"2:"integer""#, "first\ntype = string\n", 17).unwrap_err();
+        assert_eq!(missing.kind, ErrorKind::Parse);
+        assert_eq!(missing.line, Some(17));
+        assert_eq!(
+            missing.message,
+            "partial emphasis text was not found on code line 2"
+        );
+        assert!(!missing.help.is_empty());
+
+        let repeated = parse_emphasis_spec(r#"1:"aa""#, "aaaa\n", 19).unwrap_err();
+        assert_eq!(repeated.kind, ErrorKind::Parse);
+        assert_eq!(repeated.line, Some(19));
+        assert_eq!(
+            repeated.message,
+            "partial emphasis text occurs more than once on code line 1"
+        );
+        assert!(
+            repeated
+                .help
+                .contains("lengthen the string until it is unique"),
+            "help: {}",
+            repeated.help
+        );
+    }
+
+    #[test]
+    fn overlapping_partial_matches_count_as_multiple_occurrences() {
+        let err = parse_emphasis_spec(r#"1:"aa""#, "aaa\n", 19).unwrap_err();
+
+        assert_eq!(err.line, Some(19));
+        assert_eq!(
+            err.message,
+            "partial emphasis text occurs more than once on code line 1"
+        );
+    }
+
+    #[test]
+    fn malformed_partial_entries_have_focused_errors() {
+        for (spec, message) in [
+            (r#"1:"""#, "partial emphasis text cannot be empty"),
+            (r#"1:"text"#, "unclosed partial emphasis text"),
+            (r#"2-4:"text""#, "partial emphasis cannot use a line range"),
+        ] {
+            let err = parse_emphasis_spec(spec, "text\ntext\ntext\ntext\n", 23).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Parse, "spec {spec:?}");
+            assert_eq!(err.line, Some(23), "spec {spec:?}");
+            assert_eq!(err.message, message, "spec {spec:?}");
+            assert!(!err.help.is_empty(), "spec {spec:?}");
+        }
+
+        let escaped_quote =
+            parse_emphasis_spec(r#"1:"say \"hi\"""#, "say \"hi\"\n", 23).unwrap_err();
+        assert_eq!(escaped_quote.kind, ErrorKind::Parse);
+        assert_eq!(escaped_quote.line, Some(23));
+        assert_eq!(
+            escaped_quote.message,
+            "partial emphasis text cannot contain `\"` or `}`"
+        );
+        assert!(
+            escaped_quote.help.contains("ends at the next `\"`"),
+            "{}",
+            escaped_quote.help
+        );
+        assert!(
+            escaped_quote.help.contains("cannot contain `\"` or `}`"),
+            "{}",
+            escaped_quote.help
+        );
+        assert!(
+            escaped_quote.help.contains("no escape syntax"),
+            "{}",
+            escaped_quote.help
+        );
+    }
+
+    #[test]
+    fn partial_emphasis_without_a_line_number_has_a_focused_error() {
+        let err = parse_emphasis_spec(r#":"a""#, "a\n", 25).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(25));
+        assert_eq!(err.message, "partial emphasis needs a line number");
+        assert!(err.help.contains(r#"2:"text""#), "{}", err.help);
+    }
+
+    #[test]
+    fn partial_emphasis_rejects_non_delimiter_text_after_the_closing_quote() {
+        let err = parse_emphasis_spec(r#"2:"a"b"#, "first\na\n", 27).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(27));
+        assert_eq!(err.message, "unexpected text after partial emphasis text");
+        assert_eq!(err.help, "put `,`, `|`, or `@N` after the closing quote");
+    }
+
+    #[test]
+    fn partial_entries_keep_the_existing_out_of_range_error_priority() {
+        let err = parse_emphasis_spec(r#"2:"text""#, "one line\n", 29).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(29));
+        assert_eq!(
+            err.message,
+            "emphasis line 2 is past the end of a 1-line code block"
+        );
+    }
+
+    #[test]
     fn a_trailing_separator_is_an_empty_group_error() {
         // `{2|}` is stepped notation with an empty second group: an error,
         // not a silent downgrade to static emphasis.
@@ -644,12 +1126,14 @@ mod tests {
     }
 
     #[test]
-    fn max_line_reports_the_highest_referenced_line() {
-        let e = parse("2,5-7|9", 3).unwrap();
-        assert_eq!(e.max_line(), 9);
+    fn highest_referenced_line_is_checked_at_the_parse_seam() {
+        assert!(parse("12-14|3", 3).is_ok());
 
-        let e = parse("12-14|3", 3).unwrap();
-        assert_eq!(e.max_line(), 14);
+        let err = parse_emphasis_spec("2,5-7|15", CODE, 3).unwrap_err();
+        assert_eq!(
+            err.message,
+            "emphasis line 15 is past the end of a 14-line code block"
+        );
     }
 
     #[test]
@@ -677,18 +1161,139 @@ mod tests {
             .unwrap();
         assert_eq!(stepped_values(e.mark_for_line(3)), vec![1, 2]);
         assert_eq!(stepped_values(e.mark_for_line(1)), vec![1]);
-        assert_eq!(e.mark_for_line(6), LineMark::None);
+        assert_eq!(e.mark_for_line(6).whole, EmphasisMark::None);
 
         let e = parse("1-3|5", 3)
             .unwrap()
             .resolve(|_| NonZeroUsize::new(4))
             .unwrap();
-        assert_eq!(e.mark_for_line(4), LineMark::None);
+        assert_eq!(e.mark_for_line(4).whole, EmphasisMark::None);
         assert_eq!(stepped_values(e.mark_for_line(5)), vec![5]);
 
         let e = parse("2-4", 3).unwrap().resolve(|_| None).unwrap();
-        assert_eq!(e.mark_for_line(1), LineMark::None);
-        assert_eq!(e.mark_for_line(2), LineMark::Static);
+        assert_eq!(e.mark_for_line(1).whole, EmphasisMark::None);
+        assert_eq!(e.mark_for_line(2).whole, EmphasisMark::Static);
+    }
+
+    #[test]
+    fn mark_for_line_reports_whole_marks_and_boundary_split_partial_segments() {
+        let emphasis = parse_emphasis_spec(r#"1,2:"string""#, "whole line\ntype = string\n", 3)
+            .unwrap()
+            .resolve(|_| None)
+            .unwrap();
+        assert_eq!(emphasis.mark_for_line(1).whole, EmphasisMark::Static);
+        let partial = emphasis.mark_for_line(2);
+        assert_eq!(partial.whole, EmphasisMark::None);
+        assert_eq!(partial.partials.len(), 1);
+        assert_eq!(partial.partials[0].range, 7..13);
+        assert_eq!(partial.partials[0].mark, PartialEmphasis::Static);
+
+        let overlapping = parse_emphasis_spec(r#"1:"abcd"|1:"cdef""#, "abcdef\n", 3)
+            .unwrap()
+            .resolve(|_| Some(NonZeroUsize::MIN))
+            .unwrap();
+        let mark = overlapping.mark_for_line(1);
+        assert_eq!(mark.whole, EmphasisMark::None);
+        assert_eq!(
+            mark.partials,
+            vec![
+                PartialMark {
+                    range: 0..2,
+                    mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(1).unwrap()]),
+                },
+                PartialMark {
+                    range: 2..4,
+                    mark: PartialEmphasis::Stepped(vec![
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(2).unwrap(),
+                    ]),
+                },
+                PartialMark {
+                    range: 4..6,
+                    mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(2).unwrap()]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_partial_ranges_keep_distinct_marks_and_merge_equal_neighbors() {
+        let nested = parse_emphasis_spec(r#"1:"abcdef"@1|1:"cd"@2"#, "abcdef\n", 3)
+            .unwrap()
+            .resolve(|_| panic!("explicit emphasis must not request a step"))
+            .unwrap();
+        assert_eq!(
+            nested.mark_for_line(1).partials,
+            vec![
+                PartialMark {
+                    range: 0..2,
+                    mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(1).unwrap()]),
+                },
+                PartialMark {
+                    range: 2..4,
+                    mark: PartialEmphasis::Stepped(vec![
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(2).unwrap(),
+                    ]),
+                },
+                PartialMark {
+                    range: 4..6,
+                    mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(1).unwrap()]),
+                },
+            ]
+        );
+
+        let static_adjacent = parse_emphasis_spec(r#"1:"abcd",1:"cd""#, "abcd\n", 3)
+            .unwrap()
+            .resolve(|_| None)
+            .unwrap();
+        assert_eq!(
+            static_adjacent.mark_for_line(1).partials,
+            vec![PartialMark {
+                range: 0..4,
+                mark: PartialEmphasis::Static,
+            }]
+        );
+
+        let stepped_adjacent = parse_emphasis_spec(r#"|1:"ab",1:"cd"@1"#, "abcd\n", 3)
+            .unwrap()
+            .resolve(|_| panic!("explicit emphasis must not request a step"))
+            .unwrap();
+        assert_eq!(
+            stepped_adjacent.mark_for_line(1).partials,
+            vec![PartialMark {
+                range: 0..4,
+                mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(1).unwrap()]),
+            }]
+        );
+    }
+
+    #[test]
+    fn whole_line_marks_remove_duplicate_partial_membership() {
+        let static_emphasis = parse_emphasis_spec(r#"1,1:"x""#, "xy\n", 3)
+            .unwrap()
+            .resolve(|_| None)
+            .unwrap();
+        let static_mark = static_emphasis.mark_for_line(1);
+        assert_eq!(static_mark.whole, EmphasisMark::Static);
+        assert!(static_mark.partials.is_empty());
+
+        let stepped_emphasis = parse_emphasis_spec(r#"1,1:"x"@1|1:"y"@2"#, "xy\n", 3)
+            .unwrap()
+            .resolve(|_| panic!("explicit emphasis must not request a step"))
+            .unwrap();
+        let stepped_mark = stepped_emphasis.mark_for_line(1);
+        assert_eq!(
+            stepped_mark.whole,
+            EmphasisMark::Stepped(vec![NonZeroUsize::new(1).unwrap()])
+        );
+        assert_eq!(
+            stepped_mark.partials,
+            vec![PartialMark {
+                range: 1..2,
+                mark: PartialEmphasis::Stepped(vec![NonZeroUsize::new(2).unwrap()]),
+            }]
+        );
     }
 
     #[test]
@@ -697,7 +1302,7 @@ mod tests {
             .unwrap()
             .resolve(|_| panic!("static emphasis must not request a step"))
             .unwrap();
-        assert_eq!(static_emphasis.mark_for_line(2), LineMark::Static);
+        assert_eq!(static_emphasis.mark_for_line(2).whole, EmphasisMark::Static);
 
         let explicit_emphasis = parse("1@2|3@1", 3)
             .unwrap()

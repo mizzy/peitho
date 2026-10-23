@@ -396,6 +396,52 @@ ones. Trailing empty lines at the end of the block are not counted. Within a
 group, `,` separates entries and `-` makes a range:
 `{2,5-7|9}` emphasizes lines 2 and 5–7 on the first step, then line 9.
 
+To emphasize only part of one line, follow its number with the exact text in
+double quotes:
+
+````markdown
+```hcl {2:"string"}
+variable "vpc_id" {
+  type = string
+}
+```
+````
+
+The text must occur exactly once on that line. A missing match and a repeated
+match are build errors; when a match is repeated, lengthen the string until it
+is unique. Overlapping occurrences count separately, so `"aa"` is not unique
+in `aaaa`. Matching uses the code exactly as written, including spaces and
+case.
+
+Whole-line and partial entries can share a group: `{1,2:"string"}` emphasizes
+all of line 1 and only `string` on line 2. A partial entry names one line, so a
+range such as `{2-4:"string"}` is invalid. Partial entries work with implicit
+or explicit steps in the same way as whole lines:
+
+````markdown
+```text {2:"aws.ec2.Vpc.Id"@1|3:"'dev' | 'stg' | 'prod'"@2}
+arguments {
+  vpc_id: aws.ec2.Vpc.Id
+  environment: 'dev' | 'stg' | 'prod'
+}
+```
+````
+
+Separators are quote-aware: `|`, `,`, and `@` inside the quoted text are
+literal, as are `-`, `:`, and spaces. Spaces inside the quotes are never
+trimmed. There is no escape syntax; the next `"` ends the text, and `"` or `}`
+cannot be included in a match. Empty or unclosed text and a `}` that truncates
+it are focused line-numbered errors.
+
+A backtick inside partial text silently breaks a backtick fence under
+CommonMark. Use a `~~~` fence when the text to match contains a backtick:
+
+````markdown
+~~~text {1:"`name`"}
+`name` = value
+~~~
+````
+
 The language tag is optional — ` ```{2-4} ` works on an untagged block.
 
 **Static vs stepped.** The `|` is the only difference:
@@ -420,16 +466,21 @@ When a deck uses static emphasis, its default styling travels with the deck,
 including when the deck has its own `css/`. Restyle it with the
 `--peitho-emphasis-background`, `--peitho-emphasis-marker`, and
 `--peitho-emphasis-dim` custom properties, or override
-`.code-line-emphasis` directly. Stepped emphasis is styled by `peitho present`,
-the `peitho preview` stage, distributions that set `public_reveal: steps`, and
-PDF exports that set `public_reveal: steps`.
+`.code-line-emphasis` or `.code-range-emphasis` directly. Whole-line emphasis
+uses the background plus the inset marker bar; partial emphasis uses a tight
+rounded background box. A line containing an active partial box stays undimmed
+while unrelated lines in the same block dim. Stepped emphasis is styled by
+`peitho present`, the `peitho preview` stage, distributions that set
+`public_reveal: steps`, and PDF exports that set `public_reveal: steps`.
 
 Line numbers past the end of the block; malformed specs, including signed
 numbers such as `{+2}` or `{|1@+1}`; `@0`; `@N` on static emphasis; mixed
 implicit and explicit groups; repeated explicit steps within one block; gaps in
 a slide's explicit steps; explicit steps anywhere on a slide with
 `::: {reveal}`; stepped emphasis inside a reveal group; and emphasis on a
-`code_images` block are all line-numbered build errors.
+`code_images` block are all line-numbered build errors. Partial ranges add
+focused errors for missing or non-unique text, empty or unclosed quotes,
+brace-truncated text, and a substring attached to a line range.
 
 ## Code block titles
 
