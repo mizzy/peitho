@@ -16,7 +16,7 @@ use crate::{
         SourceSpan,
     },
     embed_card::{generic_embed_card_css, EmbedCardAssets},
-    emphasis::{emphasis_code, LineEmphasis},
+    emphasis::{emphasis_code, LineEmphasis, LineMark},
     error::{BuildError, ErrorKind, Result},
     fence_info::CodeTitle,
     highlight::Highlighter,
@@ -218,11 +218,9 @@ fn slide_uses_generic_embed_card(
 
 fn slide_uses_static_emphasis(slots: &BTreeMap<SlotName, CheckedSlot<ResolvedImagePath>>) -> bool {
     slots.values().any(|slot| {
-        slot.fragments().iter().any(|fragment| {
-            fragment
-                .emphasis()
-                .is_some_and(|emphasis| !emphasis.stepped())
-        })
+        slot.fragments()
+            .iter()
+            .any(|fragment| fragment.emphasis().is_some_and(LineEmphasis::is_static))
     })
 }
 
@@ -820,30 +818,13 @@ fn render_revealed_fragment(
         FragmentKind::Text => unreachable!("revealed Text fragments are not renderable"),
         FragmentKind::Code => {
             let code = render_code_fragment(fragment, context.highlighter)?;
-            // A stepped-emphasis block owns its span for *emphasis* steps, not
-            // for appearing: the code is visible from the start and only the
-            // emphasized line moves. Stamping `data-reveal-step` on the `<pre>`
-            // would hide the whole block until its first step.
-            let stepped_emphasis = fragment
-                .emphasis()
-                .is_some_and(|emphasis| emphasis.stepped());
-            if stepped_emphasis {
-                body.push_str(&render_code_block(
-                    class_name,
-                    &code,
-                    fragment.language(),
-                    fragment.code_title(),
-                    None,
-                ));
-            } else {
-                body.push_str(&render_code_block(
-                    class_name,
-                    &code,
-                    fragment.language(),
-                    fragment.code_title(),
-                    Some(span.start),
-                ));
-            }
+            body.push_str(&render_code_block(
+                class_name,
+                &code,
+                fragment.language(),
+                fragment.code_title(),
+                Some(span.start),
+            ));
             Ok(())
         }
         FragmentKind::Math { html } => {
@@ -1760,11 +1741,7 @@ fn render_code_fragment(
             .collect(),
     };
 
-    // Stepped emphasis is assigned a reveal span at parse time so its groups
-    // occupy real steps in the slide's shared step space; the span's start is
-    // the step of the first group.
-    let base_step = fragment.reveal_span().map(|span| span.start);
-    Ok(wrap_emphasis_lines(&lines, emphasis, base_step))
+    Ok(wrap_emphasis_lines(&lines, emphasis))
 }
 
 /// The one non-emphasis highlighting seam for top-level and container code.
@@ -1787,35 +1764,27 @@ fn render_highlighted_code(
 /// Static emphasis (no `|` in the spec) emits the `code-line-emphasis` class
 /// directly, so it survives into PDF, preview, and `dist/`. Stepped emphasis
 /// emits every containing group's step in a space-separated
-/// `data-emphasis-step` token list and stays inert everywhere except the
-/// present shell, which is the only consumer that acts on it.
-fn wrap_emphasis_lines(
-    lines: &[String],
-    emphasis: &LineEmphasis,
-    base_step: Option<usize>,
-) -> String {
+/// `data-emphasis-step` token list; step-aware surfaces activate a token only
+/// when it equals the current slide step.
+fn wrap_emphasis_lines(lines: &[String], emphasis: &LineEmphasis) -> String {
     let mut out = String::new();
-    let mut stamped_groups = vec![false; emphasis.groups().len()];
     for (offset, line_html) in lines.iter().enumerate() {
         // Code lines are 1-based, matching what the author wrote.
-        let groups = emphasis.groups_of(offset + 1).collect::<Vec<_>>();
-        if groups.is_empty() {
-            out.push_str(r#"<span class="code-line">"#);
-        } else if emphasis.stepped() {
-            let base = base_step.expect("stepped emphasis is assigned a reveal span at parse");
-            let steps = groups
-                .iter()
-                .map(|group| {
-                    stamped_groups[*group] = true;
-                    (base + group).to_string()
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&format!(
-                r#"<span class="code-line" data-emphasis-step="{steps}">"#,
-            ));
-        } else {
-            out.push_str(r#"<span class="code-line code-line-emphasis">"#);
+        match emphasis.mark_for_line(offset + 1) {
+            LineMark::None => out.push_str(r#"<span class="code-line">"#),
+            LineMark::Static => {
+                out.push_str(r#"<span class="code-line code-line-emphasis">"#);
+            }
+            LineMark::Stepped(steps) => {
+                let steps = steps
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                out.push_str(&format!(
+                    r#"<span class="code-line" data-emphasis-step="{steps}">"#,
+                ));
+            }
         }
         out.push_str(line_html);
         out.push_str("</span>");
@@ -1823,15 +1792,7 @@ fn wrap_emphasis_lines(
             out.push('\n');
         }
     }
-    if emphasis.stepped() {
-        let stamped_group_count = stamped_groups.iter().filter(|stamped| **stamped).count();
-        if stamped_group_count != emphasis.groups().len() {
-            unreachable!(
-                "stepped emphasis group count mismatch: stamped {stamped_group_count} groups but emphasis has {}",
-                emphasis.groups().len()
-            );
-        }
-    }
+    // parse_emphasis_spec bounds every group to an existing line, so every group is stamped.
     out
 }
 
@@ -4050,6 +4011,36 @@ mod tests {
             html.contains(r#"<span class="code-line" data-emphasis-step="1 2">c</span>"#),
             "{html}"
         );
+    }
+
+    #[test]
+    fn explicit_emphasis_steps_render_interleaved_blocks_without_revealing_them() {
+        let html = render_code_html(
+            "# T\n\n```{1-3@1|8@3}\na1\na2\na3\na4\na5\na6\na7\na8\n```\n\n```{|1-8@2}\nb1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\n```",
+        );
+
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="1">a1</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="3">a8</span>"#),
+            "{html}"
+        );
+        for line in 4..=7 {
+            assert!(
+                html.contains(&format!(r#"<span class="code-line">a{line}</span>"#)),
+                "{html}"
+            );
+        }
+        assert!(
+            html.contains(r#"<span class="code-line" data-emphasis-step="2">b4</span>"#),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"<pre class="slot-code">"#).count(), 2);
+        assert!(!html.contains(r#"<pre class="slot-code" data-reveal-step="#));
+        assert!(!html.contains(r#"<figure class="code-block" data-reveal-step="#));
+        assert!(html.contains(r#"data-reveal-steps="3""#), "{html}");
     }
 
     #[test]
@@ -8227,7 +8218,10 @@ Paragraph after heading.
                     vec![
                         SourceFragment::code(7, Some("rust".to_owned()), "let x = 1;")
                             .with_emphasis(
-                                crate::emphasis::parse_emphasis_spec("1", "let x = 1;", 7).unwrap(),
+                                crate::emphasis::parse_emphasis_spec("1", "let x = 1;", 7)
+                                    .unwrap()
+                                    .resolve(|_| None)
+                                    .unwrap(),
                             ),
                     ],
                 ),

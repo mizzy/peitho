@@ -1,8 +1,8 @@
 # Code Line Emphasis — Design
 
-**Issue:** #372
+**Issues:** #372, #737
 **Date:** 2026-08-01
-**Status:** Approved by author (notation, static-vs-stepped split, distribution policy, untagged-block support decided 2026-08-01)
+**Status:** Approved by author (original notation decided 2026-08-01; explicit absolute steps decided 2026-10-23)
 
 ## Goal
 
@@ -18,15 +18,16 @@ The hard constraints (from the three pillars):
 
 Issue #364 (moving presentation vocabulary out of Markdown into layouts) is explicitly **not** a constraint here (author decision 2026-08-01: "#364 is a best-effort direction, don't factor it in for now"). Note also that line emphasis is structurally unable to move layout-side: a layout is a container shared across slides, so it cannot name "line 3 of this particular code block". If #364 is ever pursued, this notation belongs to the residue it already contemplates ("accepting that some residue stays in Markdown").
 
-## Author decisions (2026-08-01)
+## Author decisions (2026-08-01; extended 2026-10-23)
 
 | Question | Decision |
 | --- | --- |
 | Where the notation lives | Code fence info string, after the language token |
 | Static vs stepped | The `\|` separator is the sole discriminator: no `\|` → static (0 steps), `\|` present → one step per group |
-| Step number space | Shared with incremental reveal (#290) — same counter, same `data-reveal-step` attribute |
+| Step number space | Shared with incremental reveal (#290); implicit groups take the next source-order step, while `@N` names an absolute slide step |
+| Explicit-step consistency | All stepped groups on a slide use `@N`, or none do; explicit steps cover `1..max` without gaps and cannot share a slide with `::: {reveal}` |
 | Line numbering basis | Per fenced block, always starting at 1; each block renders as its own `<pre>` |
-| Distributed artifacts (PDF / preview / lint / `dist/`) | Stepped emphasis: absent. Static emphasis: present |
+| Output behavior | Static emphasis is always present; stepped emphasis is active in present and preview, and in distributions/PDF only with `public_reveal: steps` |
 | Untagged code blocks | Supported — emphasis works without a language tag |
 | Non-contiguous lines | Supported from v1 via `,` |
 | Out-of-range / malformed | Line-numbered build error |
@@ -48,15 +49,27 @@ fn main() {
 Grammar:
 
 ```
-spec      := "{" "|"? group ("|" group)* "}"
-group     := item ("," item)*
-item      := N | N "-" M          (1-based, inclusive, N <= M)
+spec           := "{" (static-group | stepped-groups) "}"
+static-group   := items
+stepped-groups := "|" stepped-group ("|" stepped-group)*
+                | stepped-group "|" stepped-group ("|" stepped-group)*
+stepped-group  := items ("@" step)?
+items          := item ("," item)*
+item           := N | N "-" M          (1-based, inclusive, N <= M)
+step           := N                      (1-based)
 ```
 
+`N` and `step` contain ASCII decimal digits only, with no sign. Both are
+positive: `0`, `+2`, and `@+1` are errors.
+
 - **`|` absent** — static emphasis. The listed lines are emphasized whenever the slide is shown. Consumes **no** reveal steps.
-- **`|` present** — stepped emphasis. Group *k* is emphasized at reveal step *k*; each group replaces the previous one. Consumes exactly *n* steps for *n* groups.
+- **`|` present, no `@N`** — implicit stepped emphasis. Groups take consecutive steps from the slide's source-order counter, preserving the original behavior.
+- **`|` present, every group has `@N`** — explicit stepped emphasis. Each group uses the named absolute slide step, so groups in different blocks can interleave.
 - A leading `|` makes a single group stepped: `{|3}` (Issue #693).
+- A single explicit group therefore uses the same marker: `{|3@2}`. `@N` on a static spec is an error.
 - Groups may overlap: a line listed in several groups is emphasized at each of their steps, so `{1-5|3}` emphasizes lines 1–5, then only line 3 (Issue #696).
+- Within one block, groups may be authored in any step order, but an explicit step may occur only once. Across blocks, the same step is allowed and activates all matching lines together.
+- If any stepped group on a slide uses `@N`, every stepped group on that slide must use it. The union of explicit steps must cover `1..max` without a gap, and that slide cannot contain a `::: {reveal}` group.
 - The language token is optional: ` ```{2-4} ` (no language) emphasizes lines of an unhighlighted block. Detection is positional — an info string whose first token starts with `{` has no language.
 
 ### Collision with Pandoc attribute syntax
@@ -71,6 +84,10 @@ No existing deck regresses — peitho currently treats the whole info string as 
 ````
 
 reads: step 1 emphasizes lines 2 and 5–7; step 2 emphasizes line 9.
+
+Explicit steps allow interleaving across blocks. `{1-3@1|8@3}` on block A
+and `{|1-8@2}` on block B produces A lines 1–3, then B lines 1–8, then A
+line 8.
 
 ### Why `|` is the discriminator
 
@@ -93,34 +110,56 @@ line against that count, and the renderer splits the same trimmed slice. This
 keeps trailing blank lines from passing validation only to disappear during
 rendering.
 
-`SourceFragment` gains `emphasis: Option<LineEmphasis>`, handled exactly like the existing `reveal_span`:
+`SourceFragment` carries `emphasis: Option<LineEmphasis>` independently of
+`reveal_span`. Parsing first produces an unresolved spec; the parser then
+assigns implicit groups consecutive steps or accepts each explicit `@N` and
+constructs the resolved annotation through an emphasis-module-private
+constructor:
 
 ```rust
-/// Line emphasis groups for one code fragment.
-///
-/// `groups` is never empty. `stepped` records whether the author wrote `|`:
-/// stepped emphasis consumes one reveal step per group, static emphasis
-/// consumes none and is always visible.
 pub struct LineEmphasis {
-    groups: Vec<LineGroup>,   // each a set of 1-based inclusive ranges
-    stepped: bool,
+    kind: LineEmphasisKind,
+}
+
+enum LineEmphasisKind {
+    Static(Vec<LineGroup>),
+    Stepped(Vec<SteppedGroup>),
+}
+
+struct SteppedGroup {
+    group: LineGroup,
+    step: NonZeroUsize, // absolute slide step
 }
 ```
+
+Thus, “stepped without a step” is unrepresentable after parsing. The single
+line-membership accessor returns `LineMark::{None, Static, Stepped}`, with the
+stepped case carrying every containing group's `NonZeroUsize` absolute step.
+This preserves overlapping groups without encoding static/stepped twice or
+introducing a first-match path. The unresolved form exposes one matchable
+static/implicit/explicit view; its lazy resolver reserves a counter range only
+for implicit groups.
 
 No new `FragmentKind` variant, and **`FragmentKind::Code` stays a unit variant**. Making it `Code { emphasis }` would break exhaustive matches in 15+ sites across `check.rs`, `render.rs`, `code_images.rs`, `mapping.rs`, `plain.rs`, `domain.rs`, and `parser.rs` for no benefit — the language and source text already live on `SourceFragment` rather than in the variant, and emphasis belongs with them.
 
 Consequences:
 
 - Mapping, slot-contract checking, and `Accepts` validation are unchanged.
-- `code_images.rs` needs **no** emphasis handling: emphasis on a `code_images` block is rejected at parse time (see "Rejected combinations"), so no annotated fragment ever reaches `transform_fragment`. This must be enforced by ordering, not assumed — the validation has to run at the same point the parser already resolves `renderer_for(language)` to decide whether a block is a diagram, so a rejected combination cannot slip past into the transform. An emphasis annotation surviving into `transform_fragment` would be silently dropped when that function rebuilds the fragment, which is exactly the failure mode pillar ③ forbids; a debug assertion there is cheap insurance against the ordering being broken later.
+- `code_images.rs` passes ordinary code fragments through with their emphasis intact, but never rebuilds an emphasized fragment: emphasis on a block with a resolved `code_images` renderer is rejected at parse time (see "Rejected combinations"). This must be enforced by ordering, not assumed — validation runs at the same point the parser resolves `renderer_for(language)`, and a debug assertion protects the transform seam from silently dropping the annotation.
 - `try_map_image_src_inner` destructures and rebuilds `SourceFragment`; it gains one field.
 
-### 2. Step counting keeps its single source of truth
+### 2. Step counting remains a parse-time decision
 
-Step counting already has exactly one parse-time authority (`reveal_span_len`), with the renderer consuming spans and never recounting — an invariant the reveal implementation guards with an `unreachable!` when stamped elements and span length disagree. Line emphasis extends that authority rather than adding a second one:
+`reveal_span_len` continues to count only content that actually appears from a
+`::: {reveal}` group. Stepped emphasis never receives a `RevealSpan`.
 
-- `reveal_span_len` gains a `FragmentKind::Code` arm: `groups.len()` for stepped emphasis, `1` for a code fragment inside `::: {reveal}` with no stepped emphasis, and — for stepped emphasis — the fragment is *not* additionally counted as one appearing block.
-- The renderer stamps exactly `groups.len()` distinct step values and asserts agreement in the same shape as `render_revealed_list_fragment` does today.
+For implicit emphasis, the parser resolves each group from
+`next_reveal_step` and advances that counter exactly as before. At slide end,
+explicit-mode validation rejects mixing, reveal coexistence, and gaps; a valid
+explicit slide's step count is its maximum `@N`. The renderer consumes the
+absolute steps stored on `LineEmphasis` and never derives them from fragment
+order or a span base. `ManifestSlide.revealSteps` still comes from this one
+parse-time `step_count`.
 
 ### 3. Rendering: line-wrapping spans
 
@@ -148,7 +187,7 @@ Reveal hides with `visibility: hidden`; emphasis must not hide anything — the 
 
 So the shell gains a parallel, equally small mechanism alongside `applyRevealState`: split each `[data-emphasis-step]` value on whitespace and toggle `data-emphasis-active` when any whitespace-separated step token equals the current step (note: **equals per token**, not "less than or equal" — emphasis moves, it does not accumulate), with `[data-emphasis-active]` styling injected next to the existing `REVEAL_HIDDEN_CSS`.
 
-`stepnav.ts`, `sync.ts`, the `{index, step}` wire format, `ManifestSlide.revealSteps`, presenter, and remote are all **unchanged**: emphasis steps are reveal steps, counted by the same parse-time authority and surfaced through the same manifest field.
+`stepnav.ts`, `sync.ts`, the `{index, step}` wire format, `ManifestSlide.revealSteps`, presenter, and remote are all **unchanged**: emphasis steps share the slide step space, are resolved by the parser, and surface through the same manifest field.
 
 ### Styling
 
@@ -168,11 +207,12 @@ all build, preview, present, PDF, and lint workspaces write the same rendered
 deck CSS, static markup and its defaults cannot diverge when a deck replaces
 the built-in theme with its own `css/`.
 
-The present shell injects only the stepped `[data-emphasis-active]` appearance
-and dimming rules. It also retains the shared `.code-line` layout rule because
-a stepped-only deck has no static-emphasis block to prepend. Both embedded
-blocks supply only `--peitho-emphasis-*` fallbacks; author/theme CSS remains
-last and can override the defaults.
+Shared `stepState.ts` injects only the stepped `[data-emphasis-active]`
+appearance and dimming rules on step-aware surfaces. It also retains the
+shared `.code-line` layout rule because a stepped-only deck has no
+static-emphasis block to prepend. Both embedded blocks supply only
+`--peitho-emphasis-*` fallbacks; author/theme CSS remains last and can override
+the defaults.
 
 ## Errors (all line-numbered, with help)
 
@@ -183,6 +223,12 @@ last and can override the defaults.
 | Malformed spec (`{2-}`, `{a}`, unclosed `{`) | Parse failure must be loud |
 | Pandoc-style attribute block (`{.rust}`, `{=html}`) | Help names the case and points at the bare-language form, so the author is not sent hunting for a line-number bug |
 | Empty spec `{}` or empty group (`{2||4}`, `{2,,4}`) | Ambiguous intent |
+| Missing, non-numeric, signed, oversized, or zero `@N`, or more than one `@` in a group | An explicit group must name exactly one unsigned positive ASCII-decimal step |
+| `@N` on a static spec | Explicit steps are meaningful only for stepped emphasis; write `{|2-4@2}` |
+| Implicit and explicit stepped groups mixed within a block or across a slide | A slide must use one numbering mode |
+| The same explicit step repeated within one block | Merge the line entries into one group, e.g. `{|2,5@1}`; the same step across different blocks remains valid |
+| A gap in the slide-wide explicit step set | Navigation must cover every position from 1 through the maximum |
+| Explicit stepped emphasis and `::: {reveal}` anywhere on one slide | Explicit numbering owns the complete slide step sequence |
 | Stepped emphasis on a code block inside `::: {reveal}` | See below |
 | Emphasis on a `code_images` block (`mermaid`, `math`, declared external renderers) | The block becomes an image/math node; line emphasis has no meaning |
 
@@ -190,7 +236,13 @@ Existing behavior that must not regress: an unknown language tag is already a bu
 
 ### Rejected combinations
 
-**Stepped emphasis inside `::: {reveal}`** is an error. The reveal span model is flat (`RevealSpan { start, len }`), and "the code block appears at step 5, then emphasis moves within it at steps 6–8" is a nested step space that representation cannot express. Rather than invent nesting, this is rejected with a line-numbered error suggesting the two supported alternatives: keep the block in the reveal group with static emphasis, or move it out of the group and use stepped emphasis.
+**Stepped emphasis inside `::: {reveal}`** is an error. “The code block
+appears at step 5, then emphasis moves within it at steps 6–8” would create a
+nested step space, while peitho has one flat slide sequence. Rather than invent
+nesting, this is rejected with a line-numbered error suggesting the two
+supported alternatives: keep the block in the reveal group with static
+emphasis, or move it out of the group and use stepped emphasis. Explicit
+`@N` emphasis is stricter: its slide cannot contain a reveal group anywhere.
 
 **Static emphasis inside `::: {reveal}`** is fine and needs no special handling: the block appears at its reveal step with its emphasis already applied.
 
@@ -209,32 +261,33 @@ Recorded here so that a future "emphasis pointed at the wrong line" report is re
 | Output | Static emphasis | Stepped emphasis |
 | --- | --- | --- |
 | `peitho present` | shown | steps through |
-| `peitho preview` | shown | final state = no emphasis |
-| PDF export | shown | no emphasis |
-| `dist/` (publish) | shown | no emphasis |
+| `peitho preview` | shown | steps through on the stage; inactive in thumbnails/grid |
+| PDF export | shown | inactive by default; exact step pages with `public_reveal: steps` |
+| `dist/` (publish) | shown | inactive by default; steps through with `public_reveal: steps` |
 | lint | shown | no emphasis |
 
-This split follows from what the two notations mean. Static emphasis says "these lines are the important ones" — a property of the content, which belongs in distributed artifacts. Stepped emphasis is a pointer that tracks the speaker's narration; freezing an arbitrary moment of it into a PDF would communicate something the author never asserted.
+This split follows from what the two notations mean. Static emphasis says "these lines are the important ones" — a property of the content, which belongs in distributed artifacts. Stepped emphasis is a pointer that tracks the speaker's narration; default/final output does not freeze an arbitrary moment, while `public_reveal: steps` deliberately emits or walks every exact state.
 
 Static-emphasis markup and its conditional embedded CSS travel together in
 `RenderedDeck::css()` through every output writer. Stepped emphasis is stamped
-as `data-emphasis-step` and only the present shell acts on it, so every other
-output shows no stepped emphasis **by construction** — the same structure that
-already gives reveal its PDF/preview behavior.
+as `data-emphasis-step`; shared `stepState.ts` applies equality matching in
+present, preview, stepped distribution, and steps-mode PDF expansion. Other
+surfaces leave it inactive.
 
 ## Test plan
 
 - **Parser**: valid specs (static / stepped / multi-item / untagged / with-language); every error row above, asserting line number and help text; unknown-language regression; `{.rust}` produces the Pandoc-specific help rather than a generic parse failure; an emphasis spec on a `mermaid`/`math`/external-renderer block is rejected at parse time (asserted before any transform runs, pinning the ordering the architecture depends on).
-- **Step counting**: stepped emphasis contributes `groups.len()`; static contributes `0`; a code block inside `::: {reveal}` with static emphasis still contributes `1`; `manifest.json` `revealSteps` reflects the total.
-- **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped step values match the counted span; a line in overlapping groups carries every step token (`data-emphasis-step="1 2"`).
+- **Step counting**: implicit stepped emphasis contributes one consecutive step per group; explicit A→B→A blocks use their authored absolute steps and set `revealSteps` to the maximum; static contributes `0`; a code block inside `::: {reveal}` with static emphasis still contributes `1`.
+- **Slide validation**: cover mixed numbering modes, reveal coexistence, gaps, cross-block shared steps, in-block duplicates, and groups authored out of step order, always asserting line number and help.
+- **Render**: line-wrapping preserves syntect's `hl-*` classes and produces well-formed nesting across line boundaries (multi-line string literals and block comments are the adversarial cases, since they leave scopes open at end of line); no emphasis spec → byte-identical output to today; stamped values are the groups' absolute steps and stepped-emphasis `<pre>` elements have no `data-reveal-step`; a line in overlapping groups carries every step token (`data-emphasis-step="1 2"`).
 - **Shell (vitest)**: `data-emphasis-active` follows the current step exactly (not cumulatively); emphasis clears when stepping past the last group; a multi-token marker is active at each listed step only; the injected shell CSS retains stepped rules and line layout but no static selector; listeners torn down per test.
-- **E2E (browser, required)**: emphasis is visible and moves with arrow keys in `peitho present`; PDF export of a stepped deck contains no emphasis while a static deck does. Per CLAUDE.md, jsdom cannot confirm the visual result.
+- **E2E (browser, required)**: explicit A→B→A emphasis moves in authored step order; default/final output leaves the pointer inactive, while `public_reveal: steps` walks or emits each exact state. Per CLAUDE.md, jsdom cannot confirm the visual result.
 - **Example deck**: extend `examples/` with a walked-through code block so the feature is covered by the demo site build.
 
 ## Resolved styling decision (2026-08-01)
 
 Emphasis uses **both** a background tint on emphasized lines and dimming of the rest. Dimming is scoped by `:has()` so it applies only while some line in that block is emphasized — a block whose stepped emphasis has not yet started, or has been stepped past, renders as ordinary undimmed code. Untagged blocks get identical styling; the only difference is the absence of `hl-*` spans inside the line.
 
-Default colors and opacity live in the renderer's embedded static CSS and the
-present shell's stepped CSS. Both use `--peitho-emphasis-*` fallbacks, so
+Default colors and opacity live in the renderer's embedded static CSS and
+shared `stepState.ts` stepped CSS. Both use `--peitho-emphasis-*` fallbacks, so
 author/theme CSS can change the appearance without touching the build.

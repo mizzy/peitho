@@ -1,6 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
+    num::NonZeroUsize,
     ops::Range,
     path::PathBuf,
 };
@@ -2288,6 +2289,103 @@ fn close_container(
     Ok(Some((open.start, fragment)))
 }
 
+struct SteppedEmphasisBlock {
+    line: usize,
+    explicit_steps: Option<Vec<NonZeroUsize>>,
+}
+
+impl SteppedEmphasisBlock {
+    fn step_kind(&self) -> &'static str {
+        if self.explicit_steps.is_some() {
+            "explicit `@N`"
+        } else {
+            "implicit"
+        }
+    }
+}
+
+fn slide_step_count(
+    next_reveal_step: usize,
+    emphasis_blocks: &[SteppedEmphasisBlock],
+    reveal_fence_line: Option<usize>,
+) -> Result<usize> {
+    let Some(first_block) = emphasis_blocks.first() else {
+        return Ok(next_reveal_step - 1);
+    };
+
+    if let Some(conflicting) = emphasis_blocks
+        .iter()
+        .find(|block| block.explicit_steps.is_some() != first_block.explicit_steps.is_some())
+    {
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(conflicting.line),
+            "a slide cannot mix implicit and explicit emphasis steps",
+            format!(
+                "line {} uses {} steps while line {} uses {} steps; add `@N` to every stepped group on this slide, or remove every `@N`",
+                first_block.line,
+                first_block.step_kind(),
+                conflicting.line,
+                conflicting.step_kind(),
+            ),
+        ));
+    }
+
+    if first_block.explicit_steps.is_none() {
+        return Ok(next_reveal_step - 1);
+    }
+
+    let first_explicit_line = first_block.line;
+    if let Some(reveal_line) = reveal_fence_line {
+        let error_line = first_explicit_line.max(reveal_line);
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(error_line),
+            format!(
+                "explicit stepped line emphasis on line {first_explicit_line} cannot share a slide with the reveal fence on line {reveal_line}"
+            ),
+            format!(
+                "remove the `@N` emphasis from line {first_explicit_line}, or remove the `::: {{reveal}}` group opened on line {reveal_line}"
+            ),
+        ));
+    }
+
+    let steps = emphasis_blocks
+        .iter()
+        .filter_map(|block| block.explicit_steps.as_deref())
+        .flatten()
+        .map(|step| step.get())
+        .collect::<BTreeSet<_>>();
+    let max_step = steps
+        .last()
+        .copied()
+        .expect("explicit emphasis blocks always contain at least one step");
+    if let Some(missing_step) = (1..=max_step).find(|step| !steps.contains(step)) {
+        // `max_step` came from these blocks and exceeds `missing_step`, so the
+        // first matching block is precisely the source location that jumped
+        // past the gap.
+        let jumping_block = emphasis_blocks
+            .iter()
+            .find(|block| {
+                block
+                    .explicit_steps
+                    .as_ref()
+                    .is_some_and(|steps| steps.iter().any(|step| step.get() > missing_step))
+            })
+            .expect("the block containing the maximum step always exceeds a missing step");
+        return Err(BuildError::new(
+            ErrorKind::Parse,
+            Some(jumping_block.line),
+            format!("explicit emphasis steps are missing step {missing_step}"),
+            format!(
+                "step {missing_step} is missing before the slide's maximum step {max_step}; change a group to `@{missing_step}` or add one"
+            ),
+        ));
+    }
+
+    Ok(max_step)
+}
+
 fn parse_slide(
     source: &str,
     range: SourceSpan,
@@ -2297,6 +2395,12 @@ fn parse_slide(
 ) -> Result<PendingSlide> {
     let slice = &source[range.start..range.end];
     let markers = scan_div_markers(slice, range.start, source)?;
+    let reveal_fence_line = markers
+        .iter()
+        .filter_map(|(line, marker)| {
+            matches!(marker, DivMarker::Open(DivOpen::Reveal)).then_some(*line)
+        })
+        .min();
     let mut explicit_key: Option<(SlideKey, usize)> = None;
     let mut layout_request: Option<LayoutRequest> = None;
     let mut section_marker: Option<PageSectionMarker> = None;
@@ -2307,6 +2411,7 @@ fn parse_slide(
     let mut settings_span: Option<SourceSpan> = None;
     let mut fragments = Vec::new();
     let mut next_reveal_step = 1usize;
+    let mut stepped_emphasis_blocks = Vec::new();
     // Stack of open fenced divs. Each frame owns the children collected so far
     // for that group; the top of stack is the current push target.
     let mut div_stack: Vec<(usize, DivOpen, Vec<SourceFragment>)> = Vec::new();
@@ -2938,37 +3043,61 @@ fn parse_slide(
                     };
                     let fragment = match emphasis {
                         Some(emphasis) => {
-                            if emphasis.stepped() {
-                                // Stepped emphasis owns steps of its own. Inside
-                                // a reveal group that would nest two step
-                                // spaces ("the block appears at step 5, then
-                                // emphasis moves at 6-8"), which the flat
-                                // `RevealSpan { start, len }` cannot express —
-                                // so reject it rather than invent nesting.
-                                if div_stack
+                            let stepped_block = match emphasis.steps() {
+                                emphasis::UnresolvedStepsRef::Static => None,
+                                emphasis::UnresolvedStepsRef::Implicit => {
+                                    Some(SteppedEmphasisBlock {
+                                        line: code_line,
+                                        explicit_steps: None,
+                                    })
+                                }
+                                emphasis::UnresolvedStepsRef::Explicit(steps) => {
+                                    Some(SteppedEmphasisBlock {
+                                        line: code_line,
+                                        explicit_steps: Some(steps.to_vec()),
+                                    })
+                                }
+                            };
+                            if let Some(block) = stepped_block {
+                                // A revealed code block appears at one step,
+                                // while stepped emphasis changes its state at
+                                // other steps. Peitho has one flat slide step
+                                // space, so reject that nesting.
+                                if let Some((reveal_line, _, _)) = div_stack
                                     .iter()
-                                    .any(|(_, open, _)| matches!(open, DivOpen::Reveal))
+                                    .rev()
+                                    .find(|(_, open, _)| matches!(open, DivOpen::Reveal))
                                 {
                                     return Err(slide_err(BuildError::new(
                                         ErrorKind::Parse,
                                         Some(code_line),
-                                        "stepped line emphasis cannot be inside a reveal group",
-                                        "use static emphasis (no `|`) here, or move the code block outside the `::: {reveal}` group",
+                                        format!(
+                                            "stepped line emphasis on line {code_line} cannot be inside the reveal group opened on line {reveal_line}"
+                                        ),
+                                        format!(
+                                            "use static emphasis (no `|`) on line {code_line}, or move that code block outside the `::: {{reveal}}` group opened on line {reveal_line}"
+                                        ),
                                     )));
                                 }
-                                // Outside a group the block is always visible;
-                                // the span exists only to place its emphasis
-                                // groups in the slide's shared step space.
-                                let len = emphasis.groups().len();
-                                let span = RevealSpan {
-                                    start: next_reveal_step,
-                                    len,
-                                };
-                                next_reveal_step += len;
-                                fragment.with_emphasis(emphasis).with_reveal_span(span)
-                            } else {
-                                fragment.with_emphasis(emphasis)
+
+                                stepped_emphasis_blocks.push(block);
                             }
+                            let emphasis = emphasis
+                                .resolve(|group_count| {
+                                    let first = NonZeroUsize::new(next_reveal_step)?;
+                                    let following = next_reveal_step.checked_add(group_count)?;
+                                    next_reveal_step = following;
+                                    Some(first)
+                                })
+                                .ok_or_else(|| {
+                                    slide_err(BuildError::new(
+                                        ErrorKind::Parse,
+                                        Some(code_line),
+                                        "slide has too many emphasis steps",
+                                        "reduce the number of implicit stepped-emphasis groups on this slide",
+                                    ))
+                                })?;
+                            fragment.with_emphasis(emphasis)
                         }
                         None => fragment,
                     };
@@ -3145,6 +3274,13 @@ fn parse_slide(
         ));
     }
 
+    let step_count = slide_step_count(
+        next_reveal_step,
+        &stepped_emphasis_blocks,
+        reveal_fence_line,
+    )
+    .map_err(|err| attach_slide_context(err, index, explicit_key.as_ref(), &fragments))?;
+
     let step_for_footnote_line = footnote_reveal_step_resolver(&fragments);
     if let Some(fragment) = footnotes
         .into_fragment(step_for_footnote_line)
@@ -3178,7 +3314,7 @@ fn parse_slide(
             layout_request,
             fragments,
             skip: skip_flag.unwrap_or(false),
-            step_count: next_reveal_step - 1,
+            step_count,
             page_number_hidden: page_number_hidden_flag
                 .as_ref()
                 .map(|flag| flag.enabled)
@@ -8291,8 +8427,8 @@ After list
         let fragment = code_fragment(&deck);
         assert_eq!(fragment.language(), Some("rust"));
         let emphasis = fragment.emphasis().expect("emphasis rides the fragment");
-        assert!(!emphasis.stepped());
-        assert_eq!(emphasis.groups().len(), 1);
+        assert!(emphasis.is_static());
+        assert_eq!(emphasis.mark_for_line(1), emphasis::LineMark::Static);
     }
 
     #[test]
@@ -8509,6 +8645,15 @@ After list
             .iter()
             .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
             .expect("deck has a code fragment")
+    }
+
+    fn stepped_steps_at(emphasis: &emphasis::LineEmphasis, line: usize) -> Vec<usize> {
+        match emphasis.mark_for_line(line) {
+            emphasis::LineMark::Stepped(steps) => {
+                steps.into_iter().map(NonZeroUsize::get).collect()
+            }
+            other => panic!("expected stepped line mark, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10411,19 +10556,219 @@ After list
 
         let slide = &deck.parsed_slides()[0];
         assert_eq!(slide.step_count, 2);
-        let code_spans = slide
+        let code = slide
             .fragments
             .iter()
             .filter(|fragment| matches!(fragment.kind(), FragmentKind::Code))
-            .map(|fragment| fragment.reveal_span())
             .collect::<Vec<_>>();
+        assert_eq!(code[0].reveal_span(), None);
+        assert_eq!(code[1].reveal_span(), None);
+        assert_eq!(stepped_steps_at(code[0].emphasis().unwrap(), 1), vec![1]);
+        assert_eq!(stepped_steps_at(code[1].emphasis().unwrap(), 1), vec![2]);
+    }
+
+    #[test]
+    fn explicit_emphasis_steps_can_interleave_across_code_blocks() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {1-3@1|8@3}\na1\na2\na3\na4\na5\na6\na7\na8\n```\n\n```rust {|1-8@2}\nb1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 3);
+        let code = slide
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .collect::<Vec<_>>();
+        assert_eq!(code.len(), 2);
+        assert_eq!(code[0].reveal_span(), None);
+        assert_eq!(code[1].reveal_span(), None);
+        assert_eq!(stepped_steps_at(code[0].emphasis().unwrap(), 1), vec![1]);
+        assert_eq!(stepped_steps_at(code[0].emphasis().unwrap(), 8), vec![3]);
+        assert_eq!(stepped_steps_at(code[1].emphasis().unwrap(), 4), vec![2]);
+    }
+
+    #[test]
+    fn slide_cannot_mix_implicit_and_explicit_emphasis_steps() {
+        let err = parse_markdown(
+            "# T\n\n```rust {|1}\na\n```\n\n```rust {|1@2}\nb\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
         assert_eq!(
-            code_spans,
-            vec![
-                Some(RevealSpan { start: 1, len: 1 }),
-                Some(RevealSpan { start: 2, len: 1 }),
-            ]
+            err.message,
+            "a slide cannot mix implicit and explicit emphasis steps"
         );
+        assert!(err.help.contains("line 3"), "help: {}", err.help);
+        assert!(err.help.contains("@N"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn static_emphasis_may_share_a_slide_with_explicit_steps() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {1}\na\n```\n\n```rust {|1@1}\nb\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 1);
+        let code = slide
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .collect::<Vec<_>>();
+        assert_eq!(code.len(), 2);
+        assert_eq!(
+            code[0].emphasis().unwrap().mark_for_line(1),
+            emphasis::LineMark::Static
+        );
+    }
+
+    #[test]
+    fn explicit_emphasis_steps_cannot_share_a_slide_with_reveal() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\nShown later.\n\n:::\n\n```rust {|1@1}\na\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(9));
+        assert!(err.message.contains("explicit"), "message: {}", err.message);
+        assert!(err.message.contains("reveal"), "message: {}", err.message);
+        assert!(err.help.contains("line 3"), "help: {}", err.help);
+        assert!(err.help.contains("line 9"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn explicit_emphasis_steps_before_a_reveal_fence_report_the_fence_line() {
+        let err = parse_markdown(
+            "# T\n\n```rust {|1@1}\na\n```\n\n::: {reveal}\n\nLater.\n\n:::",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert!(err.help.contains("line 3"), "help: {}", err.help);
+        assert!(err.help.contains("line 7"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn explicit_emphasis_steps_must_not_have_gaps() {
+        let err = parse_markdown(
+            "# T\n\n```rust {|1@1}\na\n```\n\n```rust {|1@3}\nb\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(7));
+        assert_eq!(err.message, "explicit emphasis steps are missing step 2");
+        assert!(err.help.contains("step 2"), "help: {}", err.help);
+        assert!(err.help.contains("maximum step 3"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn emphasis_numbers_reject_a_leading_plus_sign() {
+        for (spec, message) in [
+            ("{+2}", "emphasis spec expects line numbers"),
+            ("{|1@+1}", "explicit emphasis step must be a number"),
+        ] {
+            let markdown = format!("# T\n\n```rust {spec}\na\nb\n```");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "spec {spec}");
+            assert_eq!(err.line, Some(3), "spec {spec}");
+            assert_eq!(err.message, message, "spec {spec}");
+            assert!(!err.help.is_empty(), "spec {spec}");
+        }
+    }
+
+    #[test]
+    fn oversized_emphasis_numbers_have_distinct_errors() {
+        for (spec, message) in [
+            (
+                "{99999999999999999999999}",
+                "emphasis line number is too large",
+            ),
+            (
+                "{|1@99999999999999999999999}",
+                "explicit emphasis step is too large",
+            ),
+        ] {
+            let markdown = format!("# T\n\n```rust {spec}\na\n```");
+            let err =
+                parse_markdown(&markdown, &crate::highlight::Highlighter::defaults()).unwrap_err();
+
+            assert_eq!(err.kind, ErrorKind::Parse, "spec {spec}");
+            assert_eq!(err.line, Some(3), "spec {spec}");
+            assert_eq!(err.message, message, "spec {spec}");
+            assert!(!err.help.is_empty(), "spec {spec}");
+        }
+    }
+
+    #[test]
+    fn explicit_emphasis_step_may_be_shared_across_code_blocks() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {|1@1}\na\n```\n\n```rust {1@1|2@2}\nb\nc\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 2);
+        let code = slide
+            .fragments
+            .iter()
+            .filter(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .collect::<Vec<_>>();
+        assert_eq!(stepped_steps_at(code[0].emphasis().unwrap(), 1), vec![1]);
+        assert_eq!(stepped_steps_at(code[1].emphasis().unwrap(), 1), vec![1]);
+        assert_eq!(stepped_steps_at(code[1].emphasis().unwrap(), 2), vec![2]);
+    }
+
+    #[test]
+    fn explicit_emphasis_groups_may_be_authored_out_of_step_order() {
+        let deck = parse_markdown(
+            "# T\n\n```rust {1@3|2@1|3@2}\na\nb\nc\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap();
+
+        let slide = &deck.parsed_slides()[0];
+        assert_eq!(slide.step_count, 3);
+        let code = slide
+            .fragments
+            .iter()
+            .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
+            .expect("deck has a code fragment");
+        let emphasis = code.emphasis().expect("code carries emphasis");
+        assert_eq!(stepped_steps_at(emphasis, 1), vec![3]);
+        assert_eq!(stepped_steps_at(emphasis, 2), vec![1]);
+        assert_eq!(stepped_steps_at(emphasis, 3), vec![2]);
+    }
+
+    #[test]
+    fn one_code_block_cannot_repeat_an_explicit_emphasis_step() {
+        let err = parse_markdown(
+            "# T\n\n```rust {1@1|2@1}\na\nb\n```",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(3));
+        assert_eq!(err.message, "explicit emphasis step 1 is repeated");
+        assert!(err.help.contains("merge"), "help: {}", err.help);
+        assert!(err.help.contains("{|2,5@1}"), "help: {}", err.help);
     }
 
     #[test]
@@ -10467,16 +10812,16 @@ After list
             .iter()
             .find(|fragment| matches!(fragment.kind(), FragmentKind::Code))
             .expect("deck has a code fragment");
-        let span = code.reveal_span().expect("stepped emphasis carries a span");
-        assert_eq!(span.start, 3);
-        assert_eq!(span.len, 2);
+        assert_eq!(code.reveal_span(), None);
+        let emphasis = code.emphasis().expect("code carries emphasis");
+        assert_eq!(stepped_steps_at(emphasis, 1), vec![3]);
+        assert_eq!(stepped_steps_at(emphasis, 2), vec![4]);
     }
 
     #[test]
     fn stepped_emphasis_inside_reveal_is_rejected() {
-        // The flat RevealSpan cannot express "the block appears at step N,
-        // then emphasis moves within it at N+1..", so this is an error rather
-        // than an invented nested step space.
+        // A block appearing at one step and changing emphasis at later steps
+        // would create a nested step space, so reject it.
         let err = parse_markdown(
             "# T\n\n::: {reveal}\n\n```rust {1|2}\nlet a = 1;\nlet b = 2;\n```\n\n:::",
             &crate::highlight::Highlighter::defaults(),
@@ -10487,7 +10832,7 @@ After list
         assert_eq!(err.line, Some(5));
         assert_eq!(
             err.message,
-            "stepped line emphasis cannot be inside a reveal group"
+            "stepped line emphasis on line 5 cannot be inside the reveal group opened on line 3"
         );
         // The help must name both supported alternatives.
         assert!(err.help.contains("static"), "help: {}", err.help);
@@ -10506,10 +10851,26 @@ After list
         assert_eq!(err.line, Some(5));
         assert_eq!(
             err.message,
-            "stepped line emphasis cannot be inside a reveal group"
+            "stepped line emphasis on line 5 cannot be inside the reveal group opened on line 3"
         );
         assert!(err.help.contains("static"), "help: {}", err.help);
         assert!(err.help.contains("outside"), "help: {}", err.help);
+    }
+
+    #[test]
+    fn explicit_emphasis_inside_reveal_names_both_source_lines() {
+        let err = parse_markdown(
+            "# T\n\n::: {reveal}\n\n```rust {|1@1}\nlet a = 1;\n```\n\n:::",
+            &crate::highlight::Highlighter::defaults(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Parse);
+        assert_eq!(err.line, Some(5));
+        assert!(err.message.contains("line 3"), "message: {}", err.message);
+        assert!(err.message.contains("line 5"), "message: {}", err.message);
+        assert!(err.help.contains("reveal"), "help: {}", err.help);
+        assert!(err.help.contains("emphasis"), "help: {}", err.help);
     }
 
     #[test]

@@ -39,6 +39,28 @@ fn handle(req: Request) -> Response {
 
 ---
 
+# Interleaving Two Blocks
+
+`@N` names an absolute slide step, so the pointer can return to an earlier
+block instead of being locked to source order.
+
+```rust {1@1|3@3} title="request.rs"
+let request = read_request()?;
+let config = load_config()?;
+dispatch(request, config)
+```
+
+```rust {|1-3@2} title="config.rs"
+let file = open_config()?;
+let parsed = parse(file)?;
+validate(parsed)
+```
+
+- Step 1 points at `request.rs`, step 2 at `config.rs`, and step 3 returns to
+  `request.rs`.
+
+---
+
 # Ranges and No Language Tag
 
 Within a group, `,` separates entries and `-` makes a range. The language tag
@@ -58,7 +80,8 @@ GET /api/decks/99     404   2ms
 
 # Sharing Steps With Reveal
 
-Emphasis steps are reveal steps, so `next` walks through both in source order.
+Static emphasis takes no step, so `next` walks only the revealed bullets while
+the code stays emphasized.
 
 ::: {reveal}
 

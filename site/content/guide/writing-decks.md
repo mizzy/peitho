@@ -347,12 +347,49 @@ A leading `|` makes a single group stepped, so `{|3}` consumes one step:
 ````
 
 The code is fully visible from the start either way — only the emphasis moves.
-Emphasis steps share the same step space as [incremental reveal](#incremental-reveal),
-so `next` walks through both in source order.
+Implicit emphasis steps share the same step space as
+[incremental reveal](#incremental-reveal), so `next` walks through both in
+source order.
 
-That is how to point at one line in each of two code blocks in turn: give
-each block a single stepped group (`{|1}`), and source order gives each block
-its own step.
+To interleave groups across code blocks, assign each group an absolute slide
+step with `@N`:
+
+````markdown
+```rust {1-3@1|8@3}
+a1
+a2
+a3
+a4
+a5
+a6
+a7
+a8
+```
+
+```rust {|1-8@2}
+b1
+b2
+b3
+b4
+b5
+b6
+b7
+b8
+```
+````
+
+This produces A lines 1-3 → B lines 1-8 → A line 8. On a slide that uses
+explicit steps, every stepped group must have `@N`; implicit and explicit
+stepped groups cannot be mixed, even across blocks. Explicit steps must cover
+every number from 1 through the largest step with no gap. Two different blocks
+may use the same step and emphasize together, but one block cannot repeat a
+step — merge those lines into one group, such as `{|2,5@1}`. Groups within a
+block may appear in any step order.
+
+An explicit single group still needs the leading `|`, for example
+`{|2-4@1}`. Without `|`, `{2-4@2}` is invalid because `{2-4}` is static
+emphasis. A slide using explicit emphasis steps cannot also contain a
+`::: {reveal}` group.
 
 Line numbers are 1-based and count every line of the block, including blank
 ones. Trailing empty lines at the end of the block are not counted. Within a
@@ -368,6 +405,7 @@ The language tag is optional — ` ```{2-4} ` works on an untagged block.
 | `{2-4}` (no `\|`) | none | everywhere, including PDF and published output |
 | `{\|3}` | one | `peitho present`, the `peitho preview` stage, distributions with `public_reveal: steps`, and PDFs with `public_reveal: steps` |
 | `{2-4\|6-8}` | one per group | `peitho present`, the `peitho preview` stage, distributions with `public_reveal: steps`, and PDFs with `public_reveal: steps` |
+| `{2-4@2\|6-8@1}` | the named absolute steps | the same stepped-emphasis surfaces |
 
 Static emphasis says "these lines are the important ones" — a property of the
 content, so it ships with the deck. Stepped emphasis is a pointer that follows
@@ -386,9 +424,12 @@ including when the deck has its own `css/`. Restyle it with the
 the `peitho preview` stage, distributions that set `public_reveal: steps`, and
 PDF exports that set `public_reveal: steps`.
 
-Line numbers past the end of the block, malformed specs, stepped emphasis
-inside a `::: {reveal}` group (which would nest two step spaces), and emphasis
-on a `code_images` block are all line-numbered build errors.
+Line numbers past the end of the block; malformed specs, including signed
+numbers such as `{+2}` or `{|1@+1}`; `@0`; `@N` on static emphasis; mixed
+implicit and explicit groups; repeated explicit steps within one block; gaps in
+a slide's explicit steps; explicit steps anywhere on a slide with
+`::: {reveal}`; stepped emphasis inside a reveal group; and emphasis on a
+`code_images` block are all line-numbered build errors.
 
 ## Code block titles
 
