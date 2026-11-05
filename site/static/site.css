@@ -6,12 +6,15 @@
   --rule: #000;
   --hair: #e3e3e1;
   --code-bg: #f7f7f5;
-  --code-muted: #57606a;
-  --code-keyword: #cf222e;
-  --code-string: #0a3069;
-  --code-accent: #8250df;
-  --code-tag: #116329;
-  --code-attention: #9a6700;
+  /* syntax colors mirror the hl-* rules of peitho's built-in themes/base.css */
+  --code-comment: #8a8578;
+  --code-string: #2f7d4f;
+  --code-keyword: #7141d8;
+  --code-constant: #b45309;
+  --code-function: #1d4ed8;
+  --code-type: #0f766e;
+  --terminal-error: #cf222e;
+  --terminal-help: #9a6700;
   --code-mark: #ededeb;
 }
 
@@ -458,35 +461,32 @@ pre code {
   user-select: none;
 }
 
-.z-comment,
-.z-brackethighlighter,
-.z-punctuation {
-  color: var(--code-muted);
+/* Same selectors and order as themes/base.css (later rules win, so
+   storage.type is a type, as on a slide); giallo's z-* classes are the
+   same TextMate scope atoms as syntect's hl-* classes. */
+.z-comment {
+  color: var(--code-comment);
 }
 
-.z-keyword,
-.z-storage,
-.z-invalid,
-.z-message.z-error {
-  color: var(--code-keyword);
-}
-
-.z-string,
-.z-punctuation.z-definition.z-string {
+.z-string {
   color: var(--code-string);
 }
 
-.z-constant,
-.z-support,
-.z-entity,
-.z-entity.z-name,
-.z-variable,
-.z-meta {
-  color: var(--code-accent);
+.z-keyword,
+.z-storage {
+  color: var(--code-keyword);
 }
 
-.z-entity.z-name.z-tag {
-  color: var(--code-tag);
+.z-constant {
+  color: var(--code-constant);
+}
+
+.z-function {
+  color: var(--code-function);
+}
+
+.z-type {
+  color: var(--code-type);
 }
 
 /* peitho's own diagnostic labels: bold red error, bold yellow help (SGR 1;31 / 1;33) */
@@ -496,11 +496,11 @@ pre code {
 }
 
 .terminal-error {
-  color: var(--code-keyword);
+  color: var(--terminal-error);
 }
 
 .terminal-help {
-  color: var(--code-attention);
+  color: var(--terminal-help);
 }
 
 .z-markup.z-heading,
