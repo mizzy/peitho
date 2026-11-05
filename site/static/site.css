@@ -565,6 +565,50 @@ hr {
   }
 }
 
+.panels {
+  margin: 28px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--hair);
+  background: var(--code-bg);
+}
+
+.panel-label {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 0.95rem;
+}
+
+.panel pre {
+  flex: 1;
+  margin: 0;
+  border: 0;
+}
+
+.panel img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  object-fit: contain;
+  background: #fff;
+}
+
+@media (max-width: 700px) {
+  .panels {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 700px) {
   .shots {
     grid-template-columns: minmax(0, 1fr);
