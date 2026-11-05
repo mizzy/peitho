@@ -95,17 +95,18 @@
         <ol class="panels" role="list">
           {% for panel in landing_section.panels %}
             {% for key, value in panel %}
-              {% if key != "label" and key != "code" and key != "deck_shot" and key != "alt" %}
+              {% if key != "label" and key != "markdown" and key != "deck_shot" and key != "alt" %}
                 {{ throw_unknown_landing_panel_key }}
               {% endif %}
             {% endfor %}
 
             <li class="panel">
               <span class="panel-label">{{ panel.label }}</span>
-              {% if panel.code and panel.deck_shot %}
-                {{ throw_landing_panel_has_both_code_and_deck_shot }}
-              {% elif panel.code %}
-                <pre><code>{{ panel.code }}</code></pre>
+              {% if panel.markdown and panel.deck_shot %}
+                {{ throw_landing_panel_has_both_markdown_and_deck_shot }}
+              {% elif panel.markdown %}
+                {# rendered as Markdown so fenced code gets the site's syntax highlighting #}
+                {{ panel.markdown | markdown | safe }}
               {% elif panel.deck_shot %}
                 {% if not panel.alt %}
                   {{ throw_landing_panel_deck_shot_without_alt }}

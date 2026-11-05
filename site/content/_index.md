@@ -26,14 +26,17 @@ title = "From contract to slide"
 
 [[extra.sections.panels]]
 label = "layouts/title-body-code.html"
-code = '''
+markdown = '''
+```html
 <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
 <slot name="body" accepts="blocks" arity="0..*"></slot>
-<slot name="code" accepts="code" arity="0..1"></slot>'''
+<slot name="code" accepts="code" arity="0..1"></slot>
+```'''
 
 [[extra.sections.panels]]
 label = "deck.md"
-code = '''
+markdown = '''
+````markdown
 # Peitho Architecture
 
 Markdown is the source of truth, while HTML and CSS own layout.
@@ -44,13 +47,16 @@ enum Phase { Parsed, Mapped, Checked, Rendered }
 
 ```rust
 fn render(deck: Deck<Checked>) -> Deck<Rendered>
-```'''
+```
+````'''
 
 [[extra.sections.panels]]
 label = "peitho build"
-code = '''
+markdown = '''
+```
 error: slide 1 ('peitho-architecture'), line 5: slot 'code' got 2 item(s), but layout 'title-body-code' allows 0..1
- help: use a layout with more code capacity or remove one code block'''
+ help: use a layout with more code capacity or remove one code block
+```'''
 
 [[extra.sections.panels]]
 label = "After removing one code block"
