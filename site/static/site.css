@@ -6,10 +6,11 @@
   --rule: #000;
   --hair: #e3e3e1;
   --code-bg: #f7f7f5;
-  --code-muted: #666;
-  --code-keyword: #3f4854;
-  --code-string: #5f5a46;
-  --code-accent: #4f5d75;
+  --code-muted: #57606a;
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-accent: #8250df;
+  --code-tag: #116329;
   --code-mark: #ededeb;
 }
 
@@ -481,6 +482,10 @@ pre code {
 .z-variable,
 .z-meta {
   color: var(--code-accent);
+}
+
+.z-entity.z-name.z-tag {
+  color: var(--code-tag);
 }
 
 .z-markup.z-heading,
