@@ -11,7 +11,7 @@ title = "Write with AI, fix from diagnostics"
 
 [[extra.sections.rows]]
 title = "Contracts to write against"
-meta = "Every layout declares what each slot accepts and how many items it takes. Give an AI the layouts and it knows what a slide may contain before it writes one."
+meta = "Every layout declares what each slot accepts and how many items it takes. Give an AI the layouts and it knows what a slide may contain before it writes one. Layouts are plain HTML and CSS files that diff and review like code."
 
 [[extra.sections.rows]]
 title = "Diagnostics to fix from"
@@ -75,21 +75,6 @@ meta = "Content that overflows the slide, and text below 24pt unless the layout 
 [[extra.sections.rows]]
 title = "peitho preview: your eyes"
 meta = "Whether the slides say the right thing. Edits made in preview are written back to the Markdown."
-
-[[extra.sections]]
-title = "Pillars"
-
-[[extra.sections.rows]]
-title = "Separation of content and design"
-meta = "Markdown owns the content; HTML and CSS own the layout and theme. Neither leaks into the other."
-
-[[extra.sections.rows]]
-title = "Version-controllable HTML/CSS layouts"
-meta = "Layouts and CSS are normal files that diff and review cleanly. The layout itself is the schema (<slot name accepts arity>)."
-
-[[extra.sections.rows]]
-title = "Type-checked slot contracts"
-meta = "Slot excess and deficiency, type mismatches, broken references, and unassigned content are all build errors with line numbers and help."
 
 [[extra.sections]]
 title = "Install"
