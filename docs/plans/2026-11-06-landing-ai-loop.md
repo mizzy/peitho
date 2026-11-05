@@ -27,7 +27,7 @@ diagnostics drive its fixes. Three gaps, all from outside feedback on the site:
 - `site/templates/index.html`: a `panels` section shape. Each panel has a
   `label` plus exactly one of `code` or `deck_shot` (+ `alt`); unknown keys and
   both/neither are build failures, like the other shapes.
-- `site/static/site.css`: `.panels` grid, one column below 700px.
+- `site/static/site.css`: `.panels` as one column (the landing column is too narrow for two code panels side by side), with wrapping code so the error line is never clipped.
 
 ## Verification
 

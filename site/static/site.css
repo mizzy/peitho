@@ -570,7 +570,7 @@ hr {
   padding: 0;
   list-style: none;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
 }
 
@@ -589,9 +589,10 @@ hr {
 }
 
 .panel pre {
-  flex: 1;
   margin: 0;
   border: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .panel img {
@@ -601,12 +602,6 @@ hr {
   height: auto;
   object-fit: contain;
   background: #fff;
-}
-
-@media (max-width: 700px) {
-  .panels {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 700px) {
