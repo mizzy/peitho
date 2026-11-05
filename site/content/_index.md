@@ -53,10 +53,8 @@ fn render(deck: Deck<Checked>) -> Deck<Rendered>
 [[extra.sections.panels]]
 label = "peitho build"
 markdown = '''
-```
-error: slide 1 ('peitho-architecture'), line 5: slot 'code' got 2 item(s), but layout 'title-body-code' allows 0..1
- help: use a layout with more code capacity or remove one code block
-```'''
+<pre class="terminal"><code><span class="terminal-error">error:</span> slide 1 ('peitho-architecture'), line 5: slot 'code' got 2 item(s), but layout 'title-body-code' allows 0..1
+ <span class="terminal-help">help:</span> use a layout with more code capacity or remove one code block</code></pre>'''
 
 [[extra.sections.panels]]
 label = "After removing one code block"

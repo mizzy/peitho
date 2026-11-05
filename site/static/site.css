@@ -11,6 +11,7 @@
   --code-string: #0a3069;
   --code-accent: #8250df;
   --code-tag: #116329;
+  --code-attention: #9a6700;
   --code-mark: #ededeb;
 }
 
@@ -486,6 +487,20 @@ pre code {
 
 .z-entity.z-name.z-tag {
   color: var(--code-tag);
+}
+
+/* peitho's own diagnostic labels: bold red error, bold yellow help (SGR 1;31 / 1;33) */
+.terminal-error,
+.terminal-help {
+  font-weight: 700;
+}
+
+.terminal-error {
+  color: var(--code-keyword);
+}
+
+.terminal-help {
+  color: var(--code-attention);
 }
 
 .z-markup.z-heading,

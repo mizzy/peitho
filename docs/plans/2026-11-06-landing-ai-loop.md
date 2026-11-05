@@ -25,7 +25,7 @@ diagnostics drive its fixes. Three gaps, all from outside feedback on the site:
   - New section "What each check catches" (rows): build = structure,
     lint = rendering, preview = the author's eyes.
 - `site/templates/index.html`: a `panels` section shape. Each panel has a
-  `label` plus exactly one of `markdown` (fenced code, rendered through the `markdown` filter so it gets the site's syntax highlighting) or `deck_shot` (+ `alt`); unknown keys and
+  `label` plus exactly one of `markdown` (fenced code, or a raw `<pre>` for terminal output colored like the CLI's `error:`/`help:` labels, rendered through the `markdown` filter so it gets the site's syntax highlighting) or `deck_shot` (+ `alt`); unknown keys and
   both/neither are build failures, like the other shapes.
 - `site/static/site.css`: `.panels` as one column (the landing column is too narrow for two code panels side by side), with wrapping code so the error line is never clipped.
 
