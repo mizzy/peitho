@@ -58,11 +58,20 @@
     </p>
     <section class="deck-source">
       <h2>Deck source</h2>
-      {# Rendered as a plain escaped code block, not via a Markdown fence: a
-         deck that itself contains a four-backtick fence (e.g. code-images'
-         before/after slide) would terminate any fixed-length wrapper fence
-         early and leak the rest of the deck into the page. #}
-      <pre><code>{{ deck_source }}</code></pre>
+      {# Wrapped in a tilde fence for syntax highlighting. Decks use backtick
+         fences (code-images even nests a four-backtick one), and a backtick
+         line can never close a tilde fence; the only deck text that could is
+         a run of 16+ tildes, which fails the build here instead of leaking
+         the rest of the deck into the page. #}
+      {% set deck_source_fence = "~~~~~~~~~~~~~~~~" %}
+      {% if deck_source is containing(deck_source_fence) %}
+        {{ throw_deck_source_contains_wrapper_fence }}
+      {% endif %}
+{% filter markdown %}
+{{ deck_source_fence }}markdown
+{{ deck_source | trim_end | safe }}
+{{ deck_source_fence }}
+{% endfilter %}
     </section>
   </article>
 {% endblock docs_content %}

@@ -18,7 +18,7 @@
 
   {% for landing_section in section.extra.sections %}
     {% for key, value in landing_section %}
-      {% if key != "title" and key != "code" and key != "rows" and key != "gallery_from" and key != "gallery_intro" and key != "shots" and key != "shots_intro" %}
+      {% if key != "title" and key != "code" and key != "rows" and key != "gallery_from" and key != "gallery_intro" and key != "shots" and key != "shots_intro" and key != "panels" %}
         {{ throw_unknown_landing_section_key }}
       {% endif %}
     {% endfor %}
@@ -31,6 +31,7 @@
       {% if landing_section.rows %}{% set_global shape_flags = shape_flags | concat(with="rows") %}{% endif %}
       {% if landing_section.gallery_from %}{% set_global shape_flags = shape_flags | concat(with="gallery_from") %}{% endif %}
       {% if landing_section.shots %}{% set_global shape_flags = shape_flags | concat(with="shots") %}{% endif %}
+      {% if landing_section.panels %}{% set_global shape_flags = shape_flags | concat(with="panels") %}{% endif %}
       {% if shape_flags | length > 1 %}
         {{ throw_landing_section_has_multiple_shapes }}
       {% endif %}
@@ -90,6 +91,33 @@
             </li>
           {% endfor %}
         </ul>
+      {% elif landing_section.panels %}
+        <ol class="panels" role="list">
+          {% for panel in landing_section.panels %}
+            {% for key, value in panel %}
+              {% if key != "label" and key != "markdown" and key != "deck_shot" and key != "alt" %}
+                {{ throw_unknown_landing_panel_key }}
+              {% endif %}
+            {% endfor %}
+
+            <li class="panel">
+              <span class="panel-label">{{ panel.label }}</span>
+              {% if panel.markdown and panel.deck_shot %}
+                {{ throw_landing_panel_has_both_markdown_and_deck_shot }}
+              {% elif panel.markdown %}
+                {# rendered as Markdown so fenced code gets the site's syntax highlighting #}
+                {{ panel.markdown | markdown | safe }}
+              {% elif panel.deck_shot %}
+                {% if not panel.alt %}
+                  {{ throw_landing_panel_deck_shot_without_alt }}
+                {% endif %}
+                <img src="/deck-shots/{{ panel.deck_shot }}.png" alt="{{ panel.alt }}" loading="lazy">
+              {% else %}
+                {{ throw_landing_panel_has_no_content }}
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ol>
       {% elif landing_section.gallery_from %}
         {% if landing_section.gallery_from != "examples" %}
           {# the only known gallery source; a hand-written tile list is deliberately not expressible #}
