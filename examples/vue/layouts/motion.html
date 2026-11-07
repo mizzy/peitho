@@ -1,0 +1,49 @@
+<section class="motion">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="items" data-vue-source><slot name="body" accepts="blocks" arity="1"></slot></div>
+  <div class="app"></div>
+  <script type="module">
+    // @vueuse/motion imports a bare "vue". An import map points it at the same
+    // Vue URL this layout imports, so the plugin and the app share one Vue.
+    const VUE = "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
+    const { createApp } = await import(VUE);
+    if (!window.vueImportMapInstalled) {
+      window.vueImportMapInstalled = true;
+      const map = document.createElement("script");
+      map.type = "importmap";
+      map.textContent = JSON.stringify({ imports: { vue: VUE } });
+      document.head.append(map);
+    }
+    const { MotionPlugin } = await import("https://esm.sh/@vueuse/motion@3.0.3?external=vue");
+
+    if (!window.vueMotionInstalled) {
+      window.vueMotionInstalled = true;
+      const mount = ({ root }) => {
+        const source = root.querySelector(".motion .items");
+        const target = root.querySelector(".motion .app");
+        if (!source || !target || source.dataset.mounted) return;
+        source.dataset.mounted = "true";
+        const items = [...source.querySelectorAll("li")].map((li) => li.textContent.trim());
+        createApp({
+          setup: () => ({ items }),
+          // `visible` replays the spring every time the slide comes into view.
+          template: `
+            <div
+              v-for="(item, i) in items"
+              :key="item"
+              class="card"
+              v-motion
+              :initial="{ opacity: 0, y: 110, rotate: i % 2 ? 16 : -16 }"
+              :visible="{ opacity: 1, y: 0, rotate: 0,
+                          transition: { type: 'spring', stiffness: 220, damping: 12, delay: 150 + i * 140 } }"
+            >{{ item }}</div>
+          `,
+        })
+          .use(MotionPlugin)
+          .mount(target);
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

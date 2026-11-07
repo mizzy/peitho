@@ -1,0 +1,57 @@
+<section class="poll">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="options" data-vue-source><slot name="body" accepts="blocks" arity="1"></slot></div>
+  <div class="app"></div>
+  <script type="module">
+    // A module script runs after every slide has mounted, so draining
+    // __peithoShadowRoots is enough; the listener covers slides mounted later.
+    import { createApp, reactive, computed, nextTick } from "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
+
+    if (!window.vuePollInstalled) {
+      window.vuePollInstalled = true;
+      const mount = ({ root }) => {
+        const source = root.querySelector(".poll .options");
+        const target = root.querySelector(".poll .app");
+        if (!source || !target || source.dataset.mounted) return;
+        source.dataset.mounted = "true";
+        // While the ranking re-sorts, the rows are mid-transform and a quick
+        // second click can land on the bare list between them, which peitho
+        // would treat as "next slide". Keep every click inside the poll here.
+        target.addEventListener("click", (event) => event.stopPropagation());
+        const labels = [...source.querySelectorAll("li")].map((li) => li.textContent.trim());
+        createApp({
+          setup() {
+            const options = reactive(labels.map((label) => ({ label, votes: 0 })));
+            const total = computed(() => options.reduce((sum, o) => sum + o.votes, 0));
+            // Stable sort: ties keep the Markdown order.
+            const ranked = computed(() => [...options].sort((a, b) => b.votes - a.votes));
+            const share = (o) => (total.value ? (o.votes / total.value) * 100 : 0);
+            // Re-sorting moves the row in the DOM, which drops its focus; a
+            // second Space would then go to the deck and change slides.
+            const vote = (o, event) => {
+              o.votes++;
+              const button = event.currentTarget;
+              nextTick(() => button.focus({ preventScroll: true }));
+            };
+            return { ranked, total, share, vote };
+          },
+          template: `
+            <TransitionGroup name="rank" tag="ol">
+              <li v-for="(o, i) in ranked" :key="o.label">
+                <button type="button" :class="{ leading: total > 0 && i === 0 }" @click="vote(o, $event)">
+                  <span class="bar" :style="{ width: share(o) + '%' }"></span>
+                  <span class="rank">#{{ i + 1 }}</span>
+                  <span class="label">{{ o.label }}</span>
+                  <Transition name="pop"><span class="count" :key="o.votes">{{ o.votes }}</span></Transition>
+                </button>
+              </li>
+            </TransitionGroup>
+            <p class="total">{{ total }} vote{{ total === 1 ? "" : "s" }} · ranked by <code>computed()</code></p>
+          `,
+        }).mount(target);
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

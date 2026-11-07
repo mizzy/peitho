@@ -1,0 +1,53 @@
+<section class="marker">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="body"><slot name="body" accepts="blocks" arity="1..*"></slot></div>
+  <script type="module">
+    // Every **strong** word gets a hand-drawn mark when its reveal step shows
+    // it, and loses it when stepping back. peitho toggles data-reveal-hidden;
+    // this script only watches its own slide.
+    import { annotate } from "https://cdn.jsdelivr.net/npm/rough-notation@0.5.1/lib/rough-notation.esm.js";
+
+    if (!window.vueMarkerInstalled) {
+      window.vueMarkerInstalled = true;
+      const styles = [
+        { type: "underline", color: "#42b883", strokeWidth: 4 },
+        { type: "circle", color: "#f59e0b", strokeWidth: 4, padding: 10 },
+        { type: "highlight", color: "rgba(66, 184, 131, 0.35)" },
+        { type: "box", color: "#a78bfa", strokeWidth: 4, padding: 6 },
+      ];
+      // ponytail: rough-notation measures in screen pixels, but peitho scales the
+      // slide with a CSS transform. Its svg is 100px wide, so its measured width
+      // gives the scale; drop this once rough-notation handles transforms.
+      const unscaled = (annotation) => {
+        annotation.svgRect = (svg, rect) => {
+          const box = svg.getBoundingClientRect();
+          const k = box.width / 100 || 1;
+          return { x: (rect.left - box.left) / k, y: (rect.top - box.top) / k, w: rect.width / k, h: rect.height / k };
+        };
+        return annotation;
+      };
+      const mount = ({ root }) => {
+        const body = root.querySelector(".marker .body");
+        if (!body || body.dataset.mounted) return;
+        body.dataset.mounted = "true";
+        const marks = [...body.querySelectorAll("strong")].map((el, i) => ({
+          el,
+          annotation: unscaled(annotate(el, { ...styles[i % styles.length], animationDuration: 700 })),
+          shown: false,
+        }));
+        const sync = () => {
+          for (const mark of marks) {
+            const visible = !mark.el.closest("[data-reveal-hidden]");
+            if (visible === mark.shown) continue;
+            mark.shown = visible;
+            visible ? mark.annotation.show() : mark.annotation.hide();
+          }
+        };
+        new MutationObserver(sync).observe(body, { subtree: true, attributeFilter: ["data-reveal-hidden"] });
+        sync();
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

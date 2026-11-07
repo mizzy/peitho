@@ -1,0 +1,57 @@
+<section class="morph">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="steps" data-vue-source><slot name="code" accepts="code" arity="1..*"></slot></div>
+  <div class="app"></div>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shikijs/magic-move@4.5.0/dist/style.css">
+  <script type="module">
+    // Each code block in the Markdown is one step. Shiki Magic Move animates
+    // the tokens from one step to the next; Vue owns the step state and controls.
+    import { createApp, ref, watch, onMounted } from "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
+    import { createHighlighter } from "https://esm.sh/shiki@4.5.0";
+    import { createMagicMoveMachine, codeToKeyedTokens } from "https://esm.sh/@shikijs/magic-move@4.5.0/core";
+    import { MagicMoveRenderer } from "https://esm.sh/@shikijs/magic-move@4.5.0/renderer";
+
+    if (!window.vueMorphInstalled) {
+      window.vueMorphInstalled = true;
+      const theme = "vitesse-dark";
+      const highlighter = createHighlighter({ themes: [theme], langs: ["js"] });
+      const mount = ({ root }) => {
+        const source = root.querySelector(".morph .steps");
+        const target = root.querySelector(".morph .app");
+        if (!source || !target || source.dataset.started) return;
+        source.dataset.started = "true";
+        const steps = [...source.querySelectorAll("pre")].map((pre) => pre.textContent.replace(/\n$/, ""));
+        highlighter.then((hl) => {
+          source.dataset.mounted = "true";
+          createApp({
+            setup() {
+              const step = ref(0);
+              const code = ref();
+              onMounted(() => {
+                const renderer = new MagicMoveRenderer(code.value, { duration: 800, stagger: 0.3 });
+                const machine = createMagicMoveMachine((text) => codeToKeyedTokens(hl, text, { lang: "js", theme }));
+                renderer.replace(machine.commit(steps[0]).current);
+                watch(step, (i) => {
+                  const { current, previous } = machine.commit(steps[i]);
+                  renderer.replace(previous);
+                  renderer.render(current);
+                });
+              });
+              const next = () => (step.value = (step.value + 1) % steps.length);
+              return { steps, step, code, next };
+            },
+            template: `
+              <pre ref="code" class="shiki-magic-move-container"></pre>
+              <div class="controls">
+                <button type="button" @click="next">{{ step === steps.length - 1 ? "Start over" : "Next" }}</button>
+                <span v-for="(_, i) in steps" :key="i" class="dot" :class="{ active: i === step }"></span>
+              </div>
+            `,
+          }).mount(target);
+        });
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>
