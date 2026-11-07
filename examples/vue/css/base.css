@@ -91,12 +91,13 @@
   letter-spacing: -0.03em;
 }
 
+/* Solid color, not a background-clip: text gradient: Chrome does not paint a
+   transformed descendant through the clip, so the bouncing letters would be
+   invisible until they landed. */
 .cover .live h1 {
   min-height: 1.05em;
-  background: linear-gradient(90deg, var(--green), #a7f3d0);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--green);
+  text-shadow: 0 0 36px rgba(66, 184, 131, 0.45);
 }
 
 .cover .live h1 span {
@@ -426,12 +427,6 @@
 
 /* PDF export: print the cards at rest, before any spring could play. */
 @media print {
-  /* PDF export flattens gradients, which loses background-clip: text. */
-  .cover .live h1 {
-    background: none;
-    color: var(--green);
-  }
-
   .motion .card {
     opacity: 1 !important;
     transform: none !important;
@@ -455,8 +450,11 @@
   font: 400 32px/1.5 var(--font-mono);
 }
 
+/* Twoslash trims the trailing blank line, and its last `^?` popup is
+   absolutely positioned, so leave one line of room below the code. */
 .types .app pre {
   overflow: visible;
+  padding-bottom: 80px;
 }
 
 .types .app {
@@ -466,6 +464,14 @@
   --twoslash-underline-color: rgba(66, 184, 131, 0.7);
 }
 
+/* Hover popups carry full signatures and docs; keep them inside the slide. */
 .types .app .twoslash-popup-container {
+  width: max-content;
+  max-width: 880px;
   font-size: 32px;
+}
+
+.types .app .twoslash-popup-code,
+.types .app .twoslash-popup-docs {
+  white-space: pre-wrap;
 }
