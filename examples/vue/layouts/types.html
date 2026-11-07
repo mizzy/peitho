@@ -15,7 +15,13 @@
       window.vueTypesInstalled = true;
       const theme = "vitesse-dark";
       const highlighter = createHighlighter({ themes: [theme], langs: ["ts"] });
-      const twoslash = createTwoslashFromCDN({ compilerOptions: { lib: ["esnext", "dom"] } });
+      // Type acquisition fetches every .d.ts in the vue package, and the
+      // compiler-sfc and server-renderer entries drag in Babel, PostCSS,
+      // @types/node, and TypeScript itself: ~550 files and ~3 s of parsing
+      // for types `import ... from "vue"` never reaches. Skip those two.
+      const unused = /\/npm\/vue@[^/]+\/(compiler-sfc|server-renderer)\//;
+      const fetcher = (url, init) => unused.test(url) ? Promise.resolve(new Response("", { status: 404 })) : fetch(url, init);
+      const twoslash = createTwoslashFromCDN({ compilerOptions: { lib: ["esnext", "dom"] }, fetcher });
       const transformer = createTransformerFactory(twoslash.runSync)({ renderer: rendererRich() });
       const mount = ({ root }) => {
         const source = root.querySelector(".types .source");
