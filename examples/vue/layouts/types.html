@@ -1,0 +1,35 @@
+<section class="types">
+  <h1><slot name="title" accepts="inline" arity="1"></slot></h1>
+  <div class="source" data-vue-source><slot name="code" accepts="code" arity="1"></slot></div>
+  <div class="app"></div>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shikijs/twoslash@4.5.0/style-rich.css">
+  <script type="module">
+    // Twoslash runs the TypeScript compiler in the browser: `// ^?` queries in
+    // the Markdown code block become type popups, and every identifier shows
+    // its type on hover. Vue's types are fetched from the CDN on demand.
+    import { createHighlighter } from "https://esm.sh/shiki@4.5.0";
+    import { createTransformerFactory, rendererRich } from "https://esm.sh/@shikijs/twoslash@4.5.0/core?deps=typescript@6.0.3";
+    import { createTwoslashFromCDN } from "https://esm.sh/twoslash-cdn@0.3.9?deps=typescript@6.0.3";
+
+    if (!window.vueTypesInstalled) {
+      window.vueTypesInstalled = true;
+      const theme = "vitesse-dark";
+      const highlighter = createHighlighter({ themes: [theme], langs: ["ts"] });
+      const twoslash = createTwoslashFromCDN({ compilerOptions: { lib: ["esnext", "dom"] } });
+      const transformer = createTransformerFactory(twoslash.runSync)({ renderer: rendererRich() });
+      const mount = ({ root }) => {
+        const source = root.querySelector(".types .source");
+        const target = root.querySelector(".types .app");
+        if (!source || !target || source.dataset.started) return;
+        source.dataset.started = "true";
+        const code = source.textContent.replace(/\n$/, "");
+        Promise.all([highlighter, twoslash.prepareTypes(code)]).then(([hl]) => {
+          target.innerHTML = hl.codeToHtml(code, { lang: "ts", theme, transformers: [transformer] });
+          source.dataset.mounted = "true";
+        }, (error) => console.error("twoslash:", error));
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

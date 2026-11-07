@@ -1,0 +1,34 @@
+<section class="cover">
+  <div class="title" data-vue-source><h1><slot name="title" accepts="inline" arity="1"></slot></h1></div>
+  <div class="live"></div>
+  <script type="module">
+    import { createApp, ref, computed } from "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
+
+    if (!window.vueCoverInstalled) {
+      window.vueCoverInstalled = true;
+      const mount = ({ root }) => {
+        const source = root.querySelector(".cover .title");
+        const target = root.querySelector(".cover .live");
+        if (!source || !target || source.dataset.mounted) return;
+        source.dataset.mounted = "true";
+        const initial = source.textContent.trim();
+        createApp({
+          setup() {
+            const msg = ref(initial);
+            const chars = computed(() => [...msg.value]);
+            return { msg, chars };
+          },
+          template: `
+            <TransitionGroup name="char" tag="h1">
+              <span v-for="(c, i) in chars" :key="i + c">{{ c }}</span>
+            </TransitionGroup>
+            <input v-model="msg" aria-label="Title" spellcheck="false">
+            <p class="meta">msg.length = <b>{{ msg.length }}</b></p>
+          `,
+        }).mount(target);
+      };
+      window.__peithoShadowRoots.forEach(mount);
+      document.addEventListener("peitho:shadow-mounted", (event) => mount(event.detail));
+    }
+  </script>
+</section>

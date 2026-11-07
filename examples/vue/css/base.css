@@ -1,0 +1,467 @@
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("theme-fonts/Inter-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("theme-fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.peitho-slide {
+  --night: #0f1a1f;
+  --panel: #16262d;
+  --ink: #f2f7f5;
+  --body: #b9cbc4;
+  --muted: #7f968e;
+  --green: #42b883;
+  --green-soft: rgba(66, 184, 131, 0.22);
+  --slate: #35495e;
+  --font-sans: "Inter", "Hiragino Kaku Gothic ProN", "Hiragino Sans",
+    "Noto Sans JP", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+
+  width: var(--peitho-canvas-width, 1280px);
+  height: var(--peitho-canvas-height, 720px);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--night);
+  color: var(--body);
+  font-family: var(--font-sans);
+}
+
+.peitho-slide *,
+.peitho-slide *::before,
+.peitho-slide *::after {
+  box-sizing: border-box;
+}
+
+/* The Markdown stays in the slide as data; Vue renders the view. */
+[data-vue-source][data-mounted] {
+  display: none;
+}
+
+/* Until a library loads (or where it cannot), the Markdown itself shows. */
+.poll .options ul,
+.motion .items ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 34px;
+  line-height: 1.6;
+}
+
+/* Cover: the Markdown title becomes v-model state. */
+.cover {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+  background:
+    radial-gradient(circle at 85% 15%, rgba(66, 184, 131, 0.45), transparent 45%),
+    radial-gradient(circle at 10% 90%, rgba(53, 73, 94, 0.9), transparent 55%),
+    var(--night);
+}
+
+.cover h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 104px;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.cover .live h1 {
+  min-height: 1.05em;
+  background: linear-gradient(90deg, var(--green), #a7f3d0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.cover .live h1 span {
+  display: inline-block;
+  white-space: pre;
+}
+
+.cover .live input {
+  width: 100%;
+  margin-top: 40px;
+  padding: 16px 24px;
+  border: 3px solid var(--green);
+  border-radius: 14px;
+  background: rgba(15, 26, 31, 0.7);
+  color: var(--ink);
+  font: 500 34px/1.3 var(--font-mono);
+}
+
+.cover .live input:focus-visible {
+  outline: 6px solid var(--green-soft);
+  outline-offset: 4px;
+}
+
+.cover .live .meta {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font: 400 32px/1.4 var(--font-mono);
+}
+
+.cover .live .meta b {
+  color: var(--green);
+}
+
+.char-enter-active {
+  transition: transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 240ms;
+}
+
+.char-enter-from {
+  transform: translateY(-0.6em) scale(0.4) rotate(-12deg);
+  opacity: 0;
+}
+
+.char-leave-active {
+  position: absolute;
+  transition: transform 260ms ease-in, opacity 260ms;
+}
+
+.char-leave-to {
+  transform: translateY(0.5em) scale(0.6);
+  opacity: 0;
+}
+
+/* Poll: TransitionGroup re-sorts the ranking with FLIP moves. */
+.poll,
+.plain {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+}
+
+.poll h1,
+.plain h1 {
+  margin: 0 0 32px;
+  color: var(--ink);
+  font-size: 58px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.poll .app ol {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.poll .app li {
+  margin: 0 0 16px;
+}
+
+.poll .app button {
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  align-items: center;
+  position: relative;
+  width: 100%;
+  padding: 14px 24px;
+  overflow: hidden;
+  border: 2px solid rgba(66, 184, 131, 0.5);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 600 32px/1.3 var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.poll .app li:first-child button.leading {
+  border-color: var(--green);
+  box-shadow: 0 0 32px rgba(66, 184, 131, 0.45);
+}
+
+.poll .app button:focus-visible {
+  outline: 6px solid var(--green-soft);
+  outline-offset: 4px;
+}
+
+.poll .app .bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--slate), var(--green));
+  opacity: 0.55;
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.poll .app .rank,
+.poll .app .label,
+.poll .app .count {
+  position: relative;
+}
+
+.poll .app .rank {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.poll .app .count {
+  display: inline-block;
+  color: #a7f3d0;
+  font-variant-numeric: tabular-nums;
+}
+
+.poll .app .total {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 32px;
+}
+
+.rank-move {
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.pop-enter-active {
+  transition: transform 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.pop-enter-from {
+  transform: scale(1.8);
+}
+
+/* Plain */
+.plain .body ul {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: 34px;
+  line-height: 1.66;
+}
+
+.plain .body li {
+  margin: 0 0 10px;
+}
+
+.plain .body li::marker {
+  color: var(--green);
+}
+
+.plain .body code {
+  padding: 0.14em 0.4em;
+  border-radius: 4px;
+  background: rgba(66, 184, 131, 0.14);
+  color: #a7f3d0;
+  font-family: var(--font-mono);
+  font-size: 1em;
+}
+
+/* Morph: Shiki Magic Move animates tokens between the Markdown code blocks. */
+.morph {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+}
+
+.morph h1 {
+  margin: 0 0 28px;
+  color: var(--ink);
+  font-size: 54px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.morph h1 code {
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+/* Before Shiki loads (and where it cannot), show the first step only. */
+.morph .steps pre:not(:first-of-type) {
+  display: none;
+}
+
+.morph .steps pre,
+.morph .app pre {
+  min-height: 480px;
+  margin: 0;
+  padding: 24px 32px;
+  border-radius: 16px;
+  background: #121212;
+  color: var(--body);
+  font: 400 32px/1.35 var(--font-mono);
+}
+
+.morph .controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.morph .controls button {
+  margin-right: 12px;
+  padding: 10px 28px;
+  border: 2px solid var(--green);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 600 32px/1.3 var(--font-sans);
+  cursor: pointer;
+}
+
+.morph .controls button:focus-visible {
+  outline: 6px solid var(--green-soft);
+  outline-offset: 4px;
+}
+
+.morph .controls .dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: background 300ms, transform 300ms;
+}
+
+.morph .controls .dot.active {
+  background: var(--green);
+  transform: scale(1.4);
+}
+
+/* Marker: rough-notation draws on the strong words as reveal steps show them. */
+.marker {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+}
+
+.marker h1 {
+  margin: 0 0 40px;
+  color: var(--ink);
+  font-size: 58px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.marker .body ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 44px;
+  line-height: 1.5;
+}
+
+.marker .body li {
+  margin: 0 0 22px;
+}
+
+.marker .body strong {
+  color: var(--ink);
+}
+
+/* rough-notation defines this in document.head; the slide's own tree needs it too. */
+@keyframes rough-notation-dash {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Motion: @vueuse/motion springs the Markdown list in as cards. */
+.motion {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+  background:
+    radial-gradient(circle at 50% 120%, rgba(66, 184, 131, 0.35), transparent 60%),
+    var(--night);
+}
+
+.motion h1,
+.types h1 {
+  margin: 0 0 48px;
+  color: var(--ink);
+  font-size: 58px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.motion .app {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 28px;
+}
+
+.motion .card {
+  display: grid;
+  place-items: center;
+  height: 260px;
+  border: 2px solid rgba(66, 184, 131, 0.6);
+  border-radius: 24px;
+  background: linear-gradient(160deg, var(--panel), var(--slate));
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+  color: var(--ink);
+  font: 700 34px/1.2 var(--font-sans);
+}
+
+/* PDF export: print the cards at rest, before any spring could play. */
+@media print {
+  /* PDF export flattens gradients, which loses background-clip: text. */
+  .cover .live h1 {
+    background: none;
+    color: var(--green);
+  }
+
+  .motion .card {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* Types: Twoslash renders Shiki HTML with type popups. */
+.types {
+  display: grid;
+  align-content: center;
+  padding: 0 96px;
+}
+
+.types .source pre,
+.types .app pre {
+  margin: 0;
+  padding: 28px 32px;
+  border-radius: 16px;
+  background: #121212;
+  color: var(--body);
+  font: 400 32px/1.5 var(--font-mono);
+}
+
+.types .app pre {
+  overflow: visible;
+}
+
+.types .app {
+  --twoslash-popup-bg: #1b2b32;
+  --twoslash-popup-color: var(--ink);
+  --twoslash-border-color: rgba(66, 184, 131, 0.6);
+  --twoslash-underline-color: rgba(66, 184, 131, 0.7);
+}
+
+.types .app .twoslash-popup-container {
+  font-size: 32px;
+}
