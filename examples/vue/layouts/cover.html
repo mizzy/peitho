@@ -2,7 +2,7 @@
   <div class="title" data-vue-source><h1><slot name="title" accepts="inline" arity="1"></slot></h1></div>
   <div class="live"></div>
   <script type="module">
-    import { createApp, ref, computed } from "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
+    import { createApp, ref, watch } from "https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.esm-browser.prod.js";
 
     if (!window.vueCoverInstalled) {
       window.vueCoverInstalled = true;
@@ -12,15 +12,32 @@
         if (!source || !target || source.dataset.mounted) return;
         source.dataset.mounted = "true";
         const initial = source.textContent.trim();
+        let nextId = 0;
+        const keyed = (letters) => letters.map((c) => ({ c, id: nextId++ }));
         createApp({
           setup() {
             const msg = ref(initial);
-            const chars = computed(() => [...msg.value]);
+            const chars = ref(keyed([...initial]));
+            // Keep the ids of the unchanged prefix and suffix, so only the
+            // letters actually typed or deleted animate, wherever the caret is.
+            watch(msg, (text) => {
+              const old = chars.value;
+              const next = [...text];
+              let p = 0;
+              while (p < old.length && p < next.length && old[p].c === next[p]) p++;
+              let s = 0;
+              while (s < old.length - p && s < next.length - p && old[old.length - 1 - s].c === next[next.length - 1 - s]) s++;
+              chars.value = [
+                ...old.slice(0, p),
+                ...keyed(next.slice(p, next.length - s)),
+                ...old.slice(old.length - s),
+              ];
+            });
             return { msg, chars };
           },
           template: `
             <TransitionGroup name="char" tag="h1">
-              <span v-for="(c, i) in chars" :key="i + c">{{ c }}</span>
+              <span v-for="ch in chars" :key="ch.id">{{ ch.c }}</span>
             </TransitionGroup>
             <input v-model="msg" aria-label="Title" spellcheck="false">
             <p class="meta">msg.length = <b>{{ msg.length }}</b></p>
