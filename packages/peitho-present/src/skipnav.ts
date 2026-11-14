@@ -15,3 +15,23 @@ export function initialSlideIndex(slides: ReadonlyArray<{ skip?: boolean }>): nu
   if (slides.length === 0) return null;
   return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
+
+export function presentedBefore(slides: ReadonlyArray<{ skip: boolean }>, index: number): number {
+  let count = 0;
+  for (let i = 0; i < slides.length && i < index; i += 1) {
+    if (slides[i].skip !== true) count += 1;
+  }
+  return count;
+}
+
+export function presentedCount(slides: ReadonlyArray<{ skip: boolean }>): number {
+  return slides.reduce((count, slide) => count + (slide.skip ? 0 : 1), 0);
+}
+
+export function slideProgress(slides: ReadonlyArray<{ skip: boolean }>, index: number): number {
+  const count = presentedCount(slides);
+  if (count === 0) return 0;
+  if (count === 1) return 1;
+  const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);
+  return Math.min(1, Math.max(0, position / (count - 1)));
+}

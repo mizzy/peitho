@@ -113,6 +113,7 @@ Implement `installTimeTracker(options)` in the new `packages/peitho-present/src/
 
 Position calculation:
 - Rabbit: `index / (total - 1)` (right edge on the final slide). Fixed at 0% when `total <= 1` (division-by-zero guard)
+  - Superseded by `docs/plans/2026-11-14-pace-progress-skip.md` (Issue #745): progress now runs over non-skipped slides through `skipnav.ts` `slideProgress`, and a deck with exactly one presented slide sits at 100%
 - Turtle: `min(elapsedMs / plannedDurationMs, 1)`. Pins to the right edge on overrun, and adds an overrun state attribute (`data-peitho-overrun`) to the tracker to turn it a warning color
 
 ### D6: Automatic timer start

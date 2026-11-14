@@ -41,6 +41,37 @@ function installCanvasScaler(options) {
   return () => win.removeEventListener("resize", apply);
 }
 
+// src/skipnav.ts
+function nextNonSkippedIndex(slides, from, direction) {
+  let index = from + direction;
+  while (index >= 0 && index < slides.length) {
+    if (slides[index].skip !== true) return index;
+    index += direction;
+  }
+  return null;
+}
+function initialSlideIndex(slides) {
+  if (slides.length === 0) return null;
+  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
+}
+function presentedBefore(slides, index) {
+  let count = 0;
+  for (let i = 0; i < slides.length && i < index; i += 1) {
+    if (slides[i].skip !== true) count += 1;
+  }
+  return count;
+}
+function presentedCount(slides) {
+  return slides.reduce((count, slide) => count + (slide.skip ? 0 : 1), 0);
+}
+function slideProgress(slides, index) {
+  const count = presentedCount(slides);
+  if (count === 0) return 0;
+  if (count === 1) return 1;
+  const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);
+  return Math.min(1, Math.max(0, position / (count - 1)));
+}
+
 // src/timeTracker.ts
 var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
@@ -117,9 +148,8 @@ function installTimeTracker(options) {
     element.style.left = `${Math.round(ratio * 1e4) / 100}%`;
     element.style.transform = `translateX(${-Math.round(ratio * 1e4) / 100}%)`;
   };
-  const updateSlides = (index, total) => {
-    const ratio = total <= 1 ? 0 : index / (total - 1);
-    setMarker(rabbit, clamp01(ratio));
+  const updateSlides = (index) => {
+    setMarker(rabbit, slideProgress(options.shell.manifest?.slides ?? [], index));
   };
   const tick = () => {
     const elapsedMs = options.shell.elapsedMs();
@@ -138,7 +168,7 @@ function installTimeTracker(options) {
       log.error("Invalid peitho:slidechange event");
       return;
     }
-    updateSlides(detail.index, detail.total);
+    updateSlides(detail.index);
     if (!autoStarted && detail.previousIndex !== null && detail.index > detail.previousIndex) {
       autoStarted = true;
       bus.dispatchEvent(
@@ -148,7 +178,7 @@ function installTimeTracker(options) {
       );
     }
   };
-  updateSlides(options.shell.currentIndex, options.shell.manifest?.slideCount ?? 0);
+  updateSlides(options.shell.currentIndex);
   tick();
   bus.addEventListener("peitho:slidechange", onSlideChange);
   const interval = win.setInterval(tick, 250);
@@ -515,20 +545,6 @@ ${text}
     }
   };
   replaceFrom(0);
-}
-
-// src/skipnav.ts
-function nextNonSkippedIndex(slides, from, direction) {
-  let index = from + direction;
-  while (index >= 0 && index < slides.length) {
-    if (slides[index].skip !== true) return index;
-    index += direction;
-  }
-  return null;
-}
-function initialSlideIndex(slides) {
-  if (slides.length === 0) return null;
-  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
 
 // src/stepnav.ts
