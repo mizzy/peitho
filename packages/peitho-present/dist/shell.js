@@ -61,8 +61,11 @@ function presentedBefore(slides, index) {
   }
   return count;
 }
+function presentedCount(slides) {
+  return slides.reduce((count, slide) => count + (slide.skip ? 0 : 1), 0);
+}
 function slideProgress(slides, index) {
-  const count = presentedBefore(slides, slides.length);
+  const count = presentedCount(slides);
   if (count === 0) return 0;
   if (count === 1) return 1;
   const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);

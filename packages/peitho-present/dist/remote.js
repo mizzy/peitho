@@ -46,8 +46,11 @@ function presentedBefore(slides, index) {
   }
   return count;
 }
+function presentedCount(slides) {
+  return slides.reduce((count, slide) => count + (slide.skip ? 0 : 1), 0);
+}
 function slideProgress(slides, index) {
-  const count = presentedBefore(slides, slides.length);
+  const count = presentedCount(slides);
   if (count === 0) return 0;
   if (count === 1) return 1;
   const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);
@@ -2324,7 +2327,7 @@ function expectedElapsedAtSlide(manifest, index) {
   if (requestedIndex >= manifest.slides.length) return plannedDurationMs;
   const sectionIndex = sectionIndexForSlide(manifest.sections, requestedIndex);
   if (sectionIndex < 0) {
-    const count2 = Math.max(1, presentedBefore(manifest.slides, manifest.slides.length));
+    const count2 = Math.max(1, presentedCount(manifest.slides));
     return plannedDurationMs * presentedBefore(manifest.slides, requestedIndex) / count2;
   }
   let elapsed = 0;
@@ -2333,7 +2336,7 @@ function expectedElapsedAtSlide(manifest, index) {
   }
   const section = manifest.sections[sectionIndex];
   const slides = manifest.slides.slice(section.startIndex, section.endIndex + 1);
-  const count = presentedBefore(slides, slides.length);
+  const count = presentedCount(slides);
   const fraction = count === 0 ? 0 : presentedBefore(slides, requestedIndex - section.startIndex) / count;
   return elapsed + section.plannedDurationMs * fraction;
 }

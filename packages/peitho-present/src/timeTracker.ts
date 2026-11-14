@@ -2,7 +2,7 @@ import type { SlideChangeDetail, TimerControlDetail } from "./shell";
 import { slideProgress } from "./skipnav";
 
 export type TimeTrackerShell = {
-  manifest: { slides: ReadonlyArray<{ skip?: boolean }> } | null;
+  manifest: { slides: ReadonlyArray<{ skip: boolean }> } | null;
   currentIndex: number;
   elapsedMs(): number;
 };

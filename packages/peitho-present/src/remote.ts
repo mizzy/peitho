@@ -8,7 +8,7 @@ import {
   type ShellOptions,
   type TimerControlDetail
 } from "./shell";
-import { initialSlideIndex, presentedBefore, slideProgress } from "./skipnav";
+import { initialSlideIndex, presentedBefore, presentedCount, slideProgress } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 import {
   isBuildErrorSyncMessage,
@@ -1089,7 +1089,7 @@ export function expectedElapsedAtSlide(manifest: Manifest, index: number): numbe
   if (requestedIndex >= manifest.slides.length) return plannedDurationMs;
   const sectionIndex = sectionIndexForSlide(manifest.sections, requestedIndex);
   if (sectionIndex < 0) {
-    const count = Math.max(1, presentedBefore(manifest.slides, manifest.slides.length));
+    const count = Math.max(1, presentedCount(manifest.slides));
     return (plannedDurationMs * presentedBefore(manifest.slides, requestedIndex)) / count;
   }
   let elapsed = 0;
@@ -1098,7 +1098,7 @@ export function expectedElapsedAtSlide(manifest: Manifest, index: number): numbe
   }
   const section = manifest.sections[sectionIndex];
   const slides = manifest.slides.slice(section.startIndex, section.endIndex + 1);
-  const count = presentedBefore(slides, slides.length);
+  const count = presentedCount(slides);
   const fraction =
     count === 0 ? 0 : presentedBefore(slides, requestedIndex - section.startIndex) / count;
   return elapsed + section.plannedDurationMs * fraction;

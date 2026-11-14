@@ -11,7 +11,7 @@ const cleanups: Array<() => void> = [];
 
 function shell(overrides: Partial<TimeTrackerShell> = {}): TimeTrackerShell {
   return {
-    manifest: { slides: [{}, {}, {}] },
+    manifest: { slides: [{ skip: false }, { skip: false }, { skip: false }] },
     currentIndex: 0,
     elapsedMs: () => 0,
     ...overrides
@@ -81,7 +81,11 @@ it.each(["present", "presenter"] as const)(
       installTimeTracker({
         root,
         shell: shell({
-          manifest: { slides: [{}, {}, { skip: true }, {}, { skip: true }] },
+          manifest: {
+            slides: [
+              { skip: false }, { skip: false }, { skip: true }, { skip: false }, { skip: true }
+            ]
+          },
           currentIndex: 1
         }),
         plannedDurationMs: 60_000,
@@ -247,7 +251,7 @@ it("dispatches timer start once on the first forward slidechange", () => {
   cleanups.push(
     installTimeTracker({
       root,
-      shell: shell({ manifest: { slides: [{}, {}] } }),
+      shell: shell({ manifest: { slides: [{ skip: false }, { skip: false }] } }),
       plannedDurationMs: 60_000,
       bus,
       window,
@@ -431,7 +435,7 @@ it("keeps rabbit at one hundred percent for a one-slide deck", () => {
   cleanups.push(
     installTimeTracker({
       root,
-      shell: shell({ manifest: { slides: [{}] } }),
+      shell: shell({ manifest: { slides: [{ skip: false }] } }),
       plannedDurationMs: 60_000,
       bus,
       window,
