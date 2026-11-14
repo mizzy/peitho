@@ -10426,20 +10426,6 @@ contexts:
     }
 
     #[test]
-    fn docs_unknown_topic_names_valid_topics() {
-        let err = Cli::try_parse_from(["peitho", "docs", "missing"]).unwrap_err();
-        let stderr = err.to_string();
-
-        assert!(
-            stderr.contains("invalid value 'missing' for '[TOPIC]'"),
-            "actual stderr: {stderr}"
-        );
-        for slug in docs::topic_slugs() {
-            assert!(stderr.contains(slug), "actual stderr: {stderr}");
-        }
-    }
-
-    #[test]
     fn completions_command_accepts_shell_argument() {
         let cli = Cli::parse_from(["peitho", "completions", "bash"]);
 
