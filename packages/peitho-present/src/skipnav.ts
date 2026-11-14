@@ -26,7 +26,8 @@ export function presentedBefore(slides: ReadonlyArray<{ skip?: boolean }>, index
 
 export function slideProgress(slides: ReadonlyArray<{ skip?: boolean }>, index: number): number {
   const count = presentedBefore(slides, slides.length);
-  if (count <= 1) return 1;
+  if (count === 0) return 0;
+  if (count === 1) return 1;
   const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);
   return Math.min(1, Math.max(0, position / (count - 1)));
 }

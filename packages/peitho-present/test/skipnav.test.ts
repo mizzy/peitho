@@ -61,11 +61,20 @@ it("keeps leading skipped slides at the start of the track", () => {
   expect(slides.map((_, index) => slideProgress(slides, index))).toEqual([0, 0, 0, 1]);
 });
 
-it("returns the goal when there is at most one presented slide", () => {
+it("returns zero progress for an empty deck", () => {
+  expect(slideProgress([], 0)).toBe(0);
+});
+
+it("returns zero progress when every slide is skipped", () => {
+  const slides = [{ skip: true }, { skip: true }];
+
+  expect(slideProgress(slides, 0)).toBe(0);
+  expect(slideProgress(slides, 1)).toBe(0);
+});
+
+it("returns the goal when there is exactly one presented slide", () => {
   for (const slides of [
-    [],
     [{}],
-    [{ skip: true }, { skip: true }],
     [{ skip: true }, {}, { skip: true }]
   ]) {
     for (const index of [0, 1, 2]) expect(slideProgress(slides, index)).toBe(1);

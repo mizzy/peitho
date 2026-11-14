@@ -25,9 +25,10 @@ progress anymore.
   `n` = non-skipped count. Position = `presentedBefore(index)`, minus 1 when the
   current slide is skipped (a skipped slide holds the preceding presented
   slide's position), floored at 0. Fraction = `position / (n - 1)`, clamped to
-  [0, 1]; `n <= 1` returns 1 (you are on the last presented slide), matching the
-  remote's existing behavior. The tracker previously returned 0 there; the two
-  copies disagreed, and they now share one answer.
+  [0, 1]; `n === 0` returns 0 (there are no presented slides), while `n === 1`
+  returns 1 (you are on the last presented slide), matching the remote's existing
+  single-slide behavior. The tracker previously returned 0 for a single-slide
+  deck; the two copies disagreed, and they now share one answer.
 - `expectedElapsedAtSlide` keeps its shape (entry time of slide `index`) but
   counts presented slides: deck-wide `plannedMs * presentedBefore(index) / n`,
   per section `presentedBefore` within the section over the section's presented

@@ -408,6 +408,23 @@ it("logs and ignores slidechange detail with a non-positive total", () => {
   expect(rabbit.style.left).toBe("50%");
 });
 
+it("keeps rabbit at zero percent when the shell has no manifest", () => {
+  const root = document.createElement("main");
+  const bus = new EventTarget();
+  cleanups.push(
+    installTimeTracker({
+      root,
+      shell: shell({ manifest: null }),
+      plannedDurationMs: 60_000,
+      bus,
+      window,
+      document
+    })
+  );
+
+  expect(root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')?.style.left).toBe("0%");
+});
+
 it("keeps rabbit at one hundred percent for a one-slide deck", () => {
   const root = document.createElement("main");
   const bus = new EventTarget();
