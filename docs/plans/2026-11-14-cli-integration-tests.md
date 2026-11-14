@@ -7,7 +7,7 @@ Rust 1.100 (CI's `stable` since 2026-11-09) broke 16 unit tests in
 `CARGO_BIN_EXE_peitho is unset`. They spawned the CLI through
 `assert_cmd::Command::cargo_bin("peitho")`. Cargo sets `CARGO_BIN_EXE_<name>`
 only for integration tests, and assert_cmd 2.2.2 (the latest release) no longer
-finds the binary from a unit test with the newer cargo. Toolchains up to 1.99
+finds the binary from a unit test with the newer cargo. The local 1.95 toolchain
 still passed, so local gates did not catch it.
 
 ## Rule

@@ -17,6 +17,7 @@ fn docs_command_smoke() {
         .success()
         .stdout(starts_with("# "));
     let topic_stdout = String::from_utf8(topic.get_output().stdout.clone()).unwrap();
+    assert!(!topic_stdout.ends_with("\n\n"));
 
     Command::cargo_bin("peitho")
         .unwrap()
@@ -30,5 +31,5 @@ fn docs_command_smoke() {
         .args(["docs", "missing"])
         .assert()
         .failure()
-        .stderr(contains("invalid value 'missing'"));
+        .stderr(contains("invalid value 'missing' for '[TOPIC]'"));
 }
