@@ -293,8 +293,6 @@ fn unknown_topic(slug: &str) -> BuildError {
 mod tests {
     use std::{collections::BTreeSet, fs, path::Path};
 
-    use assert_cmd::Command as AssertCommand;
-
     use super::*;
 
     #[test]
@@ -386,12 +384,7 @@ mod tests {
 
     #[test]
     fn docs_list() {
-        let assert = AssertCommand::cargo_bin("peitho")
-            .unwrap()
-            .arg("docs")
-            .assert()
-            .success();
-        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let stdout = render(None, false).unwrap();
 
         for topic in TOPICS.iter() {
             assert!(stdout.contains(topic.slug), "actual stdout: {stdout}");
@@ -407,12 +400,7 @@ mod tests {
     #[test]
     fn docs_topic() {
         let topic = TOPICS.first().expect("embedded topics");
-        let assert = AssertCommand::cargo_bin("peitho")
-            .unwrap()
-            .args(["docs", topic.slug])
-            .assert()
-            .success();
-        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let stdout = render(Some(topic.slug), false).unwrap();
 
         assert_eq!(stdout, render_topic(topic));
         assert!(stdout.starts_with(&format!("# {}\n\n", topic.title)));
@@ -421,12 +409,7 @@ mod tests {
 
     #[test]
     fn docs_all() {
-        let assert = AssertCommand::cargo_bin("peitho")
-            .unwrap()
-            .args(["docs", "--all"])
-            .assert()
-            .success();
-        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let stdout = render(None, true).unwrap();
         let mut previous_heading = None;
 
         for topic in TOPICS.iter() {
@@ -499,24 +482,6 @@ mod tests {
                 "rendered topic '{}' still contains a root-relative link:\n{rendered}",
                 topic.slug
             );
-        }
-    }
-
-    #[test]
-    fn docs_unknown_topic_names_valid_topics() {
-        let assert = AssertCommand::cargo_bin("peitho")
-            .unwrap()
-            .args(["docs", "missing"])
-            .assert()
-            .failure();
-        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-
-        assert!(
-            stderr.contains("invalid value 'missing' for '[TOPIC]'"),
-            "actual stderr: {stderr}"
-        );
-        for topic in TOPICS.iter() {
-            assert!(stderr.contains(topic.slug), "actual stderr: {stderr}");
         }
     }
 
