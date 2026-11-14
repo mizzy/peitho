@@ -8,7 +8,7 @@ import {
   type ShellOptions,
   type TimerControlDetail
 } from "./shell";
-import { initialSlideIndex } from "./skipnav";
+import { initialSlideIndex, presentedBefore, slideProgress } from "./skipnav";
 import { clampStep, resolveStepTarget, revealStepCount } from "./stepnav";
 import {
   isBuildErrorSyncMessage,
@@ -1048,8 +1048,7 @@ function clampIndex(index: number, total: number): number | null {
 
 function slideFraction(manifest: Manifest, currentIndex: number | null): number {
   if (currentIndex == null) return 0;
-  if (manifest.slideCount <= 1) return 1;
-  return clamp01(currentIndex / (manifest.slideCount - 1));
+  return slideProgress(manifest.slides, currentIndex);
 }
 
 function chasePercent(ratio: number): number {
@@ -1085,25 +1084,24 @@ function validPlannedDurationMs(manifest: Manifest): number | null {
 export function expectedElapsedAtSlide(manifest: Manifest, index: number): number | null {
   const plannedDurationMs = validPlannedDurationMs(manifest);
   if (plannedDurationMs == null) return null;
-  const slideCount = Math.max(1, manifest.slideCount);
   const requestedIndex = Number.isFinite(index) ? Math.trunc(index) : 0;
   if (requestedIndex <= 0) return 0;
-  if (requestedIndex >= slideCount) return plannedDurationMs;
-  if (manifest.sections.length === 0) {
-    return (plannedDurationMs * requestedIndex) / slideCount;
-  }
+  if (requestedIndex >= manifest.slides.length) return plannedDurationMs;
   const sectionIndex = sectionIndexForSlide(manifest.sections, requestedIndex);
-  if (sectionIndex < 0) return (plannedDurationMs * requestedIndex) / slideCount;
+  if (sectionIndex < 0) {
+    const count = Math.max(1, presentedBefore(manifest.slides, manifest.slides.length));
+    return (plannedDurationMs * presentedBefore(manifest.slides, requestedIndex)) / count;
+  }
   let elapsed = 0;
   for (let i = 0; i < sectionIndex; i += 1) {
     elapsed += manifest.sections[i].plannedDurationMs;
   }
   const section = manifest.sections[sectionIndex];
-  const sectionSlideCount = section.endIndex - section.startIndex + 1;
-  return (
-    elapsed +
-    section.plannedDurationMs * ((requestedIndex - section.startIndex) / sectionSlideCount)
-  );
+  const slides = manifest.slides.slice(section.startIndex, section.endIndex + 1);
+  const count = presentedBefore(slides, slides.length);
+  const fraction =
+    count === 0 ? 0 : presentedBefore(slides, requestedIndex - section.startIndex) / count;
+  return elapsed + section.plannedDurationMs * fraction;
 }
 
 export function remotePaceState(

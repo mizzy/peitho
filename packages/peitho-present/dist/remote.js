@@ -26,6 +26,33 @@ function hasChordModifier(event) {
   return event.metaKey || event.ctrlKey || event.altKey;
 }
 
+// src/skipnav.ts
+function nextNonSkippedIndex(slides, from, direction) {
+  let index = from + direction;
+  while (index >= 0 && index < slides.length) {
+    if (slides[index].skip !== true) return index;
+    index += direction;
+  }
+  return null;
+}
+function initialSlideIndex(slides) {
+  if (slides.length === 0) return null;
+  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
+}
+function presentedBefore(slides, index) {
+  let count = 0;
+  for (let i = 0; i < slides.length && i < index; i += 1) {
+    if (slides[i].skip !== true) count += 1;
+  }
+  return count;
+}
+function slideProgress(slides, index) {
+  const count = presentedBefore(slides, slides.length);
+  if (count <= 1) return 1;
+  const position = presentedBefore(slides, index) - (slides[index]?.skip === true ? 1 : 0);
+  return Math.min(1, Math.max(0, position / (count - 1)));
+}
+
 // src/timeTracker.ts
 var clamp01 = (ratio) => Math.min(Math.max(ratio, 0), 1);
 function isOverrun(elapsedMs, plannedDurationMs) {
@@ -270,20 +297,6 @@ ${text}
     }
   };
   replaceFrom(0);
-}
-
-// src/skipnav.ts
-function nextNonSkippedIndex(slides, from, direction) {
-  let index = from + direction;
-  while (index >= 0 && index < slides.length) {
-    if (slides[index].skip !== true) return index;
-    index += direction;
-  }
-  return null;
-}
-function initialSlideIndex(slides) {
-  if (slides.length === 0) return null;
-  return nextNonSkippedIndex(slides, -1, 1) ?? 0;
 }
 
 // src/stepnav.ts
@@ -2278,8 +2291,7 @@ function clampIndex(index, total) {
 }
 function slideFraction(manifest, currentIndex) {
   if (currentIndex == null) return 0;
-  if (manifest.slideCount <= 1) return 1;
-  return clamp01(currentIndex / (manifest.slideCount - 1));
+  return slideProgress(manifest.slides, currentIndex);
 }
 function chasePercent(ratio) {
   return Math.round(clamp01(ratio) * 1e4) / 100;
@@ -2306,22 +2318,23 @@ function validPlannedDurationMs(manifest) {
 function expectedElapsedAtSlide(manifest, index) {
   const plannedDurationMs = validPlannedDurationMs(manifest);
   if (plannedDurationMs == null) return null;
-  const slideCount = Math.max(1, manifest.slideCount);
   const requestedIndex = Number.isFinite(index) ? Math.trunc(index) : 0;
   if (requestedIndex <= 0) return 0;
-  if (requestedIndex >= slideCount) return plannedDurationMs;
-  if (manifest.sections.length === 0) {
-    return plannedDurationMs * requestedIndex / slideCount;
-  }
+  if (requestedIndex >= manifest.slides.length) return plannedDurationMs;
   const sectionIndex = sectionIndexForSlide(manifest.sections, requestedIndex);
-  if (sectionIndex < 0) return plannedDurationMs * requestedIndex / slideCount;
+  if (sectionIndex < 0) {
+    const count2 = Math.max(1, presentedBefore(manifest.slides, manifest.slides.length));
+    return plannedDurationMs * presentedBefore(manifest.slides, requestedIndex) / count2;
+  }
   let elapsed = 0;
   for (let i = 0; i < sectionIndex; i += 1) {
     elapsed += manifest.sections[i].plannedDurationMs;
   }
   const section = manifest.sections[sectionIndex];
-  const sectionSlideCount = section.endIndex - section.startIndex + 1;
-  return elapsed + section.plannedDurationMs * ((requestedIndex - section.startIndex) / sectionSlideCount);
+  const slides = manifest.slides.slice(section.startIndex, section.endIndex + 1);
+  const count = presentedBefore(slides, slides.length);
+  const fraction = count === 0 ? 0 : presentedBefore(slides, requestedIndex - section.startIndex) / count;
+  return elapsed + section.plannedDurationMs * fraction;
 }
 function remotePaceState(manifest, index, elapsedMs, running) {
   const expectedStart = expectedElapsedAtSlide(manifest, index);

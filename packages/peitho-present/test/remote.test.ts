@@ -921,6 +921,40 @@ it("remote chase puts the last-slide rabbit at the slide goal", async () => {
   );
 });
 
+it.each([null, 60_000])(
+  "remote chase excludes skipped slides with planned time %s",
+  async (plannedDurationMs) => {
+    const { root, channel } = await mountRemoteForTest(
+      manifestWithSlides(
+        [
+          { key: "intro" },
+          { key: "middle" },
+          { key: "skip", skip: true },
+          { key: "end" },
+          { key: "appendix", skip: true }
+        ],
+        { plannedDurationMs }
+      )
+    );
+    const progress = root.querySelector<HTMLElement>(
+      plannedDurationMs == null
+        ? '[data-peitho-remote="chase-fill"]'
+        : '[data-peitho-remote="marker-rabbit"]'
+    )!;
+    const property = plannedDurationMs == null ? "width" : "left";
+    expect(progress.style[property]).toBe("0%");
+
+    channel.deliver({ index: 1, step: 0 });
+    expect(progress.style[property]).toBe("50%");
+    channel.deliver({ index: 2, step: 0 });
+    expect(progress.style[property]).toBe("50%");
+    channel.deliver({ index: 3, step: 0 });
+    expect(progress.style[property]).toBe("100%");
+    channel.deliver({ index: 4, step: 0 });
+    expect(progress.style[property]).toBe("100%");
+  }
+);
+
 it("remote chase pins the single-slide rabbit at the slide goal", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(1_000);
@@ -1111,6 +1145,88 @@ it("pace math falls back to whole-deck timing without sections", () => {
   expect(expectedElapsedAtSlide(manifest, 1)).toBe(20_000);
   expect(expectedElapsedAtSlide(manifest, 2)).toBe(40_000);
   expect(expectedElapsedAtSlide(manifest, 3)).toBe(60_000);
+});
+
+it("pace math excludes skipped slides from whole-deck timing", () => {
+  const manifest = manifestWithSlides(
+    [
+      { key: "a" },
+      { key: "skip", skip: true },
+      { key: "b" },
+      { key: "c" },
+      { key: "appendix", skip: true }
+    ],
+    { plannedDurationMs: 60_000 }
+  );
+
+  expect(Array.from({ length: 6 }, (_, index) => expectedElapsedAtSlide(manifest, index))).toEqual([
+    0, 20_000, 20_000, 40_000, 60_000, 60_000
+  ]);
+});
+
+it("pace math stays finite inside an all-skipped deck", () => {
+  const manifest = manifestWithSlides(
+    [{ key: "a", skip: true }, { key: "b", skip: true }],
+    { plannedDurationMs: 60_000 }
+  );
+
+  expect(expectedElapsedAtSlide(manifest, 1)).toBe(0);
+  expect(expectedElapsedAtSlide(manifest, 2)).toBe(60_000);
+});
+
+it("pace math and labels exclude skipped slides within sections", () => {
+  const manifest = manifestWithSlides(
+    [
+      { key: "a" },
+      { key: "skip-one", skip: true },
+      { key: "b" },
+      { key: "c" },
+      { key: "skip-two", skip: true },
+      { key: "d" },
+      { key: "appendix", skip: true }
+    ],
+    {
+      plannedDurationMs: 60_000,
+      sections: [
+        { name: "One", startIndex: 0, endIndex: 2, plannedDurationMs: 20_000 },
+        { name: "Two", startIndex: 3, endIndex: 6, plannedDurationMs: 40_000 }
+      ]
+    }
+  );
+
+  expect(Array.from({ length: 8 }, (_, index) => expectedElapsedAtSlide(manifest, index))).toEqual([
+    0, 10_000, 10_000, 20_000, 40_000, 40_000, 60_000, 60_000
+  ]);
+  expect(remotePaceState(manifest, 2, 5_000, true)).toEqual({ kind: "ahead", label: "0:05 ahead" });
+  expect(remotePaceState(manifest, 2, 15_000, true)).toEqual({ kind: "onpace", label: "on pace" });
+  expect(remotePaceState(manifest, 2, 25_000, true)).toEqual({ kind: "behind", label: "0:05 behind" });
+  expect(remotePaceState(manifest, 1, 9_000, true)).toEqual({ kind: "ahead", label: "0:01 ahead" });
+  expect(remotePaceState(manifest, 1, 10_000, true)).toEqual({ kind: "onpace", label: "on pace" });
+  expect(remotePaceState(manifest, 1, 11_000, true)).toEqual({ kind: "behind", label: "0:01 behind" });
+});
+
+it("pace math holds inside a skipped section and consumes its time at the next section", () => {
+  const manifest = manifestWithSlides(
+    [
+      { key: "a" },
+      { key: "skip-one", skip: true },
+      { key: "skip-two", skip: true },
+      { key: "b" },
+      { key: "c" }
+    ],
+    {
+      plannedDurationMs: 60_000,
+      sections: [
+        { name: "Intro", startIndex: 0, endIndex: 0, plannedDurationMs: 10_000 },
+        { name: "Backup", startIndex: 1, endIndex: 2, plannedDurationMs: 20_000 },
+        { name: "End", startIndex: 3, endIndex: 4, plannedDurationMs: 30_000 }
+      ]
+    }
+  );
+
+  expect(Array.from({ length: 6 }, (_, index) => expectedElapsedAtSlide(manifest, index))).toEqual([
+    0, 10_000, 10_000, 30_000, 45_000, 60_000
+  ]);
 });
 
 it("pace state selection covers ahead on-pace behind overrun paused and null planned time", () => {

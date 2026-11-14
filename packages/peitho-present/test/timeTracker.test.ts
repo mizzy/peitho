@@ -11,7 +11,7 @@ const cleanups: Array<() => void> = [];
 
 function shell(overrides: Partial<TimeTrackerShell> = {}): TimeTrackerShell {
   return {
-    manifest: { slideCount: 3 },
+    manifest: { slides: [{}, {}, {}] },
     currentIndex: 0,
     elapsedMs: () => 0,
     ...overrides
@@ -71,6 +71,44 @@ it("moves rabbit by slide progress and turtle by elapsed progress", () => {
   expect(root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')?.style.left).toBe("50%");
   expect(root.querySelector<HTMLElement>('[data-peitho-marker="turtle"]')?.style.left).toBe("50%");
 });
+
+it.each(["present", "presenter"] as const)(
+  "%s rabbit uses presented slides from the manifest for initial and changed positions",
+  (variant) => {
+    const root = document.createElement("main");
+    const bus = new EventTarget();
+    cleanups.push(
+      installTimeTracker({
+        root,
+        shell: shell({
+          manifest: { slides: [{}, {}, { skip: true }, {}, { skip: true }] },
+          currentIndex: 1
+        }),
+        plannedDurationMs: 60_000,
+        bus,
+        window,
+        document,
+        variant
+      })
+    );
+    const rabbit = root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')!;
+    expect(rabbit.style.left).toBe("50%");
+
+    bus.dispatchEvent(
+      new CustomEvent("peitho:slidechange", {
+        detail: { index: 2, total: 5, previousIndex: 1, key: "skip" }
+      })
+    );
+    expect(rabbit.style.left).toBe("50%");
+
+    bus.dispatchEvent(
+      new CustomEvent("peitho:slidechange", {
+        detail: { index: 3, total: 99, previousIndex: 2, key: "end" }
+      })
+    );
+    expect(rabbit.style.left).toBe("100%");
+  }
+);
 
 it("keeps the present variant DOM unchanged", () => {
   const root = document.createElement("main");
@@ -139,7 +177,7 @@ it("clamps markers to the track edges so the glyph never overflows", () => {
   cleanups.push(
     installTimeTracker({
       root,
-      shell: shell({ manifest: { slideCount: 3 }, elapsedMs: () => elapsed }),
+      shell: shell({ elapsedMs: () => elapsed }),
       plannedDurationMs: 60_000,
       bus,
       window,
@@ -209,7 +247,7 @@ it("dispatches timer start once on the first forward slidechange", () => {
   cleanups.push(
     installTimeTracker({
       root,
-      shell: shell({ manifest: { slideCount: 2 } }),
+      shell: shell({ manifest: { slides: [{}, {}] } }),
       plannedDurationMs: 60_000,
       bus,
       window,
@@ -370,13 +408,13 @@ it("logs and ignores slidechange detail with a non-positive total", () => {
   expect(rabbit.style.left).toBe("50%");
 });
 
-it("keeps rabbit at zero percent for a one-slide deck", () => {
+it("keeps rabbit at one hundred percent for a one-slide deck", () => {
   const root = document.createElement("main");
   const bus = new EventTarget();
   cleanups.push(
     installTimeTracker({
       root,
-      shell: shell({ manifest: { slideCount: 1 } }),
+      shell: shell({ manifest: { slides: [{}] } }),
       plannedDurationMs: 60_000,
       bus,
       window,
@@ -390,7 +428,7 @@ it("keeps rabbit at zero percent for a one-slide deck", () => {
     })
   );
 
-  expect(root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')?.style.left).toBe("0%");
+  expect(root.querySelector<HTMLElement>('[data-peitho-marker="rabbit"]')?.style.left).toBe("100%");
 });
 
 it("pins turtle at one hundred percent and marks overrun after planned time", () => {

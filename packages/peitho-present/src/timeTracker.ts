@@ -1,7 +1,8 @@
 import type { SlideChangeDetail, TimerControlDetail } from "./shell";
+import { slideProgress } from "./skipnav";
 
 export type TimeTrackerShell = {
-  manifest: { slideCount: number } | null;
+  manifest: { slides: ReadonlyArray<{ skip?: boolean }> } | null;
   currentIndex: number;
   elapsedMs(): number;
 };
@@ -113,9 +114,8 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
     element.style.left = `${Math.round(ratio * 10_000) / 100}%`;
     element.style.transform = `translateX(${-Math.round(ratio * 10_000) / 100}%)`;
   };
-  const updateSlides = (index: number, total: number): void => {
-    const ratio = total <= 1 ? 0 : index / (total - 1);
-    setMarker(rabbit, clamp01(ratio));
+  const updateSlides = (index: number): void => {
+    setMarker(rabbit, slideProgress(options.shell.manifest?.slides ?? [], index));
   };
   const tick = (): void => {
     const elapsedMs = options.shell.elapsedMs();
@@ -134,7 +134,7 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
       log.error("Invalid peitho:slidechange event");
       return;
     }
-    updateSlides(detail.index, detail.total);
+    updateSlides(detail.index);
     if (!autoStarted && detail.previousIndex !== null && detail.index > detail.previousIndex) {
       autoStarted = true;
       bus.dispatchEvent(
@@ -145,7 +145,7 @@ export function installTimeTracker(options: TimeTrackerOptions): () => void {
     }
   };
 
-  updateSlides(options.shell.currentIndex, options.shell.manifest?.slideCount ?? 0);
+  updateSlides(options.shell.currentIndex);
   tick();
   bus.addEventListener("peitho:slidechange", onSlideChange);
   const interval = win.setInterval(tick, 250);

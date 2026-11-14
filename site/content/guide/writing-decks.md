@@ -632,6 +632,7 @@ needs more than one.
 not counted, not written to the manifest, and do not contribute notes.
 `skip:true` keeps a slide in the deck and manifest, but `next` and `prev`
 navigation step over it in the presentation and single-slide preview shells.
+Skipped slides do not count toward presenter and remote pace progress.
 Presentation and preview open on the first non-skipped slide (unless preview
 restores a saved index). Direct navigation by key or index, Home/End first/last
 navigation, and overview grid selection can still land on skipped slides; a
